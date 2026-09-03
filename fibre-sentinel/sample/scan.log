@@ -1,0 +1,7 @@
+SENT| 00:53:27.369 connected: chain_id=fibre-devnet tip=46 rpc=http://127.0.0.1:26657
+SENT| 00:53:27.372 fresh scan: start=1 seed params: promise_timeout=10m0s shard_retention=10m0s withdrawal_delay=12h10m0s
+SENT| 00:53:27.373 scanning from height 1 to 46 (follow=true)
+SENT| 00:53:49.619 RECORDED h=59 tx=0 promise=1b693b1ea2e1 commit=1579a2b5cffc blob_v0 size=262144 valset_h=57 assign[with_rows=4 sigma=12291 distinct=12291 overlaps=0] must_serve_until=2026-09-03T01:03:45Z
+SENT| 00:53:57.647 RECORDED h=64 tx=0 promise=ff1d33b24e06 commit=9eae855c77ce blob_v0 size=262144 valset_h=62 assign[with_rows=4 sigma=12291 distinct=12291 overlaps=0] must_serve_until=2026-09-03T01:03:53Z
+SENT| 00:54:05.674 RECORDED h=69 tx=0 promise=7cb57511e4db commit=786d4240432c blob_v0 size=262144 valset_h=67 assign[with_rows=4 sigma=12291 distinct=12291 overlaps=0] must_serve_until=2026-09-03T01:04:01Z
+SENT| 00:54:13.702 RECORDED h=74 tx=0 promise=072422764684 commit=c6c53b522b57 blob_v0 size=262144 valset_h=72 assign[with_rows=4 sigma=12291 distinct=12291 overlaps=0] must_serve_until=2026-09-03T01:04:09Z

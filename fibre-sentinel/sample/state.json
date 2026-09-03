@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "chain_id": "fibre-devnet",
+  "start_height": 1,
+  "last_scanned_height": 76,
+  "protocol_params_fingerprint": "329e61c47e1da264",
+  "param_history": [
+    {
+      "from_height": 1,
+      "from_tx_index": -1,
+      "source": "seed",
+      "params": {
+        "withdrawal_delay": "12h10m0s",
+        "payment_promise_timeout": "10m0s",
+        "payment_promise_height_window": 1000,
+        "shard_retention": "10m0s",
+        "full_stake_storage_budget": 2199023255552,
+        "withdrawal_delay_seconds": 43800,
+        "payment_promise_timeout_seconds": 600,
+        "shard_retention_seconds": 600,
+        "effective_from_height": 1,
+        "effective_from_tx_index": -1,
+        "source": "seed"
+      }
+    }
+  ]
+}

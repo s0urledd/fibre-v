@@ -1,0 +1,32 @@
+--> starting devnet (N=4)
+--> waiting for devnet READY .................................................................................ok
+--> starting sentinel-scan (follow)
+--> publishing 3 blobs
+--> published: cde3587abeea3469b0207b09b9bfb1b18d9eb0a483e0de348f349946a4f8c9d0,e4cdcb0b8bb6b2397b8016f41fb8f9a45c43542b614934c5c36d8e975a728476,75b954e48f8e921e7af7097efa0f6201a021e1f0b71c4113e04231e1a006c507
+--> waiting for scanner to record 3 . ok (3)
+--> starting sentinel-probe (--drain)
+--> waiting 173s before killing fibre on :7981
+--> >>> FAULT: killed fibre :7981 (pid 19060) at 2026-09-03T12:33:10Z
+--> waiting for sentinel-probe to drain (up to ~21m) ...................................................................................................................................... exited
+--> sentinel-measure-check
+measure-check| loaded 60 measurements
+measure-check| by classification:
+measure-check|   HEALTHY                  27
+measure-check|   FAULT                    9
+measure-check|   TOLERATED                12
+measure-check|   EXPECTED_GONE            9
+measure-check|   UNREACHABLE_POST_WINDOW  3
+measure-check| by outcome:
+measure-check|   SERVED_OK                27
+measure-check|   TCP_REFUSED              15
+measure-check|   NOT_FOUND                18
+measure-check| 0 checks failed
+measure-check| PASS: taxonomy held (fault injection detected, live validators healthy, post-window expected)
+
+==================================================
+  PASS: probe schedule + measurements + taxonomy
+        fault injection detected, live validators healthy
+==================================================
+--> cleanup
+--> done. logs + data under /home/user/spdt
+EXIT=0

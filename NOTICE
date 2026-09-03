@@ -1,0 +1,15 @@
+fibre — independent observer tools for Celestia Fibre
+Copyright 2026 The fibre contributors
+
+This product includes software developed for the Celestia project
+(https://github.com/celestiaorg/celestia-app), licensed under the Apache
+License, Version 2.0.
+
+fibre-tlsverify and fibre-assign are independent re-implementations of
+protocol logic that also appears in celestia-app. Each carries an in-repo
+test that pins it to a specific celestia-app commit:
+
+  - fibre-tlsverify/testdata/identity_vectors.json is a byte-for-byte copy of
+    celestia-app's golden vectors at commit dba155084505a8f6c5d37260a94f70f939fb96de.
+  - fibre-assign/reftest/ builds celestia-app v10.0.0-20260901162319-0b69316466c3
+    from the module proxy and diffs against its real implementation.
