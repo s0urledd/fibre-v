@@ -83,7 +83,39 @@ only the executable bit.
 
 ### Result with the patch applied
 
-Second run in progress at the time of this commit; the result is recorded in the next commit to this file.
+`./probe-devtest.sh 4 3` completed with exit code 0 in about 18 minutes:
+devnet READY in ~50 s, 3 blobs of 256 KiB published (4 signatures each),
+scanner recorded all three with `must_serve_until = creation + 10m`, prober
+drained the whole schedule, node 1's fibre server killed 174 s after the
+first publish, `sentinel-measure-check` reported `0 checks failed`.
+
+| classification | count | matches upstream `sample/` |
+|---|---:|---|
+| `HEALTHY` | 27 | yes |
+| `FAULT` | 9 | yes (the killed validator, in window, caught at TCP in 0 ms) |
+| `TOLERATED` | 12 | yes |
+| `EXPECTED_GONE` | 9 | yes |
+| `UNREACHABLE_POST_WINDOW` | 3 | yes |
+| total | 60 | yes |
+
+By outcome: 27 `SERVED_OK`, 18 `NOT_FOUND`, 15 `TCP_REFUSED`. Assigned row
+counts were 3186 for the proposer and 3035 for the other three, exactly the
+numbers in `docs/fibre-operational-notes.md`. Probe cost on this machine,
+localhost, per full probe (dial, TLS, identity, `DownloadShard`, verify
+~3000 rows):
+
+| outcome | n | p50 | p95 | max |
+|---|---:|---:|---:|---:|
+| `SERVED_OK` | 27 | 24 ms | 30 ms | 32 ms |
+| `NOT_FOUND` | 18 | 3 ms | | 4 ms |
+| `TCP_REFUSED` | 15 | 0 ms | | 0 ms |
+
+These sit inside the ranges the upstream notes report (p50 14 to 24 ms, p95
+24 to 40 ms), so the taxonomy and the cost figures reproduce on a fresh
+Linux machine once the two defects above are fixed. The first `TOLERATED`
+`NOT_FOUND` in this run was observed at `must_serve_until + 2m00s` (the
+grace probe is scheduled at +120 s in this script), consistent with the
+measured prune lag of about 1m45s.
 
 ## 4. What to change upstream
 
