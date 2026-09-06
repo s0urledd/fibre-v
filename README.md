@@ -19,6 +19,7 @@ work. Everything under `docs/` is written to be moved into that repository's
 | `docs/research/R4-probe-etiquette.md` | how often and how much the observer may download without looking like an attack |
 | `docs/research/R5-fdp-signals.md` | what the Foundation Delegation Program says it rewards, mapped to our deliverables |
 | `docs/research/R6-hosting-and-cost.md` | what running the observer costs, with the arithmetic |
+| `docs/research/R7-devnet-reproduction.md` | what happened when the existing tests and the devnet fault-injection run were reproduced on a fresh Linux machine from the README alone, with a patch for the two portability defects found |
 | `docs/research/R0-open-decisions.md` | decisions only the owners can make |
 | `docs/adr/0001-observer-architecture.md` | the architecture decision for collector, prober, store, API and web |
 | `docs/verdicts.md` | the verdict taxonomy the dashboard is allowed to use, one sentence per class |
