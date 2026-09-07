@@ -1,0 +1,21 @@
+--> starting devnet (N=4)
+--> waiting for devnet READY ..................................................................................ok
+--> starting sentinel-scan (follow, from height 1)
+--> publishing 4 blobs
+--> published commitments: 1579a2b5cffcc1f0b4201f58eaaa92d0b40f3913b0755d9596f7d699ae5fb384,9eae855c77ce073d0e338fe28c93fcceba13c791d07008cc02af52ec6760924d,786d4240432c0fd6cac616fb0dda5aa4a846db356335409cab9c7a6cdb3bfe72,c6c53b522b57f6dbd78fbc5230f686ddb99f1d0e6ebf01084f60dcb4e95a9eb3
+--> waiting for scanner to record 4 publications . ok (4)
+--> stopping scanner, running sentinel-verify
+verify| loaded 4 publications from C:/Users/user/sdt/sentinel-data
+PASS 1579a2b5cffc  settle_h=59 valset_h=57 with_rows=4 sigma=12291 distinct=12291 overlaps=0 must_serve_until=2026-09-03T01:03:45Z
+PASS 9eae855c77ce  settle_h=64 valset_h=62 with_rows=4 sigma=12291 distinct=12291 overlaps=0 must_serve_until=2026-09-03T01:03:53Z
+PASS 786d4240432c  settle_h=69 valset_h=67 with_rows=4 sigma=12291 distinct=12291 overlaps=0 must_serve_until=2026-09-03T01:04:01Z
+PASS c6c53b522b57  settle_h=74 valset_h=72 with_rows=4 sigma=12291 distinct=12291 overlaps=0 must_serve_until=2026-09-03T01:04:09Z
+verify| 4 checked, 0 failed
+
+==========================================
+  PASS: scanner captured all 4 publications
+        with correct assignment + must_serve_until
+==========================================
+--> cleanup
+--> done. logs + data under /home/user/sdt
+EXIT=0

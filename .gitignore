@@ -1,0 +1,21 @@
+# build output
+/bin/
+**/bin/
+*.exe
+*.test
+*.out
+coverage.txt
+
+# local Go workspace (use for cross-module dev; not committed)
+go.work
+go.work.sum
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# runtime data the tools write (only sample/ is committed, by exception)
+sentinel-data/
+*.jsonl
+!fibre-sentinel/sample/**/*.jsonl

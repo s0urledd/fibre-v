@@ -1,0 +1,71 @@
+SENT| 12:30:18.267 prober up: vantage=devtest chain_id=fibre-devnet tip=69 rpc=http://127.0.0.1:26657 pubs=/home/user/spdt\sentinel-data\publications.jsonl data=/home/user/spdt\sentinel-data\measurements.jsonl
+SENT| 12:33:43.404 PROBE 5635ef462fc5 val=1722831ea563 w1[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (38ms lat=11ms) rows=3186/3186 commit=true assign=true
+SENT| 12:33:43.406 PROBE 5635ef462fc5 val=9c1dbf213a79 w1[in_window] assigned=true phase=in_window -> TCP_REFUSED / FAULT (0ms lat=51ms)
+SENT| 12:33:43.406   FAULT reason: assigned validator unreachable while under retention obligation | raw: dial tcp 127.0.0.1:7981: connectex: No connection could be made because the target machine actively refused it.
+SENT| 12:33:43.475 PROBE 5635ef462fc5 val=dbaf4a2322b1 w1[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (68ms lat=53ms) rows=3035/3035 commit=true assign=true
+SENT| 12:33:43.574 PROBE 5635ef462fc5 val=f3f5078bf01e w1[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (98ms lat=122ms) rows=3035/3035 commit=true assign=true
+SENT| 12:33:50.068 PROBE 65909c859df0 val=1722831ea563 w1[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (31ms lat=5ms) rows=3186/3186 commit=true assign=true
+SENT| 12:33:50.069 PROBE 65909c859df0 val=9c1dbf213a79 w1[in_window] assigned=true phase=in_window -> TCP_REFUSED / FAULT (0ms lat=37ms)
+SENT| 12:33:50.069   FAULT reason: assigned validator unreachable while under retention obligation | raw: dial tcp 127.0.0.1:7981: connectex: No connection could be made because the target machine actively refused it.
+SENT| 12:33:50.095 PROBE 65909c859df0 val=dbaf4a2322b1 w1[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (24ms lat=39ms) rows=3035/3035 commit=true assign=true
+SENT| 12:33:50.129 PROBE 65909c859df0 val=f3f5078bf01e w1[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (33ms lat=64ms) rows=3035/3035 commit=true assign=true
+SENT| 12:33:56.358 PROBE 99823434710f val=1722831ea563 w1[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (25ms lat=8ms) rows=3186/3186 commit=true assign=true
+SENT| 12:33:56.359 PROBE 99823434710f val=9c1dbf213a79 w1[in_window] assigned=true phase=in_window -> TCP_REFUSED / FAULT (0ms lat=34ms)
+SENT| 12:33:56.359   FAULT reason: assigned validator unreachable while under retention obligation | raw: dial tcp 127.0.0.1:7981: connectex: No connection could be made because the target machine actively refused it.
+SENT| 12:33:56.383 PROBE 99823434710f val=dbaf4a2322b1 w1[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (23ms lat=35ms) rows=3035/3035 commit=true assign=true
+SENT| 12:33:56.428 PROBE 99823434710f val=f3f5078bf01e w1[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (43ms lat=59ms) rows=3035/3035 commit=true assign=true
+SENT| 12:36:05.253 PROBE 5635ef462fc5 val=1722831ea563 w2[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (23ms lat=12ms) rows=3186/3186 commit=true assign=true
+SENT| 12:36:05.254 PROBE 5635ef462fc5 val=9c1dbf213a79 w2[in_window] assigned=true phase=in_window -> TCP_REFUSED / FAULT (0ms lat=36ms)
+SENT| 12:36:05.254   FAULT reason: assigned validator unreachable while under retention obligation | raw: dial tcp 127.0.0.1:7981: connectex: No connection could be made because the target machine actively refused it.
+SENT| 12:36:05.280 PROBE 5635ef462fc5 val=dbaf4a2322b1 w2[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (25ms lat=37ms) rows=3035/3035 commit=true assign=true
+SENT| 12:36:05.304 PROBE 5635ef462fc5 val=f3f5078bf01e w2[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (22ms lat=63ms) rows=3035/3035 commit=true assign=true
+SENT| 12:36:12.091 PROBE 65909c859df0 val=1722831ea563 w2[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (27ms lat=8ms) rows=3186/3186 commit=true assign=true
+SENT| 12:36:12.092 PROBE 65909c859df0 val=9c1dbf213a79 w2[in_window] assigned=true phase=in_window -> TCP_REFUSED / FAULT (0ms lat=36ms)
+SENT| 12:36:12.092   FAULT reason: assigned validator unreachable while under retention obligation | raw: dial tcp 127.0.0.1:7981: connectex: No connection could be made because the target machine actively refused it.
+SENT| 12:36:12.121 PROBE 65909c859df0 val=dbaf4a2322b1 w2[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (27ms lat=37ms) rows=3035/3035 commit=true assign=true
+SENT| 12:36:12.173 PROBE 65909c859df0 val=f3f5078bf01e w2[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (51ms lat=65ms) rows=3035/3035 commit=true assign=true
+SENT| 12:36:18.301 PROBE 99823434710f val=1722831ea563 w2[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (27ms lat=6ms) rows=3186/3186 commit=true assign=true
+SENT| 12:36:18.303 PROBE 99823434710f val=9c1dbf213a79 w2[in_window] assigned=true phase=in_window -> TCP_REFUSED / FAULT (1ms lat=34ms)
+SENT| 12:36:18.303   FAULT reason: assigned validator unreachable while under retention obligation | raw: dial tcp 127.0.0.1:7981: connectex: No connection could be made because the target machine actively refused it.
+SENT| 12:36:18.342 PROBE 99823434710f val=dbaf4a2322b1 w2[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (38ms lat=35ms) rows=3035/3035 commit=true assign=true
+SENT| 12:36:18.368 PROBE 99823434710f val=f3f5078bf01e w2[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (24ms lat=75ms) rows=3035/3035 commit=true assign=true
+SENT| 12:38:06.369 PROBE 5635ef462fc5 val=1722831ea563 w3[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (27ms lat=9ms) rows=3186/3186 commit=true assign=true
+SENT| 12:38:06.370 PROBE 5635ef462fc5 val=9c1dbf213a79 w3[in_window] assigned=true phase=in_window -> TCP_REFUSED / FAULT (0ms lat=38ms)
+SENT| 12:38:06.370   FAULT reason: assigned validator unreachable while under retention obligation | raw: dial tcp 127.0.0.1:7981: connectex: No connection could be made because the target machine actively refused it.
+SENT| 12:38:06.395 PROBE 5635ef462fc5 val=dbaf4a2322b1 w3[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (24ms lat=38ms) rows=3035/3035 commit=true assign=true
+SENT| 12:38:06.421 PROBE 5635ef462fc5 val=f3f5078bf01e w3[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (24ms lat=63ms) rows=3035/3035 commit=true assign=true
+SENT| 12:38:13.335 PROBE 65909c859df0 val=1722831ea563 w3[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (21ms lat=5ms) rows=3186/3186 commit=true assign=true
+SENT| 12:38:13.336 PROBE 65909c859df0 val=9c1dbf213a79 w3[in_window] assigned=true phase=in_window -> TCP_REFUSED / FAULT (0ms lat=27ms)
+SENT| 12:38:13.336   FAULT reason: assigned validator unreachable while under retention obligation | raw: dial tcp 127.0.0.1:7981: connectex: No connection could be made because the target machine actively refused it.
+SENT| 12:38:13.362 PROBE 65909c859df0 val=dbaf4a2322b1 w3[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (24ms lat=29ms) rows=3035/3035 commit=true assign=true
+SENT| 12:38:13.388 PROBE 65909c859df0 val=f3f5078bf01e w3[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (26ms lat=54ms) rows=3035/3035 commit=true assign=true
+SENT| 12:38:19.487 PROBE 99823434710f val=1722831ea563 w3[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (25ms lat=10ms) rows=3186/3186 commit=true assign=true
+SENT| 12:38:19.488 PROBE 99823434710f val=9c1dbf213a79 w3[in_window] assigned=true phase=in_window -> TCP_REFUSED / FAULT (0ms lat=36ms)
+SENT| 12:38:19.488   FAULT reason: assigned validator unreachable while under retention obligation | raw: dial tcp 127.0.0.1:7981: connectex: No connection could be made because the target machine actively refused it.
+SENT| 12:38:19.512 PROBE 99823434710f val=dbaf4a2322b1 w3[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (23ms lat=37ms) rows=3035/3035 commit=true assign=true
+SENT| 12:38:19.548 PROBE 99823434710f val=f3f5078bf01e w3[in_window] assigned=true phase=in_window -> SERVED_OK / HEALTHY (34ms lat=62ms) rows=3035/3035 commit=true assign=true
+SENT| 12:41:55.688 PROBE 5635ef462fc5 val=1722831ea563 grace[grace] assigned=true phase=grace -> NOT_FOUND / TOLERATED (4ms lat=7ms) rows=0/3186 commit=false assign=false
+SENT| 12:41:55.689 PROBE 5635ef462fc5 val=9c1dbf213a79 grace[grace] assigned=true phase=grace -> TCP_REFUSED / TOLERATED (0ms lat=13ms)
+SENT| 12:41:55.693 PROBE 5635ef462fc5 val=dbaf4a2322b1 grace[grace] assigned=true phase=grace -> NOT_FOUND / TOLERATED (3ms lat=14ms) rows=0/3035 commit=false assign=false
+SENT| 12:41:55.699 PROBE 5635ef462fc5 val=f3f5078bf01e grace[grace] assigned=true phase=grace -> NOT_FOUND / TOLERATED (4ms lat=18ms) rows=0/3035 commit=false assign=false
+SENT| 12:42:02.788 PROBE 65909c859df0 val=1722831ea563 grace[grace] assigned=true phase=grace -> NOT_FOUND / TOLERATED (5ms lat=6ms) rows=0/3186 commit=false assign=false
+SENT| 12:42:02.790 PROBE 65909c859df0 val=9c1dbf213a79 grace[grace] assigned=true phase=grace -> TCP_REFUSED / TOLERATED (0ms lat=13ms)
+SENT| 12:42:02.796 PROBE 65909c859df0 val=dbaf4a2322b1 grace[grace] assigned=true phase=grace -> NOT_FOUND / TOLERATED (4ms lat=14ms) rows=0/3035 commit=false assign=false
+SENT| 12:42:02.801 PROBE 65909c859df0 val=f3f5078bf01e grace[grace] assigned=true phase=grace -> NOT_FOUND / TOLERATED (4ms lat=20ms) rows=0/3035 commit=false assign=false
+SENT| 12:42:08.868 PROBE 99823434710f val=1722831ea563 grace[grace] assigned=true phase=grace -> NOT_FOUND / TOLERATED (5ms lat=7ms) rows=0/3186 commit=false assign=false
+SENT| 12:42:08.870 PROBE 99823434710f val=9c1dbf213a79 grace[grace] assigned=true phase=grace -> TCP_REFUSED / TOLERATED (0ms lat=12ms)
+SENT| 12:42:08.875 PROBE 99823434710f val=dbaf4a2322b1 grace[grace] assigned=true phase=grace -> NOT_FOUND / TOLERATED (3ms lat=14ms) rows=0/3035 commit=false assign=false
+SENT| 12:42:08.879 PROBE 99823434710f val=f3f5078bf01e grace[grace] assigned=true phase=grace -> NOT_FOUND / TOLERATED (4ms lat=19ms) rows=0/3035 commit=false assign=false
+SENT| 12:44:10.698 PROBE 5635ef462fc5 val=1722831ea563 post[post] assigned=true phase=post -> NOT_FOUND / EXPECTED_GONE (8ms lat=13ms) rows=0/3186 commit=false assign=false
+SENT| 12:44:10.699 PROBE 5635ef462fc5 val=9c1dbf213a79 post[post] assigned=true phase=post -> TCP_REFUSED / UNREACHABLE_POST_WINDOW (0ms lat=23ms)
+SENT| 12:44:10.708 PROBE 5635ef462fc5 val=dbaf4a2322b1 post[post] assigned=true phase=post -> NOT_FOUND / EXPECTED_GONE (8ms lat=25ms) rows=0/3035 commit=false assign=false
+SENT| 12:44:10.722 PROBE 5635ef462fc5 val=f3f5078bf01e post[post] assigned=true phase=post -> NOT_FOUND / EXPECTED_GONE (13ms lat=33ms) rows=0/3035 commit=false assign=false
+SENT| 12:44:17.791 PROBE 65909c859df0 val=1722831ea563 post[post] assigned=true phase=post -> NOT_FOUND / EXPECTED_GONE (6ms lat=9ms) rows=0/3186 commit=false assign=false
+SENT| 12:44:17.792 PROBE 65909c859df0 val=9c1dbf213a79 post[post] assigned=true phase=post -> TCP_REFUSED / UNREACHABLE_POST_WINDOW (0ms lat=16ms)
+SENT| 12:44:17.797 PROBE 65909c859df0 val=dbaf4a2322b1 post[post] assigned=true phase=post -> NOT_FOUND / EXPECTED_GONE (4ms lat=16ms) rows=0/3035 commit=false assign=false
+SENT| 12:44:17.802 PROBE 65909c859df0 val=f3f5078bf01e post[post] assigned=true phase=post -> NOT_FOUND / EXPECTED_GONE (4ms lat=22ms) rows=0/3035 commit=false assign=false
+SENT| 12:44:23.868 PROBE 99823434710f val=1722831ea563 post[post] assigned=true phase=post -> NOT_FOUND / EXPECTED_GONE (6ms lat=6ms) rows=0/3186 commit=false assign=false
+SENT| 12:44:23.870 PROBE 99823434710f val=9c1dbf213a79 post[post] assigned=true phase=post -> TCP_REFUSED / UNREACHABLE_POST_WINDOW (0ms lat=12ms)
+SENT| 12:44:23.874 PROBE 99823434710f val=dbaf4a2322b1 post[post] assigned=true phase=post -> NOT_FOUND / EXPECTED_GONE (3ms lat=14ms) rows=0/3035 commit=false assign=false
+SENT| 12:44:23.880 PROBE 99823434710f val=f3f5078bf01e post[post] assigned=true phase=post -> NOT_FOUND / EXPECTED_GONE (4ms lat=18ms) rows=0/3035 commit=false assign=false
+SENT| 12:44:23.880 done (--drain): every known schedule is in the past; 60 probes this run

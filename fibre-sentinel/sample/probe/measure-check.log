@@ -1,0 +1,21 @@
+measure-check| loaded 60 measurements
+measure-check| by classification:
+measure-check|   HEALTHY                  27
+measure-check|   FAULT                    9
+measure-check|   TOLERATED                12
+measure-check|   EXPECTED_GONE            9
+measure-check|   UNREACHABLE_POST_WINDOW  3
+measure-check| by outcome:
+measure-check|   SERVED_OK                27
+measure-check|   TCP_REFUSED              15
+measure-check|   NOT_FOUND                18
+measure-check| 0 checks failed
+measure-check| PASS: taxonomy held (fault injection detected, live validators healthy, post-window expected)
+
+==================================================
+  PASS: probe schedule + measurements + taxonomy
+        fault injection detected, live validators healthy
+==================================================
+--> cleanup
+--> done. logs + data under /home/user/spdt
+EXIT=0
