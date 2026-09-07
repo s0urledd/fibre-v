@@ -1,0 +1,33 @@
+diff --git a/fibre-devnet/multi-node-fibre.sh b/fibre-devnet/multi-node-fibre.sh
+old mode 100644
+new mode 100755
+diff --git a/fibre-sentinel/devtest.sh b/fibre-sentinel/devtest.sh
+old mode 100644
+new mode 100755
+diff --git a/fibre-sentinel/probe-devtest.sh b/fibre-sentinel/probe-devtest.sh
+old mode 100644
+new mode 100755
+index ee7a08a..0d3433d
+--- a/fibre-sentinel/probe-devtest.sh
++++ b/fibre-sentinel/probe-devtest.sh
+@@ -75,7 +75,19 @@ fail() {
+ }
+ 
+ pid_on_port() {
+-  netstat -ano -p tcp 2>/dev/null | grep -E ":$1 .*LISTENING" | awk '{print $NF}' | head -1
++  # Portable: prefer the devnet's own pid table, then lsof (Linux/macOS),
++  # then Windows netstat (Git Bash). Never let a missing tool abort the script.
++  local pid=""
++  if [ -f "$DEVNET_HOME/logs/fibre-pids" ]; then
++    pid="$(awk -v port="$1" '$3 == port {print $2}' "$DEVNET_HOME/logs/fibre-pids" 2>/dev/null | head -1 || true)"
++  fi
++  if [ -z "$pid" ] && command -v lsof >/dev/null 2>&1; then
++    pid="$(lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
++  fi
++  if [ -z "$pid" ] && command -v netstat >/dev/null 2>&1; then
++    pid="$(netstat -ano -p tcp 2>/dev/null | grep -E ":$1 .*LISTENING" | awk '{print $NF}' | head -1 || true)"
++  fi
++  echo "$pid"
+ }
+ 
+ # ---- 1. devnet ----
