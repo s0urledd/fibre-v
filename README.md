@@ -84,6 +84,7 @@ on top of the modules above. The research that precedes it lives in `docs/`:
 | `docs/research/R4-probe-etiquette.md` | how often and how much the observer may download without looking like an attack |
 | `docs/research/R5-fdp-signals.md` | what the Foundation Delegation Program says it rewards, mapped to our deliverables |
 | `docs/research/R6-hosting-and-cost.md` | what running the observer costs, with the arithmetic |
+| `docs/research/R9-presentation-and-celestia-design.md` | Celestia's visual identity, Celenium conventions, trusted-dashboard patterns, and the dashboard design spec |
 | `docs/research/R7-devnet-reproduction.md` | reproducing the tests and the devnet fault-injection run on a fresh Linux machine |
 | `docs/research/R0-open-decisions.md` | decisions only the owners can make |
 | `docs/adr/0001-observer-architecture.md` | the architecture decision for collector, prober, store, API and web |
