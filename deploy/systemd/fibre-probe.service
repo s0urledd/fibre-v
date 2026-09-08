@@ -1,0 +1,17 @@
+[Unit]
+Description=Fibre observer: retrievability prober (sentinel-probe)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fibre-observer
+EnvironmentFile=/etc/fibre-observer/observer.env
+ExecStart=/usr/local/bin/sentinel-probe -rpc ${RPC} -data-dir ${DATA_DIR} -vantage ${VANTAGE} -policy ${POLICY}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fibre-observer /etc/fibre-observer
+
+[Install]
+WantedBy=multi-user.target

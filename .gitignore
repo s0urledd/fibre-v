@@ -19,3 +19,7 @@ go.work.sum
 sentinel-data/
 *.jsonl
 !fibre-sentinel/sample/**/*.jsonl
+
+# observer test fixture (one consistent devnet run); the sentinel data-dir patterns above must not hide it
+!fibre-sentinel/observer/testdata/*.jsonl
+!fibre-sentinel/observer/testdata/state.json

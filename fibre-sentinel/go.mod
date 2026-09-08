@@ -18,13 +18,14 @@ go 1.26.5
 
 require (
 	github.com/celestiaorg/celestia-app/v10 v10.0.0-20260901162319-0b69316466c3
-	github.com/plsgiveup/fibre/fibre-assign v0.0.0
-	github.com/plsgiveup/fibre/fibre-tlsverify v0.0.0
 	github.com/celestiaorg/go-square/v4 v4.0.0
 	github.com/cometbft/cometbft v1.0.1
 	github.com/cosmos/cosmos-sdk v0.52.11
 	github.com/cosmos/gogoproto v1.7.2
+	github.com/plsgiveup/fibre/fibre-assign v0.0.0
+	github.com/plsgiveup/fibre/fibre-tlsverify v0.0.0
 	google.golang.org/grpc v1.83.2
+	modernc.org/sqlite v1.58.0
 )
 
 require (
@@ -204,6 +205,7 @@ require (
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mtibben/percent v0.2.1 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/oasisprotocol/curve25519-voi v0.0.0-20230904125328-1f23a7beb09a // indirect
 	github.com/oklog/run v1.1.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
@@ -215,6 +217,7 @@ require (
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/ronanh/intcomp v1.1.1 // indirect
 	github.com/rs/cors v1.11.1 // indirect
@@ -270,6 +273,9 @@ require (
 	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
+	modernc.org/libc v1.75.6 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.12.1 // indirect
 	nhooyr.io/websocket v1.8.17 // indirect
 	pgregory.net/rapid v1.2.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect

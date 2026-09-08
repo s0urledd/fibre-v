@@ -132,6 +132,19 @@ web. A docker-compose file as the alternative. Both documented in the README
 and both exercised in CI at least to the point of `docker compose config`
 and `systemd-analyze verify`.
 
+## Amendment (8 September 2026): raw files first
+
+Implemented with one refinement. `sentinel-scan` and `sentinel-probe` are
+not wrapped as libraries writing to SQLite; they keep writing their
+append-only JSONL files, and `observer-collector` tails those files into
+SQLite with byte-offset cursors and idempotent keys. This keeps the raw
+record and the derived store separate (R8's pattern: the database can be
+deleted and rebuilt from the files), lets the existing devnet scripts run
+unchanged, and needs no change to the sentinel binaries beyond the policy
+hook and the `-policy` flag. The new services live inside the
+`fibre-sentinel` module so they import `internal/scan` and `internal/probe`
+without moving them.
+
 ## Consequences
 
 - The existing modules stay libraries. The collector and prober import

@@ -1,0 +1,17 @@
+[Unit]
+Description=Fibre observer: chain scanner (sentinel-scan)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fibre-observer
+EnvironmentFile=/etc/fibre-observer/observer.env
+ExecStart=/usr/local/bin/sentinel-scan -rpc ${RPC} -data-dir ${DATA_DIR} -start-height ${START_HEIGHT} -follow -follow-timeout 10m
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fibre-observer
+
+[Install]
+WantedBy=multi-user.target

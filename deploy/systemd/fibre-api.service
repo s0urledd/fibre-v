@@ -1,0 +1,17 @@
+[Unit]
+Description=Fibre observer: read-only JSON API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fibre-observer
+EnvironmentFile=/etc/fibre-observer/observer.env
+ExecStart=/usr/local/bin/observer-api -data-dir ${DATA_DIR} -listen ${API_LISTEN} -vantage ${VANTAGE}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fibre-observer
+
+[Install]
+WantedBy=multi-user.target

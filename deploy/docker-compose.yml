@@ -1,0 +1,49 @@
+# docker compose -f deploy/docker-compose.yml up -d --build
+# Settings come from deploy/.env (copy observer.env.example).
+services:
+  scan:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["sentinel-scan", "-rpc", "${RPC}", "-data-dir", "/data", "-start-height", "${START_HEIGHT:-0}", "-follow", "-follow-timeout", "10m"]
+    volumes: ["observer-data:/data"]
+    restart: unless-stopped
+  probe:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["sentinel-probe", "-rpc", "${RPC}", "-data-dir", "/data", "-vantage", "${VANTAGE}", "-policy", "/etc/fibre-observer/policy.yaml"]
+    volumes: ["observer-data:/data"]
+    restart: unless-stopped
+  heartbeat:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["observer-heartbeat", "-rpc", "${RPC}", "-data-dir", "/data", "-vantage", "${VANTAGE}", "-interval", "10m"]
+    volumes: ["observer-data:/data"]
+    restart: unless-stopped
+  collector:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["observer-collector", "-rpc", "${RPC}", "-data-dir", "/data", "-vantage", "${VANTAGE}"]
+    volumes: ["observer-data:/data"]
+    restart: unless-stopped
+  api:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["observer-api", "-data-dir", "/data", "-listen", "0.0.0.0:8080", "-vantage", "${VANTAGE}"]
+    volumes: ["observer-data:/data"]
+    restart: unless-stopped
+  caddy:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile.compose:/etc/caddy/Caddyfile:ro
+      - site:/var/www/fibre-observer:ro
+      - caddy-data:/data
+    environment: ["DOMAIN=${DOMAIN}"]
+    depends_on: [api, site-copy]
+    restart: unless-stopped
+  # copies the built site out of the image into the shared volume once
+  site-copy:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["sh", "-c", "cp -r /var/www/fibre-observer/. /site/"]
+    volumes: ["site:/site"]
+    restart: "no"
+
+volumes:
+  observer-data:
+  site:
+  caddy-data:

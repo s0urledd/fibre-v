@@ -23,6 +23,11 @@ type Config struct {
 
 	IncludeUnassigned bool
 
+	// Policy, if set, decides which publications are probed (sampling), which
+	// probes fit the byte and request budgets, and when to back off. nil
+	// means probe everything, the pre-policy behaviour.
+	Policy Policy
+
 	// run mode
 	Once     bool          // probe everything due right now, then exit
 	Drain    bool          // run until every known publication's schedule is fully in the past
@@ -143,10 +148,13 @@ func (p *Prober) Run(parent context.Context) error {
 		}
 
 		now := time.Now()
-		due, future, missed := p.plan(pubs, now)
+		due, future, missed, dropped := p.plan(pubs, now)
 
 		for _, mj := range missed {
-			p.recordMissed(mj)
+			p.recordNotProbed(mj, "scheduled point elapsed before the prober ran it")
+		}
+		for _, d := range dropped {
+			p.recordNotProbed(d.job, d.reason)
 		}
 
 		if len(due) > 0 {
@@ -200,19 +208,56 @@ type job struct {
 	point SchedulePoint
 }
 
+// Policy is the prober's load policy hook (see observer/policy).
+type Policy interface {
+	// Admit decides whether a publication is probed at all. alreadyStarted
+	// is true when any of its points was already handled, in which case the
+	// decision must stay "yes" so a schedule is never half-recorded.
+	Admit(pub scan.Publication, alreadyStarted bool) (ok bool, reason string)
+	// BeforeProbe is asked right before one probe. It may deny it (recorded
+	// as NOT_PROBED with reason) or ask for L1-L3 only.
+	BeforeProbe(pub scan.Publication, t Target, now time.Time) (allow, skipDownload bool, reason string)
+	// AfterProbe accounts the bytes and requests a probe consumed.
+	AfterProbe(pub scan.Publication, m Measurement)
+}
+
+// skipped is a slot the policy decided not to probe.
+type skipped struct {
+	job    job
+	reason string
+}
+
 // plan splits every not-yet-recorded schedule point into due (probe now),
 // future (sleep until), and missed (record a MISSED marker). "Recorded" is
 // per-validator, so plan works at publication+point granularity and runDue
 // expands to validators.
-func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, missed []job) {
+func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, missed []job, dropped []skipped) {
 	for _, pub := range pubs {
 		if pub.Assignment.Error != "" {
 			continue // no assignment table -> nothing to probe
 		}
-		for _, pt := range ScheduleFor(pub, p.cfg.Schedule) {
+		points := ScheduleFor(pub, p.cfg.Schedule)
+		var pending []SchedulePoint
+		started := false
+		for _, pt := range points {
 			if p.store.HandledPoint(p.cfg.Vantage, pub.PromiseHash, pt.At) {
+				started = true
 				continue // already probed / marked for every target
 			}
+			pending = append(pending, pt)
+		}
+		if len(pending) == 0 {
+			continue
+		}
+		if p.cfg.Policy != nil {
+			if ok, reason := p.cfg.Policy.Admit(pub, started); !ok {
+				for _, pt := range pending {
+					dropped = append(dropped, skipped{job{pub, pt}, reason})
+				}
+				continue
+			}
+		}
+		for _, pt := range pending {
 			switch {
 			case now.Before(pt.At):
 				future = append(future, job{pub, pt})
@@ -225,7 +270,7 @@ func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, miss
 	}
 	sort.Slice(future, func(i, j int) bool { return future[i].point.At.Before(future[j].point.At) })
 	sort.Slice(due, func(i, j int) bool { return due[i].point.At.Before(due[j].point.At) })
-	return due, future, missed
+	return due, future, missed, dropped
 }
 
 // runDue probes every due slot. Slots are grouped by publication so the
@@ -269,6 +314,15 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 				if p.store.Has(p.cfg.Vantage, ph, t.AddressHex, j.point.At) {
 					continue
 				}
+				skipDL := false
+				if p.cfg.Policy != nil {
+					allow, skip, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now())
+					if !allow {
+						p.recordNotProbedTarget(pub, j.point, t, reason)
+						continue
+					}
+					skipDL = skip
+				}
 				in := Input{
 					Vantage:            p.cfg.Vantage,
 					ChainID:            p.chainID,
@@ -281,10 +335,14 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 					Target:             t,
 					SchedulePoint:      j.point,
 					PruneTolerance:     p.schedCfg().PruneTolerance,
+					SkipDownload:       skipDL,
 				}
 				m := Run(ctx, in, coder, p.cfg.Timeouts)
 				if err := p.store.Append(m); err != nil {
 					p.log.Fatalf("append measurement: %v", err)
+				}
+				if p.cfg.Policy != nil {
+					p.cfg.Policy.AfterProbe(pub, m)
 				}
 				n++
 				p.logMeasurement(m)
@@ -294,11 +352,13 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 	return n
 }
 
-func (p *Prober) recordMissed(j job) {
+// recordNotProbed marks one (publication, point) slot NOT_PROBED for every
+// target, with the given reason (elapsed, or a policy decision).
+func (p *Prober) recordNotProbed(j job, reason string) {
 	pub := j.pub
 	targets, err := p.resolver.TargetsFor(context.Background(), pub, p.cfg.IncludeUnassigned)
 	if err != nil {
-		// cannot resolve targets for a past slot: record one bare MISSED
+		// cannot resolve targets for the slot: record one bare marker
 		// against the publication so the slot is not retried forever.
 		m := Measurement{
 			SchemaVersion: MeasurementSchemaVersion, Vantage: p.cfg.Vantage,
@@ -306,32 +366,37 @@ func (p *Prober) recordMissed(j job) {
 			MustServeUntil: pub.MustServeUntil, ScheduleLabel: j.point.Label,
 			ScheduledAt: j.point.At.UTC(), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
 			Phase: PhaseAt(j.point.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,
-			Classification: ClassNotProbed, ClassificationReason: "slot elapsed; targets unresolved: " + err.Error(),
+			Classification: ClassNotProbed, ClassificationReason: reason + "; targets unresolved: " + err.Error(),
 		}
 		_ = p.store.Append(m)
 		return
 	}
 	for _, t := range targets {
-		if p.store.Has(p.cfg.Vantage, pub.PromiseHash, t.AddressHex, j.point.At) {
-			continue
-		}
-		m := Measurement{
-			SchemaVersion: MeasurementSchemaVersion, Vantage: p.cfg.Vantage,
-			PromiseHash: pub.PromiseHash, Commitment: pub.Promise.Commitment,
-			BlobVersion: pub.Promise.BlobVersion, MustServeUntil: pub.MustServeUntil,
-			ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
-			ValidatorAddress:   t.AddressHex, ValidatorHost: t.Host,
-			Assigned: t.Assigned, AssignedRowCount: t.RowCount,
-			ScheduleLabel: j.point.Label, ScheduledAt: j.point.At.UTC(),
-			StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
-			Phase: PhaseAt(j.point.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,
-			Classification: ClassNotProbed, ClassificationReason: "scheduled point elapsed before the prober ran it",
-		}
-		if err := p.store.Append(m); err != nil {
-			p.log.Fatalf("append missed measurement: %v", err)
-		}
-		p.logMeasurement(m)
+		p.recordNotProbedTarget(pub, j.point, t, reason)
 	}
+}
+
+// recordNotProbedTarget writes one NOT_PROBED measurement for a single target.
+func (p *Prober) recordNotProbedTarget(pub scan.Publication, pt SchedulePoint, t Target, reason string) {
+	if p.store.Has(p.cfg.Vantage, pub.PromiseHash, t.AddressHex, pt.At) {
+		return
+	}
+	m := Measurement{
+		SchemaVersion: MeasurementSchemaVersion, Vantage: p.cfg.Vantage,
+		PromiseHash: pub.PromiseHash, Commitment: pub.Promise.Commitment,
+		BlobVersion: pub.Promise.BlobVersion, MustServeUntil: pub.MustServeUntil,
+		ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
+		ValidatorAddress:   t.AddressHex, ValidatorHost: t.Host,
+		Assigned: t.Assigned, AssignedRowCount: t.RowCount,
+		ScheduleLabel: pt.Label, ScheduledAt: pt.At.UTC(),
+		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
+		Phase: PhaseAt(pt.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,
+		Classification: ClassNotProbed, ClassificationReason: reason,
+	}
+	if err := p.store.Append(m); err != nil {
+		p.log.Fatalf("append not-probed measurement: %v", err)
+	}
+	p.logMeasurement(m)
 }
 
 func (p *Prober) logMeasurement(m Measurement) {

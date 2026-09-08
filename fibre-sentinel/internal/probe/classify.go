@@ -20,6 +20,7 @@ const (
 	OutcomeRPCError       Outcome = "RPC_ERROR"       // some other gRPC error
 	OutcomeProbeError     Outcome = "PROBE_ERROR"     // the probe itself failed (bug / config), not the target
 	OutcomeMissed         Outcome = "MISSED"          // scheduled point elapsed before the prober could run it
+	OutcomeReachable      Outcome = "REACHABLE"       // DNS/TCP/TLS/identity all fine; download deliberately skipped (heartbeat or policy backoff)
 )
 
 // Classification is the Sentinel's verdict on one measurement, given the probe
@@ -84,6 +85,11 @@ func Classify(assigned bool, phase Phase, o Outcome) (Classification, string) {
 	}
 	if o == OutcomeMissed {
 		return ClassNotProbed, "scheduled point elapsed before the prober ran it"
+	}
+	if o == OutcomeReachable {
+		// The endpoint answered and proved its identity; no retention verdict
+		// was attempted. Recorded as an observer-side gap for the shard.
+		return ClassNotProbed, "reachable; download skipped by policy"
 	}
 
 	if !assigned {

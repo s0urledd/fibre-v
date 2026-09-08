@@ -61,6 +61,24 @@ cd fibre-sentinel && go test ./...
 cd fibre-sentinel && ./probe-devtest.sh 4 3
 ```
 
+## The observer (dashboard, API, collector)
+
+The product built on the modules above lives in `fibre-sentinel/observer/`,
+`fibre-sentinel/cmd/observer-*` and `web/`:
+
+| piece | what it does |
+|---|---|
+| `observer-collector` | tails `publications.jsonl`, `measurements.jsonl`, `reachability.jsonl` and `state.json` into SQLite (`observer/store`), polls `x/valaddr` into an endpoint history, records its own run span so downtime renders as a gap |
+| `sentinel-probe -policy` | the R4 load policy (`observer/policy`): deterministic per-blob sampling, per-validator and global byte and request caps, backoff that never adds requests |
+| `observer-heartbeat` | dials every registered endpoint every 10 minutes (DNS, TCP, TLS, identity, no download) |
+| `observer-api` | read-only JSON under `/v1/`; every rate carries its numerator and denominator |
+| `web/` | static Next.js export: network overview, validator detail, blob detail, methodology, about, API |
+| `deploy/` | systemd units, Caddyfile, docker-compose, litestream config |
+
+Run everything on a chain from a clean checkout: see `deploy/README.md`.
+`make verify` runs every test and the web build; `make build` produces the
+binaries and the site.
+
 ## Pinned upstream
 
 celestia-app commit `0b69316466c3ba02f708c0e2a101f834d5d1827f`
@@ -84,6 +102,8 @@ on top of the modules above. The research that precedes it lives in `docs/`:
 | `docs/research/R4-probe-etiquette.md` | how often and how much the observer may download without looking like an attack |
 | `docs/research/R5-fdp-signals.md` | what the Foundation Delegation Program says it rewards, mapped to our deliverables |
 | `docs/research/R6-hosting-and-cost.md` | what running the observer costs, with the arithmetic |
+| `docs/research/R8-comparable-products-and-durability.md` | how Filecoin Spark, Xatu, Storj, Celenium, ProbeLab and L2BEAT measure and present, and the data-loss prevention patterns the observer adopts |
+| `docs/research/R9-presentation-and-celestia-design.md` | Celestia's visual identity, Celenium conventions, trusted-dashboard patterns, and the dashboard design spec |
 | `docs/research/R7-devnet-reproduction.md` | reproducing the tests and the devnet fault-injection run on a fresh Linux machine |
 | `docs/research/R0-open-decisions.md` | decisions only the owners can make |
 | `docs/adr/0001-observer-architecture.md` | the architecture decision for collector, prober, store, API and web |
