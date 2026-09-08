@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -236,5 +237,14 @@ func TestDecodePayForFibre_NotFibre(t *testing.T) {
 	msg, err := decodePayForFibre([]byte("not a tx at all"))
 	if err != nil || msg != nil {
 		t.Fatalf("expected (nil,nil), got (%v,%v)", msg, err)
+	}
+}
+
+func TestIsModuleInactive(t *testing.T) {
+	if !IsModuleInactive(errors.New("abci query params h=595770: code=6 log=unknown query path: unknown request")) {
+		t.Fatal("pre-v10 error should read as inactive module")
+	}
+	if IsModuleInactive(errors.New("post failed: connection refused")) || IsModuleInactive(nil) {
+		t.Fatal("transport errors and nil are not an inactive module")
 	}
 }

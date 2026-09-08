@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	celfibre "github.com/celestiaorg/celestia-app/v10/fibre"
@@ -47,6 +48,13 @@ type Scanner struct {
 	params      *ParamHistory
 	chainID     string
 	startHeight int64 // resolved fresh-scan start (persisted across restarts)
+
+	// fibreInactive is set when the x/fibre module does not answer queries
+	// (the chain is on an app version before Fibre). The scanner keeps
+	// following blocks so it is already in place at activation, retries
+	// the params seed every inactiveRetryEvery heights, and seeds at once if
+	// a MsgPayForFibre shows up.
+	fibreInactive bool
 
 	valSetCache map[int64][]assign.Validator
 }
@@ -168,13 +176,12 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 		if st.ChainID != "" && st.ChainID != s.chainID {
 			return 0, fmt.Errorf("data dir belongs to chain %q but RPC is chain %q", st.ChainID, s.chainID)
 		}
-		if len(st.ParamHistory) == 0 {
-			return 0, errors.New("state.json has no param history")
-		}
 		s.params = LoadParamHistory(st.ParamHistory)
+		s.fibreInactive = len(st.ParamHistory) == 0
 		s.startHeight = st.StartHeight
 		resumeAt := st.LastScannedHeight + 1
-		s.log.Printf("resuming: last_scanned=%d, %d param-history entries", st.LastScannedHeight, len(st.ParamHistory))
+		s.log.Printf("resuming: last_scanned=%d, %d param-history entries%s", st.LastScannedHeight, len(st.ParamHistory),
+			map[bool]string{true: " (x/fibre not active yet)", false: ""}[s.fibreInactive])
 		return resumeAt, nil
 	}
 
@@ -187,13 +194,20 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 		start = 1
 	}
 	seed, err := s.chain.FibreParamsAt(ctx, start)
-	if err != nil {
+	switch {
+	case err == nil:
+		s.params = NewParamHistory(start, seed)
+		s.log.Printf("fresh scan: start=%d seed params: promise_timeout=%s shard_retention=%s withdrawal_delay=%s",
+			start, seed.PaymentPromiseTimeout, seed.ShardRetention, seed.WithdrawalDelay)
+	case IsModuleInactive(err):
+		s.params = LoadParamHistory(nil)
+		s.fibreInactive = true
+		s.log.Printf("fresh scan: start=%d, x/fibre is not active on this chain yet (%v); following blocks without params and retrying every %d heights",
+			start, err, inactiveRetryEvery)
+	default:
 		return 0, fmt.Errorf("seed params at height %d: %w", start, err)
 	}
-	s.params = NewParamHistory(start, seed)
 	s.startHeight = start
-	s.log.Printf("fresh scan: start=%d seed params: promise_timeout=%s shard_retention=%s withdrawal_delay=%s",
-		start, seed.PaymentPromiseTimeout, seed.ShardRetention, seed.WithdrawalDelay)
 
 	// persist the seed immediately so a crash before the first block still
 	// resumes with the right history.
@@ -257,7 +271,40 @@ func (s *Scanner) waitForHeight(ctx context.Context, want int64) (int64, error) 
 
 // processBlock scans one height: first apply any fibre-param updates, then
 // record every single-message MsgPayForFibre tx. Returns publications recorded.
+// inactiveRetryEvery is how often (in heights) the scanner re-asks for
+// x/fibre params while the module is inactive.
+const inactiveRetryEvery = 100
+
+// IsModuleInactive reports whether an ABCI query error means the queried
+// module does not exist on the chain (app version before Fibre).
+func IsModuleInactive(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "unknown query path") || strings.Contains(msg, "unknown request")
+}
+
+// trySeed asks for params at h and, on success, starts the history there.
+func (s *Scanner) trySeed(ctx context.Context, h int64) bool {
+	seed, err := s.chain.FibreParamsAt(ctx, h)
+	if err != nil {
+		if !IsModuleInactive(err) {
+			s.log.Printf("params at h=%d: %v (still treating x/fibre as inactive)", h, err)
+		}
+		return false
+	}
+	s.params = NewParamHistory(h, seed)
+	s.fibreInactive = false
+	s.log.Printf("x/fibre ACTIVE at h=%d: promise_timeout=%s shard_retention=%s withdrawal_delay=%s",
+		h, seed.PaymentPromiseTimeout, seed.ShardRetention, seed.WithdrawalDelay)
+	return true
+}
+
 func (s *Scanner) processBlock(ctx context.Context, h int64) int {
+	if s.fibreInactive && (h%inactiveRetryEvery == 0 || h == s.startHeight) {
+		s.trySeed(ctx, h)
+	}
 	blk, err := s.chain.Block(ctx, h)
 	if err != nil {
 		s.log.Fatalf("fetch block %d: %v", h, err)
@@ -320,6 +367,9 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 		}
 		if s.store.Seen(txHash) {
 			continue
+		}
+		if s.fibreInactive && !s.trySeed(ctx, h) {
+			s.log.Fatalf("h=%d tx=%d: MsgPayForFibre seen but x/fibre params cannot be read", h, i)
 		}
 		msg, derr := decodePayForFibre(raw)
 		if derr != nil || msg == nil {

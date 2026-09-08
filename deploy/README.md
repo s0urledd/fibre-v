@@ -17,8 +17,17 @@ collector. Back up the JSONL files and the database (see "Backups").
 - A Linux VM with Go 1.23+ (the celestia-app pin needs 1.26.5; `GOTOOLCHAIN=auto` downloads it), Node 22, Caddy 2.
 - A CometBFT RPC endpoint for the chain you observe. Use your own full node
   (default pruning is fine; no archive node is needed, see
-  `docs/research/R6-hosting-and-cost.md`). Public RPCs on celestia-core
-  v0.41.0 cap heavy requests at 20 in flight.
+  `docs/research/R6-hosting-and-cost.md`) with
+  `storage.discard_abci_responses = false` in `config.toml`: the scanner
+  reads `block_results` for every block, and a node that discards ABCI
+  responses answers "node is not persisting finalize block responses"
+  (rpc-mocha.pops.one did on 8 September 2026). Public RPCs on
+  celestia-core v0.41.0 also cap heavy requests at 20 in flight.
+- Before the chain runs app version 10, `x/fibre` and `x/valaddr` do not
+  exist. The scanner logs "x/fibre is not active on this chain yet" and
+  keeps following blocks, retrying the params query every 100 heights;
+  the collector and heartbeat log the missing registry and carry on. This
+  is the expected state on mocha-5 until the v10 upgrade.
 - Outbound TCP to validators' Fibre ports (default 7980).
 
 ## 2. Build
