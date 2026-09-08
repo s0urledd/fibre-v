@@ -61,6 +61,24 @@ cd fibre-sentinel && go test ./...
 cd fibre-sentinel && ./probe-devtest.sh 4 3
 ```
 
+## The observer (dashboard, API, collector)
+
+The product built on the modules above lives in `fibre-sentinel/observer/`,
+`fibre-sentinel/cmd/observer-*` and `web/`:
+
+| piece | what it does |
+|---|---|
+| `observer-collector` | tails `publications.jsonl`, `measurements.jsonl`, `reachability.jsonl` and `state.json` into SQLite (`observer/store`), polls `x/valaddr` into an endpoint history, records its own run span so downtime renders as a gap |
+| `sentinel-probe -policy` | the R4 load policy (`observer/policy`): deterministic per-blob sampling, per-validator and global byte and request caps, backoff that never adds requests |
+| `observer-heartbeat` | dials every registered endpoint every 10 minutes (DNS, TCP, TLS, identity, no download) |
+| `observer-api` | read-only JSON under `/v1/`; every rate carries its numerator and denominator |
+| `web/` | static Next.js export: network overview, validator detail, blob detail, methodology, about, API |
+| `deploy/` | systemd units, Caddyfile, docker-compose, litestream config |
+
+Run everything on a chain from a clean checkout: see `deploy/README.md`.
+`make verify` runs every test and the web build; `make build` produces the
+binaries and the site.
+
 ## Pinned upstream
 
 celestia-app commit `0b69316466c3ba02f708c0e2a101f834d5d1827f`

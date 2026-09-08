@@ -1,0 +1,14 @@
+# litestream replicate -config /etc/litestream.yml
+# Continuous SQLite replication to an S3-compatible bucket (R2 works).
+dbs:
+  - path: /var/lib/fibre-observer/data/observer.db
+    replicas:
+      - type: s3
+        bucket: fibre-observer-backup
+        path: observer.db
+        endpoint: https://<account>.r2.cloudflarestorage.com
+        region: auto
+        # access keys via LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY
+        sync-interval: 1s
+        retention: 72h
+        snapshot-interval: 24h

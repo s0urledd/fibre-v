@@ -1,0 +1,19 @@
+# Fibre observer: static dashboard plus the API under /api.
+observer.example.org {
+	encode gzip
+
+	handle_path /api/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle {
+		root * /var/www/fibre-observer
+		try_files {path} {path}/ {path}.html /index.html
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+}

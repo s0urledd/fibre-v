@@ -1,0 +1,17 @@
+[Unit]
+Description=Fibre observer: collector (JSONL to SQLite, endpoint registry)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fibre-observer
+EnvironmentFile=/etc/fibre-observer/observer.env
+ExecStart=/usr/local/bin/observer-collector -rpc ${RPC} -data-dir ${DATA_DIR} -vantage ${VANTAGE}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fibre-observer
+
+[Install]
+WantedBy=multi-user.target
