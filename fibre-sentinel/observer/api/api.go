@@ -644,10 +644,11 @@ type blobRow struct {
 }
 
 // reconstruct is the per-blob reconstructability verdict at the latest
-// in-window or grace schedule point that has probes: distinct rows held by
+// in-window schedule point that has probes: distinct rows held by
 // validators that served correctly versus the rows needed (OriginalRows).
-// Post-window points are never used, because "not found" is the correct
-// answer there; WindowOver says whether the obligation has ended.
+// Grace and post points are never used: "not found" is tolerated or
+// expected there, so a quiet grace point says nothing about the promise.
+// WindowOver says whether the obligation has ended since.
 type reconstruct struct {
 	Status        string `json:"status"` // yes | degraded | no | unknown
 	Point         string `json:"point"`  // schedule label the verdict is taken at
@@ -705,7 +706,7 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 	db := s.st.DB()
 	var label, pointAt, msu string
 	err := db.QueryRowContext(ctx, `SELECT schedule_label, scheduled_at, must_serve_until FROM probes
-		WHERE promise_hash = ? AND outcome NOT IN ('MISSED','PROBE_ERROR') AND phase IN ('in_window','grace')
+		WHERE promise_hash = ? AND outcome NOT IN ('MISSED','PROBE_ERROR') AND phase = 'in_window'
 		ORDER BY scheduled_at DESC LIMIT 1`, hash).Scan(&label, &pointAt, &msu)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &reconstruct{Status: "unknown"}, nil
