@@ -1,0 +1,94 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  gofmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - name: gofmt -l
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+  # ---- zero-dependency modules: fast, standalone, race-checked ----
+  fibre-tlsverify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: fibre-tlsverify/go.mod
+          cache-dependency-path: fibre-tlsverify/go.sum
+      - name: vet
+        working-directory: fibre-tlsverify
+        run: go vet ./...
+      - name: test (with -race)
+        working-directory: fibre-tlsverify
+        run: go test -race -shuffle=on ./...
+
+  fibre-assign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: fibre-assign/go.mod
+          cache-dependency-path: fibre-assign/go.sum
+      - name: vet
+        working-directory: fibre-assign
+        run: go vet ./...
+      - name: test (with -race)
+        working-directory: fibre-assign
+        run: go test -race -shuffle=on ./...
+
+  # ---- differential test: builds celestia-app from the module proxy ----
+  fibre-assign-reftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: fibre-assign/reftest/go.mod
+          cache-dependency-path: fibre-assign/reftest/go.sum
+      - name: differential test vs celestia-app
+        working-directory: fibre-assign/reftest
+        run: go test -shuffle=on ./...
+
+  # ---- the Sentinel: scanner + prober ----
+  fibre-sentinel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: fibre-sentinel/go.mod
+          cache-dependency-path: fibre-sentinel/go.sum
+      - name: vet
+        working-directory: fibre-sentinel
+        run: go vet ./...
+      - name: build all commands
+        working-directory: fibre-sentinel
+        run: go build ./...
+      - name: test
+        working-directory: fibre-sentinel
+        run: go test -shuffle=on ./...
+
+  # ---- devnet + test scripts ----
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n (syntax)
+        run: for f in fibre-devnet/*.sh fibre-sentinel/*.sh; do bash -n "$f"; done
+      - name: shellcheck (errors only)
+        run: shellcheck --severity=error fibre-devnet/*.sh fibre-sentinel/*.sh

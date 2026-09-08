@@ -1,0 +1,12 @@
+PUB| uploader-derived key: celestia1m0v5vrvyclkpuvlu66eefcqyv4hje4q0vze9xs
+PUB| escrow funded (tx AA641419BE60D12C12C3FF352F09DBC8B28E7C6B483A936DFA93FD29AD2C1656 @ h57)
+2026/09/03 03:53:45 INFO loaded fibre providers fibre-client.count=4
+2026/09/03 03:53:45 INFO connected to app node fibre-client.chain_id=fibre-devnet
+2026/09/03 03:53:45 INFO client ready fibre-client.chain_id=fibre-devnet
+PUB| fibre client started; chain_id=fibre-devnet
+PUB| #0 PUBLISHED promise_height=57 commitment=1579a2b5cffcc1f0b4201f58eaaa92d0b40f3913b0755d9596f7d699ae5fb384 blob_v0 size=262144 sigs=4 creation=2026-09-03T00:53:45.09077Z settle_height=59 settle_tx=7B28C35A1BFC57D62C4484E9B8441109D2BB09BC663B3B7043CB6D858AB33271 dur=3.091s
+PUB| #1 PUBLISHED promise_height=62 commitment=9eae855c77ce073d0e338fe28c93fcceba13c791d07008cc02af52ec6760924d blob_v0 size=262144 sigs=4 creation=2026-09-03T00:53:53.1854042Z settle_height=64 settle_tx=6D25EC91630D46FAD8696FB79EFA3168F3A1AC783F389FEFBDCA80142BB0E8F2 dur=3.08s
+PUB| #2 PUBLISHED promise_height=67 commitment=786d4240432c0fd6cac616fb0dda5aa4a846db356335409cab9c7a6cdb3bfe72 blob_v0 size=262144 sigs=4 creation=2026-09-03T00:54:01.2703434Z settle_height=69 settle_tx=94FFA9603AE79C456607E854C49FE47546E7D1367D1AC656F8305010B6F56FE0 dur=3.052s
+PUB| #3 PUBLISHED promise_height=72 commitment=c6c53b522b57f6dbd78fbc5230f686ddb99f1d0e6ebf01084f60dcb4e95a9eb3 blob_v0 size=262144 sigs=4 creation=2026-09-03T00:54:09.3268745Z settle_height=74 settle_tx=5B55DA7ED7906448B65B827F2E02F187EBBE47875A41CD24CCA82F6130F00807 dur=3.053s
+PUB| done: 4 blobs published
+2026/09/03 03:54:12 INFO stopping client
