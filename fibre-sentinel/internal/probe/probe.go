@@ -101,6 +101,11 @@ type Input struct {
 
 	SchedulePoint  SchedulePoint
 	PruneTolerance time.Duration // grace/post boundary; phase is computed from the actual start time
+
+	// SkipDownload stops after the identity step (L1-L3 only). Used by the
+	// reachability heartbeat and by the probe policy's backoff, where the
+	// expensive DownloadShard would only repeat a transport failure.
+	SkipDownload bool
 }
 
 // Run executes one layered probe and returns a fully-populated Measurement.
@@ -239,6 +244,11 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		m.Identity.Error = verr.Error()
 		m.Outcome = OutcomeIdentityFail
 		m.RawError = verr.Error()
+		return m
+	}
+
+	if in.SkipDownload {
+		m.Outcome = OutcomeReachable
 		return m
 	}
 

@@ -386,3 +386,25 @@ func (s *Store) Count(ctx context.Context) (Counts, error) {
 	}
 	return c, nil
 }
+
+// ---- reachability ----
+
+// InsertReachability stores one heartbeat measurement. Idempotent on
+// (vantage, validator, scheduled_at).
+func (s *Store) InsertReachability(m probe.Measurement, raw []byte) (inserted bool, err error) {
+	key := m.Vantage + "|" + m.ValidatorAddress + "|" + m.ScheduledAt.UTC().Format(time.RFC3339Nano)
+	res, err := s.db.Exec(`INSERT INTO reachability
+		(dedupe_key, vantage, validator_address, validator_host, height, scheduled_at, started_at,
+		 dns_ok, tcp_ok, tcp_ms, tls_ok, tls_ms, peer_cert_sha256, identity_ok, identity_reason,
+		 outcome, raw_error, total_duration_ms, raw_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(dedupe_key) DO NOTHING`,
+		key, m.Vantage, m.ValidatorAddress, m.ValidatorHost, m.ValidatorSetHeight, ts(m.ScheduledAt), ts(m.StartedAt),
+		b2i(m.DNS.OK), b2i(m.TCP.OK), m.TCP.DurationMS, b2i(m.TLS.OK), m.TLS.DurationMS, m.TLS.PeerCertSHA256,
+		b2i(m.Identity.OK), m.Identity.Reason, string(m.Outcome), m.RawError, m.TotalDurationMS, string(raw))
+	if err != nil {
+		return false, fmt.Errorf("reachability %s: %w", key, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}

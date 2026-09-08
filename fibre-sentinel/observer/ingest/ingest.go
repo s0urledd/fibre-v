@@ -156,3 +156,17 @@ func State(st *store.Store, path string, now time.Time) error {
 	}
 	return nil
 }
+
+// Reachability ingests reachability.jsonl written by observer-heartbeat.
+func Reachability(st *store.Store, path string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var m probe.Measurement
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return false, fmt.Errorf("decode reachability: %w", err)
+		}
+		if m.ValidatorAddress == "" {
+			return false, errors.New("reachability without validator_address")
+		}
+		return st.InsertReachability(m, raw)
+	}, now)
+}

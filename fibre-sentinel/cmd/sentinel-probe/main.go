@@ -22,6 +22,7 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/policy"
 )
 
 func main() {
@@ -49,6 +50,7 @@ func main() {
 		tlsTO       = flag.Duration("tls-timeout", 10*time.Second, "")
 		dlTO        = flag.Duration("download-timeout", 25*time.Second, "")
 		logLines    = flag.Int("log-ring", 400, "log lines kept in memory for the crash dump")
+		policyPath  = flag.String("policy", "", "probe load policy YAML (observer/policy); \"default\" applies the R4 defaults; empty = no policy (probe everything)")
 	)
 	flag.Parse()
 
@@ -70,7 +72,25 @@ func main() {
 		fracs = append(fracs, math.Pow(x, 0.7))
 	}
 
+	var pol probe.Policy
+	if *policyPath != "" {
+		path := *policyPath
+		if path == "default" {
+			path = ""
+		}
+		cfg, err := policy.Load(path)
+		if err != nil {
+			log.Fatalf("policy: %v", err)
+		}
+		p, err := policy.New(cfg)
+		if err != nil {
+			log.Fatalf("policy: %v", err)
+		}
+		pol = p
+	}
+
 	pr, err := probe.New(probe.Config{
+		Policy:           pol,
 		RPCURL:           *rpc,
 		PublicationsPath: *pubsPath,
 		DataDir:          *dataDir,

@@ -39,6 +39,7 @@ func main() {
 		pubsPath  = flag.String("publications", "", "path to publications.jsonl (default <data-dir>/publications.jsonl)")
 		statePath = flag.String("state", "", "path to state.json (default <data-dir>/state.json)")
 		measPath  = flag.String("measurements", "", "path to measurements.jsonl (default <data-dir>/measurements.jsonl)")
+		reachPath = flag.String("reachability", "", "path to reachability.jsonl (default <data-dir>/reachability.jsonl)")
 	)
 	flag.Parse()
 
@@ -53,6 +54,9 @@ func main() {
 	}
 	if *measPath == "" {
 		*measPath = filepath.Join(*dataDir, "measurements.jsonl")
+	}
+	if *reachPath == "" {
+		*reachPath = filepath.Join(*dataDir, "reachability.jsonl")
 	}
 
 	log := scan.NewLogger(*logLines)
@@ -94,6 +98,11 @@ func main() {
 			log.Printf("measurements: %v", err)
 		} else if r.Inserted > 0 {
 			log.Printf("measurements: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		if r, err := ingest.Reachability(st, *reachPath, now); err != nil {
+			log.Printf("reachability: %v", err)
+		} else if r.Inserted > 0 {
+			log.Printf("reachability: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
 		if pollEndpoints && chain != nil {
 			_, height, err := chain.Status(ctx)

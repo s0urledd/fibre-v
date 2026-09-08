@@ -1,0 +1,26 @@
+# Probe load policy. Defaults are the ones in docs/research/R4-probe-etiquette.md.
+# Every per-validator number is PER VANTAGE; run at most three vantages.
+
+capacity_model:
+  floor_rows: 148                 # smallest assignment (MinRowsPerValidator)
+  floor_validator_bps: 650000000  # 0.65 Gbps: assumed serving capacity of a floor validator (UNVERIFIED, R4 section 2.5)
+  scale_with_rows: true           # cap(rows) = cap(148) * rows / 148
+
+caps:
+  per_validator:
+    requests_per_minute: 30
+    min_request_spacing: 2s
+    bytes_per_hour_fraction: 0.01     # 1% of the capacity model -> 2.93 GB/h at 148 rows
+    bytes_per_day_fraction: 0.0075    # -> 52.7 GB/day at 148 rows
+  global:
+    bytes_per_hour: 53687091200       # 50 GiB; binds first in the 128 MiB/min scenario (p ~ 0.4)
+    bytes_per_day: 644245094400       # 600 GiB
+
+sampling:
+  master_secret_file: ""            # empty: a process-local random secret (fine for devnet; set a path for a public vantage)
+  projection_lookback: 1h
+  always_probe: []                  # promise hashes exempt from sampling, e.g. a blob under dispute
+
+backoff:
+  skip_download_after: 3            # consecutive transport failures before DownloadShard is skipped
+  skip_window: 20m

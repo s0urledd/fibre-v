@@ -170,3 +170,29 @@ CREATE TABLE IF NOT EXISTS meta (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Reachability heartbeats: L1-L3 probes of every registered endpoint, no
+-- download. One row per (vantage, validator, round).
+CREATE TABLE IF NOT EXISTS reachability (
+    dedupe_key        TEXT PRIMARY KEY,
+    vantage           TEXT NOT NULL,
+    validator_address TEXT NOT NULL,   -- 20-byte consensus address, hex
+    validator_host    TEXT NOT NULL,
+    height            INTEGER NOT NULL,
+    scheduled_at      TEXT NOT NULL,
+    started_at        TEXT NOT NULL,
+    dns_ok            INTEGER NOT NULL,
+    tcp_ok            INTEGER NOT NULL,
+    tcp_ms            INTEGER NOT NULL,
+    tls_ok            INTEGER NOT NULL,
+    tls_ms            INTEGER NOT NULL,
+    peer_cert_sha256  TEXT NOT NULL DEFAULT '',
+    identity_ok       INTEGER NOT NULL,
+    identity_reason   TEXT NOT NULL DEFAULT '',
+    outcome           TEXT NOT NULL,
+    raw_error         TEXT NOT NULL DEFAULT '',
+    total_duration_ms INTEGER NOT NULL,
+    raw_json          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reachability_validator_time ON reachability (validator_address, started_at);
+CREATE INDEX IF NOT EXISTS reachability_started ON reachability (started_at);
