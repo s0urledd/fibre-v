@@ -11,7 +11,7 @@ import (
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
 
-const sampleDir = "../../sample"
+const sampleDir = "../testdata"
 
 func open(t *testing.T) *store.Store {
 	t.Helper()
@@ -23,7 +23,7 @@ func open(t *testing.T) *store.Store {
 	return st
 }
 
-// TestIngestSampleIsIdempotent ingests the committed devnet run twice and
+// TestIngestSampleIsIdempotent ingests the committed devnet fixture twice and
 // checks the second pass inserts nothing.
 func TestIngestSampleIsIdempotent(t *testing.T) {
 	st := open(t)
@@ -36,12 +36,12 @@ func TestIngestSampleIsIdempotent(t *testing.T) {
 	if pubs.Inserted == 0 || pubs.Inserted != pubs.Read {
 		t.Fatalf("publications: read=%d inserted=%d", pubs.Read, pubs.Inserted)
 	}
-	meas, err := ingest.Measurements(st, filepath.Join(sampleDir, "probe", "measurements.jsonl"), now)
+	meas, err := ingest.Measurements(st, filepath.Join(sampleDir, "measurements.jsonl"), now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if meas.Inserted != 60 {
-		t.Fatalf("measurements: want 60 inserted (the README run), got read=%d inserted=%d", meas.Read, meas.Inserted)
+		t.Fatalf("measurements: want 60 inserted (testdata/README.md), got read=%d inserted=%d", meas.Read, meas.Inserted)
 	}
 	if err := ingest.State(st, filepath.Join(sampleDir, "state.json"), now); err != nil {
 		t.Fatal(err)
@@ -65,10 +65,10 @@ func TestIngestSampleIsIdempotent(t *testing.T) {
 	}
 
 	// reset the cursor and re-read: rows are re-read but not re-inserted.
-	if err := st.SetCursor(filepath.Join(sampleDir, "probe", "measurements.jsonl"), 0, 0, now); err != nil {
+	if err := st.SetCursor(filepath.Join(sampleDir, "measurements.jsonl"), 0, 0, now); err != nil {
 		t.Fatal(err)
 	}
-	meas2, err := ingest.Measurements(st, filepath.Join(sampleDir, "probe", "measurements.jsonl"), now)
+	meas2, err := ingest.Measurements(st, filepath.Join(sampleDir, "measurements.jsonl"), now)
 	if err != nil {
 		t.Fatal(err)
 	}

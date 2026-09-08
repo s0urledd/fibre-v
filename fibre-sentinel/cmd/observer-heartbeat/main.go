@@ -24,7 +24,7 @@ import (
 	"syscall"
 	"time"
 
-	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/types/bech32"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
@@ -94,14 +94,14 @@ func main() {
 			if ctx.Err() != nil {
 				return
 			}
-			addr, err := sdk.ConsAddressFromBech32(pr.ConsAddressBech32)
-			if err != nil {
+			_, raw, err := bech32.DecodeAndConvert(pr.ConsAddressBech32)
+			if err != nil || len(raw) != 20 {
 				log.Printf("bad consensus address %q: %v", pr.ConsAddressBech32, err)
 				continue
 			}
-			addrHex := hex.EncodeToString(addr.Bytes())
+			addrHex := hex.EncodeToString(raw)
 			var a [20]byte
-			copy(a[:], addr.Bytes())
+			copy(a[:], raw)
 			in := probe.Input{
 				Vantage: *vantage, ChainID: chainID,
 				Target:        probe.Target{Address: a, AddressHex: addrHex, PubKey: keyByHex[addrHex], Host: pr.Host},
