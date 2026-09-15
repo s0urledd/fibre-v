@@ -86,6 +86,33 @@ Conclusion from sources: Corto (`corto-1`) is a Celestia testnet, started on app
 
 ---
 
+## 2a. Update, 15 September 2026: the Celestia "Fibre requirements" sheet
+
+A Google Sheet titled "Fibre requirements" (two tabs, Mocha and Mainnet;
+`docs.google.com/spreadsheets/d/1P3k-KQrZxbRjRwIxWkJBNwgAFlFMJUdT7OupA_WoKa0`,
+read 15 Sep 2026) states that its guidance "was supplied by the Celestia
+rollout owner". Snapshot 14 Sep 2026: mocha-5 height 761,263 (78 active
+validators, total voting power 306,769,438); mainnet height 14,033,013 (100
+validators, 477,650,056). Sources it cites: `x/fibre/types/params.go`,
+`fibre/validator/set.go`, `fibre/protocol_params.go`, `fibre/store_codec.go`,
+`fibre/server.go` at commit `afc3370`, and QuickNode RPCs.
+
+| Item | Value in the sheet | Status |
+|---|---|---|
+| Launch params (both networks) | 2 TiB full-stake budget, 4 h retention, "~148 MB/s network planning rate" (derived: the floor validator's 79.46 GB budget filled over 4 h, divided by its 0.0372 shard/blob fraction) | confirms the defaults in R1 §6 |
+| Mocha | "LAUNCH ONLY. No November requirement is included for Mocha." | new |
+| Mainnet, November 2026 | "Potential mainnet demand: 2.2 GB/s; requires a governance parameter update." Floor validator: 0.785 Gbps with a 20% allowance (0.654 Gbps without), 1,178 GB over 4 h. | new; this is the source of the brief's "0.65 Gbps / 1.18 TB" (see R4 §2.5) |
+| Per-validator rows | `min(4096, max(148, ceil(4096 × share ÷ 1/3)))`; e.g. P-OPS 7.53% → 926 rows | matches `fibre-assign` |
+| Shard bytes, 148 rows, 128 MiB blob | 4,991,580 B (on-disk `store_codec` layout: 12 B row prefix, 4 B per proof length, 12 B shard header) | our wire estimate is 4,986,836 B (R4 §1.3); 0.1% apart |
+| Hardware | "32+ cores, GFNI and SHA-NI" CPU baseline; co-location with the validator at launch and, on mainnet, in November | new |
+| Roadmap | S3-compatible shard storage and multiple Fibre servers per validator "targeted for the next 1–2 months (October–November 2026)"; "not available yet" | new |
+| Activation date | none given | still unknown |
+| Huginn (mocha-5) | voting power 2,100,001 (0.68%), 148 rows, 79.46 GB, 0.053 Gbps launch bandwidth | the stake concern in R5 §5.1 no longer applies |
+
+The sheet's "Launch bandwidth" is the average fill rate of the validator's
+storage budget over one retention window plus a 20% allowance; the sheet
+says it "is not a bandwidth cap".
+
 ## 3. How the Fibre server is packaged in releases
 
 ### 3.1 Exact asset names

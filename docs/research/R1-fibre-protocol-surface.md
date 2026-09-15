@@ -354,6 +354,25 @@ Additional contradictions found in the source itself (spec vs code), useful beca
 
 ---
 
+## 12a. Update, 15 September 2026: what changed on main after this note
+
+`git log 5735e050..origin/main -- fibre x/fibre x/valaddr proto specs` (main fetched 15 Sep 2026):
+
+| Commit | Subject | Affects the observer? |
+|---|---|---|
+| 6ea05dd9 | feat: make fibre server connection caps configurable (#7841) | **Yes.** `max_connections` (default 16) and `max_concurrent_streams` (default 13) are now `server_config.toml` fields (`fibre/server_config.go:40-43`, validated ≥ 1 at `:158-162`), no longer compile-time constants as §5 says. Operators may run different caps; the observer cannot read them and must keep assuming the default. |
+| README (with #7841) | "An upload uses 16 signers, so it fills all 16 connection slots and blocks concurrent downloads. Raise `max_connections` above 16 to keep slots free for downloads." | **Yes.** With default caps a probe that arrives during an upload waits for a listener slot; if the wait exceeds the 15 s connection timeout the probe records `TCP_TIMEOUT` or `TLS_HANDSHAKE_FAIL` and, in window, a `FAULT`. That is a false positive about retention. The prober now retries a transport timeout once after a delay before recording it (`internal/probe`, `RetryTransportTimeout`). |
+| 11f9e4c7 | fix(fibre): bound DownloadShard request size in the server codec (#7793) | No. The observer's request is the 33-byte blob id. |
+| 8810c49a | fix: route Fibre OTLP signals to separate paths (#7847) | No (operator-side telemetry). |
+| 060c6274 | fix(fibre): retry PayForFibre broadcast until the signing height commits (#7775) | No (client side). |
+| a5053e54 | test: wait for first block before starting host registry (#7843) | No (tests). |
+| a6bb04d3 | docs: recommend separate disks for fibre and celestia-app (#7848) | No; noted in `deploy/README.md` for our own validator. |
+| 223fc7d8 | docs: simplify fibre server signing section (#7767) | No. |
+
+Tracing and metrics (`fibre/cmd/README.md`, "Tracing & Metrics"): the server exports OTLP/HTTP traces and metrics to the operator's own collector (`--otel-endpoint`, base URL; `/v1/metrics` and `/v1/traces` appended). Server metrics: `fibre.server.{upload_shard,download_shard}.{in_flight,duration,bytes}`, `store.{put,get}.duration`, `sign.duration`, `prune.{entries,duration}`; duration histograms carry a `success` attribute. There is no public metrics endpoint, so these are operator self-reports and do not replace external probing; they are useful for an operator comparing our probe timings with their own `download_shard.duration`.
+
+Effect on §9: the pin-to-main diff now contains one observer-relevant change (#7841). The recommendation stands (re-pin at the `v10.x-mocha` tag), but the re-pin must also update §5 and the prober's assumption about connection caps.
+
 ## 13. Unknowns
 
 | Item | What would resolve it |

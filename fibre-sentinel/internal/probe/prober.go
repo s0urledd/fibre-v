@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
@@ -39,6 +40,18 @@ type Config struct {
 	MaxLateness  time.Duration // a slot older than this is recorded MISSED, not probed
 	RPCTimeout   time.Duration
 	HostCacheTTL time.Duration
+
+	// RetryTransportTimeout re-runs a probe once when the first attempt fails
+	// with a transport timeout (TCP connect timeout, TLS handshake timeout, or
+	// a gRPC Unavailable whose cause is a timeout). The server's default
+	// connection cap is filled by a 16-signer upload, so a probe arriving
+	// during an upload waits for a slot and can time out without saying
+	// anything about retention. The retry costs one extra request and no
+	// bytes, waits RetryDelay, and is skipped when the retry would land in a
+	// different schedule phase than the first attempt. Both attempts are
+	// recorded in the final measurement's Retry field.
+	RetryTransportTimeout bool
+	RetryDelay            time.Duration // default 20s
 }
 
 func (c Config) withDefaults() Config {
@@ -56,6 +69,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.HostCacheTTL <= 0 {
 		c.HostCacheTTL = 60 * time.Second
+	}
+	if c.RetryDelay <= 0 {
+		c.RetryDelay = 20 * time.Second
 	}
 	if c.Vantage == "" {
 		c.Vantage = "local"
@@ -338,6 +354,12 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 					SkipDownload:       skipDL,
 				}
 				m := Run(ctx, in, coder, p.cfg.Timeouts)
+				if p.cfg.RetryTransportTimeout && shouldRetryTransport(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
+					p.log.Printf("probe %s %s: %s (%s); retrying once in %s", short(ph), t.Host, m.Outcome, m.RawError, p.cfg.RetryDelay)
+					if sleepCtx(ctx, p.cfg.RetryDelay) {
+						m = retryOnce(ctx, in, coder, p.cfg.Timeouts, m, p.cfg.RetryDelay)
+					}
+				}
 				if err := p.store.Append(m); err != nil {
 					p.log.Fatalf("append measurement: %v", err)
 				}
@@ -424,4 +446,74 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// shouldRetryTransport decides whether a first attempt deserves the one
+// transport-timeout retry: the outcome must be a transport timeout, and the
+// retry, started after delay, must still fall in the same schedule phase as
+// the first attempt (a retry that crossed from in_window into grace would
+// change the verdict, not just the evidence).
+func shouldRetryTransport(m Measurement, pub scan.Publication, sc ScheduleConfig, delay time.Duration, now time.Time) bool {
+	if m.Retry != nil {
+		return false // already retried
+	}
+	if !m.transportTimeout() {
+		return false
+	}
+	return PhaseAt(now.Add(delay), pub, sc) == m.Phase
+}
+
+// transportTimeout reports whether the measurement failed because a
+// connection could not be established in time: TCP connect timeout, TLS
+// handshake timeout, or gRPC Unavailable caused by a timeout. A download that
+// started and then ran out of time is not a transport timeout.
+func (m Measurement) transportTimeout() bool {
+	switch m.Outcome {
+	case OutcomeTCPTimeout:
+		return true
+	case OutcomeTLSFail:
+		return m.TLS.Attempted && isTimeoutText(m.TLS.Error)
+	case OutcomeRPCUnavailable:
+		return m.Download.Attempted && isTimeoutText(m.Download.Error)
+	}
+	return false
+}
+
+func isTimeoutText(s string) bool {
+	ls := strings.ToLower(s)
+	return strings.Contains(ls, "timeout") || strings.Contains(ls, "deadline exceeded")
+}
+
+// retryOnce runs the probe a second time and returns the second measurement
+// with the first attempt attached. The second attempt's timings and verdict
+// stand on their own; the first is evidence.
+func retryOnce(ctx context.Context, in Input, coder *Coder, to StepTimeouts, first Measurement, delay time.Duration) Measurement {
+	m := Run(ctx, in, coder, to)
+	m.Retry = &RetryInfo{
+		Attempts:        2,
+		DelayMS:         delay.Milliseconds(),
+		FirstStartedAt:  first.StartedAt,
+		FirstOutcome:    first.Outcome,
+		FirstError:      first.RawError,
+		FirstDurationMS: first.TotalDurationMS,
+	}
+	if m.Outcome == first.Outcome {
+		m.ClassificationReason += "; persisted across a retry after " + delay.String()
+	} else {
+		m.ClassificationReason += "; first attempt " + string(first.Outcome) + ", retried after " + delay.String()
+	}
+	return m
+}
+
+// sleepCtx waits d or until ctx is done; it reports whether the full wait
+// completed.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
