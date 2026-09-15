@@ -1,17 +1,19 @@
-# Probe load policy. Defaults are the ones in docs/research/R4-probe-etiquette.md.
+# Probe load policy for mocha-5 at Fibre launch. Differs from policy.example.yaml
+# (the mainnet November model) only in the capacity model and the hourly
+# fraction; see docs/research/R4-probe-etiquette.md section 6a.
 # Every per-validator number is PER VANTAGE; run at most three vantages.
 
 capacity_model:
   floor_rows: 148                 # smallest assignment (MinRowsPerValidator)
-  floor_validator_bps: 650000000  # 0.65 Gbps: floor validator ingress at the 2.2 GB/s mainnet November model (Celestia "Fibre requirements" sheet; R4 section 6a). Use policy.mocha.yaml on mocha-5.
+  floor_validator_bps: 53000000   # 53 Mbps: floor validator's launch ingress incl. 20% allowance, Celestia "Fibre requirements" sheet, 14 Sep 2026
   scale_with_rows: true           # cap(rows) = cap(148) * rows / 148
 
 caps:
   per_validator:
     requests_per_minute: 30
     min_request_spacing: 2s
-    bytes_per_hour_fraction: 0.01     # 1% of the capacity model -> 2.93 GB/h at 148 rows
-    bytes_per_day_fraction: 0.0075    # -> 52.7 GB/day at 148 rows
+    bytes_per_hour_fraction: 0.02     # 2% of the launch ingress -> 47.7 MB/h at 148 rows (~9 floor shards of a 128 MiB blob)
+    bytes_per_day_fraction: 0.015     # -> 859 MB/day at 148 rows
   global:
     bytes_per_hour: 53687091200       # 50 GiB; binds first in the 128 MiB/min scenario (p ~ 0.4)
     bytes_per_day: 644245094400       # 600 GiB

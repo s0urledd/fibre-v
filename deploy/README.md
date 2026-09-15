@@ -29,6 +29,10 @@ collector. Back up the JSONL files and the database (see "Backups").
   the collector and heartbeat log the missing registry and carry on. This
   is the expected state on mocha-5 until the v10 upgrade.
 - Outbound TCP to validators' Fibre ports (default 7980).
+- If the same host also runs your own validator and Fibre server: celestia-app
+  main (#7848, 15 Sep 2026) recommends separate disks for Fibre shards and
+  the node's data; the observer's data directory should not share the Fibre
+  shard disk either.
 
 ## 2. Build
 

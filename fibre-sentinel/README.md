@@ -170,6 +170,17 @@ identity verdict (with the claimed validity window even on failure), rows
 returned and both verification results, and the raw error text. **No scores** —
 a reliability view is a separate, later derivation from these records.
 
+**Transport-timeout retry.** A Fibre server's default connection cap (16) is
+filled by a single 16-signer upload, so a probe that arrives during an upload
+waits for a slot and can time out at TCP or TLS without saying anything about
+retention. When the first attempt ends in a transport timeout (TCP connect
+timeout, TLS handshake timeout, or gRPC `Unavailable` caused by a timeout) the
+prober waits `-retry-delay` (20s) and runs the probe once more; the second
+attempt is the recorded measurement and carries the first in its `retry`
+field. The retry is skipped when it would land in a different schedule phase
+than the first attempt. `-retry-transport-timeout=false` disables it. A
+download that started and then ran out of time is not retried.
+
 ### Error-class taxonomy
 
 Classification is a fact about one probe (given whether the validator is

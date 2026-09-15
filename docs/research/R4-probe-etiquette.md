@@ -543,6 +543,36 @@ opt_out:
 
 ---
 
+## 6a. Update, 15 September 2026
+
+**The 0.65 Gbps / 1.18 TB figure is now sourced.** Celestia's "Fibre
+requirements" sheet (R2 §2a) models a mainnet November demand of 2.2 GB/s;
+a floor validator (148 rows, 0.0372 of each 128 MiB blob) then ingests
+0.654 Gbps and stores 1,178 GB per 4-hour window (0.785 Gbps with the sheet's
+20% allowance). The "UNVERIFIED" label in §2.5 is withdrawn; the number is
+the *ingress* planning rate for November on mainnet, not a serving capacity
+and not a Mocha figure.
+
+**Mocha launch is planned an order of magnitude lower.** The sheet's launch
+planning rate is 0.148 GB/s network-wide, which is 44 Mbps of ingress for a
+floor validator (53 Mbps with allowance). The default `capacity_model` in
+`policy.example.yaml` (650 Mbps) therefore overstates Mocha capacity about
+twelve-fold, and a "1% of capacity" cap would be about 15% of the planned
+Mocha ingress. `policy.mocha.yaml` sets `floor_validator_bps: 53000000` and
+`bytes_per_hour_fraction: 0.02`, which is 47.7 MB/h per floor validator, or
+about nine floor-validator shards of a 128 MiB blob per hour; at higher
+publication rates the sampler takes over and the dashboard shows the
+coverage.
+
+**Connection-slot blocking is a false-positive source.** The server README
+(with celestia-app #7841) states that an upload uses 16 signers and fills
+all 16 default connection slots, blocking concurrent downloads. A probe
+arriving during an upload waits for a slot; past the 15 s connection timeout
+it fails at TCP or TLS. The prober now retries one transport timeout after
+`RetryDelay` (default 20 s) before recording the probe, and records both
+attempts in the measurement. The policy's "one connection at a time" rule
+matters for the same reason: the observer must never hold a slot.
+
 ## 7. Open items / unknowns
 
 1. **0.65 Gbps / 1.18 TB provenance** — UNVERIFIED (§2.5). If core's number

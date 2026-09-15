@@ -45,6 +45,8 @@ func main() {
 		maxSleep    = flag.Duration("max-sleep", 30*time.Second, "longest sleep between cycles")
 		maxLateness = flag.Duration("max-lateness", 90*time.Second, "a schedule point older than this is recorded MISSED instead of probed")
 		rpcTO       = flag.Duration("rpc-timeout", 15*time.Second, "per-RPC-call timeout")
+		retryTO     = flag.Bool("retry-transport-timeout", true, "retry a probe once when the first attempt fails with a transport timeout (slot blocking during uploads)")
+		retryDelay  = flag.Duration("retry-delay", 20*time.Second, "wait before the transport-timeout retry")
 		dnsTO       = flag.Duration("dns-timeout", 5*time.Second, "")
 		tcpTO       = flag.Duration("tcp-timeout", 5*time.Second, "")
 		tlsTO       = flag.Duration("tls-timeout", 10*time.Second, "")
@@ -111,6 +113,9 @@ func main() {
 		MaxSleep:          *maxSleep,
 		MaxLateness:       *maxLateness,
 		RPCTimeout:        *rpcTO,
+
+		RetryTransportTimeout: *retryTO,
+		RetryDelay:            *retryDelay,
 	}, log)
 	if err != nil {
 		log.Fatalf("init: %v", err)

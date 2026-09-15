@@ -53,6 +53,22 @@ type Measurement struct {
 	ClassificationReason string         `json:"classification_reason"`
 	RawError             string         `json:"raw_error,omitempty"`
 	TotalDurationMS      int64          `json:"total_duration_ms"`
+
+	// Retry is set when this measurement is the second attempt after a
+	// transport timeout (see Config.RetryTransportTimeout). Absent on
+	// single-attempt measurements; additive, so the schema version is unchanged.
+	Retry *RetryInfo `json:"retry,omitempty"`
+}
+
+// RetryInfo records the first attempt of a probe that was retried once after
+// a transport timeout. The enclosing Measurement is the second attempt.
+type RetryInfo struct {
+	Attempts        int       `json:"attempts"` // always 2
+	DelayMS         int64     `json:"delay_ms"`
+	FirstStartedAt  time.Time `json:"first_started_at"`
+	FirstOutcome    Outcome   `json:"first_outcome"`
+	FirstError      string    `json:"first_error,omitempty"`
+	FirstDurationMS int64     `json:"first_duration_ms"`
 }
 
 // StepResult is one timed network step (DNS resolution, TCP connect).
