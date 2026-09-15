@@ -74,7 +74,7 @@ LivenessThreshold)` — through **both** this package and celestia-app's real
 `validator.Set.Assign`, asserting the two `ShardMap`s are **bit-identical**
 (same validators, same row slices, same order). Plus the called-out edge shapes
 and shuffled input order. `reftest/go.mod` pins celestia-app to the
-pseudo-version for commit `0b69316466c3ba02f708c0e2a101f834d5d1827f` and repeats
+tag for commit `fa5b523b7e3b2b83bd16bc072a45cbd3819fa369` and repeats
 its `replace` block (Go does not apply a dependency's replaces).
 
 CI runs both on every push (`fibre-assign` with `-race`, `fibre-assign-reftest`

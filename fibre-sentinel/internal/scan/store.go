@@ -2,8 +2,10 @@ package scan
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -23,7 +25,6 @@ type Store struct {
 	statePth string
 
 	pubFile *os.File
-	pubW    *bufio.Writer
 	seen    map[string]bool
 }
 
@@ -56,11 +57,64 @@ func OpenStore(dir string) (*Store, error) {
 		return nil, fmt.Errorf("open %s: %w", s.pubPath, err)
 	}
 	s.pubFile = f
-	s.pubW = bufio.NewWriter(f)
 	return s, nil
 }
 
+// TruncateTornTail cuts a trailing partial line (no final newline) off an
+// append-only JSONL file and reports how many bytes were removed. A crash or
+// power loss mid-write leaves exactly such a tail; without this repair the
+// tool refuses to start until someone edits the file by hand. Files that end
+// in a newline, are empty, or do not exist are left alone.
+func TruncateTornTail(path string) (int64, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return 0, err
+	}
+	size := info.Size()
+	last := make([]byte, 1)
+	if _, err := f.ReadAt(last, size-1); err != nil {
+		return 0, err
+	}
+	if last[0] == '\n' {
+		return 0, nil
+	}
+	cut := size
+	const chunk = 1 << 16
+	for cut > 0 {
+		start := cut - chunk
+		if start < 0 {
+			start = 0
+		}
+		b := make([]byte, cut-start)
+		if _, err := f.ReadAt(b, start); err != nil && err != io.EOF {
+			return 0, err
+		}
+		if i := bytes.LastIndexByte(b, '\n'); i >= 0 {
+			cut = start + int64(i) + 1
+			break
+		}
+		cut = start
+	}
+	if err := f.Truncate(cut); err != nil {
+		return 0, err
+	}
+	return size - cut, f.Sync()
+}
+
 func (s *Store) loadSeen() error {
+	if cut, err := TruncateTornTail(s.pubPath); err != nil {
+		return fmt.Errorf("repair %s: %w", s.pubPath, err)
+	} else if cut > 0 {
+		fmt.Fprintf(os.Stderr, "publications: truncated %d bytes of a torn final line in %s\n", cut, s.pubPath)
+	}
 	f, err := os.Open(s.pubPath)
 	if os.IsNotExist(err) {
 		return nil
@@ -110,9 +164,10 @@ func (s *Store) LoadState() (*PersistState, error) {
 // persisted.
 func (s *Store) Seen(settlementTxHash string) bool { return s.seen[settlementTxHash] }
 
-// AppendPublication writes one record (skipping an already-seen one) and flushes
-// it to the OS. It does NOT fsync per call; call Sync() before advancing the
-// cursor.
+// AppendPublication writes one record (skipping an already-seen one) in a
+// single write, so a concurrent reader (the prober tails this file) never
+// sees a record split across two buffer flushes. It does NOT fsync per call;
+// call Sync() before advancing the cursor.
 func (s *Store) AppendPublication(p Publication) error {
 	if s.seen[p.SettlementTxHash] {
 		return nil
@@ -121,18 +176,15 @@ func (s *Store) AppendPublication(p Publication) error {
 	if err != nil {
 		return fmt.Errorf("marshal publication %s: %w", p.PromiseHash, err)
 	}
-	if _, err := s.pubW.Write(append(b, '\n')); err != nil {
+	if _, err := s.pubFile.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("write publication: %w", err)
 	}
 	s.seen[p.SettlementTxHash] = true
 	return nil
 }
 
-// Sync flushes and fsyncs the publications file.
+// Sync fsyncs the publications file.
 func (s *Store) Sync() error {
-	if err := s.pubW.Flush(); err != nil {
-		return fmt.Errorf("flush publications: %w", err)
-	}
 	if err := s.pubFile.Sync(); err != nil {
 		return fmt.Errorf("fsync publications: %w", err)
 	}
@@ -147,20 +199,40 @@ func (s *Store) SaveState(st PersistState) error {
 		return fmt.Errorf("marshal state: %w", err)
 	}
 	tmp := s.statePth + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := writeFileSync(tmp, b); err != nil {
 		return fmt.Errorf("write %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, s.statePth); err != nil {
 		return fmt.Errorf("rename %s: %w", tmp, err)
 	}
+	// fsync the directory so the rename itself survives a power loss.
+	if d, err := os.Open(s.dir); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
 	return nil
 }
 
-// Close flushes and closes the publications file.
-func (s *Store) Close() error {
-	if s.pubW != nil {
-		_ = s.pubW.Flush()
+// writeFileSync writes b to path and fsyncs it before returning, so a rename
+// over the live file never exposes an empty or partial state.json.
+func writeFileSync(path string, b []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
 	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// Close closes the publications file.
+func (s *Store) Close() error {
 	if s.pubFile != nil {
 		return s.pubFile.Close()
 	}

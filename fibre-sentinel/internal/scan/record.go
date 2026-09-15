@@ -32,6 +32,10 @@ type Publication struct {
 	ParamsAtPublication ParamsSnapshot `json:"params_at_publication"`
 	MustServeUntil      time.Time      `json:"must_serve_until"`
 	MustServeUntilBasis string         `json:"must_serve_until_basis"`
+	// MustServeUntilAmbiguous is set when the fibre params changed between the
+	// promise height and the settlement tx; the server's own window depends on
+	// the upload instant, so the earlier candidate is recorded. Additive field.
+	MustServeUntilAmbiguous bool `json:"must_serve_until_ambiguous,omitempty"`
 
 	Assignment AssignmentTable `json:"assignment"`
 

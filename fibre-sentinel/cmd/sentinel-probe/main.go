@@ -13,7 +13,6 @@ package main
 import (
 	"context"
 	"flag"
-	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -45,6 +44,8 @@ func main() {
 		maxSleep    = flag.Duration("max-sleep", 30*time.Second, "longest sleep between cycles")
 		maxLateness = flag.Duration("max-lateness", 90*time.Second, "a schedule point older than this is recorded MISSED instead of probed")
 		rpcTO       = flag.Duration("rpc-timeout", 15*time.Second, "per-RPC-call timeout")
+		concurrency = flag.Int("concurrency", 8, "probes in flight across all validators (never more than one per validator)")
+		backfill    = flag.Duration("backfill-missed", time.Hour, "on (re)start, write NOT_PROBED markers only for slots newer than this; older gaps are left without a row")
 		retryTO     = flag.Bool("retry-transport-timeout", true, "retry a probe once when the first attempt fails with a transport timeout (slot blocking during uploads)")
 		retryDelay  = flag.Duration("retry-delay", 20*time.Second, "wait before the transport-timeout retry")
 		dnsTO       = flag.Duration("dns-timeout", 5*time.Second, "")
@@ -62,17 +63,7 @@ func main() {
 
 	log := scan.NewLogger(*logLines)
 
-	// spread the in-window probes across (0,1), clustered toward the deadline
-	// (x^0.7), where a retention breach is most likely to show.
-	var fracs []float64
-	for i := 0; i < *inWindow; i++ {
-		if *inWindow == 1 {
-			fracs = append(fracs, 0.6)
-			break
-		}
-		x := float64(i+1) / float64(*inWindow+1)
-		fracs = append(fracs, math.Pow(x, 0.7))
-	}
+	fracs := probe.InWindowFractions(*inWindow)
 
 	var pol probe.Policy
 	if *policyPath != "" {
@@ -116,6 +107,8 @@ func main() {
 
 		RetryTransportTimeout: *retryTO,
 		RetryDelay:            *retryDelay,
+		Concurrency:           *concurrency,
+		BackfillMissed:        *backfill,
 	}, log)
 	if err != nil {
 		log.Fatalf("init: %v", err)

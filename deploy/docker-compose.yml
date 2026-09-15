@@ -1,5 +1,9 @@
 # docker compose -f deploy/docker-compose.yml up -d --build
-# Settings come from deploy/.env (copy observer.env.example).
+# Settings come from deploy/.env (copy observer.env.example). RPC must be
+# reachable from inside the containers: a node on the host is
+# http://host.docker.internal:26657 (add extra_hosts on Linux) or its LAN
+# address, never 127.0.0.1. POLICY picks the policy file baked into the
+# image: /etc/fibre-observer/policy.mocha.yaml or policy.example.yaml.
 services:
   scan:
     build: { context: .., dockerfile: deploy/Dockerfile }
@@ -8,7 +12,7 @@ services:
     restart: unless-stopped
   probe:
     build: { context: .., dockerfile: deploy/Dockerfile }
-    command: ["sentinel-probe", "-rpc", "${RPC}", "-data-dir", "/data", "-vantage", "${VANTAGE}", "-policy", "/etc/fibre-observer/policy.yaml"]
+    command: ["sentinel-probe", "-rpc", "${RPC}", "-data-dir", "/data", "-vantage", "${VANTAGE}", "-policy", "${POLICY:-/etc/fibre-observer/policy.mocha.yaml}"]
     volumes: ["observer-data:/data"]
     restart: unless-stopped
   heartbeat:
@@ -25,6 +29,12 @@ services:
     build: { context: .., dockerfile: deploy/Dockerfile }
     command: ["observer-api", "-data-dir", "/data", "-listen", "0.0.0.0:8080", "-vantage", "${VANTAGE}"]
     volumes: ["observer-data:/data"]
+    depends_on: [collector]
+    healthcheck:
+      test: ["CMD", "observer-api", "-check", "http://127.0.0.1:8080/v1/meta"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
   caddy:
     image: caddy:2
@@ -34,7 +44,9 @@ services:
       - site:/var/www/fibre-observer:ro
       - caddy-data:/data
     environment: ["DOMAIN=${DOMAIN}"]
-    depends_on: [api, site-copy]
+    depends_on:
+      api: { condition: service_healthy }
+      site-copy: { condition: service_completed_successfully }
     restart: unless-stopped
   # copies the built site out of the image into the shared volume once
   site-copy:

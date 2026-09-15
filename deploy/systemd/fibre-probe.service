@@ -11,7 +11,7 @@ Restart=always
 RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/fibre-observer /etc/fibre-observer
+ReadWritePaths=/var/lib/fibre-observer
 
 [Install]
 WantedBy=multi-user.target

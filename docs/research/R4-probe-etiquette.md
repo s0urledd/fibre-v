@@ -559,8 +559,10 @@ floor validator (53 Mbps with allowance). The default `capacity_model` in
 `policy.example.yaml` (650 Mbps) therefore overstates Mocha capacity about
 twelve-fold, and a "1% of capacity" cap would be about 15% of the planned
 Mocha ingress. `policy.mocha.yaml` sets `floor_validator_bps: 53000000` and
-`bytes_per_hour_fraction: 0.02`, which is 47.7 MB/h per floor validator, or
-about nine floor-validator shards of a 128 MiB blob per hour; at higher
+`bytes_per_hour_fraction: 0.002` (0.2 %), which is 47.7 MB/h per floor
+validator, or about nine floor-validator shards of a 128 MiB blob per hour
+(an earlier draft of this section wrote 0.02, ten times that; the shipped
+file is now pinned by a test); at higher
 publication rates the sampler takes over and the dashboard shows the
 coverage.
 

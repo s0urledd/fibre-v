@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
@@ -41,6 +42,18 @@ type Config struct {
 	RPCTimeout   time.Duration
 	HostCacheTTL time.Duration
 
+	// Concurrency is how many probes run at once across all validators (R4
+	// section 3.5: global 8). A single validator never sees more than one
+	// connection from this vantage at a time, whatever this value is.
+	Concurrency int
+
+	// BackfillMissed bounds how far back a (re)started prober writes
+	// NOT_PROBED markers for slots it never ran. Older slots are simply left
+	// without a row: the gap is just as visible, and a fresh prober pointed at
+	// a data directory with days of history does not spend hours writing
+	// markers before its first live probe.
+	BackfillMissed time.Duration
+
 	// RetryTransportTimeout re-runs a probe once when the first attempt fails
 	// with a transport timeout (TCP connect timeout, TLS handshake timeout, or
 	// a gRPC Unavailable whose cause is a timeout). The server's default
@@ -73,6 +86,12 @@ func (c Config) withDefaults() Config {
 	if c.RetryDelay <= 0 {
 		c.RetryDelay = 20 * time.Second
 	}
+	if c.Concurrency <= 0 {
+		c.Concurrency = 8
+	}
+	if c.BackfillMissed <= 0 {
+		c.BackfillMissed = time.Hour
+	}
 	if c.Vantage == "" {
 		c.Vantage = "local"
 	}
@@ -80,18 +99,30 @@ func (c Config) withDefaults() Config {
 }
 
 // Prober turns the scanner's publications into scheduled probes and raw
-// measurements. The pending-probe queue is never persisted — it is re-derived
+// measurements. The pending-probe queue is never persisted: it is re-derived
 // from publications.jsonl + measurements.jsonl every cycle, so a restart
-// resumes exactly.
+// resumes exactly (per target, so a point interrupted half-way is finished
+// for the remaining validators).
 type Prober struct {
 	cfg      Config
 	log      *scan.Logger
 	chain    *scan.Chain
 	resolver *Resolver
 	store    *MeasurementStore
+	feed     *pubFeed
 	chainID  string
 
 	coders map[[2]int]*Coder // keyed by (originalRows, totalRows)
+
+	// complete marks (vantage, promise, point) slots every target of which
+	// has a row; plan skips them without resolving targets again.
+	complete map[string]bool
+	// skippedPubs are publications logged once as not probeable (wrong chain,
+	// failed settlement tx).
+	skippedPubs map[string]bool
+
+	valMu    sync.Mutex
+	valLocks map[string]*sync.Mutex // one connection per validator at a time
 }
 
 // New builds a Prober.
@@ -106,12 +137,16 @@ func New(cfg Config, log *scan.Logger) (*Prober, error) {
 		return nil, err
 	}
 	return &Prober{
-		cfg:      cfg,
-		log:      log,
-		chain:    ch,
-		resolver: NewResolver(ch, cfg.HostCacheTTL),
-		store:    st,
-		coders:   map[[2]int]*Coder{},
+		cfg:         cfg,
+		log:         log,
+		chain:       ch,
+		resolver:    NewResolver(ch, cfg.HostCacheTTL),
+		store:       st,
+		feed:        newPubFeed(cfg.PublicationsPath),
+		coders:      map[[2]int]*Coder{},
+		complete:    map[string]bool{},
+		skippedPubs: map[string]bool{},
+		valLocks:    map[string]*sync.Mutex{},
 	}, nil
 }
 
@@ -130,6 +165,17 @@ func (p *Prober) coderFor(originalRows, totalRows int) (*Coder, error) {
 	return c, nil
 }
 
+func (p *Prober) validatorLock(addr string) *sync.Mutex {
+	p.valMu.Lock()
+	defer p.valMu.Unlock()
+	l, ok := p.valLocks[addr]
+	if !ok {
+		l = &sync.Mutex{}
+		p.valLocks[addr] = l
+	}
+	return l
+}
+
 // Run executes the prober.
 func (p *Prober) Run(parent context.Context) error {
 	ctx := parent
@@ -145,8 +191,8 @@ func (p *Prober) Run(parent context.Context) error {
 		p.log.Fatalf("initial status: %v", err)
 	}
 	p.chainID = id
-	p.log.Printf("prober up: vantage=%s chain_id=%s tip=%d rpc=%s pubs=%s data=%s",
-		p.cfg.Vantage, id, tip, p.cfg.RPCURL, p.cfg.PublicationsPath, p.store.Path())
+	p.log.Printf("prober up: vantage=%s chain_id=%s tip=%d rpc=%s pubs=%s data=%s concurrency=%d",
+		p.cfg.Vantage, id, tip, p.cfg.RPCURL, p.cfg.PublicationsPath, p.store.Path(), p.cfg.Concurrency)
 
 	probed := 0
 	for {
@@ -158,19 +204,29 @@ func (p *Prober) Run(parent context.Context) error {
 			p.log.Fatalf("run deadline hit: %v", err)
 		}
 
-		pubs, err := scan.LoadPublications(p.cfg.PublicationsPath)
-		if err != nil {
+		if added, err := p.feed.refresh(); err != nil {
 			p.log.Fatalf("load publications: %v", err)
+		} else if added > 0 {
+			p.log.Printf("publications: +%d (%d live)", added, len(p.feed.pubs))
 		}
 
 		now := time.Now()
-		due, future, missed, dropped := p.plan(pubs, now)
+		due, future, missed, dropped, finished := p.plan(p.feed.all(), now)
 
 		for _, mj := range missed {
 			p.recordNotProbed(mj, "scheduled point elapsed before the prober ran it")
 		}
 		for _, d := range dropped {
 			p.recordNotProbed(d.job, d.reason)
+		}
+		if len(missed)+len(dropped) > 0 {
+			if err := p.store.Sync(); err != nil {
+				p.log.Fatalf("sync measurements: %v", err)
+			}
+		}
+		for _, h := range finished {
+			p.feed.forget(h)
+			p.store.Forget(h)
 		}
 
 		if len(due) > 0 {
@@ -218,7 +274,8 @@ func (p *Prober) sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// job is one (publication, schedule point, validator) probe slot.
+// job is one (publication, schedule point) slot; runDue expands it to
+// validators.
 type job struct {
 	pub   scan.Publication
 	point SchedulePoint
@@ -243,32 +300,69 @@ type skipped struct {
 	reason string
 }
 
-// plan splits every not-yet-recorded schedule point into due (probe now),
-// future (sleep until), and missed (record a MISSED marker). "Recorded" is
-// per-validator, so plan works at publication+point granularity and runDue
-// expands to validators.
-func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, missed []job, dropped []skipped) {
+// probeable reports whether a publication belongs to this prober at all, and
+// logs once when it does not.
+func (p *Prober) probeable(pub scan.Publication) bool {
+	reason := ""
+	switch {
+	case pub.Assignment.Error != "":
+		return false // no assignment table -> nothing to probe (logged by the scanner)
+	case pub.SettlementTxCode != 0:
+		reason = fmt.Sprintf("settlement tx failed (code %d); no obligation", pub.SettlementTxCode)
+	case pub.Promise.ChainID != "" && p.chainID != "" && pub.Promise.ChainID != p.chainID:
+		reason = fmt.Sprintf("promise chain_id %q is not this RPC's chain %q", pub.Promise.ChainID, p.chainID)
+	}
+	if reason == "" {
+		return true
+	}
+	if !p.skippedPubs[pub.PromiseHash] {
+		p.skippedPubs[pub.PromiseHash] = true
+		p.log.Printf("skip %s: %s", short(pub.PromiseHash), reason)
+	}
+	return false
+}
+
+// plan splits every not-yet-complete schedule point into due (probe now),
+// future (sleep until), missed (record a MISSED marker) and dropped (policy
+// refused the publication). finished lists publications whose whole schedule
+// is behind the backfill horizon: nothing will ever be recorded for them
+// again, so they can be forgotten.
+func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, missed []job, dropped []skipped, finished []string) {
+	horizon := now.Add(-p.cfg.BackfillMissed)
 	for _, pub := range pubs {
-		if pub.Assignment.Error != "" {
-			continue // no assignment table -> nothing to probe
+		if !p.probeable(pub) {
+			continue
 		}
 		points := ScheduleFor(pub, p.cfg.Schedule)
 		var pending []SchedulePoint
 		started := false
+		allPast := true
 		for _, pt := range points {
-			if p.store.HandledPoint(p.cfg.Vantage, pub.PromiseHash, pt.At) {
+			key := pointKey(p.cfg.Vantage, pub.PromiseHash, pt.At)
+			if p.complete[key] {
 				started = true
-				continue // already probed / marked for every target
+				continue
+			}
+			if p.store.HandledPoint(p.cfg.Vantage, pub.PromiseHash, pt.At) {
+				started = true // at least one target has a row; finish the rest
+			}
+			if pt.At.After(horizon) {
+				allPast = false
 			}
 			pending = append(pending, pt)
 		}
-		if len(pending) == 0 {
+		if len(pending) == 0 || allPast {
+			// every point is complete, or so old that nothing will be
+			// written for it: forget the publication.
+			finished = append(finished, pub.PromiseHash)
 			continue
 		}
 		if p.cfg.Policy != nil {
 			if ok, reason := p.cfg.Policy.Admit(pub, started); !ok {
 				for _, pt := range pending {
-					dropped = append(dropped, skipped{job{pub, pt}, reason})
+					if pt.At.After(horizon) {
+						dropped = append(dropped, skipped{job{pub, pt}, reason})
+					}
 				}
 				continue
 			}
@@ -279,20 +373,35 @@ func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, miss
 				future = append(future, job{pub, pt})
 			case now.Sub(pt.At) <= p.cfg.MaxLateness:
 				due = append(due, job{pub, pt})
-			default:
+			case pt.At.After(horizon):
 				missed = append(missed, job{pub, pt})
+			default:
+				// behind the backfill horizon: left without a row
+				p.complete[pointKey(p.cfg.Vantage, pub.PromiseHash, pt.At)] = true
 			}
 		}
 	}
-	sort.Slice(future, func(i, j int) bool { return future[i].point.At.Before(future[j].point.At) })
-	sort.Slice(due, func(i, j int) bool { return due[i].point.At.Before(due[j].point.At) })
-	return due, future, missed, dropped
+	sort.SliceStable(future, func(i, j int) bool { return future[i].point.At.Before(future[j].point.At) })
+	sort.SliceStable(due, func(i, j int) bool { return due[i].point.At.Before(due[j].point.At) })
+	return due, future, missed, dropped, finished
+}
+
+// work is one (publication, point, validator) probe ready to run.
+type work struct {
+	job        job
+	target     Target
+	coder      *Coder
+	commitment [32]byte
+	key        string // point key, for completion tracking
 }
 
 // runDue probes every due slot. Slots are grouped by publication so the
-// validator set / host registry is resolved once per group. A group whose
-// targets cannot be resolved is left for the next cycle (not marked, so it
-// retries until it either succeeds or ages into MISSED).
+// validator set / host registry is resolved once per group; the resulting
+// (point, validator) probes then run on a pool of Concurrency workers, with
+// at most one in-flight probe per validator. A group whose targets cannot be
+// resolved is left for the next cycle (not marked, so it retries until it
+// either succeeds or ages into MISSED). A point is marked complete only when
+// every one of its targets has a row.
 func (p *Prober) runDue(ctx context.Context, due []job) int {
 	byPub := map[string][]job{}
 	order := []string{}
@@ -303,7 +412,8 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 		byPub[j.pub.PromiseHash] = append(byPub[j.pub.PromiseHash], j)
 	}
 
-	n := 0
+	var items []work
+	pointItems := map[string]int{}
 	for _, ph := range order {
 		jobs := byPub[ph]
 		pub := jobs[0].pub
@@ -323,61 +433,126 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 		copy(commitment[:], cb)
 
 		for _, j := range jobs {
+			key := pointKey(p.cfg.Vantage, ph, j.point.At)
 			for _, t := range targets {
-				if ctx.Err() != nil {
-					return n // stopping; leave the rest for the next run
-				}
 				if p.store.Has(p.cfg.Vantage, ph, t.AddressHex, j.point.At) {
 					continue
 				}
-				skipDL := false
-				if p.cfg.Policy != nil {
-					allow, skip, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now())
-					if !allow {
-						p.recordNotProbedTarget(pub, j.point, t, reason)
-						continue
-					}
-					skipDL = skip
-				}
-				in := Input{
-					Vantage:            p.cfg.Vantage,
-					ChainID:            p.chainID,
-					PromiseHash:        ph,
-					Commitment:         commitment,
-					CommitmentHex:      pub.Promise.Commitment,
-					BlobVersion:        pub.Promise.BlobVersion,
-					MustServeUntil:     pub.MustServeUntil,
-					ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
-					Target:             t,
-					SchedulePoint:      j.point,
-					PruneTolerance:     p.schedCfg().PruneTolerance,
-					SkipDownload:       skipDL,
-				}
-				m := Run(ctx, in, coder, p.cfg.Timeouts)
-				if p.cfg.RetryTransportTimeout && shouldRetryTransport(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
-					p.log.Printf("probe %s %s: %s (%s); retrying once in %s", short(ph), t.Host, m.Outcome, m.RawError, p.cfg.RetryDelay)
-					if sleepCtx(ctx, p.cfg.RetryDelay) {
-						m = retryOnce(ctx, in, coder, p.cfg.Timeouts, m, p.cfg.RetryDelay)
-					}
-				}
-				if err := p.store.Append(m); err != nil {
-					p.log.Fatalf("append measurement: %v", err)
-				}
-				if p.cfg.Policy != nil {
-					p.cfg.Policy.AfterProbe(pub, m)
-				}
+				items = append(items, work{job: j, target: t, coder: coder, commitment: commitment, key: key})
+				pointItems[key]++
+			}
+			if pointItems[key] == 0 {
+				p.complete[key] = true // every target already recorded
+			}
+		}
+	}
+	if len(items) == 0 {
+		return 0
+	}
+
+	var (
+		mu       sync.Mutex
+		n        int
+		done     = map[string]int{}
+		sem      = make(chan struct{}, p.cfg.Concurrency)
+		wg       sync.WaitGroup
+		canceled bool
+	)
+	for _, it := range items {
+		if ctx.Err() != nil {
+			canceled = true
+			break
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(it work) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			probedOne := p.runOne(ctx, it)
+			mu.Lock()
+			if probedOne {
 				n++
-				p.logMeasurement(m)
+			}
+			done[it.key]++
+			mu.Unlock()
+		}(it)
+	}
+	wg.Wait()
+	if !canceled && ctx.Err() == nil {
+		for key, want := range pointItems {
+			if done[key] == want {
+				p.complete[key] = true
 			}
 		}
 	}
 	return n
 }
 
+// runOne runs a single probe end to end: lateness re-check, policy gate,
+// per-validator serialisation, the probe itself, the optional retry, and the
+// record. It reports whether a network probe was carried out.
+func (p *Prober) runOne(ctx context.Context, it work) bool {
+	j, t, pub := it.job, it.target, it.job.pub
+	ph := pub.PromiseHash
+
+	// The slot was due when planned; a long cycle must not silently probe it
+	// in a later phase. Past MaxLateness it is a gap, not a verdict.
+	if late := time.Since(j.point.At); late > p.cfg.MaxLateness {
+		p.recordNotProbedTarget(pub, j.point, t, fmt.Sprintf("elapsed while the cycle ran (%s late)", late.Round(time.Second)))
+		return false
+	}
+	skipDL := false
+	if p.cfg.Policy != nil {
+		allow, skip, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now())
+		if !allow {
+			p.recordNotProbedTarget(pub, j.point, t, reason)
+			return false
+		}
+		skipDL = skip
+	}
+	in := Input{
+		Vantage:            p.cfg.Vantage,
+		ChainID:            p.chainID,
+		PromiseHash:        ph,
+		Commitment:         it.commitment,
+		CommitmentHex:      pub.Promise.Commitment,
+		BlobVersion:        pub.Promise.BlobVersion,
+		MustServeUntil:     pub.MustServeUntil,
+		ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
+		Target:             t,
+		SchedulePoint:      j.point,
+		PruneTolerance:     p.schedCfg().PruneTolerance,
+		SkipDownload:       skipDL,
+		ExpectedShardBytes: ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, t.RowCount),
+	}
+
+	lock := p.validatorLock(t.AddressHex)
+	lock.Lock()
+	m := Run(ctx, in, it.coder, p.cfg.Timeouts)
+	if p.cfg.RetryTransportTimeout && shouldRetryTransport(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
+		p.log.Printf("probe %s %s: %s (%s); retrying once in %s", short(ph), t.Host, m.Outcome, m.RawError, p.cfg.RetryDelay)
+		if sleepCtx(ctx, p.cfg.RetryDelay) {
+			m = retryOnce(ctx, in, it.coder, p.cfg.Timeouts, m, p.cfg.RetryDelay)
+		}
+	}
+	lock.Unlock()
+
+	if err := p.store.Append(m); err != nil {
+		p.log.Fatalf("append measurement: %v", err)
+	}
+	if p.cfg.Policy != nil {
+		p.cfg.Policy.AfterProbe(pub, m)
+	}
+	p.logMeasurement(m)
+	return true
+}
+
 // recordNotProbed marks one (publication, point) slot NOT_PROBED for every
-// target, with the given reason (elapsed, or a policy decision).
+// target, with the given reason (elapsed, or a policy decision). Rows are
+// appended without fsync; the caller syncs once per batch.
 func (p *Prober) recordNotProbed(j job, reason string) {
 	pub := j.pub
+	key := pointKey(p.cfg.Vantage, pub.PromiseHash, j.point.At)
 	targets, err := p.resolver.TargetsFor(context.Background(), pub, p.cfg.IncludeUnassigned)
 	if err != nil {
 		// cannot resolve targets for the slot: record one bare marker
@@ -390,12 +565,14 @@ func (p *Prober) recordNotProbed(j job, reason string) {
 			Phase: PhaseAt(j.point.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,
 			Classification: ClassNotProbed, ClassificationReason: reason + "; targets unresolved: " + err.Error(),
 		}
-		_ = p.store.Append(m)
+		_ = p.store.AppendDeferred(m)
+		p.complete[key] = true
 		return
 	}
 	for _, t := range targets {
 		p.recordNotProbedTarget(pub, j.point, t, reason)
 	}
+	p.complete[key] = true
 }
 
 // recordNotProbedTarget writes one NOT_PROBED measurement for a single target.
@@ -415,7 +592,7 @@ func (p *Prober) recordNotProbedTarget(pub scan.Publication, pt SchedulePoint, t
 		Phase: PhaseAt(pt.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,
 		Classification: ClassNotProbed, ClassificationReason: reason,
 	}
-	if err := p.store.Append(m); err != nil {
+	if err := p.store.AppendDeferred(m); err != nil {
 		p.log.Fatalf("append not-probed measurement: %v", err)
 	}
 	p.logMeasurement(m)

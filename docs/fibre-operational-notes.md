@@ -2,7 +2,9 @@
 
 *Draft. Raw numbers from a local multi-validator devnet
 (`fibre-devnet/multi-node-fibre.sh`, N=4) running celestia-app at commit
-`0b69316466c3ba02f708c0e2a101f834d5d1827f`, plus the constants compiled into
+`0b69316466c3ba02f708c0e2a101f834d5d1827f` (the code has since been re-pinned
+to `v10.1.0-corto`, whose fibre protocol, assignment and TLS code is
+byte-identical), plus the constants compiled into
 that build. None of the numbers below appear in Fibre's public docs or specs;
 they are what you find by reading the source and watching a network.*
 

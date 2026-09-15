@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -57,6 +58,36 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
+// OpenReadOnly opens an existing database for queries only: no migration,
+// no DDL, every statement runs under PRAGMA query_only. The API uses it so a
+// read-only process cannot race the collector's schema setup or write by
+// accident. It fails if the database does not exist or its schema is not the
+// version this binary knows.
+func OpenReadOnly(path string) (*Store, error) {
+	if path == ":memory:" {
+		return nil, errors.New("read-only open needs a file")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("observer database %s: %w (start the collector first)", path, err)
+	}
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	var version int
+	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("read schema version: %w (is this an observer database?)", err)
+	}
+	if version != SchemaVersion {
+		db.Close()
+		return nil, fmt.Errorf("schema version %d, this binary expects %d", version, SchemaVersion)
+	}
+	return &Store{db: db}, nil
+}
+
 // DB exposes the underlying handle for read-only queries (the API).
 func (s *Store) DB() *sql.DB { return s.db }
 
@@ -83,12 +114,28 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("schema: %w\n%s", err, stmt)
 		}
 	}
+	var version int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+		return err
+	}
+	if version > SchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than this binary's %d", version, SchemaVersion)
+	}
 	_, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
 		SchemaVersion, ts(time.Now()))
 	return err
 }
 
-func ts(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+// TimeLayout is the fixed-width UTC layout every timestamp column uses, so
+// that string comparison in SQL (>=, ORDER BY, MAX) is chronological.
+// RFC3339Nano trims trailing zeros, which breaks that: "...:00Z" sorts after
+// "...:00.5Z".
+const TimeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// TS formats a time for a timestamp column or a comparison argument.
+func TS(t time.Time) string { return t.UTC().Format(TimeLayout) }
+
+func ts(t time.Time) string { return TS(t) }
 
 func b2i(b bool) int {
 	if b {

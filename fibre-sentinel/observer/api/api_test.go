@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/api"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
@@ -16,6 +18,12 @@ import (
 const sampleDir = "../testdata"
 
 func serverWithSample(t *testing.T) *httptest.Server {
+	t.Helper()
+	ts, _ := serverAndStore(t)
+	return ts
+}
+
+func serverAndStore(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
 	if err != nil {
@@ -37,7 +45,7 @@ func serverWithSample(t *testing.T) *httptest.Server {
 	}
 	ts := httptest.NewServer(api.New(st, "test"))
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, st
 }
 
 func get(t *testing.T, ts *httptest.Server, path string, into any) int {
@@ -195,5 +203,168 @@ func TestValidatorsAndBlobs(t *testing.T) {
 	var probes struct{ Probes []any }
 	if code := get(t, ts, "/v1/probes?class=fault&limit=5", &probes); code != 200 || len(probes.Probes) != 5 {
 		t.Fatalf("probes: %d, %d rows", code, len(probes.Probes))
+	}
+}
+
+type reconResp struct {
+	Status           string `json:"status"`
+	Point            string `json:"point"`
+	ServedBy         int    `json:"served_by_validators"`
+	Assigned         int    `json:"assigned_validators"`
+	ProbedValidators int    `json:"probed_validators"`
+}
+
+type blobResp struct {
+	PromiseHash     string     `json:"promise_hash"`
+	Reconstructable *reconResp `json:"reconstructable"`
+}
+
+func sampleMeasurements(t *testing.T) []probe.Measurement {
+	t.Helper()
+	ms, err := probe.LoadMeasurements(filepath.Join(sampleDir, "measurements.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ms
+}
+
+func insert(t *testing.T, st *store.Store, m probe.Measurement) {
+	t.Helper()
+	raw, _ := json.Marshal(m)
+	if _, err := st.InsertProbe(m, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A newer in-window point with a row for only one validator must not flip
+// the blob's verdict: the verdict stays at the last complete point, and a
+// point where every validator was skipped by the policy is not "no".
+func TestReconstructableIgnoresIncompletePoint(t *testing.T) {
+	ts, st := serverAndStore(t)
+	var before struct{ Blobs []blobResp }
+	if code := get(t, ts, "/v1/blobs", &before); code != 200 || len(before.Blobs) == 0 {
+		t.Fatalf("blobs: %d / %d", code, len(before.Blobs))
+	}
+	var target blobResp
+	for _, b := range before.Blobs {
+		if b.Reconstructable != nil && (b.Reconstructable.Status == "yes" || b.Reconstructable.Status == "degraded") {
+			target = b
+			break
+		}
+	}
+	if target.PromiseHash == "" {
+		t.Fatalf("fixture has no reconstructable blob: %+v", before.Blobs)
+	}
+	var seed probe.Measurement
+	for _, m := range sampleMeasurements(t) {
+		if m.PromiseHash == target.PromiseHash && m.Phase == probe.PhaseInWindow && m.Outcome == probe.OutcomeServedOK {
+			seed = m
+			break
+		}
+	}
+	if seed.PromiseHash == "" {
+		t.Fatal("no HEALTHY in-window row for the target blob")
+	}
+	// one validator's row at a newer in-window point (sweep in progress)
+	late := seed
+	late.ScheduledAt = seed.ScheduledAt.Add(time.Hour)
+	late.StartedAt = late.ScheduledAt
+	late.ScheduleLabel = "w9"
+	insert(t, st, late)
+
+	var after struct{ Blobs []blobResp }
+	get(t, ts, "/v1/blobs", &after)
+	for _, b := range after.Blobs {
+		if b.PromiseHash != target.PromiseHash {
+			continue
+		}
+		r := b.Reconstructable
+		if r.Status != target.Reconstructable.Status || r.Point != target.Reconstructable.Point {
+			t.Fatalf("incomplete point changed the verdict: before %+v after %+v", target.Reconstructable, r)
+		}
+	}
+
+	// a point where every validator was backoff-skipped: NOT_PROBED rows only
+	for _, m := range sampleMeasurements(t) {
+		if m.PromiseHash != target.PromiseHash || m.Phase != probe.PhaseInWindow || !m.ScheduledAt.Equal(seed.ScheduledAt) {
+			continue
+		}
+		sk := m
+		sk.ScheduledAt = seed.ScheduledAt.Add(2 * time.Hour)
+		sk.StartedAt = sk.ScheduledAt
+		sk.ScheduleLabel = "w10"
+		sk.Outcome = probe.OutcomeReachable
+		sk.Classification = probe.ClassNotProbed
+		sk.Download = probe.DownloadResult{}
+		insert(t, st, sk)
+	}
+	get(t, ts, "/v1/blobs", &after)
+	for _, b := range after.Blobs {
+		if b.PromiseHash == target.PromiseHash && b.Reconstructable.Status == "no" {
+			t.Fatalf("all-skipped point read as not reconstructable: %+v", b.Reconstructable)
+		}
+	}
+
+	// a blob whose only in-window point is half done is "pending", not "no"
+	var netAll struct {
+		Reconstructable struct{ Num, Den int64 } `json:"reconstructable"`
+	}
+	get(t, ts, "/v1/network?window=all", &netAll)
+	if netAll.Reconstructable.Den == 0 {
+		t.Fatal("network reconstructable lost its denominator")
+	}
+}
+
+// Rows from a second vantage never make served_by exceed assigned.
+func TestTwoVantagesDoNotDoubleCountReconstructability(t *testing.T) {
+	ts, st := serverAndStore(t)
+	for _, m := range sampleMeasurements(t) {
+		m.Vantage = "b"
+		insert(t, st, m)
+	}
+	var blobs struct{ Blobs []blobResp }
+	get(t, ts, "/v1/blobs", &blobs)
+	for _, b := range blobs.Blobs {
+		if r := b.Reconstructable; r != nil && r.ServedBy > r.Assigned {
+			t.Fatalf("served_by %d > assigned %d for %s", r.ServedBy, r.Assigned, b.PromiseHash)
+		}
+	}
+	var meta struct {
+		VantageCount int  `json:"vantage_count"`
+		OneLoc       bool `json:"observed_from_one_location"`
+	}
+	get(t, ts, "/v1/meta", &meta)
+	if meta.VantageCount != 2 || meta.OneLoc {
+		t.Fatalf("meta vantages: %+v", meta)
+	}
+}
+
+func TestLimitsAndMethods(t *testing.T) {
+	ts := serverWithSample(t)
+	for _, q := range []string{"limit=0", "limit=-1", "limit=abc", "limit=5000"} {
+		if code := get(t, ts, "/v1/blobs?"+q, nil); code != 400 {
+			t.Errorf("/v1/blobs?%s -> %d, want 400", q, code)
+		}
+		if code := get(t, ts, "/v1/probes?"+q, nil); code != 400 {
+			t.Errorf("/v1/probes?%s -> %d, want 400", q, code)
+		}
+	}
+	if code := get(t, ts, "/v1/blobs?limit=2", nil); code != 200 {
+		t.Errorf("valid limit -> %d", code)
+	}
+	resp, err := http.Post(ts.URL+"/v1/meta", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 405 {
+		t.Errorf("POST /v1/meta -> %d, want 405", resp.StatusCode)
+	}
+	var meta struct {
+		LastProbeAt *string `json:"last_probe_at"`
+	}
+	get(t, ts, "/v1/meta", &meta)
+	if meta.LastProbeAt == nil || *meta.LastProbeAt == "" {
+		t.Error("last_probe_at missing")
 	}
 }

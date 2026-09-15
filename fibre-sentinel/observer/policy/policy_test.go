@@ -196,3 +196,31 @@ func TestBudgetAndBackoff(t *testing.T) {
 		t.Fatalf("5 MB shard should exceed a 36 KB/h cap; reason=%s", reason)
 	}
 }
+
+// The shipped YAML files must load, and the caps they compute must be the
+// numbers their own comments (and R4) promise validators.
+func TestShippedPoliciesLoad(t *testing.T) {
+	cases := []struct {
+		file    string
+		perHour int64
+		perDay  int64
+	}{
+		{"policy.example.yaml", 2_925_000_000, 52_650_000_000},
+		{"policy.mocha.yaml", 47_700_000, 858_600_000},
+	}
+	for _, c := range cases {
+		cfg, err := Load(c.file)
+		if err != nil {
+			t.Fatalf("%s: %v", c.file, err)
+		}
+		if err := cfg.validate(); err != nil {
+			t.Fatalf("%s: %v", c.file, err)
+		}
+		if got := cfg.bytesPerHourCap(cfg.Capacity.FloorRows); got != c.perHour {
+			t.Errorf("%s: per-hour cap at floor rows = %d, want %d", c.file, got, c.perHour)
+		}
+		if got := cfg.bytesPerDayCap(cfg.Capacity.FloorRows); got != c.perDay {
+			t.Errorf("%s: per-day cap at floor rows = %d, want %d", c.file, got, c.perDay)
+		}
+	}
+}

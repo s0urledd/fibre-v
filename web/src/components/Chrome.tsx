@@ -42,7 +42,7 @@ export function Banner() {
 
 export function Footer() {
   const { data: meta, error } = useApi<Meta>("/v1/meta", 30000);
-  const lastBeat = meta?.prober?.last_heartbeat_at ?? meta?.collector?.last_heartbeat_at ?? null;
+  const lastBeat = meta?.collector?.last_heartbeat_at ?? null;
   const stale = !!lastBeat && Date.now() - new Date(lastBeat).getTime() > 20 * 60 * 1000;
   return (
     <footer className={"foot" + (stale ? " stale" : "")}>
@@ -52,7 +52,7 @@ export function Footer() {
           <>
             {stale && <strong>Data is stale (last observer heartbeat {ago(lastBeat)}). </strong>}
             collector h{meta.last_scanned_height || "?"} {meta.collector ? (meta.collector.alive ? "· collector alive" : "· collector stopped") : "· no collector run"}
-            {meta.prober ? (meta.prober.alive ? " · prober alive" : " · prober stopped") : " · no prober run"}
+            {meta.last_probe_at ? <> · last probe {ago(meta.last_probe_at)}</> : " · no probe recorded yet"}
             {" · vantage "}{meta.vantage}
             {meta.pinned_celestia_app_commit && <> · celestia-app {meta.pinned_celestia_app_commit.slice(0, 9)}</>}
             {" · server time "}{utc(meta.server_time)}

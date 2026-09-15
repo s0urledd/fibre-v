@@ -81,8 +81,8 @@ binaries and the site.
 
 ## Pinned upstream
 
-celestia-app commit `0b69316466c3ba02f708c0e2a101f834d5d1827f`
-(`v10.0.0-20260901162319-0b69316466c3`), celestia-core `v0.40.8`, cosmos-sdk
+celestia-app `v10.1.0-corto` (commit `fa5b523b7e3b2b83bd16bc072a45cbd3819fa369`,
+15 September 2026; the tag Corto runs), celestia-core `v0.42.0`, cosmos-sdk
 fork `v0.52.11`. TLS golden vectors from celestia-app commit
 `dba155084505a8f6c5d37260a94f70f939fb96de`. `fibre-assign/reftest/go.mod` and
 `fibre-sentinel/go.mod` each carry a verbatim copy of celestia-app's `replace`

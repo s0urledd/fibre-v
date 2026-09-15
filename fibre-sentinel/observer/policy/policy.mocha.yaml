@@ -12,8 +12,8 @@ caps:
   per_validator:
     requests_per_minute: 30
     min_request_spacing: 2s
-    bytes_per_hour_fraction: 0.02     # 2% of the launch ingress -> 47.7 MB/h at 148 rows (~9 floor shards of a 128 MiB blob)
-    bytes_per_day_fraction: 0.015     # -> 859 MB/day at 148 rows
+    bytes_per_hour_fraction: 0.002    # 0.2% of the launch ingress -> 47.7 MB/h at 148 rows (~9 floor shards of a 128 MiB blob)
+    bytes_per_day_fraction: 0.0015    # -> 859 MB/day at 148 rows
   global:
     bytes_per_hour: 53687091200       # 50 GiB; binds first in the 128 MiB/min scenario (p ~ 0.4)
     bytes_per_day: 644245094400       # 600 GiB

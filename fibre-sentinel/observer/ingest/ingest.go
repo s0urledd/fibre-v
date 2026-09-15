@@ -28,9 +28,19 @@ const maxLine = 64 << 20
 type Result struct {
 	Read     int64 // lines read this pass
 	Inserted int64 // rows actually inserted (rest were already present)
+	Skipped  int64 // undecodable lines stepped over this pass (see ErrBadRecord)
 	Offset   int64 // byte offset after the pass
 	Line     int64 // line number after the pass
+	// LastSkipped is the error of the most recent skipped line, for the log.
+	LastSkipped string
 }
+
+// ErrBadRecord marks a line that cannot be decoded. A torn write (a crash
+// mid-record followed by the next record appended after it) leaves exactly
+// one such line; stopping at it would stall the file forever, so the tailer
+// logs it, counts it and advances past it. Store errors are never wrapped in
+// it and still stop the pass.
+var ErrBadRecord = errors.New("bad record")
 
 // handler consumes one raw JSONL line and reports whether it inserted a row.
 type handler func(raw []byte) (bool, error)
@@ -87,9 +97,12 @@ func tail(st *store.Store, path string, fn handler, now time.Time) (Result, erro
 		}
 		ins, err := fn(trimmed)
 		if err != nil {
-			return res, fmt.Errorf("%s line %d: %w", path, res.Line, err)
-		}
-		if ins {
+			if !errors.Is(err, ErrBadRecord) {
+				return res, fmt.Errorf("%s line %d: %w", path, res.Line, err)
+			}
+			res.Skipped++
+			res.LastSkipped = fmt.Sprintf("%s line %d: %v", path, res.Line, err)
+		} else if ins {
 			res.Inserted++
 		}
 		if err := st.SetCursor(path, res.Offset, res.Line, now); err != nil {
@@ -104,10 +117,10 @@ func Publications(st *store.Store, path string, now time.Time) (Result, error) {
 	return tail(st, path, func(raw []byte) (bool, error) {
 		var p scan.Publication
 		if err := json.Unmarshal(raw, &p); err != nil {
-			return false, fmt.Errorf("decode publication: %w", err)
+			return false, fmt.Errorf("%w: decode publication: %v", ErrBadRecord, err)
 		}
 		if p.PromiseHash == "" {
-			return false, errors.New("publication without promise_hash")
+			return false, fmt.Errorf("%w: publication without promise_hash", ErrBadRecord)
 		}
 		return st.UpsertPublication(p, raw)
 	}, now)
@@ -118,10 +131,10 @@ func Measurements(st *store.Store, path string, now time.Time) (Result, error) {
 	return tail(st, path, func(raw []byte) (bool, error) {
 		var m probe.Measurement
 		if err := json.Unmarshal(raw, &m); err != nil {
-			return false, fmt.Errorf("decode measurement: %w", err)
+			return false, fmt.Errorf("%w: decode measurement: %v", ErrBadRecord, err)
 		}
 		if m.PromiseHash == "" || m.ValidatorAddress == "" {
-			return false, errors.New("measurement without promise_hash or validator_address")
+			return false, fmt.Errorf("%w: measurement without promise_hash or validator_address", ErrBadRecord)
 		}
 		return st.InsertProbe(m, raw)
 	}, now)
@@ -162,10 +175,10 @@ func Reachability(st *store.Store, path string, now time.Time) (Result, error) {
 	return tail(st, path, func(raw []byte) (bool, error) {
 		var m probe.Measurement
 		if err := json.Unmarshal(raw, &m); err != nil {
-			return false, fmt.Errorf("decode reachability: %w", err)
+			return false, fmt.Errorf("%w: decode reachability: %v", ErrBadRecord, err)
 		}
 		if m.ValidatorAddress == "" {
-			return false, errors.New("reachability without validator_address")
+			return false, fmt.Errorf("%w: reachability without validator_address", ErrBadRecord)
 		}
 		return st.InsertReachability(m, raw)
 	}, now)

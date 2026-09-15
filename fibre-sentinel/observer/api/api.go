@@ -97,7 +97,7 @@ func (w Window) startArg() string {
 	if w.Span == 0 {
 		return "0000"
 	}
-	return w.Start.UTC().Format(time.RFC3339Nano)
+	return store.TS(w.Start)
 }
 
 // Rate is a numerator, denominator and their ratio, never a bare percentage.
@@ -119,20 +119,24 @@ func rate(num, den int64) Rate {
 // ---- meta ----
 
 type metaResponse struct {
-	APIVersion             string            `json:"api_version"`
-	Vantage                string            `json:"vantage"`
-	VantageCount           int               `json:"vantage_count"`
-	ObservedFromOneVantage bool              `json:"observed_from_one_location"`
-	ChainID                string            `json:"chain_id"`
-	LastScannedHeight      string            `json:"last_scanned_height"`
-	EndpointsHeight        string            `json:"endpoints_height"`
-	ProtocolParamsFinger   string            `json:"protocol_params_fingerprint"`
-	PinnedCelestiaApp      string            `json:"pinned_celestia_app_commit"`
-	Counts                 store.Counts      `json:"counts"`
-	Collector              *runStatus        `json:"collector"`
-	Prober                 *runStatus        `json:"prober"`
-	Meta                   map[string]string `json:"meta"`
-	ServerTime             time.Time         `json:"server_time"`
+	APIVersion             string       `json:"api_version"`
+	Vantage                string       `json:"vantage"`
+	VantageCount           int          `json:"vantage_count"`
+	ObservedFromOneVantage bool         `json:"observed_from_one_location"`
+	ChainID                string       `json:"chain_id"`
+	LastScannedHeight      string       `json:"last_scanned_height"`
+	EndpointsHeight        string       `json:"endpoints_height"`
+	ProtocolParamsFinger   string       `json:"protocol_params_fingerprint"`
+	PinnedCelestiaApp      string       `json:"pinned_celestia_app_commit"`
+	Counts                 store.Counts `json:"counts"`
+	Collector              *runStatus   `json:"collector"`
+	Prober                 *runStatus   `json:"prober"`
+	// LastProbeAt is the newest measurement's start time. The prober writes
+	// JSONL only (it never touches this database), so this is the only live
+	// signal of it; a quiet chain makes it old without anything being wrong.
+	LastProbeAt *string           `json:"last_probe_at"`
+	Meta        map[string]string `json:"meta"`
+	ServerTime  time.Time         `json:"server_time"`
 }
 
 type runStatus struct {
@@ -141,6 +145,17 @@ type runStatus struct {
 	LastHeartbeat string  `json:"last_heartbeat_at"`
 	StoppedAt     *string `json:"stopped_at"`
 	Alive         bool    `json:"alive"` // heartbeat within the last 2 minutes
+}
+
+// vantageCount counts the distinct vantages that ever wrote a probe or a
+// heartbeat (a second location that only runs the heartbeat still counts).
+func (s *Server) vantageCount(ctx context.Context) int {
+	var n int
+	_ = s.st.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT vantage FROM probes UNION SELECT vantage FROM reachability)`).Scan(&n)
+	if n == 0 {
+		n = 1
+	}
+	return n
 }
 
 func (s *Server) latestRun(ctx context.Context, component string, now time.Time) (*runStatus, error) {
@@ -180,20 +195,21 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rows.Close()
-	var vantages int
-	_ = s.st.DB().QueryRowContext(ctx, `SELECT COUNT(DISTINCT vantage) FROM probes`).Scan(&vantages)
-	if vantages == 0 {
-		vantages = 1
-	}
+	vantages := s.vantageCount(ctx)
 	col, _ := s.latestRun(ctx, "collector", now)
 	pr, _ := s.latestRun(ctx, "prober", now)
+	var lastProbe *string
+	var lp sql.NullString
+	if err := s.st.DB().QueryRowContext(ctx, `SELECT MAX(started_at) FROM probes`).Scan(&lp); err == nil && lp.Valid {
+		lastProbe = &lp.String
+	}
 	var pinned string
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT pinned_celestia_app FROM publications ORDER BY settlement_height DESC LIMIT 1`).Scan(&pinned)
 	writeJSON(w, 200, metaResponse{
 		APIVersion: Version, Vantage: s.vantage, VantageCount: vantages, ObservedFromOneVantage: vantages == 1,
 		ChainID: meta["chain_id"], LastScannedHeight: meta["last_scanned_height"], EndpointsHeight: meta["endpoints_height"],
 		ProtocolParamsFinger: meta["protocol_params_fingerprint"], PinnedCelestiaApp: pinned,
-		Counts: counts, Collector: col, Prober: pr, Meta: meta, ServerTime: now.UTC(),
+		Counts: counts, Collector: col, Prober: pr, LastProbeAt: lastProbe, Meta: meta, ServerTime: now.UTC(),
 	})
 }
 
@@ -290,9 +306,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	db := s.st.DB()
 	var resp networkResponse
 	resp.Window, resp.Vantage = win, s.vantage
-	var vantages int
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT vantage) FROM probes`).Scan(&vantages)
-	resp.ObservedFromOneVantage = vantages <= 1
+	resp.ObservedFromOneVantage = s.vantageCount(ctx) == 1
 
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM endpoints WHERE closed_at IS NULL`).Scan(&resp.RegisteredEndpoints)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT validator_address) FROM probes WHERE started_at >= ?`, win.startArg()).Scan(&resp.ValidatorsProbed)
@@ -345,12 +359,14 @@ type reachState struct {
 
 func (s *Server) reachabilityNow(ctx context.Context) (map[string]reachState, error) {
 	out := map[string]reachState{}
-	q := `SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'heartbeat' FROM reachability r
-	      WHERE started_at = (SELECT MAX(started_at) FROM reachability WHERE validator_address = r.validator_address)
+	// The newest row per validator is the highest rowid: both files are
+	// ingested in write order. MAX(rowid) GROUP BY uses the validator index
+	// instead of a correlated MAX(started_at) per row over the whole table.
+	q := `SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'heartbeat' FROM reachability
+	      WHERE rowid IN (SELECT MAX(rowid) FROM reachability GROUP BY validator_address)
 	      UNION ALL
-	      SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'probe' FROM probes p
-	      WHERE outcome NOT IN ('MISSED','PROBE_ERROR')
-	        AND started_at = (SELECT MAX(started_at) FROM probes WHERE validator_address = p.validator_address AND outcome NOT IN ('MISSED','PROBE_ERROR'))`
+	      SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'probe' FROM probes
+	      WHERE rowid IN (SELECT MAX(rowid) FROM probes WHERE outcome NOT IN ('MISSED','PROBE_ERROR') GROUP BY validator_address)`
 	rows, err := s.st.DB().QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -449,9 +465,11 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		v.EndpointSince = &since
 	}
 	// validators with assignments (voting power, rows)
-	rows, err := db.QueryContext(ctx, `SELECT a.validator_address, a.voting_power, a.row_count FROM assignments a
-		JOIN publications p ON p.promise_hash = a.promise_hash
-		WHERE p.settlement_height = (SELECT MAX(p2.settlement_height) FROM publications p2 JOIN assignments a2 ON a2.promise_hash = p2.promise_hash WHERE a2.validator_address = a.validator_address)`)
+	// The newest publication carries the whole bonded set with its voting
+	// power and row counts; one indexed lookup instead of a correlated
+	// subquery per assignment row.
+	rows, err := db.QueryContext(ctx, `SELECT validator_address, voting_power, row_count FROM assignments
+		WHERE promise_hash = (SELECT promise_hash FROM publications ORDER BY settlement_height DESC, settlement_tx_index DESC LIMIT 1)`)
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +668,7 @@ type blobRow struct {
 // expected there, so a quiet grace point says nothing about the promise.
 // WindowOver says whether the obligation has ended since.
 type reconstruct struct {
-	Status        string `json:"status"` // yes | degraded | no | unknown
+	Status        string `json:"status"` // yes | degraded | no | pending | unknown
 	Point         string `json:"point"`  // schedule label the verdict is taken at
 	PointAt       string `json:"point_at"`
 	WindowOver    bool   `json:"window_over"`
@@ -658,6 +676,11 @@ type reconstruct struct {
 	NeededRows    int    `json:"needed_rows"`
 	ServedBy      int    `json:"served_by_validators"`
 	AssignedTotal int    `json:"assigned_validators"`
+	// ProbedValidators is how many assigned validators have a real result
+	// (not a gap) at the point. Status is "pending" while it is short of
+	// assigned_validators: the sweep is still running or was skipped by the
+	// policy, and an absent row is a gap, never a zero.
+	ProbedValidators int `json:"probed_validators"`
 }
 
 func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...any) ([]blobRow, error) {
@@ -699,61 +722,83 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 	return out, nil
 }
 
-// reconstructable computes the verdict at the latest schedule point with any
-// probe: union the assigned row indices of validators whose probe at that
-// point was HEALTHY (or served in post phase), compare to OriginalRows.
+// reconstructable computes the verdict at the latest COMPLETE in-window
+// schedule point: the newest point at which every assigned validator has a
+// real result (HEALTHY, FAULT, ... but not NOT_PROBED or PROBE_ERROR). The
+// distinct row indices of validators that served correctly there are
+// compared to OriginalRows. If no point is complete yet, the newest point in
+// progress is reported with status "pending": a validator without a row is
+// a gap in observation, not a validator that failed to serve.
 func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct, error) {
 	db := s.st.DB()
-	var label, pointAt, msu string
-	err := db.QueryRowContext(ctx, `SELECT schedule_label, scheduled_at, must_serve_until FROM probes
-		WHERE promise_hash = ? AND outcome NOT IN ('MISSED','PROBE_ERROR') AND phase = 'in_window'
-		ORDER BY scheduled_at DESC LIMIT 1`, hash).Scan(&label, &pointAt, &msu)
+	var assigned int
+	var needed sql.NullInt64
+	err := db.QueryRowContext(ctx, `SELECT validators_with_rows, json_extract(raw_json, '$.assignment.protocol_params.original_rows')
+		FROM publications WHERE promise_hash = ?`, hash).Scan(&assigned, &needed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &reconstruct{Status: "unknown"}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	windowOver := false
-	if t, err := time.Parse(time.RFC3339Nano, msu); err == nil {
-		windowOver = time.Now().After(t)
-	}
-	var needed int
-	var assigned int
-	if err := db.QueryRowContext(ctx, `SELECT validators_with_rows FROM publications WHERE promise_hash = ?`, hash).Scan(&assigned); err != nil {
-		return nil, err
-	}
-	// OriginalRows is not stored per publication; it is the fingerprinted
-	// protocol param. Blob v0: 4096. Read it from the raw record to stay
-	// honest if a future blob version changes it.
-	var raw string
-	if err := db.QueryRowContext(ctx, `SELECT raw_json FROM publications WHERE promise_hash = ?`, hash).Scan(&raw); err != nil {
-		return nil, err
-	}
-	var rec struct {
-		Assignment struct {
-			ProtocolParams struct {
-				OriginalRows int `json:"original_rows"`
-			} `json:"protocol_params"`
-		} `json:"assignment"`
-	}
-	_ = json.Unmarshal([]byte(raw), &rec)
-	needed = rec.Assignment.ProtocolParams.OriginalRows
 
-	rows, err := db.QueryContext(ctx, `SELECT p.validator_address, a.rows_json FROM probes p
-		JOIN assignments a ON a.promise_hash = p.promise_hash AND a.validator_address = p.validator_address
-		WHERE p.promise_hash = ? AND p.scheduled_at = ? AND p.outcome = 'SERVED_OK'`, hash, pointAt)
+	// in-window points with real results, newest first, with how many
+	// distinct assigned validators answered at each.
+	rows, err := db.QueryContext(ctx, `SELECT scheduled_at, schedule_label, must_serve_until, COUNT(DISTINCT validator_address) FROM probes
+		WHERE promise_hash = ? AND phase = 'in_window' AND assigned = 1
+		  AND classification NOT IN ('NOT_PROBED','PROBE_ERROR')
+		GROUP BY scheduled_at ORDER BY scheduled_at DESC`, hash)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	var pointAt, label, msu string
+	var probed int
+	complete := false
+	first := true
+	for rows.Next() {
+		var at, lb, m string
+		var n int
+		if err := rows.Scan(&at, &lb, &m, &n); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if first {
+			pointAt, label, msu, probed = at, lb, m, n
+			first = false
+		}
+		if n >= assigned && assigned > 0 {
+			pointAt, label, msu, probed = at, lb, m, n
+			complete = true
+			break
+		}
+	}
+	rows.Close()
+	if first {
+		return &reconstruct{Status: "unknown"}, nil
+	}
+	windowOver := false
+	if t, err := time.Parse(store.TimeLayout, msu); err == nil {
+		windowOver = time.Now().After(t)
+	} else if t, err := time.Parse(time.RFC3339Nano, msu); err == nil {
+		windowOver = time.Now().After(t)
+	}
+
+	// distinct validators that served correctly at the point (any vantage
+	// counts once) and the union of their assigned rows.
+	srows, err := db.QueryContext(ctx, `SELECT DISTINCT p.validator_address, a.rows_json FROM probes p
+		JOIN assignments a ON a.promise_hash = p.promise_hash AND a.validator_address = p.validator_address
+		WHERE p.promise_hash = ? AND p.scheduled_at = ? AND p.assigned = 1 AND p.outcome = 'SERVED_OK'`, hash, pointAt)
+	if err != nil {
+		return nil, err
+	}
+	defer srows.Close()
 	served := map[int]struct{}{}
 	servedBy := 0
 	rowsKnown := true
-	for rows.Next() {
+	for srows.Next() {
 		var addr string
 		var rj sql.NullString
-		if err := rows.Scan(&addr, &rj); err != nil {
+		if err := srows.Scan(&addr, &rj); err != nil {
 			return nil, err
 		}
 		servedBy++
@@ -770,13 +815,16 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 			served[i] = struct{}{}
 		}
 	}
-	rc := &reconstruct{Point: label, PointAt: pointAt, WindowOver: windowOver, NeededRows: needed, ServedBy: servedBy, AssignedTotal: assigned, ServedRows: len(served)}
+	rc := &reconstruct{Point: label, PointAt: pointAt, WindowOver: windowOver, NeededRows: int(needed.Int64),
+		ServedBy: servedBy, AssignedTotal: assigned, ServedRows: len(served), ProbedValidators: probed}
 	switch {
-	case !rowsKnown || needed == 0:
+	case !rowsKnown || !needed.Valid || needed.Int64 == 0:
 		rc.Status = "unknown"
-	case len(served) >= needed && servedBy == assigned:
+	case !complete:
+		rc.Status = "pending"
+	case len(served) >= rc.NeededRows && servedBy == assigned:
 		rc.Status = "yes"
-	case len(served) >= needed:
+	case len(served) >= rc.NeededRows:
 		rc.Status = "degraded"
 	default:
 		rc.Status = "no"
@@ -784,14 +832,18 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 	return rc, nil
 }
 
+// reconstructSample bounds how many of the newest publications the network
+// reconstructability rate is computed over per request.
+const reconstructSample = 2000
+
 func (s *Server) reconstructableCount(ctx context.Context, win Window) (Rate, error) {
-	blobs, err := s.blobRows(ctx, `settlement_time >= ?`, 500, win.startArg())
+	blobs, err := s.blobRows(ctx, `settlement_time >= ?`, reconstructSample, win.startArg())
 	if err != nil {
 		return Rate{}, err
 	}
 	var yes, den int64
 	for _, b := range blobs {
-		if b.Reconstructable == nil || b.Reconstructable.Status == "unknown" {
+		if b.Reconstructable == nil || b.Reconstructable.Status == "unknown" || b.Reconstructable.Status == "pending" {
 			continue
 		}
 		den++
@@ -803,9 +855,10 @@ func (s *Server) reconstructableCount(ctx context.Context, win Window) (Rate, er
 }
 
 func (s *Server) handleBlobs(w http.ResponseWriter, r *http.Request) {
-	limit := 50
-	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 500 {
-		limit = l
+	limit, err := parseLimit(r, 50, 500)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
 	}
 	var where string
 	var args []any
@@ -936,9 +989,10 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 
 func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	limit := 100
-	if l, err := strconv.Atoi(q.Get("limit")); err == nil && l > 0 && l <= 1000 {
-		limit = l
+	limit, err := parseLimit(r, 100, 1000)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
 	}
 	var conds []string
 	var args []any
@@ -959,7 +1013,7 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "since must be RFC 3339")
 			return
 		}
-		conds, args = append(conds, `started_at >= ?`), append(args, t.UTC().Format(time.RFC3339Nano))
+		conds, args = append(conds, `started_at >= ?`), append(args, store.TS(t))
 	}
 	if c := q.Get("class"); c != "" {
 		conds, args = append(conds, `classification = ?`), append(args, strings.ToUpper(c))
@@ -970,4 +1024,18 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"vantage": s.vantage, "probes": rows})
+}
+
+// parseLimit reads ?limit= with a default and a maximum; anything that is
+// not an integer in [1, max] is a 400, never a silent fallback.
+func parseLimit(r *http.Request, def, max int) (int, error) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return def, nil
+	}
+	l, err := strconv.Atoi(raw)
+	if err != nil || l < 1 || l > max {
+		return 0, fmt.Errorf("limit must be an integer between 1 and %d", max)
+	}
+	return l, nil
 }

@@ -10,7 +10,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -58,7 +57,6 @@ func main() {
 		log.Fatalf("open output: %v", err)
 	}
 	defer out.Close()
-	w := bufio.NewWriter(out)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -114,20 +112,21 @@ func main() {
 			if err != nil {
 				log.Fatalf("marshal: %v", err)
 			}
-			w.Write(b)
-			w.WriteByte('\n')
+			// one write + fsync per record, like the prober's store: a crash
+			// never leaves a half record for the next round to append after.
+			if _, err := out.Write(append(b, '\n')); err != nil {
+				log.Fatalf("write: %v", err)
+			}
+			if err := out.Sync(); err != nil {
+				log.Fatalf("sync: %v", err)
+			}
 			n++
 			if m.Outcome == probe.OutcomeReachable {
 				ok++
 			}
 			log.Printf("%s %s -> %s (%d ms)", pr.ConsAddressBech32[:20], pr.Host, m.Outcome, m.TotalDurationMS)
 		}
-		if err := w.Flush(); err != nil {
-			log.Fatalf("flush: %v", err)
-		}
-		if err := out.Sync(); err != nil {
-			log.Fatalf("sync: %v", err)
-		}
+
 		log.Printf("round done: h=%d registered=%d probed=%d reachable=%d", tip, len(provs), n, ok)
 	}
 

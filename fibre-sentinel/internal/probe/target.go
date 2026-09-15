@@ -41,6 +41,11 @@ type Resolver struct {
 	valSetCache map[int64][]scan.ValSetMember
 }
 
+// maxValSetCache bounds the per-height validator-set cache; publications
+// arrive at many distinct heights and the map would otherwise grow for the
+// life of the process.
+const maxValSetCache = 256
+
 // NewResolver builds a Resolver over an RPC chain client.
 func NewResolver(chain *scan.Chain, hostCacheTTL time.Duration) *Resolver {
 	if hostCacheTTL <= 0 {
@@ -93,6 +98,9 @@ func (r *Resolver) validatorSet(ctx context.Context, height int64) ([]scan.ValSe
 		return nil, err
 	}
 	r.mu.Lock()
+	if len(r.valSetCache) >= maxValSetCache {
+		r.valSetCache = map[int64][]scan.ValSetMember{} // bounded: one entry per promise height otherwise
+	}
 	r.valSetCache[height] = v
 	r.mu.Unlock()
 	return v, nil

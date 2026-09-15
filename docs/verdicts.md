@@ -26,7 +26,11 @@ Source of truth:
 | `post` | after the grace span | the obligation is over; the blob is expected to be gone |
 
 `must_serve_until = creation_timestamp + max(payment_promise_timeout, shard_retention)`,
-using the on-chain params in force when the blob settled.
+using the on-chain params in force when the blob settled. The server itself
+reads the params when the shard is uploaded, which happens between the
+promise height and the settlement tx; the scanner evaluates both ends of that
+interval and, if a params change landed in between, records the earlier
+bound and sets `must_serve_until_ambiguous` on the publication.
 
 ## Outcomes (one per probe, mechanism level)
 
@@ -44,7 +48,10 @@ using the on-chain params in force when the blob settled.
 | `TLS_HANDSHAKE_FAIL` | TCP fine, TLS 1.3 handshake failed |
 | `IDENTITY_FAIL` | handshake fine, certificate extension is not endorsed by this validator's consensus key |
 | `RPC_UNAVAILABLE` | gRPC Unavailable after a good handshake |
+| `RPC_DEADLINE` | the download did not finish within the observer's own deadline (base plus shard size at 1 MiB/s); the observer gave up, the validator was not judged |
 | `RPC_ERROR` | any other gRPC error |
+| `NO_REGISTERED_HOST` | the validator has no fibre host in `x/valaddr`, so nobody can fetch its rows; treated as unreachable |
+| `REACHABLE` | TCP, TLS and identity passed and the download was deliberately skipped (heartbeat, or policy backoff); no retention verdict |
 | `PROBE_ERROR` | the observer's own probe failed (bug or config), not the target |
 | `MISSED` | the scheduled point elapsed before the prober ran it |
 
@@ -55,35 +62,43 @@ One sentence each, and what a reader should conclude.
 | classification | when | conclude |
 |---|---|---|
 | `HEALTHY` | assigned validator returned `SERVED_OK` in window or in grace | the validator kept its promise at this point in time |
-| `FAULT` | assigned validator, in window: `NOT_FOUND`, unreachable at any layer, bad identity, wrong, partial or invalid rows. In grace or post: bad identity or bad data | the validator broke its retention promise or is not who the chain says it is; this is the only class that counts against a validator |
+| `FAULT` | assigned validator, in window: `NOT_FOUND`, unreachable at any layer (including no registered host), bad identity, wrong, partial or invalid rows. In grace: bad identity, wrong, partial or invalid rows. In post: bad identity, wrong or invalid rows. Any validator, any phase: bad identity (identity is a property of the endpoint, not of one shard) | the validator broke its retention promise or is not who the chain says it is; this is the only class that counts against a validator |
 | `TOLERATED` | assigned validator, grace phase: `NOT_FOUND` or unreachable | honest pruning lag; do not read anything into it |
 | `EXPECTED_GONE` | assigned validator, post phase: `NOT_FOUND` | correct behaviour after the window |
-| `SERVED_PAST_WINDOW` | assigned validator, post phase: still serving | not a fault; the validator keeps data longer than it must |
+| `SERVED_PAST_WINDOW` | assigned validator, post phase: still serving (`SERVED_OK`, or `PARTIAL` with valid rows) | not a fault; the validator keeps data longer than it must |
 | `UNREACHABLE_POST_WINDOW` | assigned validator, post phase: unreachable | not a retention fault; the obligation was over. It still feeds the reachability view |
 | `EXPECTED_UNASSIGNED` | validator not assigned this shard answered `NOT_FOUND` or was unreachable | normal; only probed when `-probe-unassigned` is on |
-| `SERVING_UNASSIGNED` | validator not assigned this shard returned a shard | unexpected; either the observer's assignment is wrong or the validator over-serves. Shown for review, never as a fault |
-| `PROBE_ERROR` | the observer could not carry out the probe | an observer problem, shown as a gap |
-| `NOT_PROBED` | the slot elapsed unprobed (observer down or late) | a gap in observation, never a zero |
+| `SERVING_UNASSIGNED` | validator not assigned this shard returned data for it (`SERVED_OK`, `PARTIAL`, `WRONG_ROWS` or `INVALID_ROWS`) | unexpected; either the observer's assignment is wrong or the validator over-serves. Shown for review, never as a fault |
+| `PROBE_ERROR` | the observer could not carry out the probe, or gave up on it (`PROBE_ERROR`, `RPC_DEADLINE`) | an observer problem, shown as a gap |
+| `NOT_PROBED` | the slot elapsed unprobed (observer down or late), or the download was skipped by policy (`MISSED`, `REACHABLE`) | a gap in observation, never a zero |
 
 ## How the dashboard derives its numbers
 
 - **Serve rate** for a validator over a window = `HEALTHY / (HEALTHY + FAULT)`,
   counting only in-window and grace probes of assigned shards. The probe count
   is shown next to every rate.
-- **Reachability** = probes whose TCP and TLS steps succeeded, over all probes
-  that attempted them, any phase. This includes `UNREACHABLE_POST_WINDOW` and
-  unassigned probes, because reachability is a property of the endpoint, not
-  of one blob.
+- **Reachability** on the overview and validator pages is the latest
+  evidence per endpoint: the newest heartbeat or probe (any phase, assigned
+  or not, gaps excluded) with TCP and TLS both successful. It is "reachable
+  now", not a rate: reachability is a property of the endpoint, not of one
+  blob.
 - **TLS identity status** = the latest identity result: verified, mismatch
   (`IDENTITY_FAIL`), no TLS (`TLS_HANDSHAKE_FAIL`), or unreachable.
-- **Reconstructable** for a blob at a probe point: the distinct row indices
-  held by validators whose probe at that point was `HEALTHY` (or `SERVED_OK` in
-  post phase) is at least `OriginalRows` (4096 for blob v0). Reconstructable
-  means at least that many; degraded means fewer than the full assignment
-  answered but still at least `OriginalRows`; not reconstructable means fewer
-  than `OriginalRows` distinct rows were observed served. The threshold is the
-  row count from `fibre-assign`'s pinned protocol params, not a hard-coded
-  fraction of validators.
+- **Reconstructable** for a blob is judged at the latest **complete**
+  in-window probe point: the newest point at which every assigned validator
+  has a real result (a verdict, not a gap). Grace and post points are never
+  used, because "not found" is tolerated or expected there. The distinct row
+  indices held by validators whose probe at that point was `SERVED_OK` are
+  compared with `OriginalRows` (4096 for blob v0). Reconstructable means at
+  least that many with every assigned validator serving; degraded means fewer
+  than the full assignment answered but still at least `OriginalRows`; not
+  reconstructable means fewer than `OriginalRows` distinct rows were observed
+  served. While no in-window point is complete (a sweep still running, or
+  validators skipped by the policy) the status is `pending` and the blob is
+  left out of the network rate: an absent row is a gap, never a zero. The
+  threshold is the row count from `fibre-assign`'s pinned protocol params,
+  not a hard-coded fraction of validators. Rows from several vantages count a
+  validator once.
 - `PROBE_ERROR`, `NOT_PROBED` and `MISSED` are excluded from every rate and
   rendered as gaps.
 

@@ -2,10 +2,13 @@ package probe
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -132,26 +135,33 @@ func dedupeKey(vantage, promiseHash, validatorAddr string, scheduledAt time.Time
 
 // MeasurementStore is an append-only measurements.jsonl plus an in-memory set
 // of dedupe keys loaded on open, so a restart never re-probes a slot it already
-// has.
+// has. Keys are grouped by promise hash so a finished publication can be
+// forgotten in O(1) (Forget) instead of growing the set forever. Safe for
+// concurrent use.
 type MeasurementStore struct {
-	path       string
-	f          *os.File
-	w          *bufio.Writer
-	seen       map[string]bool // full dedupe keys
-	seenPoints map[string]bool // vantage|promise|scheduledAt — "this point was handled"
+	path string
+	f    *os.File
+
+	mu         sync.Mutex
+	seen       map[string]map[string]bool // promise hash -> full dedupe keys
+	seenPoints map[string]map[string]bool // promise hash -> vantage|promise|scheduledAt
+	dirty      bool                       // appended without fsync since the last Sync
 }
 
 func pointKey(vantage, promiseHash string, scheduledAt time.Time) string {
 	return vantage + "|" + promiseHash + "|" + scheduledAt.UTC().Format(time.RFC3339Nano)
 }
 
-// OpenMeasurementStore opens or creates <dir>/measurements.jsonl.
+// OpenMeasurementStore opens or creates <dir>/measurements.jsonl. A torn
+// final line (a write interrupted by a crash) is truncated away before the
+// file is opened for append, so one bad byte sequence at the end never bricks
+// the prober; a malformed interior line is still a hard error.
 func OpenMeasurementStore(dir string) (*MeasurementStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, "measurements.jsonl")
-	s := &MeasurementStore{path: path, seen: map[string]bool{}, seenPoints: map[string]bool{}}
+	s := &MeasurementStore{path: path, seen: map[string]map[string]bool{}, seenPoints: map[string]map[string]bool{}}
 	if err := s.loadSeen(); err != nil {
 		return nil, err
 	}
@@ -160,11 +170,63 @@ func OpenMeasurementStore(dir string) (*MeasurementStore, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	s.f = f
-	s.w = bufio.NewWriter(f)
 	return s, nil
 }
 
+// TruncateTornTail cuts a trailing partial line (no final newline) off an
+// append-only JSONL file and reports how many bytes were removed. Files that
+// end in a newline, are empty, or do not exist are left alone.
+func TruncateTornTail(path string) (int64, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return 0, err
+	}
+	size := info.Size()
+	buf := make([]byte, 1)
+	if _, err := f.ReadAt(buf, size-1); err != nil {
+		return 0, err
+	}
+	if buf[0] == '\n' {
+		return 0, nil
+	}
+	// walk back to the previous newline (bounded chunks)
+	cut := size
+	const chunk = 1 << 16
+	for cut > 0 {
+		start := cut - chunk
+		if start < 0 {
+			start = 0
+		}
+		b := make([]byte, cut-start)
+		if _, err := f.ReadAt(b, start); err != nil && err != io.EOF {
+			return 0, err
+		}
+		if i := bytes.LastIndexByte(b, '\n'); i >= 0 {
+			cut = start + int64(i) + 1
+			break
+		}
+		cut = start
+	}
+	if err := f.Truncate(cut); err != nil {
+		return 0, err
+	}
+	return size - cut, f.Sync()
+}
+
 func (s *MeasurementStore) loadSeen() error {
+	if cut, err := TruncateTornTail(s.path); err != nil {
+		return fmt.Errorf("repair %s: %w", s.path, err)
+	} else if cut > 0 {
+		fmt.Fprintf(os.Stderr, "measurements: truncated %d bytes of a torn final line in %s\n", cut, s.path)
+	}
 	f, err := os.Open(s.path)
 	if os.IsNotExist(err) {
 		return nil
@@ -184,62 +246,113 @@ func (s *MeasurementStore) loadSeen() error {
 		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
 			return fmt.Errorf("%s line %d: %w", s.path, n+1, err)
 		}
-		s.seen[m.DedupeKey()] = true
-		s.seenPoints[pointKey(m.Vantage, m.PromiseHash, m.ScheduledAt)] = true
+		s.remember(m)
 		n++
 	}
 	return sc.Err()
 }
 
+func (s *MeasurementStore) remember(m Measurement) {
+	if s.seen[m.PromiseHash] == nil {
+		s.seen[m.PromiseHash] = map[string]bool{}
+		s.seenPoints[m.PromiseHash] = map[string]bool{}
+	}
+	s.seen[m.PromiseHash][m.DedupeKey()] = true
+	s.seenPoints[m.PromiseHash][pointKey(m.Vantage, m.PromiseHash, m.ScheduledAt)] = true
+}
+
 // Has reports whether a measurement for this exact slot is already recorded.
 func (s *MeasurementStore) Has(vantage, promiseHash, validatorAddr string, scheduledAt time.Time) bool {
-	return s.seen[dedupeKey(vantage, promiseHash, validatorAddr, scheduledAt)]
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seen[promiseHash][dedupeKey(vantage, promiseHash, validatorAddr, scheduledAt)]
 }
 
 // HandledPoint reports whether this (vantage, publication, schedule point) has
-// been touched at all — used to skip re-planning a point the prober already ran
-// (or marked missed) for every target.
+// been touched at all: at least one target has a row. It is a hint that the
+// point was started, not that it is complete (see Prober.complete).
 func (s *MeasurementStore) HandledPoint(vantage, promiseHash string, scheduledAt time.Time) bool {
-	return s.seenPoints[pointKey(vantage, promiseHash, scheduledAt)]
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seenPoints[promiseHash][pointKey(vantage, promiseHash, scheduledAt)]
 }
 
-// Append writes one measurement (skipping an already-seen slot) and fsyncs.
-// Probes are infrequent, so a sync per measurement is cheap and makes every
-// record durable immediately.
+// Forget drops the in-memory keys of a publication whose schedule is entirely
+// in the past; the file keeps every row.
+func (s *MeasurementStore) Forget(promiseHash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.seen, promiseHash)
+	delete(s.seenPoints, promiseHash)
+}
+
+// Append writes one measurement (skipping an already-seen slot) and fsyncs,
+// so every probe result is durable the moment it is recorded.
 func (s *MeasurementStore) Append(m Measurement) error {
-	if s.seen[m.DedupeKey()] {
+	return s.append(m, true)
+}
+
+// AppendDeferred writes without fsync; call Sync after a batch (used for the
+// NOT_PROBED markers a late start fans out, where one fsync per row would
+// take hours).
+func (s *MeasurementStore) AppendDeferred(m Measurement) error {
+	return s.append(m, false)
+}
+
+func (s *MeasurementStore) append(m Measurement, sync bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen[m.PromiseHash][m.DedupeKey()] {
 		return nil
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("marshal measurement: %w", err)
 	}
-	if _, err := s.w.Write(append(b, '\n')); err != nil {
+	// one write per record: a reader never sees half a line from a buffer
+	// flush, and a crash leaves at most one torn tail (repaired on open).
+	if _, err := s.f.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("write measurement: %w", err)
 	}
-	if err := s.w.Flush(); err != nil {
-		return fmt.Errorf("flush measurements: %w", err)
+	s.dirty = true
+	if sync {
+		if err := s.f.Sync(); err != nil {
+			return fmt.Errorf("fsync measurements: %w", err)
+		}
+		s.dirty = false
+	}
+	s.remember(m)
+	return nil
+}
+
+// Sync fsyncs pending deferred appends.
+func (s *MeasurementStore) Sync() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.dirty {
+		return nil
 	}
 	if err := s.f.Sync(); err != nil {
 		return fmt.Errorf("fsync measurements: %w", err)
 	}
-	s.seen[m.DedupeKey()] = true
-	s.seenPoints[pointKey(m.Vantage, m.PromiseHash, m.ScheduledAt)] = true
+	s.dirty = false
 	return nil
 }
 
-// Close flushes and closes the file.
+// Close syncs and closes the file.
 func (s *MeasurementStore) Close() error {
-	if s.w != nil {
-		_ = s.w.Flush()
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.f != nil {
+		if s.dirty {
+			_ = s.f.Sync()
+		}
 		return s.f.Close()
 	}
 	return nil
 }
 
-// Path is the measurements file path.
+// Path returns the measurements file path.
 func (s *MeasurementStore) Path() string { return s.path }
 
 // LoadMeasurements reads a measurements.jsonl (for tooling / tests).

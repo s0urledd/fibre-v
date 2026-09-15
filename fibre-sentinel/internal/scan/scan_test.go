@@ -248,3 +248,51 @@ func TestIsModuleInactive(t *testing.T) {
 		t.Fatal("transport errors and nil are not an inactive module")
 	}
 }
+
+func TestMustServeUntilForPromise_UploadTimeAmbiguity(t *testing.T) {
+	creation := time.Unix(1_700_000_000, 0).UTC()
+	h := NewParamHistory(100, params(10*time.Minute, time.Hour, 13*time.Hour))
+	// gov change at end of block 300: retention 1h -> 30m, effective from 301.
+	if !h.AddFinalizeEvent(300, params(10*time.Minute, 30*time.Minute, 13*time.Hour)) {
+		t.Fatal("finalize event should change the value")
+	}
+
+	// promise and settlement on the same side of the change: exact, not ambiguous
+	msu, _, _, amb, ok := h.MustServeUntilForPromise(creation, 250, 280, 0)
+	if !ok || amb || !msu.Equal(creation.Add(time.Hour)) {
+		t.Fatalf("same-side: msu=%s amb=%v ok=%v", msu, amb, ok)
+	}
+	msu, _, _, amb, _ = h.MustServeUntilForPromise(creation, 310, 320, 0)
+	if amb || !msu.Equal(creation.Add(30*time.Minute)) {
+		t.Fatalf("same-side after change: msu=%s amb=%v", msu, amb)
+	}
+
+	// change lands between promise height and settlement: earlier bound, flagged
+	msu, snap, basis, amb, _ := h.MustServeUntilForPromise(creation, 290, 320, 0)
+	if !amb {
+		t.Fatal("expected ambiguous")
+	}
+	if !msu.Equal(creation.Add(30 * time.Minute)) {
+		t.Fatalf("ambiguous: msu=%s want creation+30m", msu)
+	}
+	if snap.ShardRetentionSeconds != 1800 {
+		t.Fatalf("snapshot should be the params that produced the bound, got retention %ds", snap.ShardRetentionSeconds)
+	}
+	if !strings.Contains(basis, "AMBIGUOUS") {
+		t.Fatalf("basis should say AMBIGUOUS: %q", basis)
+	}
+
+	// the earlier bound can also come from the PRE-change params
+	h2 := NewParamHistory(100, params(10*time.Minute, 30*time.Minute, 13*time.Hour))
+	h2.AddFinalizeEvent(300, params(10*time.Minute, time.Hour, 13*time.Hour))
+	msu, _, _, amb, _ = h2.MustServeUntilForPromise(creation, 290, 320, 0)
+	if !amb || !msu.Equal(creation.Add(30*time.Minute)) {
+		t.Fatalf("pre-change earlier: msu=%s amb=%v", msu, amb)
+	}
+
+	// promise height before the scan start: settlement params only, not ambiguous
+	msu, _, _, amb, ok = h.MustServeUntilForPromise(creation, 50, 320, 0)
+	if !ok || amb || !msu.Equal(creation.Add(30*time.Minute)) {
+		t.Fatalf("pre-history promise: msu=%s amb=%v ok=%v", msu, amb, ok)
+	}
+}

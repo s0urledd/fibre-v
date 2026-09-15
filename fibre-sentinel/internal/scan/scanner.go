@@ -26,7 +26,7 @@ type Config struct {
 
 	// Follow keeps polling for new blocks after the tip is reached.
 	Follow        bool
-	FollowTimeout time.Duration // give up (fatal) if no new block within this
+	FollowTimeout time.Duration // give up (fatal) if no new block within this; 0 = never, warn instead
 	PollInterval  time.Duration // gap between tip polls
 
 	RPCTimeout time.Duration // per-RPC-call timeout
@@ -64,9 +64,6 @@ func New(cfg Config, log *Logger) (*Scanner, error) {
 	if cfg.RPCTimeout <= 0 {
 		cfg.RPCTimeout = 15 * time.Second
 	}
-	if cfg.FollowTimeout <= 0 {
-		cfg.FollowTimeout = 120 * time.Second
-	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 2 * time.Second
 	}
@@ -102,8 +99,13 @@ func (s *Scanner) Run(parent context.Context) error {
 	}
 	defer s.store.Close()
 
-	chainID, tip, err := s.chain.Status(ctx)
-	if err != nil {
+	var chainID string
+	var tip int64
+	if err := s.retryRPC(ctx, "initial status", func() error {
+		var err error
+		chainID, tip, err = s.chain.Status(ctx)
+		return err
+	}); err != nil {
 		s.log.Fatalf("initial status: %v", err)
 	}
 	s.chainID = chainID
@@ -247,19 +249,36 @@ func (s *Scanner) checkpoint(lastScanned int64) {
 }
 
 // waitForHeight polls Status until the tip reaches want, or FollowTimeout
-// elapses (fatal). Returns the observed tip (>= want).
+// elapses (fatal). With FollowTimeout 0 it waits forever and logs a warning
+// every five minutes: a halted chain (upgrade, outage) is the node's problem,
+// and the observer should be there when blocks resume. Returns the observed
+// tip (>= want). Transient RPC errors are retried, not fatal.
 func (s *Scanner) waitForHeight(ctx context.Context, want int64) (int64, error) {
-	deadline := time.Now().Add(s.cfg.FollowTimeout)
+	start := time.Now()
+	var deadline time.Time
+	if s.cfg.FollowTimeout > 0 {
+		deadline = start.Add(s.cfg.FollowTimeout)
+	}
+	nextWarn := start.Add(5 * time.Minute)
 	for {
-		_, tip, err := s.chain.Status(ctx)
+		var tip int64
+		err := s.retryRPC(ctx, "status while following", func() error {
+			var err error
+			_, tip, err = s.chain.Status(ctx)
+			return err
+		})
 		if err != nil {
 			return 0, fmt.Errorf("status while following: %w", err)
 		}
 		if tip >= want {
 			return tip, nil
 		}
-		if time.Now().After(deadline) {
+		if !deadline.IsZero() && time.Now().After(deadline) {
 			return 0, fmt.Errorf("no new block: tip stuck at %d, waited %s for height %d", tip, s.cfg.FollowTimeout, want)
+		}
+		if time.Now().After(nextWarn) {
+			s.log.Printf("WARNING: no new block for %s (tip %d, waiting for %d); still following", time.Since(start).Round(time.Second), tip, want)
+			nextWarn = time.Now().Add(5 * time.Minute)
 		}
 		select {
 		case <-ctx.Done():
@@ -267,6 +286,46 @@ func (s *Scanner) waitForHeight(ctx context.Context, want int64) (int64, error) 
 		case <-time.After(s.cfg.PollInterval):
 		}
 	}
+}
+
+// rpcAttempts and rpcBackoff bound the retry of a transient RPC failure
+// (public endpoints hiccup, the block/block_results race at the tip: CometBFT
+// stores the block before the FinalizeBlock response, so block_results for a
+// height /status just reported can be "not found" for a moment).
+const rpcAttempts = 20
+
+func rpcBackoff(attempt int) time.Duration {
+	d := time.Duration(1<<uint(min(attempt, 4))) * time.Second // 1,2,4,8,16,16,...
+	return d
+}
+
+// retryRPC runs fn up to rpcAttempts times with backoff. It gives up at once
+// on a context cancellation or on a failure retrying cannot fix.
+func (s *Scanner) retryRPC(ctx context.Context, what string, fn func() error) error {
+	var last error
+	for attempt := 0; attempt < rpcAttempts; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		last = err
+		if ctx.Err() != nil {
+			return err
+		}
+		if IsResultsNotPersisted(err) {
+			return fmt.Errorf("%w (the RPC node runs with storage.discard_abci_responses = true or has pruned this height; the scanner needs a node that keeps ABCI responses)", err)
+		}
+		if IsModuleInactive(err) {
+			return err
+		}
+		s.log.Printf("%s: %v (attempt %d/%d, retry in %s)", what, err, attempt+1, rpcAttempts, rpcBackoff(attempt))
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(rpcBackoff(attempt)):
+		}
+	}
+	return last
 }
 
 // processBlock scans one height: first apply any fibre-param updates, then
@@ -280,6 +339,10 @@ const inactiveRetryEvery = 100
 func IsModuleInactive(err error) bool {
 	if err == nil {
 		return false
+	}
+	var ae *ABCIError
+	if errors.As(err, &ae) && ae.Code == 6 && (ae.Codespace == "sdk" || ae.Codespace == "") {
+		return true // cosmos-sdk ErrUnknownRequest
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "unknown query path") || strings.Contains(msg, "unknown request")
@@ -305,12 +368,20 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 	if s.fibreInactive && (h%inactiveRetryEvery == 0 || h == s.startHeight) {
 		s.trySeed(ctx, h)
 	}
-	blk, err := s.chain.Block(ctx, h)
-	if err != nil {
+	var blk *Block
+	var res *BlockResults
+	if err := s.retryRPC(ctx, fmt.Sprintf("fetch block %d", h), func() error {
+		var err error
+		blk, err = s.chain.Block(ctx, h)
+		return err
+	}); err != nil {
 		s.log.Fatalf("fetch block %d: %v", h, err)
 	}
-	res, err := s.chain.BlockResults(ctx, h)
-	if err != nil {
+	if err := s.retryRPC(ctx, fmt.Sprintf("fetch block_results %d", h), func() error {
+		var err error
+		res, err = s.chain.BlockResults(ctx, h)
+		return err
+	}); err != nil {
 		s.log.Fatalf("fetch block_results %d: %v", h, err)
 	}
 	if len(res.TxCodes) != len(blk.Txs) {
@@ -429,17 +500,28 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 		Signature:         hexstr(pp.Signature),
 	}
 
-	mustServe, paramsSnap, basis, ok := s.params.MustServeUntil(pp.CreationTimestamp, blk.Height, txIndex)
+	mustServe, paramsSnap, basis, ambiguous, ok := s.params.MustServeUntilForPromise(pp.CreationTimestamp, pp.Height, blk.Height, txIndex)
 	if !ok {
 		return Publication{}, fmt.Errorf("no param history entry in effect at height %d tx %d", blk.Height, txIndex)
 	}
+	if ambiguous {
+		s.log.Printf("publication %s: fibre params changed between promise height %d and settlement %d; earlier must_serve_until recorded", hexstr(pp.Commitment)[:8], pp.Height, blk.Height)
+	}
 
-	// assignment table over the validator set at the PROMISE height.
+	// assignment table over the validator set at the PROMISE height. A
+	// failure to fetch the set is an RPC problem, retried and then fatal,
+	// never frozen into the record: a record with an assignment error is
+	// skipped by the prober for good, and there is no re-scan path.
 	var table AssignmentTable
-	vals, verr := s.validatorSet(ctx, pp.Height)
-	if verr != nil {
-		table = AssignmentTable{Error: "validator set at height " + fmt.Sprint(pp.Height) + ": " + verr.Error(), ValidatorSetHeight: pp.Height}
-	} else {
+	var vals []assign.Validator
+	if verr := s.retryRPC(ctx, fmt.Sprintf("validator set at height %d", pp.Height), func() error {
+		var err error
+		vals, err = s.validatorSet(ctx, pp.Height)
+		return err
+	}); verr != nil {
+		return Publication{}, fmt.Errorf("validator set at height %d: %w", pp.Height, verr)
+	}
+	{
 		var commitment [32]byte
 		copy(commitment[:], pp.Commitment)
 		table = buildAssignmentTable(commitment, pp.BlobVersion, pp.Height, vals, s.cfg.StoreRows)
@@ -459,6 +541,7 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 		ParamsAtPublication:     paramsSnap,
 		MustServeUntil:          mustServe,
 		MustServeUntilBasis:     basis,
+		MustServeUntilAmbiguous: ambiguous,
 		Assignment:              table,
 		RecordedAt:              time.Now().UTC(),
 	}, nil
@@ -490,6 +573,9 @@ func (s *Scanner) validatorSet(ctx context.Context, height int64) ([]assign.Vali
 			}
 		}
 		out = append(out, assign.Validator{Address: a, VotingPower: m.VotingPower})
+	}
+	if len(s.valSetCache) >= 256 {
+		s.valSetCache = map[int64][]assign.Validator{} // bounded
 	}
 	s.valSetCache[height] = out
 	return out, nil

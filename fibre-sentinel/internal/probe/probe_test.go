@@ -1,8 +1,13 @@
 package probe
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 )
@@ -151,6 +156,24 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{false, PhaseInWindow, OutcomeServedOK, ClassServingUnassigned},
 		{false, PhasePost, OutcomeNotFound, ClassExpectedUnassigned},
 		{false, PhaseGrace, OutcomeRPCUnavailable, ClassExpectedUnassigned},
+		// rows added by the pre-mocha audit (docs/verdicts.md alignment)
+		{true, PhaseInWindow, OutcomePartial, ClassFault},
+		{true, PhaseInWindow, OutcomeNoHost, ClassFault},
+		{true, PhaseGrace, OutcomePartial, ClassFault},
+		{true, PhaseGrace, OutcomeWrongRows, ClassFault},
+		{true, PhaseGrace, OutcomeNoHost, ClassTolerated},
+		{true, PhasePost, OutcomeWrongRows, ClassFault},
+		{true, PhasePost, OutcomeInvalidRows, ClassFault},
+		{true, PhasePost, OutcomePartial, ClassServedPastWindow},
+		{true, PhasePost, OutcomeNoHost, ClassUnreachablePostWindow},
+		{false, PhaseInWindow, OutcomeWrongRows, ClassServingUnassigned},
+		{false, PhaseInWindow, OutcomeInvalidRows, ClassServingUnassigned},
+		{false, PhaseInWindow, OutcomePartial, ClassServingUnassigned},
+		{false, PhaseInWindow, OutcomeIdentityFail, ClassFault},
+		{false, PhaseGrace, OutcomeNoHost, ClassExpectedUnassigned},
+		{true, PhaseInWindow, OutcomeReachable, ClassNotProbed},
+		{true, PhaseInWindow, OutcomeRPCDeadline, ClassProbeError},
+		{false, PhasePost, OutcomeRPCDeadline, ClassProbeError},
 		// probe-side
 		{true, PhaseInWindow, OutcomeProbeError, ClassProbeError},
 		{true, PhaseInWindow, OutcomeMissed, ClassNotProbed},
@@ -222,3 +245,47 @@ func TestMeasurementStore_DedupeResume(t *testing.T) {
 type errStr string
 
 func (e errStr) Error() string { return string(e) }
+
+func TestClassifyDownloadError_StatusCodes(t *testing.T) {
+	cases := []struct {
+		err  error
+		want Outcome
+	}{
+		{status.Error(codes.NotFound, "no blob shard found"), OutcomeNotFound},
+		{status.Error(codes.Unavailable, "connection error"), OutcomeRPCUnavailable},
+		{status.Error(codes.DeadlineExceeded, "context deadline exceeded"), OutcomeRPCDeadline},
+		{status.Error(codes.ResourceExhausted, "grpc: received message larger than max (5000000 vs. 4194304)"), OutcomeProbeError},
+		{status.Error(codes.InvalidArgument, "bad blob id"), OutcomeProbeError},
+		{status.Error(codes.Internal, "store: i/o error"), OutcomeRPCError},
+		{status.Error(codes.Unknown, "boom"), OutcomeRPCError},
+		{status.Error(codes.Unavailable, "connection error: desc = \"transport: authentication handshake failed: fibre tls identity [signature_invalid]: bad\""), OutcomeIdentityFail},
+		{context.DeadlineExceeded, OutcomeRPCDeadline},
+		{errors.New("dial tcp: connection refused"), OutcomeRPCUnavailable},
+	}
+	for _, c := range cases {
+		if got := classifyDownloadError(c.err); got != c.want {
+			t.Errorf("classifyDownloadError(%v) = %s, want %s", c.err, got, c.want)
+		}
+	}
+}
+
+func TestOrderAddrsAndDownloadDeadline(t *testing.T) {
+	got := orderAddrs([]string{"2001:db8::1", "10.0.0.1", "::1", "192.0.2.7"})
+	want := []string{"10.0.0.1", "192.0.2.7", "2001:db8::1", "::1"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("orderAddrs = %v, want %v", got, want)
+		}
+	}
+	to := StepTimeouts{}.withDefaults()
+	if d := to.downloadDeadline(0); d != 25*time.Second {
+		t.Errorf("base deadline = %s", d)
+	}
+	// 122 MB at 1 MiB/s adds ~116 s
+	if d := to.downloadDeadline(122_000_000); d < 25*time.Second+110*time.Second || d > 25*time.Second+120*time.Second {
+		t.Errorf("scaled deadline = %s", d)
+	}
+	if maxRecvMsgSize <= 4<<20 {
+		t.Errorf("maxRecvMsgSize = %d, must exceed grpc's 4 MiB default", maxRecvMsgSize)
+	}
+}

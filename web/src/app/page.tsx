@@ -23,7 +23,7 @@ export default function Overview() {
       <div className="controls">
         <span className="muted">window:</span>
         {WINDOWS.map((w) => <button key={w} className={win === w ? "on" : ""} onClick={() => setWin(w)}>{w}</button>)}
-        {net && <span className="faint mono">{net.window.start ? utc(net.window.start) : "beginning"} → {utc(net.window.end)}</span>}
+        {net && <span className="faint mono">{net.window.start && !net.window.start.startsWith("0001-") ? utc(net.window.start) : "beginning"} → {utc(net.window.end)}</span>}
       </div>
       {netErr && <div className="notice err">Cannot reach the observer API: {netErr}</div>}
       {loading && !net && <p className="muted">Loading…</p>}

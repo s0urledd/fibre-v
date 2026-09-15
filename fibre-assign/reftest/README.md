@@ -19,8 +19,8 @@ Needs only:
 - **Go with toolchain auto-download.** celestia-app pins `go 1.26.5`; the default
   `GOTOOLCHAIN=auto` fetches it.
 - **Network to the module proxy.** celestia-app is a normal pinned dependency —
-  `require github.com/celestiaorg/celestia-app/v10 v10.0.0-20260901162319-0b69316466c3`,
-  the pseudo-version for commit `0b69316466c3ba02f708c0e2a101f834d5d1827f`. No
+  `require github.com/celestiaorg/celestia-app/v10 v10.1.0-corto`,
+  the tag for commit `fa5b523b7e3b2b83bd16bc072a45cbd3819fa369`. No
   local checkout.
 
 The `replace (...)` block in `go.mod` is copied verbatim from celestia-app's own
