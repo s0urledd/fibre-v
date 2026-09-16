@@ -80,6 +80,12 @@ type Server struct {
 	info    VantageInfo
 	mux     *http.ServeMux
 	log     *scan.Logger // may be nil (tests)
+	// The two window aggregates the dashboard waits for, held as snapshots per
+	// window. See snapshot.go: both are aggregates over the whole window and
+	// are computed on a schedule rather than per request, so a reader never
+	// waits for one and never sees one without its age.
+	net  *snapshotCache[*networkResponse]
+	vals *snapshotCache[[]validatorRow]
 }
 
 // New builds a Server. vantage is the label rendered on every response.
@@ -102,6 +108,13 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger) *Server
 	}
 	info.Complete = info.Location != "" && info.Provider != "" && info.ASN != "" && len(info.EgressAddresses) > 0
 	s := &Server{st: st, vantage: info.Name, info: info, mux: http.NewServeMux(), log: log}
+	s.net = newSnapshotCache("network", s.computeNetwork)
+	s.vals = newSnapshotCache("validators", func(ctx context.Context, win Window) ([]validatorRow, error) {
+		return s.validatorRows(ctx, win, "")
+	})
+	// Warm every window now, so the first visitor is not the one who waits.
+	s.net.warm(s.logf(), time.Now())
+	s.vals.warm(s.logf(), time.Now())
 	s.mux.HandleFunc("GET /v1/meta", s.handleMeta)
 	s.mux.HandleFunc("GET /v1/network", s.handleNetwork)
 	s.mux.HandleFunc("GET /v1/validators", s.handleValidators)
@@ -380,8 +393,13 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 type classCounts map[string]int64
 
 type networkResponse struct {
-	Window                 Window `json:"window"`
-	Vantage                string `json:"vantage"`
+	Window  Window `json:"window"`
+	Vantage string `json:"vantage"`
+	// ComputedAt and ComputeMs say when this summary was taken and how long it
+	// took. It is a snapshot refreshed on a schedule, not a live query, so its
+	// age is published rather than left for a reader to assume.
+	ComputedAt             string `json:"computed_at,omitempty"`
+	ComputeMs              int64  `json:"compute_ms,omitempty"`
 	ObservedFromOneVantage bool   `json:"observed_from_one_location"`
 	RegisteredEndpoints    int64  `json:"registered_endpoints"`
 	ValidatorsProbed       int64  `json:"validators_probed"`
@@ -674,13 +692,36 @@ func (s *Server) attestationWhere(ctx context.Context, where string, args ...any
 }
 
 func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	now := time.Now()
-	win, err := parseWindow(r, now)
+	win, err := parseWindow(r, time.Now())
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	resp, at, ms, err := s.net.get(r.Context(), s.logf(), win)
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	// A copy, so a reader cannot mutate the cached snapshot and two concurrent
+	// readers cannot race on it.
+	out := *resp
+	out.ComputedAt, out.ComputeMs = at.UTC().Format(time.RFC3339Nano), ms
+	writeJSON(w, 200, &out)
+}
+
+// logf adapts the server's logger, which may be absent in tests, to what the
+// snapshot cache needs.
+func (s *Server) logf() logf {
+	if s.log == nil {
+		return nil
+	}
+	return func(format string, args ...any) { s.log.Printf(format, args...) }
+}
+
+// computeNetwork does the work handleNetwork used to do inline. It is called
+// from the snapshot cache rather than from the request, so its context outlives
+// the reader who triggered it.
+func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkResponse, error) {
 	db := s.st.DB()
 	var resp networkResponse
 	resp.Window, resp.Vantage = win, s.vantage
@@ -691,8 +732,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 
 	classes, total, err := s.classCountsWhere(ctx, `started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg())
 	if err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	resp.Classes = classes
 	resp.ServeRate = serveRate(classes)
@@ -701,14 +741,12 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	resp.ExcludedClasses = excludedFromRate
 	if resp.ByObligation, err = s.obligationRate(ctx,
 		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	_ = total
 	if resp.Attestation, err = s.attestationWhere(ctx,
 		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ?`, win.startArg()).Scan(&resp.ProbeCount)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`, win.startArg()).Scan(&resp.Gaps)
@@ -727,19 +765,16 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp.VantageHealth, err = s.worstCorrelatedPoint(ctx, win); err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	if resp.ByPoint, err = s.rateByPoint(ctx,
 		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 
 	reach, err := s.reachabilityNow(ctx)
 	if err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	var reachable int64
 	for _, v := range reach {
@@ -753,11 +788,10 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 
 	recon, err := s.reconstructableCount(ctx, win)
 	if err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	resp.Reconstructable = recon
-	writeJSON(w, 200, resp)
+	return &resp, nil
 }
 
 // reachState is the latest reachability evidence for one validator: the most
@@ -1164,12 +1198,15 @@ func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	rows, err := s.validatorRows(r.Context(), win, "")
+	rows, at, ms, err := s.vals.get(r.Context(), s.logf(), win)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"window": win, "vantage": s.vantage, "validators": rows})
+	writeJSON(w, 200, map[string]any{
+		"window": win, "vantage": s.vantage, "validators": rows,
+		"computed_at": at.UTC().Format(time.RFC3339Nano), "compute_ms": ms,
+	})
 }
 
 func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
@@ -1326,6 +1363,14 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// Per blob, deliberately. Batching both of these was tried and measured on
+	// a store with 2,200 publications: the class tally got about 8% slower,
+	// because fifty seeks on probes_promise beat one CTE-joined GROUP BY, and
+	// batching the row lists was far worse, taking /v1/blobs?limit=200 from
+	// 1.35s to 3.58s by pulling every in-window point's JSON when only the
+	// chosen point is wanted. A page is a few hundred rows at most. The batch
+	// is kept for the network summary, which examines two thousand and
+	// publishes no row count.
 	for i := range out {
 		classes, total, err := s.classCountsWhere(ctx, `promise_hash = ?`, out[i].PromiseHash)
 		if err != nil {
@@ -1521,17 +1566,19 @@ func (s *Server) reconstructableCount(ctx context.Context, win Window) (reconstr
 		`SELECT COUNT(*) FROM publications WHERE settlement_time >= ?`, win.startArg()).Scan(&out.PublicationsInWindow); err != nil {
 		return out, err
 	}
-	blobs, err := s.blobRows(ctx, `settlement_time >= ?`, reconstructSample, win.startArg())
+	// Statuses only: the summary publishes no row count, so the bounds settle
+	// every verdict and not one row list is parsed.
+	verdicts, err := s.reconstructBatch(ctx, `settlement_time >= ?`, reconstructSample, win.startArg())
 	if err != nil {
 		return out, err
 	}
-	out.Examined = int64(len(blobs))
-	for _, b := range blobs {
-		if b.Reconstructable == nil {
+	out.Examined = int64(len(verdicts))
+	for _, rc := range verdicts {
+		if rc == nil {
 			out.Unknown++
 			continue
 		}
-		switch b.Reconstructable.Status {
+		switch rc.Status {
 		case "unknown":
 			out.Unknown++
 		case "pending":

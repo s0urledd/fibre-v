@@ -49,7 +49,14 @@ export type VantageInfo = {
 export type RunStatus = { run_id: number; started_at: string; last_heartbeat_at: string; stopped_at: string | null; alive: boolean };
 
 export type Network = {
-  window: Window;
+  /**
+   * When this summary was computed and how long it took. It is a snapshot
+   * refreshed on a schedule, not a live query — the figures are aggregates over
+   * the whole window and recomputing them per reader is not something a public
+   * site can afford — so the page shows its age rather than implying it is now.
+   */
+  computed_at?: string;
+  compute_ms?: number;  window: Window;
   vantage: string;
   observed_from_one_location: boolean;
   registered_endpoints: number;

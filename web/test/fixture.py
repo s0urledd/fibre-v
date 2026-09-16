@@ -152,7 +152,10 @@ for v in vals:
 # --- publications ---------------------------------------------------------
 # Spread over seven days so the 24h / 7d / 30d window switcher has something to
 # switch between, and so a "last 24h" figure differs from an all-time one.
-PUBS = 260
+# Publications to write. The default is enough to judge a design; set it higher
+# to measure how the API scales — reconstructSample caps the network summary at
+# 2000, so that is the number that shows whether an endpoint holds up.
+PUBS = int(os.environ.get("FIXTURE_PUBS", "260"))
 pubs = []
 for p in range(PUBS):
     age_h = rnd.random() ** 1.7 * 168          # skewed toward recent

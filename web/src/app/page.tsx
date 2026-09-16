@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Network, type Validator, type Meta, fmtCount, bytes, utc } from "@/lib/api";
+import { useApi, type Network, type Validator, type Meta, fmtCount, bytes, utc, ago } from "@/lib/api";
 import ValidatorTable from "@/components/ValidatorTable";
 import { Reading } from "@/components/Rate";
 import Graduation from "@/components/Graduation";
@@ -63,8 +63,12 @@ export default function Overview() {
           <button key={w} aria-pressed={win === w} onClick={() => setWin(w)}>{w}</button>
         ))}
         {net && (
-          <span className="bounds sample">
+          <span className="bounds sample"
+            title={net.computed_at
+              ? `This summary is a snapshot taken at ${utc(net.computed_at)}; it took ${net.compute_ms} ms to compute. The figures are aggregates over the whole window, so they are refreshed on a schedule rather than recomputed for every reader.`
+              : undefined}>
             {net.window.start && !net.window.start.startsWith("0001-") ? utc(net.window.start) : "beginning"} → {utc(net.window.end)}
+            {net.computed_at && <> · taken {ago(net.computed_at)}</>}
           </span>
         )}
       </div>

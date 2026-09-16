@@ -33,7 +33,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -106,6 +106,34 @@ var migrations = []migration{
 				updated_at       TEXT NOT NULL
 			)`,
 			`CREATE INDEX IF NOT EXISTS validator_identities_moniker ON validator_identities (moniker)`,
+		},
+	},
+	{
+		version: 5,
+		note:    "covering index for the in-window window aggregates the network summary runs",
+		stmts: []string{
+			// Every rate on /v1/network is an aggregate over the same
+			// population — probes of an assigned shard, in window, since a
+			// timestamp — and there were five separate scans of it per
+			// request with no index to seek by. Measured on a store with
+			// 2,200 publications and 714,000 probes, /v1/network?window=7d
+			// took 27.9s.
+			//
+			// The leading columns are the two equalities and the range, in
+			// that order, so SQLite can seek instead of scanning the table.
+			// The rest are there so it never has to: every column these
+			// aggregates read is in the index, which is what turns a scan of
+			// forty-column rows into a scan of the index alone. Measured on
+			// the same store: attestation 1.63s to 0.20s, the per-point
+			// breakdown 2.37s to 0.89s, the correlated-failure guard 2.41s
+			// to 0.88s, the verdict tally 1.72s to 0.50s.
+			//
+			// It costs about 200 bytes a probe. `outcome` is deliberately not
+			// in it: it is the widest column none of these queries reads, and
+			// the one query that does read it seeks by promise_hash instead.
+			`CREATE INDEX IF NOT EXISTS probes_window ON probes
+				(assigned, phase, started_at, classification, schedule_label,
+				 attested, validator_address, promise_hash, scheduled_at)`,
 		},
 	},
 }

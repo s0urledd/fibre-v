@@ -133,6 +133,29 @@ so in their logs.
 
 `sudo systemctl status 'fibre-*'` and `journalctl -u fibre-probe -f`.
 
+### Upgrading a running observer
+
+The collector owns the schema and the API opens the database read-only, so an
+upgrade has an order: install the new binaries, restart **fibre-collector**
+first, then the rest. The API refuses to start against a database older than
+the binary expects and says so, which is the intended failure — it will not
+serve numbers from a schema it does not understand.
+
+```bash
+sudo install -m 0755 fibre-sentinel/bin/* /usr/local/bin/
+sudo systemctl restart fibre-collector       # applies migrations
+sudo systemctl restart fibre-scan fibre-probe fibre-heartbeat fibre-api
+```
+
+Schema 5 adds a covering index over `probes`. On a store with 700,000 probes it
+takes a few seconds and about 200 bytes a probe; the collector logs it and the
+restart is not otherwise different.
+
+The API computes the network summary and the validator list for every window at
+startup rather than on demand, so the first minute or two after a restart is
+busier than the steady state and the first visitor in that window waits for the
+window they asked for. After that both are served from memory.
+
 ## 5. Caddy
 
 Install the site: `sudo mkdir -p /var/www/fibre-observer && sudo cp -r web/out/. /var/www/fibre-observer/`.
