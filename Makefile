@@ -30,7 +30,8 @@ shellcheck:
 
 test-scripts:
 	for f in fibre-devnet/*.sh fibre-sentinel/*.sh deploy/test/*.sh; do bash -n "$$f"; done
-	@for f in deploy/test/*.py; do python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$$f" || exit 1; done
+	@for f in deploy/test/*.py web/test/*.py; do python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$$f" || exit 1; done
+	@for f in web/test/*.cjs; do node --check "$$f" || exit 1; done
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 
 web:
