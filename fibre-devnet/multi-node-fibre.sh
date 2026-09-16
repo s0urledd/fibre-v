@@ -230,6 +230,23 @@ load_powers() {
   echo "      ${floored} of ${N} are lifted to the 148-row floor (pick: ${FIBRE_DEVNET_POWER_PICK:-spread})"
 }
 
+# stake_summary describes the stake the run actually used, in one line. The
+# summary block used to print STAKE_NODE0 and STAKE_OTHER unconditionally, so a
+# run on a real curve reported the equal-stake defaults it had not used — the
+# one place a reader looks to confirm what they just started.
+stake_summary() {
+  if [ "${#POWERS[@]}" -gt 0 ]; then
+    local total=0 i
+    for i in $(seq 0 $((N - 1))); do total=$((total + POWERS[i])); done
+    printf '%s (pick: %s), power %s total, largest %s, smallest %s' \
+      "${FIBRE_DEVNET_POWERS##*/}" "${FIBRE_DEVNET_POWER_PICK:-spread}" \
+      "$total" "${POWERS[0]}" "${POWERS[$((N - 1))]}"
+  else
+    printf 'near-equal: node 0 %s (stable proposer), nodes 1..%s %s each' \
+      "${STAKE_NODE0}" "$((N - 1))" "${STAKE_OTHER}"
+  fi
+}
+
 # stake_for prints validator i's gentx stake.
 stake_for() {
   if [ "${#POWERS[@]}" -gt 0 ]; then
@@ -429,8 +446,7 @@ summary() {
 ============================================================
   Fibre devnet up: ${N} validators, chain-id ${CHAIN_ID}
 ============================================================
-  node 0 stake ${STAKE_NODE0}  (stable proposer)
-  nodes  1..$((N-1)) stake ${STAKE_OTHER} each
+  stake       : $(stake_summary)
 
   app RPC     : $(for i in $(seq 0 $((N-1))); do printf "127.0.0.1:%s " "$(rpc_port "$i")"; done)
   app gRPC    : $(for i in $(seq 0 $((N-1))); do printf "127.0.0.1:%s " "$(grpc_port "$i")"; done)
