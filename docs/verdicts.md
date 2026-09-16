@@ -216,6 +216,30 @@ column:
 This is why the serve rate moved after the audit. It did not get more
 forgiving; it stopped making claims the evidence did not support.
 
+## Known limits of a probe
+
+These are properties of how the observer measures, not of any validator. They
+are written down because a reader comparing two validators deserves to know
+what the measurement cannot separate.
+
+- **One address per probe.** Every resolved address is tried at the TCP layer
+  and the first that connects is the endpoint every later layer talks to. If
+  that address accepts TCP and then fails at the RPC layer, the probe does not
+  fall back to the next one, so a host whose backends differ can be recorded
+  as unreachable on the strength of one of them. The alternative, letting
+  gRPC re-resolve as the reference client does, would let the download land on
+  a different peer from the one whose certificate was checked, and the record
+  could no longer say which endpoint it describes. The result is `UNREACHABLE`
+  either way, which is outside the serve rate.
+- **Two connections per probe.** One to read the certificate, one to download.
+  A Fibre server admits a bounded number of connections, so this observer
+  occupies two slots where the reference client occupies one, and a busy
+  server is correspondingly more likely to look unreachable to it.
+- **One vantage.** Every reachability observation comes from a single network
+  path. `/v1/network` publishes the worst schedule point in the window by how
+  many validators were unreachable at once, because validators fail
+  independently and one network does not.
+
 ## Adding a class
 
 A new classification must map to a new case in the taxonomy table in

@@ -422,6 +422,33 @@ const userAgent = "fibre-sentinel-observer"
 
 // downloadAndVerify runs the L4 step against endpoint, the ip:port literal
 // that L2/L3 already verified, so all layers judge the same address.
+//
+// This is a deliberate difference from the reference client, which dials the
+// registered host string and lets grpc-go's resolver and pick_first try every
+// address (celestia-app fibre/internal/grpc/fibre_client.go). Pinning the
+// address buys a property the reference client does not need and this
+// observer does: every layer of a measurement describes one endpoint, so a
+// recorded TLS identity, a recorded round trip and a recorded download all
+// belong to the same peer. Letting grpc re-resolve would let the download
+// land on a different address from the one whose certificate was checked, and
+// the record could not say which.
+//
+// The cost is real and is the reason this comment exists. L2 tries every
+// resolved address and takes the first that connects, so a host with several
+// addresses is not judged on one of them alone; but if that address accepts
+// TCP and then fails at the RPC layer, the probe does not fall back to the
+// next. The result is UNREACHABLE, which is already outside the serve rate
+// and already says the observer could not complete a conversation rather than
+// that the validator refused to serve, so the trade costs coverage of a
+// multi-address host rather than fairness to it.
+//
+// This is also the second connection of the probe: L3 opens one to read the
+// certificate and this opens another. A Fibre server admits a bounded number
+// of connections (DefaultMaxConnections, netutil.LimitListener), so the
+// observer occupies two slots where the reference client occupies one.
+// Folding the identity check into this connection's VerifyConnection callback
+// would halve that, at the cost of restructuring the per-layer timings that
+// the whole record is built from.
 func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint string, timeout time.Duration) dlResult {
 	r := dlResult{DownloadResult: DownloadResult{Attempted: true, RowsExpected: in.Target.RowCount}}
 	t0 := time.Now()
