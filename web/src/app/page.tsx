@@ -144,15 +144,38 @@ export default function Overview() {
         </p>
       )}
 
+      {/*
+        Two different states used to share one sentence ending in "x/valaddr is
+        empty or not active on this chain". They are not the same thing at all:
+        on a chain below app version 10 the module does not exist, so an empty
+        registry is a fact about the chain, and saying "no validator has
+        registered" implies a fact about validators that nobody has established.
+        The collector records the app version, so the page can say which.
+      */}
       {noPubs && (
         <div className="plate-note">
-          <span className="label">Nothing to measure yet</span>
+          <span className="label">
+            {meta.app_version && !meta.fibre_active ? "Fibre is not live on this chain yet" : "Nothing to measure yet"}
+          </span>
           <p>
-            No Fibre publication recorded. Collector at height {meta.last_scanned_height || "?"}, following{" "}
-            chain {meta.chain_id || "?"}.{" "}
-            {meta.counts.OpenEndpoints === 0
-              ? "No validator has registered a Fibre endpoint yet — x/valaddr is empty or not active on this chain."
-              : `${meta.counts.OpenEndpoints} validators have registered a Fibre endpoint; reachability is probed every 10 minutes.`}
+            {meta.app_version && !meta.fibre_active ? (
+              <>
+                {meta.chain_id || "This chain"} is on app version {meta.app_version}. Fibre needs{" "}
+                {meta.fibre_app_version || "10"}, so <code>x/fibre</code> and <code>x/valaddr</code> do not exist here
+                and there is nothing yet for any validator to have registered or failed. This observer is following the
+                chain at height {meta.chain_height || meta.last_scanned_height || "?"} and will start measuring at the upgrade.
+                {vals && vals.validators.length > 0 &&
+                  ` The ${vals.validators.length} bonded validators below are already listed by name, read from the chain's own staking module, with every measured column empty because nothing has been measured.`}
+              </>
+            ) : (
+              <>
+                No Fibre publication recorded. Collector at height {meta.last_scanned_height || "?"}, following{" "}
+                chain {meta.chain_id || "?"}.{" "}
+                {meta.counts.OpenEndpoints === 0
+                  ? "The Fibre modules are live and no validator has registered an endpoint yet."
+                  : `${meta.counts.OpenEndpoints} validators have registered a Fibre endpoint; reachability is probed every 10 minutes.`}
+              </>
+            )}
           </p>
         </div>
       )}
@@ -226,7 +249,9 @@ export default function Overview() {
       <h2>Validators</h2>
       {vals
         ? <ValidatorTable rows={vals.validators}
-            caption={`Every validator with a registered Fibre endpoint or at least one probe, over the ${win} window. Six further columns are on each validator's page.`} />
+            caption={meta && !meta.fibre_active
+              ? `Every bonded validator on ${meta.chain_id || "this chain"}, from the staking module. Nothing has been measured about any of them yet: Fibre is not live here.`
+              : `Every bonded validator, plus any with a registered Fibre endpoint or at least one probe, over the ${win} window. Six further columns are on each validator's page.`} />
         : <p className="muted">Loading validators…</p>}
     </>
   );

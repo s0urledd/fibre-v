@@ -17,7 +17,7 @@ export function Header() {
         </nav>
         <span className="spacer" />
         <span className="chain">
-          {meta ? <>{meta.chain_id || "?"} · h{meta.last_scanned_height || "?"}</> : <>connecting…</>}
+          {meta ? <>{meta.chain_id || "?"} · h{meta.chain_height || meta.last_scanned_height || "?"}</> : <>connecting…</>}
         </span>
       </div>
     </header>

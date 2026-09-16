@@ -34,6 +34,18 @@ export type Meta = {
   vantage_count: number;
   observed_from_one_location: boolean;
   chain_id: string;
+  /**
+   * The chain's application version and whether it is high enough for x/fibre
+   * and x/valaddr to exist. Below fibre_app_version the modules are not there
+   * at all, so an empty registry says nothing about any validator: a page that
+   * cannot tell "absent" from "empty" will imply the second while the first is
+   * true.
+   */
+  app_version?: string;
+  fibre_app_version?: string;
+  fibre_active: boolean;
+  /** the chain's tip as the collector last saw it; not how far the scanner has read */
+  chain_height?: string;
   last_scanned_height: string;
   endpoints_height: string;
   protocol_params_fingerprint: string;

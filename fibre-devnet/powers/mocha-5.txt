@@ -1,7 +1,7 @@
 # voting power per validator, largest first, one per line.
 # chain     mocha-5
-# height    834524
-# taken     2026-09-16T14:40:41Z
+# height    836465
+# taken     2026-09-16T16:12:29Z
 # source    https://rpc-mocha.pops.one/validators
 # validators 79   total power 322778683
 # smallest quorum: the largest 30 validators reach 2/3 of power.
