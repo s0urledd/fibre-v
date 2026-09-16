@@ -6,12 +6,27 @@
 # validator, so shard assignment is non-degenerate (the single-node script
 # gives one validator all 4096 original rows).
 #
-# Stake is near-equal: each validator gets a full proportional share of rows
-# (well above the minRows floor, below the originalRows cap), and any single
-# validator holds < K rows, so a blob stays reconstructable after one fibre
-# server is killed. All N nodes stay up for consensus (never killed); only
-# fibre servers are stopped during fault-injection testing. Validator 0 has a
-# hair more stake so it is the stable proposer.
+# Stake is near-equal by default: each validator gets a full proportional share
+# of rows (well above the minRows floor, below the originalRows cap), and any
+# single validator holds < K rows, so a blob stays reconstructable after one
+# fibre server is killed. All N nodes stay up for consensus (never killed);
+# only fibre servers are stopped during fault-injection testing. Validator 0
+# has a hair more stake so it is the stable proposer.
+#
+# Equal stake is the wrong shape for some tests, though, because almost
+# everything that behaves differently on a real network follows from the stake
+# being skewed rather than from there being more validators:
+#
+#   - The 148-row floor in the assignment only binds for small validators.
+#     With equal stake it never binds until the set passes about eighty.
+#   - The publisher stops collecting signatures at two thirds of voting POWER
+#     (fibre/validator/signature_set.go), so which validators end up with a
+#     signature on chain — and how many — is a function of the distribution.
+#
+# So FIBRE_DEVNET_POWERS=<file> takes one voting power per line, largest first,
+# and gives validator i the i-th power. fibre-devnet/powers/ holds snapshots of
+# real networks; fibre-devnet/snapshot-powers.py refreshes them. Twenty
+# validators on mocha's real curve test more than forty equal ones.
 #
 # Fibre params are lowered to the protocol floor (payment_promise_timeout and
 # shard_retention = 10m each; withdrawal_delay cannot go below ~12h10m) so a
@@ -27,6 +42,8 @@
 #   curl            -- (jq is used for prettier output if present, not required)
 #
 # Usage:   ./multi-node-fibre.sh [N]        (default N=4, min 2)
+#          FIBRE_DEVNET_POWERS=fibre-devnet/powers/mocha-5.txt ./multi-node-fibre.sh 20
+#            picks 20 spread down mocha's curve, tail included; PICK=head for the top 20
 # Stop:    Ctrl-C  (cleans up all processes)
 
 set -o errexit
@@ -51,6 +68,13 @@ LOGDIR="${WORKDIR}/logs"
 STAKE_NODE0="1050000000000utia"   # 1.05e12 -> 1.05e6 power (stable proposer)
 STAKE_OTHER="1000000000000utia"   # 1.00e12 -> 1.00e6 power
 GENESIS_BALANCE="10000000000000utia"   # per account, > its stake + fee
+
+# POWERS[i] is validator i's voting power when FIBRE_DEVNET_POWERS is set.
+# Voting power is tokens/1e6, so the stake is the power times 1e6, and the
+# account needs a balance above that plus the gentx fee.
+POWERS=()
+STAKE_MULTIPLIER=1000000
+BALANCE_MARGIN=10000000000   # 1e10 utia over the stake, for fees and escrow
 ESCROW_DEPOSIT="2000000000utia"
 
 # Fibre params (nanoseconds not accepted; Duration JSON is "<seconds>s").
@@ -152,11 +176,87 @@ wait_for_height() {
   exit 1
 }
 
+# load_powers reads FIBRE_DEVNET_POWERS into POWERS, largest first, and refuses
+# a file that cannot cover N: silently recycling or padding powers would make a
+# run that looks like the named network and is not.
+load_powers() {
+  [ -n "${FIBRE_DEVNET_POWERS:-}" ] || return 0
+  [ -r "${FIBRE_DEVNET_POWERS}" ] || { echo "powers file not readable: ${FIBRE_DEVNET_POWERS}" >&2; exit 1; }
+  local line all=()
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    all+=("$line")
+  done < "${FIBRE_DEVNET_POWERS}"
+  if [ "${#all[@]}" -lt "$N" ]; then
+    echo "powers file has ${#all[@]} entries, need ${N}: ${FIBRE_DEVNET_POWERS}" >&2
+    exit 1
+  fi
+
+  # Which N of the file to use. The default spreads the pick evenly down the
+  # sorted curve so a smaller set keeps the shape of the real one, tail
+  # included. Taking the largest N instead drops the whole class of small
+  # validators, and that class is where the interesting behaviour is: on
+  # mocha-5, 33 of 79 validators are clamped to the 148-row floor, and the
+  # largest 20 contain none of them. FIBRE_DEVNET_POWER_PICK=head opts out.
+  local i idx
+  if [ "${FIBRE_DEVNET_POWER_PICK:-spread}" = "head" ] || [ "$N" -eq "${#all[@]}" ]; then
+    for i in $(seq 0 $((N - 1))); do POWERS+=("${all[$i]}"); done
+  else
+    for i in $(seq 0 $((N - 1))); do
+      # round(i * (len-1) / (N-1)) without floating point
+      idx=$(( (i * (${#all[@]} - 1) * 2 + (N - 1)) / (2 * (N - 1)) ))
+      POWERS+=("${all[$idx]}")
+    done
+  fi
+  local total=0
+  for i in $(seq 0 $((N - 1))); do total=$((total + POWERS[i])); done
+  echo "--> stake from ${FIBRE_DEVNET_POWERS}: ${N} validators, total power ${total}"
+  echo "      largest ${POWERS[0]} ($((POWERS[0] * 100 / total))%), smallest ${POWERS[$((N - 1))]} ($((POWERS[$((N - 1))] * 100 / total))%)"
+  # The number of largest validators reaching 2/3 of power: the floor on quorum
+  # size, and the reason a validator can hold a shard with no signature on chain.
+  local run=0 k=0
+  for i in $(seq 0 $((N - 1))); do
+    run=$((run + POWERS[i])); k=$((k + 1))
+    if [ $((run * 3)) -ge $((total * 2)) ]; then break; fi
+  done
+  echo "      smallest quorum: the largest ${k} of ${N} reach 2/3 of power"
+  # How many validators the 148-row floor lifts. A set with none of them is not
+  # exercising the clamp that half the real network lives under.
+  local floored=0 raw
+  for i in $(seq 0 $((N - 1))); do
+    raw=$(( (4096 * POWERS[i] * 3 + total - 1) / total ))
+    [ "$raw" -lt 148 ] && floored=$((floored + 1))
+  done
+  echo "      ${floored} of ${N} are lifted to the 148-row floor (pick: ${FIBRE_DEVNET_POWER_PICK:-spread})"
+}
+
+# stake_for prints validator i's gentx stake.
+stake_for() {
+  if [ "${#POWERS[@]}" -gt 0 ]; then
+    echo "$((POWERS[$1] * STAKE_MULTIPLIER))utia"
+  elif [ "$1" -eq 0 ]; then
+    echo "${STAKE_NODE0}"
+  else
+    echo "${STAKE_OTHER}"
+  fi
+}
+
+# balance_for prints validator i's genesis balance: its stake plus enough for
+# the gentx fee and later transactions.
+balance_for() {
+  if [ "${#POWERS[@]}" -gt 0 ]; then
+    echo "$((POWERS[$1] * STAKE_MULTIPLIER + BALANCE_MARGIN))utia"
+  else
+    echo "${GENESIS_BALANCE}"
+  fi
+}
+
 # ----------------------------------------------------------------------------
 # Genesis
 # ----------------------------------------------------------------------------
 build_genesis() {
   echo "--> wiping ${WORKDIR}"
+  load_powers
   rm -rf "${WORKDIR}"
   mkdir -p "${LOGDIR}"
 
@@ -170,7 +270,7 @@ build_genesis() {
     celestia-appd keys add "val${i}" --keyring-backend "${KEYRING}" --home "$(APP_HOME "$i")" >/dev/null 2>&1
     local addr
     addr="$(celestia-appd keys show "val${i}" -a --keyring-backend "${KEYRING}" --home "$(APP_HOME "$i")")"
-    celestia-appd genesis add-genesis-account "$addr" "${GENESIS_BALANCE}" --home "$(APP_HOME 0)" >/dev/null
+    celestia-appd genesis add-genesis-account "$addr" "$(balance_for "$i")" --home "$(APP_HOME 0)" >/dev/null
   done
   # a non-validator account used to fund escrow / drive the fibre client later
   celestia-appd keys add uploader --keyring-backend "${KEYRING}" --home "$(APP_HOME 0)" >/dev/null 2>&1
@@ -194,8 +294,8 @@ build_genesis() {
   mkdir -p "$(APP_HOME 0)/config/gentx"
   for i in $(seq 0 $((N - 1))); do
     [ "$i" -eq 0 ] || cp "$g" "$(APP_HOME "$i")/config/genesis.json"
-    local stake="${STAKE_OTHER}"
-    [ "$i" -eq 0 ] && stake="${STAKE_NODE0}"
+    local stake
+    stake="$(stake_for "$i")"
     celestia-appd genesis gentx "val${i}" "${stake}" \
       --chain-id "${CHAIN_ID}" --keyring-backend "${KEYRING}" --home "$(APP_HOME "$i")" \
       --fees "${FEES}" \
@@ -227,6 +327,14 @@ build_genesis() {
     toml_set_section "$cfg" "p2p" "persistent_peers" "\"${peers}\""
     toml_set_section "$cfg" "p2p" "addr_book_strict" "false"
     toml_set_section "$cfg" "p2p" "allow_duplicate_ip" "true"
+    # Defaults are 10 outbound and 40 inbound, so a node given a full mesh of
+    # more than ten persistent peers cannot hold the connections it was told to
+    # keep. Size both to the set, with headroom.
+    toml_set_section "$cfg" "p2p" "max_num_outbound_peers" "$((N + 10))"
+    toml_set_section "$cfg" "p2p" "max_num_inbound_peers" "$((N + 10))"
+    # Every peer is already in persistent_peers, so peer exchange only adds
+    # churn on a one-host mesh.
+    toml_set_section "$cfg" "p2p" "pex" "false"
     toml_set_section "$cfg" "consensus" "timeout_commit" "\"1s\""
     toml_set         "$cfg" "priv_validator_grpc_laddr" "\"127.0.0.1:$(privval_port "$i")\""
     toml_set_section "$cfg" "tx_index" "indexer" "\"kv\""
