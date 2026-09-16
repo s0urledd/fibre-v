@@ -62,7 +62,8 @@ function Page() {
   }
   return (
     <>
-      <h1 className="mono">{b.promise_hash.slice(0, 16)}…</h1>
+      <section className="card">
+      <div className="card-head"><h1 className="mono" style={{ margin: 0 }}>{b.promise_hash.slice(0, 16)}…</h1><span className="chip">{nsDisplay(b.namespace)}</span><span className="chip">{bytes(b.blob_size)}</span></div>
       <dl className="kv">
         <dt>promise hash</dt><dd className="mono">{b.promise_hash}</dd>
         <dt>commitment</dt><dd className="mono">{b.commitment}</dd>
@@ -74,7 +75,8 @@ function Page() {
         <dt>must serve until</dt><dd className="mono">{utc(b.must_serve_until)} <span className="muted">= creation + max(payment_promise_timeout {data.params.payment_promise_timeout_s}s, shard_retention {data.params.shard_retention_s}s)</span></dd>
         <dt>assignment</dt><dd className="mono">{b.validators_with_rows} validators · {b.sigma_rows} rows assigned · {b.distinct_rows} distinct{b.assignment_error && <span className="err"> · {b.assignment_error}</span>}</dd>
       </dl>
-      <Recon b={b} />
+      </section>
+      <section className="card"><Recon b={b} /></section>
       <h2>Probe timeline</h2>
       {data.probes.length === 0 ? <p className="muted">No probes yet.</p> : (
         <Timeline probes={data.probes} validators={byPower.map((a) => ({ address: a.validator_address, row_count: a.row_count, moniker: a.moniker }))} settled={b.settlement_time} mustServeUntil={b.must_serve_until} graceEnd={graceEnd} />

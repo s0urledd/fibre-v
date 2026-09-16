@@ -7,6 +7,7 @@ import Verdict from "@/components/Verdict";
 import RateCell from "@/components/Rate";
 import Info from "@/components/Info";
 import Graduation from "@/components/Graduation";
+import Tile from "@/components/Tile";
 
 type Detail = {
   window: Window;
@@ -23,50 +24,13 @@ type Detail = {
   recent_probes: Probe[];
 };
 
-/**
- * One layer of the service: what it answers, the figure, and what the figure
- * rests on. A layer with no observations shows a dash and says so — a page
- * about a named operator may not render "0%" where it means "we did not look".
- */
-/**
- * A layer whose figure is not a rate: the throughput reading. Same shape and
- * same absent state, so the row still reads as one instrument.
- */
-function Figure({ label, value, unit, what, sample }: {
-  label: string;
-  value: number | null | undefined;
-  unit: string;
-  what: React.ReactNode;
-  sample?: string;
-}) {
-  const absent = value === null || value === undefined;
-  return (
-    <div>
-      <span className="label">{label}<Info label={label}>{what}</Info></span>
-      <span className={absent ? "fig absent" : "fig"}>
-        {absent ? "—" : value.toLocaleString("en-US")}
-        {!absent && <span className="unit"> {unit}</span>}
-      </span>
-      <span className="sample">{absent ? "not observed in this window" : (sample ?? "")}</span>
-    </div>
-  );
-}
-
-function Layer({ label, r, what, sample }: {
-  label: string;
-  r: Rate | null | undefined;
-  what: React.ReactNode;
-  sample?: string;
-}) {
+function Layer({ label, r, what, sample }: { label: string; r: Rate | null | undefined; what: React.ReactNode; sample?: string }) {
   const absent = !r || r.den === 0;
   return (
-    <div>
-      <span className="label">{label}<Info label={label}>{what}</Info></span>
-      <span className={absent ? "fig absent" : "fig"}>{absent ? "—" : fmtRate(r)}</span>
-      <span className="sample">
-        {absent ? "not observed in this window" : enoughToRank(r) ? (sample ?? fmtCount(r)) : "under floor"}
-      </span>
-    </div>
+    <Tile label={label} info={what}
+      value={absent ? "—" : fmtRate(r)}
+      tone={absent ? "absent" : undefined}
+      sub={absent ? "not observed in this window" : enoughToRank(r) ? (sample ?? fmtCount(r)) : `${fmtCount(r)} · under floor`} />
   );
 }
 
@@ -86,16 +50,41 @@ function Page() {
   const last = [...points].reverse().find((p) => p.serve_rate.den > 0);
   return (
     <>
-      {/* The operator's own name first; the consensus address is the key
-          every number below is joined on, so it stays directly underneath. */}
-      <h1>{v.moniker || <span className="mono">{v.cons_address || v.address}</span>}</h1>
-      {v.moniker && <p className="mono faint">{v.cons_address || v.address}</p>}
-      {v.jailed && (
-        <p className="notice">
-          The chain has jailed this validator. That is the chain&rsquo;s own status, not something this site measured, and it does not
-          release the validator from the shards it already signed for, so its rows below stand.
-        </p>
-      )}
+      <section className="card">
+        <div className="card-head">
+          <span className="who">
+            <span className="avatar" aria-hidden="true">{(v.moniker || v.address).slice(0, 2)}</span>
+            <span>
+              <h1 style={{ margin: 0 }}>{v.moniker || <span className="mono">{v.cons_address || v.address}</span>}</h1>
+              {v.moniker && <span className="addr mono faint">{v.cons_address || v.address}</span>}
+            </span>
+          </span>
+          <span className="spacer" />
+          <span className="chips">
+            {v.reachable === true && v.identity_status === "verified" && <span className="chip ok"><i className="dot ok" />up</span>}
+            {v.reachable === false && <span className="chip hold" title={`Could not reach ${v.host} at the last heartbeat.`}><i className="dot hold" />down</span>}
+            {v.reachable === true && v.identity_status !== "verified" && <span className="chip hold" title={v.identity_reason}><i className="dot hold" />{v.identity_status.replace("_", " ")}</span>}
+            {!v.host && <span className="chip">no Fibre endpoint</span>}
+            {v.jailed && <span className="chip hold" title="Jailed by the chain. Shards it signed for are still owed.">jailed</span>}
+            {v.bond_status && <span className="chip">{v.bond_status.replace("BOND_STATUS_", "").toLowerCase()}</span>}
+          </span>
+        </div>
+        <dl className="kv">
+          <dt>Fibre endpoint</dt><dd className="mono">{v.host || "— not registered"}{v.endpoint_since && <span className="muted"> · since {utc(v.endpoint_since)}</span>}</dd>
+          <dt>last heartbeat</dt><dd>{v.reachable == null ? "not probed" : v.reachable ? "reached" : <span className="err">unreachable</span>}{v.last_seen_at && <span className="muted"> · {utc(v.last_seen_at)} ({ago(v.last_seen_at)})</span>}{v.last_unreachable_at && <span className="muted"> · last failed {ago(v.last_unreachable_at)}</span>}</dd>
+          <dt>TLS identity</dt><dd>{v.identity_status}{v.identity_reason && <span className="muted"> ({v.identity_reason})</span>}</dd>
+          <dt>voting power</dt><dd className="mono">{v.voting_power.toLocaleString("en-US")}{v.assigned_rows_last ? <span className="muted"> · {v.assigned_rows_last} rows per blob ({v.expected_load_band})</span> : null}</dd>
+          {v.attestation && v.attestation.blob_coverage.den > 0 && (
+            <><dt>signed blobs</dt><dd className="mono" title="Assigned blobs in this window whose settled promise carries this validator's signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected.">
+              {v.attestation.attested_blobs.toLocaleString("en-US")} of {v.attestation.blob_coverage.den.toLocaleString("en-US")}
+              <span className="muted"> · {fmtRate(v.attestation.blob_coverage)}</span>
+            </dd></>
+          )}
+          {v.operator_address && <><dt>operator</dt><dd className="mono">{v.operator_address}</dd></>}
+          <dt>consensus (hex)</dt><dd className="mono">{v.address}</dd>
+          {v.website && <><dt>website</dt><dd><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website}</a></dd></>}
+        </dl>
+      </section>
 
       {/*
         The four layers, in the order an operator debugs them and in the order
@@ -108,38 +97,37 @@ function Page() {
       {/* The window these four figures cover, said rather than implied. The
           serve-rate table below lists all four spans, so without this the
           reader has no way to tell which one the readings above are from. */}
-      <h2>
-        Service <span className="chip" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name}</span>
+      <div className="section-head" style={{ marginTop: "var(--s5)" }}>
+        <h2 style={{ margin: 0 }}>Service</h2>
+        <span className="chip" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name}</span>
         <Info label="These five figures">
-          <p>Five ways a Fibre service fails, in the order you would debug them. Each is measured separately, because each has a different fix.</p>
-          <p>The first two come from a heartbeat that dials every registered endpoint every ten minutes, whether or not anything was assigned, so they speak for every validator.</p>
-          <p>The last three speak only for obligations the chain proves — a smaller set, not the same one each window, and selected by which validators answered the publisher fast enough.</p>
-          <p><strong>No figure here carries a threshold.</strong> This site watches from one place, so part of every millisecond and every failed dial is its own path.</p>
+          <p>Five checks, in the order you would debug them.</p>
+          <p>Uptime and Endorsed come from the 10-minute check of every registered endpoint. Served, Held to the end and Throughput only cover blobs this validator signed for.</p>
+          <p>No figure has a threshold. Checks run from one location.</p>
         </Info>
-      </h2>
-      <div className="layers">
-        <Layer label="Reachable" r={v.reachability_window}
+      </div>
+      <div className="tiles five">
+        <Layer label="Uptime" r={v.reachability_window}
           sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} checks` : undefined}
           what={<>
-            <p>How often this site completed a TLS handshake with the registered endpoint.</p>
-            <p>Sampled every ten minutes for every validator with a host in <code>x/valaddr</code>, assigned or not — so unlike the serve rate, its coverage does not depend on the chain proving an obligation.</p>
-            <p>Half of every path measured here is this site&rsquo;s own, so a dip is not by itself a statement about the operator.</p>
+            <p>Share of 10-minute checks where the endpoint completed a TLS handshake.</p>
+            <p>Runs for every validator with a host in <code>x/valaddr</code>, assigned or not.</p>
           </>} />
         <Layer label="Endorsed" r={v.identity_rate_window}
           what={<>
-            <p>Of the checks that saw a certificate, how many carried an extension signed by this validator&rsquo;s consensus key. A client refuses the rest.</p>
-            <p>The denominator excludes checks that never completed TLS: an endpoint that was down presented nothing to judge, and counting it here would report one outage twice.</p>
+            <p>Of the checks that saw a certificate, how many were signed by this validator&rsquo;s consensus key. Clients refuse the rest.</p>
+            <p>Checks that never reached TLS are not counted here, so an outage is not reported twice.</p>
           </>} />
         <Layer label="Served" r={v.serve_rate}
           what={<>
-            <p>Of the shards the chain proves this validator stored, how many it handed over when asked.</p>
-            <p>A validator only owes a shard it stored, and the only on-chain proof of that is a verified signature on the settled promise. Where that is missing the probe sits outside this rate in both directions.</p>
+            <p>Shards handed over, out of the shards this validator signed for, inside the retention window.</p>
+            <p>Blobs without this validator&rsquo;s signature on chain are not counted either way.</p>
           </>} />
         <Layer label="Held to the end" r={last?.serve_rate}
           sample={last ? `${fmtCount(last.serve_rate)} at ${last.key}` : undefined}
           what={<>
-            <p>The same rate, at the last point of the retention window that produced a verdict.</p>
-            <p>Below the earlier points means shards pruned before the deadline — a different failure, with a different fix, from being poor throughout. The pooled rate cannot tell them apart.</p>
+            <p>The serve rate at the last probe point inside the retention window.</p>
+            <p>If this is lower than the earlier points, shards were pruned before the deadline.</p>
           </>} />
         {/*
           Throughput, not duration. Assignments run from 148 rows to 4,096, so
@@ -150,38 +138,19 @@ function Page() {
           underneath because they are what an operator recognises from their
           own logs.
         */}
-        <Figure label="Throughput" value={v.serve_rows_per_second} unit="rows/s"
-          sample={v.serve_latency_p50_ms != null
-            ? `${v.serve_latency_p50_ms.toLocaleString("en-US")} ms typical, ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at p95`
-            : undefined}
-          what={<>
-            <p>Rows handed over per second, from dial to rows verified against the blob commitment, over the probes that came back healthy.</p>
-            <p>Rows per second rather than milliseconds because assignments run from 148 rows to 4,096: a validator carrying more rows takes longer for the same service, so a duration column would name the busiest rather than the slowest.</p>
-            <p>Failed probes are excluded. How long a failure took is not a service time.</p>
+        <Tile label="Throughput" unit="rows/s"
+          value={v.serve_rows_per_second == null ? "—" : v.serve_rows_per_second.toLocaleString("en-US")}
+          tone={v.serve_rows_per_second == null ? "absent" : undefined}
+          sub={v.serve_latency_p50_ms != null
+            ? `${v.serve_latency_p50_ms.toLocaleString("en-US")} ms typical · ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms p95`
+            : "not observed in this window"}
+          info={<>
+            <p>Rows delivered per second, from connect to verified rows, over healthy probes.</p>
+            <p>Rows per second rather than milliseconds, because a bigger shard takes longer. Failed probes are not included.</p>
           </>} />
       </div>
 
-      {v.last_unreachable_at && (
-        <p className="coverage">
-          Last heartbeat that could not complete TLS: {utc(v.last_unreachable_at)} ({ago(v.last_unreachable_at)}).
-          Half of that path is this site&rsquo;s own.
-        </p>
-      )}
-
-      {points.length > 0 && <Graduation points={points} />}
-
-      <dl className="kv">
-        {v.operator_address && <><dt>operator address</dt><dd className="mono">{v.operator_address}</dd></>}
-        {v.bond_status && <><dt>bond status</dt><dd className="mono" title="The chain's own status for this validator, not a measurement of this site.">{v.bond_status.replace("BOND_STATUS_", "").toLowerCase()}</dd></>}
-        {v.website && <><dt>website</dt><dd><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website}</a></dd></>}
-        <dt>consensus address (hex)</dt><dd className="mono">{v.address}</dd>
-        {v.cons_address && <><dt>consensus address</dt><dd className="mono">{v.cons_address}</dd></>}
-        <dt>registered Fibre endpoint</dt><dd className="mono">{v.host || "— not registered"}{v.endpoint_since && <span className="muted"> since {utc(v.endpoint_since)}</span>}</dd>
-        <dt>reachable (latest)</dt><dd>{v.reachable == null ? "not probed" : v.reachable ? "yes" : <span className="err">no</span>}{v.last_seen_at && <span className="muted"> · {utc(v.last_seen_at)} ({ago(v.last_seen_at)})</span>}</dd>
-        <dt>TLS identity</dt><dd>{v.identity_status}{v.identity_reason && <span className="muted"> ({v.identity_reason})</span>}</dd>
-        <dt>voting power</dt><dd className="mono">{v.voting_power.toLocaleString("en-US")}</dd>
-        <dt>assigned rows (last)</dt><dd className="mono">{v.assigned_rows_last || "—"}{v.expected_load_band && <span className="muted"> · expected load band: {v.expected_load_band}</span>}</dd>
-      </dl>
+      {points.length > 0 && <section className="card" style={{ marginTop: "var(--s4)" }}><Graduation points={points} /></section>}
 
       <h2>Serve rate</h2>
       {/*
@@ -192,24 +161,20 @@ function Page() {
       */}
       {(unattested > 0 || unknown > 0) && (
         <p className="coverage">
-          {unattested.toLocaleString("en-US")} blob{unattested === 1 ? "" : "s"} in this window are outside these rates: the chain
-          proves no obligation.
+          {unattested.toLocaleString("en-US")} blob{unattested === 1 ? "" : "s"} in this window carry no signature from this validator and are not in these rates.
           <Info label="Outside the rates">
-            <p>A validator only owes a shard it stored, and the only on-chain proof of that is a signature on the settled promise
-              that this observer verified against the validator&rsquo;s consensus key.</p>
-            <p>The publisher stops collecting signatures once two thirds of voting power has answered, so most of the set is left
-              unproven on most blobs — <strong>by design, not by fault</strong>.</p>
-            <p>Those obligations are excluded in both directions: a failure the validator was never proven to owe cannot count
-              against it, and a success it was never proven to owe cannot count for it.</p>
+            <p>A validator only owes a shard it signed for. The signature on the settled promise is the proof, and this site verifies it against the consensus key.</p>
+            <p>Publishers stop collecting signatures at two thirds of voting power, so most validators are left without one on most blobs. That is normal.</p>
+            <p>Those blobs are left out in both directions: no fault, and no credit.</p>
             {unknown > 0 && <p>{unknown.toLocaleString("en-US")} further blob{unknown === 1 ? "" : "s"} predate signature
               verification and are counted under the older rules.</p>}
-            <p><Link href="/methodology/#quorum">How the quorum works →</Link></p>
+            <p><Link href="/methodology/#quorum">How the quorum works</Link></p>
           </Info>
         </p>
       )}
       <div className="tablewrap">
         <table>
-          <caption>healthy / (healthy + fault) over assigned probes in the in-window and grace phases whose obligation the promise proves. Tolerated, unattested, expected gone and not probed are listed, never folded in.</caption>
+          <caption>healthy / (healthy + fault) over in-window probes of shards this validator signed for. Grace-period probes are recorded but not counted; other classes are listed beside the rate.</caption>
           <thead><tr><th>window</th><th className="right">serve rate</th><th className="right">probes</th><th className="right">coverage</th><th>verdicts</th></tr></thead>
           <tbody>
             {data.windows.map((w) => (
@@ -228,7 +193,7 @@ function Page() {
       <h2>Recent probes</h2>
       <div className="tablewrap">
         <table>
-          <caption>Newest first, at most 50. Full history: <code>/v1/probes?validator={v.address}</code>.</caption>
+          <caption>Newest 50. Full history: <code>/v1/probes?validator={v.address}</code></caption>
           <thead><tr><th>started (UTC)</th><th>blob</th><th>point</th><th>phase</th><th>verdict</th><th>outcome</th><th className="right">rows</th><th className="right">ms</th><th>detail</th></tr></thead>
           <tbody>
             {data.recent_probes.length === 0 && <tr><td colSpan={9} className="muted">No probes for this validator yet.</td></tr>}
@@ -241,9 +206,9 @@ function Page() {
                 <td><Verdict cls={p.classification} title={p.classification_reason} /></td>
                 <td className="mono">
                   {p.outcome}
-                  {p.attested === false && <span className="muted" title="No verified signature on this promise, so the obligation is unproven and this probe is outside the serve rate."> (unproven)</span>}
+                  {p.attested === false && <span className="muted" title="No signature from this validator on this promise, so the probe is not in the serve rate."> (unproven)</span>}
                   {p.retry_first_outcome && (
-                    <span className="faint" title={`The first attempt was ${p.retry_first_outcome}. The retry went to the same address from the same vantage, so a repeat is one observation twice, not two that agree.`}>
+                    <span className="faint" title={`First attempt: ${p.retry_first_outcome}. Retried once from the same location.`}>
                       {" "}(retried after {p.retry_first_outcome})
                     </span>
                   )}
