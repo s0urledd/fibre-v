@@ -1,6 +1,6 @@
 import { API_BASE } from "@/lib/api";
 
-export const metadata = { title: "API · Fibre observer" };
+export const metadata = { title: "API · Muninn" };
 
 const ROUTES: [string, string][] = [
   ["GET /v1/meta", "chain id, chain height, app version and whether Fibre is live on this chain, collector height, pinned celestia-app commit, protocol-params fingerprint, row counts, latest collector run with liveness, time of the newest measurement, vantage count and description."],
@@ -18,7 +18,7 @@ export default function ApiDocs() {
   return (
     <div className="prose">
       <h1>API</h1>
-      <p className="muted">Read-only JSON, versioned under <code>/v1/</code>. Base URL for this deployment: <code>{API_BASE}</code>. CORS is open; responses carry <code>Cache-Control: public, max-age=15</code>. No authentication, no rate limit yet; be reasonable.</p>
+      <p className="muted">Read-only JSON under <code>/v1/</code>, served at <code>{API_BASE}</code> for this dashboard. It is documented here so every number on the site can be traced to a response, but it is not offered as a public service yet: no rate limit, no uptime promise, and the routes may change. If you want the data, ask; the raw JSONL files and the SQLite database can be shared.</p>
       <div className="tablewrap">
         <table>
           <caption>Routes</caption>

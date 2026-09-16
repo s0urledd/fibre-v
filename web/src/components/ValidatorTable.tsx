@@ -16,26 +16,26 @@ import Info from "./Info";
 type SortKey = "worst" | "power" | "serve" | "faults" | "uptime" | "throughput" | "proven";
 
 const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode }[] = [
-  { key: "power", label: "Voting power", dir: -1, info: <p>From the staking module at the newest assignment height. The share is of the validators in this table.</p> },
+  { key: "power", label: "Voting power", dir: -1, info: <p>From the staking module. The share is relative to the validators in this table.</p> },
   { key: "serve", label: "Serve rate", dir: 1, info: <>
-      <p>Of the shards the chain proves this validator stored, how many it handed over while the obligation held.</p>
-      <p>Below {MIN_RATED} rated observations the counts are shown instead of a percentage and the validator is not ranked.</p>
+      <p>Shards handed over, out of the shards this validator signed for. Counted inside the retention window only.</p>
+      <p>Under {MIN_RATED} rated probes the counts are shown instead of a rate and the validator is not ranked.</p>
     </> },
   { key: "faults", label: "Faults", dir: -1, info: <>
-      <p><strong>The only count held against a validator.</strong> The observer reached it and it failed to hand over a shard the chain proves it stored.</p>
-      <p>Unreachable, unproven and unregistered are each shown under their own name, never here.</p>
+      <p>The validator answered but did not hand over a shard it had signed for.</p>
+      <p>The only number counted against a validator. Unreachable, unproven and unregistered are not faults.</p>
     </> },
   { key: "uptime", label: "Uptime", dir: 1, info: <>
-      <p>Heartbeats that completed a TLS handshake with the registered endpoint, over heartbeats sent. Every registered endpoint is dialled every 10 minutes, assigned or not.</p>
-      <p>One vantage: a dip can be a route problem on our side.</p>
+      <p>Share of 10-minute checks where the endpoint completed a TLS handshake. Every registered endpoint is checked, assigned or not.</p>
+      <p>Checks run from one location, so a dip can be a network problem on our side.</p>
     </> },
   { key: "throughput", label: "Throughput", dir: -1, info: <>
-      <p>Rows handed over per second, dial to verified rows, over healthy probes.</p>
-      <p>Rows per second rather than milliseconds: assignments run from 148 to 4,096 rows, so a bigger validator legitimately takes longer per shard.</p>
+      <p>Rows delivered per second, from connect to verified rows, over healthy probes.</p>
+      <p>Rows per second rather than milliseconds, because assignments run from 148 to 4,096 rows and a bigger shard takes longer.</p>
     </> },
   { key: "proven", label: "Proven", dir: 1, info: <>
-      <p>Blobs in the window whose settled promise carries this validator&rsquo;s verified signature, over blobs it was assigned rows for.</p>
-      <p>The publisher stops collecting signatures at two thirds of voting power, so nobody is at 100% by design. A validator that is rarely inside that quorum is answering the publisher slowly, or is far from where blobs are published.</p>
+      <p>Share of assigned blobs where this validator&rsquo;s signature made it on chain.</p>
+      <p>Publishers stop collecting signatures at two thirds of stake, so 100% is not expected. A low share usually means the validator answers publishers slowly.</p>
     </> },
 ];
 
@@ -67,8 +67,8 @@ function keyValue(v: Validator, k: SortKey): number | null {
 
 function proven(v: Validator): { r: Rate | null; title: string } {
   const a = v.attestation;
-  if (!a || a.blob_coverage.den === 0) return { r: null, title: "No publication this validator was assigned rows for in this window." };
-  return { r: a.blob_coverage, title: `${a.attested_blobs.toLocaleString("en-US")} of ${a.blob_coverage.den.toLocaleString("en-US")} assigned blobs carry a verified signature from this validator. Unproven is silence, not absence.` };
+  if (!a || a.blob_coverage.den === 0) return { r: null, title: "No assigned blob in this window." };
+  return { r: a.blob_coverage, title: `${a.attested_blobs.toLocaleString("en-US")} of ${a.blob_coverage.den.toLocaleString("en-US")} assigned blobs carry this validator's signature on chain.` };
 }
 
 function live(v: Validator): { tone: "ok" | "hold" | ""; word: string; title: string } {
@@ -154,11 +154,11 @@ export default function ValidatorTable({ rows, caption, notLive }: { rows: Valid
             title="Every bonded validator, whether or not it registered a Fibre endpoint.">All bonded<span className="n">{rows.length}</span></button>
         </div>
         <button className="btn" aria-pressed={sort.key === "worst"} onClick={() => setSort({ key: "worst", dir: 1 })}
-          title="Faults first, then unreachable, then partial outages, then everyone else.">worst first</button>
+          title="Faults first, then unreachable, then partial outages.">worst first</button>
         <span className="spacer" />
         {moved && (
           <button className="btn" onClick={() => { setMoved(false); setFrozen(ranked.map((v) => v.address)); }}
-            title="New probes changed the ranking. The table kept its order so nothing moved while you read it.">order changed — reorder</button>
+            title="New probes changed the ranking. The table kept its order while you read it.">order changed, reorder</button>
         )}
         <input type="search" placeholder="Search name, address, host" value={q} onChange={(e) => setQ(e.target.value)} aria-label="search validators" />
       </div>
@@ -178,7 +178,7 @@ export default function ValidatorTable({ rows, caption, notLive }: { rows: Valid
                 </th>
               ))}
               <th>Live<Info label="Live">
-                <p>The last heartbeat: up if TCP and TLS completed and the certificate was endorsed, down if not. Never counted against anyone.</p>
+                <p>Result of the last 10-minute check. Not counted against anyone.</p>
               </Info></th>
             </tr>
           </thead>
@@ -186,7 +186,7 @@ export default function ValidatorTable({ rows, caption, notLive }: { rows: Valid
             {list.length === 0 && (
               <tr><td colSpan={9} className="muted">
                 {rows.length === 0
-                  ? "No validators yet: nothing registered and nothing probed."
+                  ? "No validators yet."
                   : needle ? `Nothing matches “${q}”.` : "No validator has registered a Fibre endpoint yet."}
               </td></tr>
             )}
@@ -203,7 +203,7 @@ export default function ValidatorTable({ rows, caption, notLive }: { rows: Valid
                       <span>
                         <Link className="name" href={`/validator/?addr=${v.address}`}>
                           {v.moniker || (v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 8) + "…" + v.address.slice(-6))}
-                          {v.jailed && <span className="chip hold" title="Jailed by the chain. It still owes the shards it signed for.">jailed</span>}
+                          {v.jailed && <span className="chip hold" title="Jailed by the chain. Shards it signed for are still owed.">jailed</span>}
                         </Link>
                         <span className="addr" title={v.cons_address || v.address}>
                           {v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 12) + "…"}{v.host ? ` · ${v.host}` : ""}
@@ -216,7 +216,7 @@ export default function ValidatorTable({ rows, caption, notLive }: { rows: Valid
                     <span className="share">{share.toFixed(1)}%</span>
                   </td>
                   <td className="right"><RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation} /></td>
-                  <td className="right" title="Reached, and failed to hand over a shard the chain proves it stored."><Count n={v.classes.FAULT} tier="fault" /></td>
+                  <td className="right" title="Answered, but did not hand over a shard it had signed for."><Count n={v.classes.FAULT} tier="fault" /></td>
                   <td className="right">
                     <RateCell r={v.reachability_window} sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} checks` : undefined} />
                   </td>
@@ -238,7 +238,7 @@ export default function ValidatorTable({ rows, caption, notLive }: { rows: Valid
           </tbody>
         </table>
       </div>
-      {notLive && <p className="coverage">Nothing has been measured yet: Fibre is not live on this chain. Names and voting power come from the staking module.</p>}
+      {notLive && <p className="coverage">Nothing measured yet: Fibre is not live on this chain. Names and voting power come from the staking module.</p>}
     </>
   );
 }

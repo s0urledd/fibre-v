@@ -67,48 +67,48 @@ export default function Overview() {
           sub={!net ? undefined : !rated ? "nothing rated in this window"
             : <span title={boundTitle(sr!, net.serve_rate_by_obligation)}>{fmtCount(sr!)} probes · {net.serve_rate_by_obligation.den.toLocaleString("en-US")} obligations{!enoughToRank(sr) && " · under floor"}</span>}
           info={<>
-            <p>Shards handed over, out of the shards the chain proves a validator stored, over probes taken while the obligation held.</p>
-            <p>Everything the rate does not speak for — unreachable, unproven, unregistered — is shown under its own name, never folded in.</p>
-            <p><Link href="/methodology/#verdicts">How a verdict is reached →</Link></p>
+            <p>Shards handed over, out of the shards validators had signed for on chain. Only probes taken inside the retention window count.</p>
+            <p>Unreachable, unproven and unregistered cases are listed separately and are not in this number.</p>
+            <p><Link href="/methodology/#verdicts">How a probe is judged</Link></p>
           </>} />
         <Tile label="Faults" loading={busy}
           value={!net ? "—" : faults > 0 ? <><Mark tier="fault" />{faults.toLocaleString("en-US")}</> : rated ? "none" : "—"}
           tone={faults > 0 ? "fault" : "absent"}
-          sub={!net ? undefined : faults > 0 ? `across ${faulted} validator${faulted === 1 ? "" : "s"}` : rated ? "no proven shard went unserved" : "nothing rated"}
+          sub={!net ? undefined : faults > 0 ? `across ${faulted} validator${faulted === 1 ? "" : "s"}` : rated ? "no signed shard went unserved" : "nothing rated"}
           info={<>
-            <p><strong>A fault is two things at once:</strong> the observer reached the validator, and it failed to hand over a shard the chain proves it stored.</p>
-            <p>The only count held against anyone.</p>
+            <p>The validator answered but did not hand over a shard it had signed for.</p>
+            <p>This is the only number counted against a validator.</p>
           </>} />
         <Tile label="Uptime" loading={busy}
           value={net?.reachability_window?.den ? fmtRate(net.reachability_window) : "—"}
           tone={net?.reachability_window?.den ? undefined : "absent"}
           sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} heartbeats` : "no heartbeat yet"}
-          info={<p>Heartbeats that completed TLS with a registered endpoint, over all heartbeats sent. Every endpoint is dialled every 10 minutes whether or not anything was assigned.</p>} />
+          info={<p>Share of 10-minute checks where a registered endpoint completed a TLS handshake. Every registered endpoint is checked, assigned or not.</p>} />
         <Tile label="Endpoints" loading={busy}
           value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
           sub={net ? `${net.reachability.num} reachable now · ${net.validators_probed} probed` : undefined}
-          info={<p>Validators with a Fibre host in <code>x/valaddr</code>. Reachable now is the newest heartbeat or probe per endpoint that completed TLS.</p>} />
+          info={<p>Validators with a Fibre host registered in <code>x/valaddr</code>. Reachable now: the last check completed TLS.</p>} />
         <Tile label="Publications" loading={busy}
           value={net ? net.publications.toLocaleString("en-US") : "—"}
           sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined}
-          info={<p>Every <code>MsgPayForFibre</code> settled on chain in the window, and the padded upload size they add up to.</p>} />
+          info={<p><code>MsgPayForFibre</code> transactions settled in this window, and their total padded upload size.</p>} />
         <Tile label="Recoverable" loading={busy}
           value={recon && recon.recoverable.den > 0 ? fmtRate(recon.recoverable) : "—"}
           tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}
           sub={recon && recon.recoverable.den > 0 ? `${recon.recoverable.num} of ${recon.recoverable.den} blobs · ${recon.rate.num} fully served` : "no blob judged yet"}
           info={<>
-            <p>Blobs that could still be rebuilt from the rows that came back at the last in-window probe, over blobs with a verdict.</p>
-            <p>Fully served means every validator the chain proves owed the blob answered. Recoverable only needs enough rows: any honest third of the stake holds enough.</p>
+            <p>Blobs that could be rebuilt from the rows we fetched at the last check inside the window.</p>
+            <p>Fully served: every validator that signed for the blob answered. Recoverable: enough rows came back, whoever answered.</p>
           </>} />
       </div>
 
       {net && (
         <p className="coverage">
-          The serve rate speaks for {fmtCount(net.serve_rate_coverage)} in-window probes of an assigned shard.
-          {net.serve_latency_p50_ms != null && <> A shard came back in {net.serve_latency_p50_ms.toLocaleString("en-US")} ms typically, {(net.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at p95 ({net.serve_latency_sample.toLocaleString("en-US")} probes).</>}
-          <Info label="What the rate leaves out">
-            <p><strong>Unattested</strong> — the chain proves no obligation. <strong>Unreachable</strong> — we could not complete a conversation. <strong>Not registered</strong> — no Fibre host on chain. <strong>Shadowed shard</strong> — another promise’s rows for the same blob. <strong>Identity expired</strong> — right key, lapsed certificate.</p>
-            <p><Link href="/methodology/#what-this-excludes">Each one, and why →</Link></p>
+          Serve rate covers {fmtCount(net.serve_rate_coverage)} in-window probes.
+          {net.serve_latency_p50_ms != null && <> Typical fetch {net.serve_latency_p50_ms.toLocaleString("en-US")} ms, p95 {(net.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms ({net.serve_latency_sample.toLocaleString("en-US")} probes).</>}
+          <Info label="Not in the serve rate">
+            <p><strong>Unattested:</strong> no signature from the validator on chain. <strong>Unreachable:</strong> no connection. <strong>Not registered:</strong> no Fibre host on chain. <strong>Shadowed shard:</strong> rows from another promise for the same blob. <strong>Identity expired:</strong> right key, expired certificate.</p>
+            <p><Link href="/methodology/#what-this-excludes">Details</Link></p>
           </Info>
         </p>
       )}
@@ -119,16 +119,16 @@ export default function Overview() {
           <p>
             {notLive ? (
               <>
-                {meta!.chain_id || "This chain"} runs app version {meta!.app_version}; Fibre needs {meta!.fibre_app_version || "10"}, so <code>x/fibre</code> and <code>x/valaddr</code> do not exist yet.
-                The observer is following the chain at height {Number(meta!.chain_height || meta!.last_scanned_height || 0).toLocaleString("en-US")} and starts measuring at the upgrade.
-                {list.length > 0 && ` The ${list.length} bonded validators below are listed by name from the staking module.`}
+                {meta!.chain_id || "This chain"} is on app version {meta!.app_version}. Fibre arrives with version {meta!.fibre_app_version || "10"}.
+                The observer is following the chain at height {Number(meta!.chain_height || meta!.last_scanned_height || 0).toLocaleString("en-US")} and starts measuring after the upgrade.
+                {list.length > 0 && ` The ${list.length} bonded validators below come from the staking module.`}
               </>
             ) : (
               <>
                 No Fibre publication recorded yet. Collector at height {meta!.last_scanned_height || "?"} on {meta!.chain_id || "?"}.{" "}
                 {meta!.counts.OpenEndpoints === 0
-                  ? "Fibre is live and no validator has registered an endpoint yet."
-                  : `${meta!.counts.OpenEndpoints} validators have registered an endpoint; reachability is checked every 10 minutes.`}
+                  ? "Fibre is live; no validator has registered an endpoint yet."
+                  : `${meta!.counts.OpenEndpoints} validators have registered an endpoint. Reachability is checked every 10 minutes.`}
               </>
             )}
           </p>
@@ -137,10 +137,10 @@ export default function Overview() {
 
       {net?.vantage_health?.correlated && (
         <div className="note hold">
-          <span className="label">This observer’s own measurement</span>
+          <span className="label">Possible problem on our side</span>
           <p>
-            At {utc(net.vantage_health.at)} ({net.vantage_health.label}), {fmtCount(net.vantage_health.worst_point)} of the validators probed were unreachable at once.
-            Validators fail independently; one network does not. None of it counts against any validator.
+            At {utc(net.vantage_health.at)} ({net.vantage_health.label}), {fmtCount(net.vantage_health.worst_point)} validators were unreachable at the same time.
+            That pattern usually means a network problem at the observer. It is not counted against anyone.
           </p>
         </div>
       )}
@@ -149,7 +149,7 @@ export default function Overview() {
         <section className="card">
           <div className="card-head">
             <h2>Validators by state</h2>
-            <span className="sample">{list.length} in the table · as of the newest heartbeat</span>
+            <span className="sample">{list.length} validators · last check</span>
           </div>
           <div className="bar" role="img"
             aria-label={`${served} serving, ${seg.hold} unreachable or unendorsed, ${seg.unproven} nothing proven owed, ${seg.gap} not probed, ${seg.fault} faulted`}>
@@ -161,8 +161,8 @@ export default function Overview() {
           </div>
           <ul className="bar-key">
             <li><Mark tier="kept" /> <b>{served}</b> serving</li>
-            <li title="Did not answer, or answered with a certificate its consensus key does not endorse."><Mark tier="hold" /> <b>{seg.hold}</b> unreachable or unendorsed</li>
-            <li title="Probed, but the chain proves no obligation in this window."><Mark tier="held" /> <b>{seg.unproven}</b> nothing proven owed</li>
+            <li title="No answer, or a certificate not signed by the validator's consensus key."><Mark tier="hold" /> <b>{seg.hold}</b> unreachable or bad certificate</li>
+            <li title="Probed, but none of its signatures reached the chain in this window."><Mark tier="held" /> <b>{seg.unproven}</b> nothing signed for</li>
             <li><Mark tier="gap" /> <b>{seg.gap}</b> not probed</li>
             <li><Mark tier="fault" /> <b>{seg.fault}</b> faulted</li>
           </ul>
@@ -179,13 +179,13 @@ export default function Overview() {
         <h2 style={{ margin: 0 }}>Validators</h2>
         <span className="sample">{win} window</span>
         <span className="spacer" />
-        {net && recon && <Link href="/blobs/" className="sample">every publication →</Link>}
+        {net && recon && <Link href="/blobs/" className="sample">all publications</Link>}
       </div>
       {vals
         ? <ValidatorTable rows={vals.validators} notLive={notLive}
             caption={notLive
-              ? `Every bonded validator on ${meta?.chain_id || "this chain"}, from the staking module.`
-              : `Sorted worst first: faults, then unreachable, then partial outages. Below ${20} rated observations a validator is listed with its counts and not ranked.`} />
+              ? `Bonded validators on ${meta?.chain_id || "this chain"}, from the staking module.`
+              : `Worst first. Validators with fewer than 20 rated probes show counts instead of a rate and are not ranked.`} />
         : <p className="muted">Loading validators…</p>}
     </>
   );

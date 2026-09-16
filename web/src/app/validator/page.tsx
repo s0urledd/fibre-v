@@ -65,7 +65,7 @@ function Page() {
             {v.reachable === false && <span className="chip hold" title={`Could not reach ${v.host} at the last heartbeat.`}><i className="dot hold" />down</span>}
             {v.reachable === true && v.identity_status !== "verified" && <span className="chip hold" title={v.identity_reason}><i className="dot hold" />{v.identity_status.replace("_", " ")}</span>}
             {!v.host && <span className="chip">no Fibre endpoint</span>}
-            {v.jailed && <span className="chip hold" title="Jailed by the chain. It still owes the shards it signed for.">jailed</span>}
+            {v.jailed && <span className="chip hold" title="Jailed by the chain. Shards it signed for are still owed.">jailed</span>}
             {v.bond_status && <span className="chip">{v.bond_status.replace("BOND_STATUS_", "").toLowerCase()}</span>}
           </span>
         </div>
@@ -95,35 +95,33 @@ function Page() {
         <h2 style={{ margin: 0 }}>Service</h2>
         <span className="chip" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name}</span>
         <Info label="These five figures">
-          <p>Five ways a Fibre service fails, in the order you would debug them. Each is measured separately, because each has a different fix.</p>
-          <p>The first two come from a heartbeat that dials every registered endpoint every ten minutes, whether or not anything was assigned, so they speak for every validator.</p>
-          <p>The last three speak only for obligations the chain proves — a smaller set, not the same one each window, and selected by which validators answered the publisher fast enough.</p>
-          <p><strong>No figure here carries a threshold.</strong> This site watches from one place, so part of every millisecond and every failed dial is its own path.</p>
+          <p>Five checks, in the order you would debug them.</p>
+          <p>Uptime and Endorsed come from the 10-minute check of every registered endpoint. Served, Held to the end and Throughput only cover blobs this validator signed for.</p>
+          <p>No figure has a threshold. Checks run from one location.</p>
         </Info>
       </div>
       <div className="tiles five">
         <Layer label="Uptime" r={v.reachability_window}
           sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} checks` : undefined}
           what={<>
-            <p>How often this site completed a TLS handshake with the registered endpoint.</p>
-            <p>Sampled every ten minutes for every validator with a host in <code>x/valaddr</code>, assigned or not — so unlike the serve rate, its coverage does not depend on the chain proving an obligation.</p>
-            <p>Half of every path measured here is this site&rsquo;s own, so a dip is not by itself a statement about the operator.</p>
+            <p>Share of 10-minute checks where the endpoint completed a TLS handshake.</p>
+            <p>Runs for every validator with a host in <code>x/valaddr</code>, assigned or not.</p>
           </>} />
         <Layer label="Endorsed" r={v.identity_rate_window}
           what={<>
-            <p>Of the checks that saw a certificate, how many carried an extension signed by this validator&rsquo;s consensus key. A client refuses the rest.</p>
-            <p>The denominator excludes checks that never completed TLS: an endpoint that was down presented nothing to judge, and counting it here would report one outage twice.</p>
+            <p>Of the checks that saw a certificate, how many were signed by this validator&rsquo;s consensus key. Clients refuse the rest.</p>
+            <p>Checks that never reached TLS are not counted here, so an outage is not reported twice.</p>
           </>} />
         <Layer label="Served" r={v.serve_rate}
           what={<>
-            <p>Of the shards the chain proves this validator stored, how many it handed over when asked.</p>
-            <p>A validator only owes a shard it stored, and the only on-chain proof of that is a verified signature on the settled promise. Where that is missing the probe sits outside this rate in both directions.</p>
+            <p>Shards handed over, out of the shards this validator signed for, inside the retention window.</p>
+            <p>Blobs without this validator&rsquo;s signature on chain are not counted either way.</p>
           </>} />
         <Layer label="Held to the end" r={last?.serve_rate}
           sample={last ? `${fmtCount(last.serve_rate)} at ${last.key}` : undefined}
           what={<>
-            <p>The same rate, at the last point of the retention window that produced a verdict.</p>
-            <p>Below the earlier points means shards pruned before the deadline — a different failure, with a different fix, from being poor throughout. The pooled rate cannot tell them apart.</p>
+            <p>The serve rate at the last probe point inside the retention window.</p>
+            <p>If this is lower than the earlier points, shards were pruned before the deadline.</p>
           </>} />
         {/*
           Throughput, not duration. Assignments run from 148 rows to 4,096, so
@@ -141,8 +139,8 @@ function Page() {
             ? `${v.serve_latency_p50_ms.toLocaleString("en-US")} ms typical · ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms p95`
             : "not observed in this window"}
           info={<>
-            <p>Rows handed over per second, dial to rows verified against the commitment, over healthy probes.</p>
-            <p>Rows per second rather than milliseconds: assignments run from 148 to 4,096 rows, so a bigger validator takes longer per shard for the same service. Failed probes are excluded.</p>
+            <p>Rows delivered per second, from connect to verified rows, over healthy probes.</p>
+            <p>Rows per second rather than milliseconds, because a bigger shard takes longer. Failed probes are not included.</p>
           </>} />
       </div>
 
@@ -157,24 +155,20 @@ function Page() {
       */}
       {(unattested > 0 || unknown > 0) && (
         <p className="coverage">
-          {unattested.toLocaleString("en-US")} blob{unattested === 1 ? "" : "s"} in this window are outside these rates: the chain
-          proves no obligation.
+          {unattested.toLocaleString("en-US")} blob{unattested === 1 ? "" : "s"} in this window carry no signature from this validator and are not in these rates.
           <Info label="Outside the rates">
-            <p>A validator only owes a shard it stored, and the only on-chain proof of that is a signature on the settled promise
-              that this observer verified against the validator&rsquo;s consensus key.</p>
-            <p>The publisher stops collecting signatures once two thirds of voting power has answered, so most of the set is left
-              unproven on most blobs — <strong>by design, not by fault</strong>.</p>
-            <p>Those obligations are excluded in both directions: a failure the validator was never proven to owe cannot count
-              against it, and a success it was never proven to owe cannot count for it.</p>
+            <p>A validator only owes a shard it signed for. The signature on the settled promise is the proof, and this site verifies it against the consensus key.</p>
+            <p>Publishers stop collecting signatures at two thirds of voting power, so most validators are left without one on most blobs. That is normal.</p>
+            <p>Those blobs are left out in both directions: no fault, and no credit.</p>
             {unknown > 0 && <p>{unknown.toLocaleString("en-US")} further blob{unknown === 1 ? "" : "s"} predate signature
               verification and are counted under the older rules.</p>}
-            <p><Link href="/methodology/#quorum">How the quorum works →</Link></p>
+            <p><Link href="/methodology/#quorum">How the quorum works</Link></p>
           </Info>
         </p>
       )}
       <div className="tablewrap">
         <table>
-          <caption>healthy / (healthy + fault) over in-window probes of an assigned shard whose obligation the promise proves; grace probes are recorded but outside the rate. Tolerated, unattested, expected gone and not probed are listed, never folded in.</caption>
+          <caption>healthy / (healthy + fault) over in-window probes of shards this validator signed for. Grace-period probes are recorded but not counted; other classes are listed beside the rate.</caption>
           <thead><tr><th>window</th><th className="right">serve rate</th><th className="right">probes</th><th className="right">coverage</th><th>verdicts</th></tr></thead>
           <tbody>
             {data.windows.map((w) => (
@@ -206,9 +200,9 @@ function Page() {
                 <td><Verdict cls={p.classification} title={p.classification_reason} /></td>
                 <td className="mono">
                   {p.outcome}
-                  {p.attested === false && <span className="muted" title="No verified signature on this promise, so the obligation is unproven and this probe is outside the serve rate."> (unproven)</span>}
+                  {p.attested === false && <span className="muted" title="No signature from this validator on this promise, so the probe is not in the serve rate."> (unproven)</span>}
                   {p.retry_first_outcome && (
-                    <span className="faint" title={`The first attempt was ${p.retry_first_outcome}. The retry went to the same address from the same vantage, so a repeat is one observation twice, not two that agree.`}>
+                    <span className="faint" title={`First attempt: ${p.retry_first_outcome}. Retried once from the same location.`}>
                       {" "}(retried after {p.retry_first_outcome})
                     </span>
                   )}

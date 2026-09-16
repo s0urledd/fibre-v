@@ -19,7 +19,7 @@ export function Header() {
   return (
     <header className="top blur">
       <div className="wrap">
-        <Link className="brand" href="/"><i aria-hidden="true" />Fibre observer</Link>
+        <Link className="brand" href="/"><i aria-hidden="true" />Muninn<span className="brand-sub">Fibre observer</span></Link>
         <nav>
           {NAV.map(([href, name]) => (
             <Link key={href} href={href} className={(href === "/" ? path === "/" : path.startsWith(href)) ? "on" : ""}>{name}</Link>
@@ -29,7 +29,7 @@ export function Header() {
         <span className="chips">
           {meta ? (
             <>
-              <span className="chip" title={alive ? "The collector is following the chain." : "The collector has stopped; figures are as of its last run."}>
+              <span className="chip" title={alive ? "Collector is following the chain." : "Collector stopped; figures are from its last run."}>
                 <i className={"dot " + (alive ? "ok" : "hold")} />
                 {meta.chain_id || "chain ?"}{height ? ` · #${Number(height).toLocaleString("en-US")}` : ""}
               </span>
@@ -61,13 +61,13 @@ export function Banner() {
         <i className="dot" aria-hidden="true" />
         {one ? (
           <span>
-            Measured from one location{where ? ` — ${where}` : meta ? ` (vantage “${meta.vantage}”, undescribed)` : ""}.
-            A failed probe means this vantage could not reach the endpoint, not that the validator is down.
+            All checks run from one location{where ? ` (${where})` : meta ? ` (vantage “${meta.vantage}”, not described)` : ""}.
+            A failed check can be a network problem on our side.
           </span>
         ) : (
-          <span>Measured from {meta?.vantage_count} locations.</span>
+          <span>Checks run from {meta?.vantage_count} locations.</span>
         )}
-        <Link href="/about/">Where this watches from</Link>
+        <Link href="/about/">Details</Link>
       </div>
     </div>
   );
@@ -81,7 +81,7 @@ export function Footer() {
     <footer className={"foot" + (stale ? " stale" : "")}>
       <div className="wrap">
         {error && <span>API unreachable: {error}.</span>}
-        {stale && <strong>Data is stale — last collector heartbeat {ago(lastBeat)}.</strong>}
+        {stale && <strong>Data is stale: last collector heartbeat {ago(lastBeat)}.</strong>}
         {meta && (
           <>
             <span>collector #{meta.last_scanned_height || "?"} {meta.collector ? (meta.collector.alive ? "· alive" : "· stopped") : "· no run"}</span>

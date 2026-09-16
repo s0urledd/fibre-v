@@ -1,6 +1,6 @@
 import { Legend } from "@/components/Verdict";
 
-export const metadata = { title: "Methodology · Fibre observer" };
+export const metadata = { title: "Methodology · Muninn" };
 
 export default function Methodology() {
   return (

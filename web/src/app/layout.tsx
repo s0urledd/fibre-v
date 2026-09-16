@@ -3,7 +3,7 @@ import "./globals.css";
 import { Header, Banner, Footer } from "@/components/Chrome";
 
 export const metadata: Metadata = {
-  title: "Fibre observer",
+  title: "Muninn · Fibre observer",
   description: "Independent measurement of whether Celestia validators keep their Fibre serving promise.",
 };
 
