@@ -33,7 +33,29 @@ outages that begin at a known hour, a validator with no registered host, one
 whose certificate has lapsed, one that never signed, and one that prunes before
 the deadline.
 
-Two modelling rules it follows, both taken from the code rather than invented:
+The reachability heartbeat is generated at its real cadence — every ten
+minutes for seven days, so 1,008 samples per registered validator — because
+that is the one stability signal whose coverage does not depend on the chain
+proving an obligation, and a dozen rows an hour deep put every validator under
+the twenty-observation floor so the uptime column was never exercised.
+
+Attestation follows the **two-thirds quorum**, not a flag. The publisher stops
+collecting signatures once it holds two thirds of voting power, so on any given
+blob about a third of the set has no signature on chain and is neither down nor
+at fault. Arrival order is drawn per publication and is independent of stake, so
+quorum membership is a race rather than a list. A fixture where everyone signs
+hides the single class most likely to be misread on the dashboard; this one
+produces it at the rate the real network will.
+
+Probe durations are generated rather than constant: they scale with the
+validator's assigned rows, sit on a per-validator floor, and have a long right
+tail, so the median and the 95th percentile are different numbers and the
+throughput column has something to show. One validator (`slow`) serves
+everything at a ninth of everyone else's speed, and one large validator carries
+enough rows that its raw duration is the worst on the network while its
+throughput is the best — which is the case the column exists to get right.
+
+Three modelling rules it follows, all taken from the code rather than invented:
 
 - **Attestation is decided at upload time, serving at probe time.** A validator
   already dark when the publisher uploaded never received the shard, so it never
@@ -43,6 +65,22 @@ Two modelling rules it follows, both taken from the code rather than invented:
 - **A validator with no registered host is absent from the signature set**, for
   the same reason, but still classifies as `NOT_REGISTERED`, because
   `classify.go` judges `OutcomeNoHost` before the attestation check.
+- **The wire is recorded as it happened, and attestation decides the class on
+  top of it.** `classify.go` judges identity, then no-host, then attestation,
+  then the outcome, and the fixture's `classify()` is a branch-for-branch port
+  of that order. An unattested validator with a lapsed certificate is
+  `IDENTITY_EXPIRED`, not `UNATTESTED`; an unattested validator that was
+  refusing connections still has `tcp_ok = 0` on its row. Writing a clean
+  handshake for every unattested probe, which is what this did before, made the
+  heartbeat and the probe history disagree about the same endpoint at the same
+  minute.
+
+Rows are inserted in start-time order, heartbeats and probes alike. Several of
+the API's "latest row per validator" queries use `MAX(rowid)` rather than a
+correlated `MAX(started_at)`, because the real collector ingests in write order
+and write order is chronological. A fixture that inserts newest-first quietly
+hands those queries the *oldest* row, which is how a validator that had been
+down for thirty hours came out of the API as `reachable: yes`.
 
 ## serve.cjs — the static export with the API behind it
 

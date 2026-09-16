@@ -12,6 +12,17 @@ export type Attestation = {
   unattested_probes: number;
   unknown_probes: number;
   coverage: Rate;
+  /**
+   * The same three counts per (validator, blob) obligation rather than per
+   * probe. An obligation is probed at four schedule points, so the probe
+   * counts run about four times these — and it is these that a page may show
+   * an operator. "812 unattested probes" and "203 blobs carried no signature
+   * from you" are the same fact, but only one of them is the fact.
+   */
+  attested_blobs: number;
+  unattested_blobs: number;
+  unknown_blobs: number;
+  blob_coverage: Rate;
 };
 export type Window = { name: string; start: string; end: string };
 export type ClassCounts = Record<string, number>;
@@ -61,7 +72,10 @@ export type Network = {
   observed_from_one_location: boolean;
   registered_endpoints: number;
   validators_probed: number;
+  /** a census of the endpoints as of their newest evidence */
   reachability: Rate;
+  /** every heartbeat in the window that completed TLS, over every one sent */
+  reachability_window: Rate;
   serve_rate: Rate;
   /** how much of the rate's own population produced a verdict */
   serve_rate_coverage: Rate;
@@ -80,6 +94,10 @@ export type Network = {
   probe_gaps_by_outcome: ClassCounts;
   vantage_health: VantageHealth;
   serve_rate_by_point: { key: string; serve_rate: Rate }[];
+  /** whole-probe duration, dial to verified rows, over HEALTHY probes */
+  serve_latency_p50_ms: number | null;
+  serve_latency_p95_ms: number | null;
+  serve_latency_sample: number;
 };
 
 /** the most correlated failure in the window: likely ours, not theirs */
@@ -124,6 +142,17 @@ export type Validator = {
   reachable: boolean | null;
   identity_status: string;
   identity_reason?: string;
+  /**
+   * How often this observer completed a TLS conversation with the endpoint
+   * over the window, from the ten-minute heartbeat. The one stability figure
+   * here whose coverage does not depend on being assigned or attested
+   * anything: a validator the publisher never collected a signature from
+   * still gets 144 samples a day.
+   */
+  reachability_window: Rate;
+  /** of the heartbeats that saw a certificate, how many were endorsed */
+  identity_rate_window: Rate;
+  last_unreachable_at: string | null;
   serve_rate: Rate;
   serve_rate_coverage: Rate;
   serve_rate_by_obligation: Rate;
@@ -133,6 +162,22 @@ export type Validator = {
   classes: ClassCounts;
   assigned_rows_last: number;
   expected_load_band: string;
+  /** this validator's serve rate per schedule point: early vs late retention */
+  serve_rate_by_point: { key: string; serve_rate: Rate }[] | null;
+  /**
+   * How long this observer waited for a shard it did get. The percentiles are
+   * the whole probe — dial, TLS, DownloadShard, row verification — over the
+   * HEALTHY probes of the window.
+   *
+   * serve_rows_per_second is the one to compare between validators.
+   * Assignments run from 148 rows to 4,096, so a large validator legitimately
+   * takes longer for the same quality of service: sorting on raw duration puts
+   * the busiest validators at the top and calls them slow.
+   */
+  serve_latency_p50_ms: number | null;
+  serve_latency_p95_ms: number | null;
+  serve_latency_sample: number;
+  serve_rows_per_second: number | null;
   /** newest publication: true proven to have stored it, false unproven, null not recorded */
   attested_last: boolean | null;
   /**

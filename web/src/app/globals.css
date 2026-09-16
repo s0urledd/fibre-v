@@ -399,6 +399,26 @@ dl.kv dd { margin: 0; word-break: break-all; }
 .grad-svg { display: block; width: 100%; min-width: 560px; max-width: 720px; height: auto; margin: var(--s3) 0 var(--s2); }
 .grad .sample { display: block; max-width: var(--measure); line-height: var(--lh-text); }
 
+/* ---------------------------------------------------------- the layers --- */
+/* A validator's Fibre service fails in four separable ways, and the page says
+   so in that order rather than leading with the rate. An endpoint that does not
+   answer, one that answers with a certificate no client will accept, one that
+   answers but will not hand over a shard, and one that hands it over early in
+   the window and not late are four different operator problems with four
+   different fixes. Reading them in that order is also reading them in order of
+   how much evidence stands behind each: the heartbeat samples everyone every
+   ten minutes, while the serve rate speaks only for obligations the chain
+   proves. */
+.layers { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--s5); margin: var(--s5) 0 var(--s6); }
+.layers > div { border-top: 1px solid var(--edge); padding-top: var(--s2); min-width: 0; }
+.layers .fig { display: block; font-family: var(--mono); font-size: var(--t-sub); color: var(--text); margin: var(--s2) 0 0; }
+.layers .fig.absent { color: var(--text-3); }
+/* The unit rides with the figure at the size of the sample, so "2,196 rows/s"
+   reads as one object and the digits stay the thing the eye lands on. */
+.layers .fig .unit { font-size: var(--t-sample); color: var(--text-3); }
+.layers .sample { display: block; margin-top: var(--s1); }
+.layers .what { display: block; font-size: var(--t-sample); color: var(--text-2); margin-top: var(--s2); line-height: var(--lh-text); }
+
 /* Screen-reader-only text, for state a sighted reader gets from the skeleton. */
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -412,6 +432,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
   .plate-side { text-align: left; }
   .counter { justify-content: flex-start; }
   dl.kv { grid-template-columns: 1fr; }
+  .layers { grid-template-columns: 1fr 1fr; gap: var(--s4); }
   .legend > div { grid-template-columns: 1fr; gap: var(--s1); }
   input[type=search] { min-width: 0; width: 100%; }
 }

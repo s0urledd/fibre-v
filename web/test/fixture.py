@@ -115,6 +115,7 @@ for v in vals:
     elif i == 28:               BEHAVIOUR[i] = "identity"      # certificate lapsed
     elif i == 41:               BEHAVIOUR[i] = "unattested"    # never signed
     elif i == 33:               BEHAVIOUR[i] = "prunes_early"  # drops late in window
+    elif i == 19:               BEHAVIOUR[i] = "slow"          # serves everything, slowly
     elif i in (37, 52):         BEHAVIOUR[i] = "jailed"
     else:                       BEHAVIOUR[i] = "healthy"
 
@@ -191,7 +192,31 @@ for p in range(PUBS):
         if b in ("unreachable", "identity") and impaired(v["i"], created):
             return False   # already dark at upload: it never got the shard
         return True
-    attested = {v["cons"]: could_attest(v) for v, _ in assigned}
+
+    # The two-thirds quorum, modelled rather than assumed away.
+    #
+    # The publisher uploads to everyone at once and collects signatures as they
+    # arrive, stopping the moment it holds two thirds of total voting power
+    # (fibre/validator/signature_set.go). Deliveries already in flight finish
+    # afterwards, off chain, where nothing records them. So on a real network a
+    # third of the set has no signature on any given blob and is neither down
+    # nor at fault, and a fixture where everyone signs hides the single class
+    # most likely to be misread on the dashboard.
+    #
+    # Arrival order is drawn per publication and is independent of stake, which
+    # is what makes quorum membership a race rather than a list: the same
+    # validator is inside on one blob and outside on the next.
+    order = [v for v, _ in assigned]
+    random.Random(f"quorum-{p}").shuffle(order)
+    need, got, stopped = total_power * 2 // 3, 0, False
+    attested = {}
+    for v in order:
+        ok = (not stopped) and could_attest(v)
+        attested[v["cons"]] = ok
+        if ok:
+            got += v["power"]
+            if got >= need:
+                stopped = True
     sigcount = sum(1 for a in attested.values() if a)
     pubs.append(dict(ph=ph, cm=cm, ns=ns, created=created, settled=settled,
                      msu=msu, size=size, assigned=assigned, attested=attested))
@@ -233,116 +258,205 @@ for p in range(PUBS):
 # grace probe and one post probe, which is the shipped schedule.
 POINTS = [("w1", 0.12), ("w2", 0.45), ("w3", 0.72), ("w4", 0.92)]
 counts = {}
+# Probe rows are buffered and inserted in start-time order for the same reason
+# the heartbeats are: rowid order stands in for time in several of the API's
+# "latest row per validator" queries, and a fixture that inserts out of order
+# makes those queries answer with an arbitrary row.
+PROBE_ROWS = []
+
+# How long a probe took, in milliseconds.
+#
+# The old fixture wrote a flat 400 for every probe, which made the median and
+# the 95th percentile the same number for every validator and the latency
+# columns untestable. A real duration is dominated by the transfer, so it scales
+# with the validator's assigned rows, sits on a per-validator floor (its own
+# path and disk), and has a long right tail: most probes are near the floor and
+# a few are several times it. utku's measurement against a local devnet — p50
+# ~14ms, p95 ~24ms for dial plus DownloadShard plus full row verification — is
+# the shape this imitates, scaled up for a public network.
+def duration_ms(v, rows, ok):
+    if not ok:
+        return rnd.randint(20, 250)          # a failure takes time too
+    base = 25 + (v["i"] % 7) * 6             # this validator's own floor
+    if BEHAVIOUR[v["i"]] == "slow":
+        base *= 9
+    transfer = rows * 0.42                   # dominated by the shard's size
+    jitter = rnd.random() ** 4 * base * 12   # long tail, rarely hit
+    return int(base + transfer + jitter) + 1
+
 def add_probe(pub, v, rows, label, at, phase, outcome, cls, **kw):
     if at > NOW:
         return
     counts[cls] = counts.get(cls, 0) + 1
     key = hashlib.sha256(f"{pub['ph']}{v['cons']}{label}".encode()).hexdigest()
     ok = cls in ("HEALTHY",)
-    db.execute("""INSERT INTO probes (
-        dedupe_key, vantage, promise_hash, commitment, blob_version,
-        must_serve_until, validator_set_height, validator_address,
-        validator_host, assigned, assigned_row_count, schedule_label,
-        scheduled_at, started_at, finished_at, lateness_ms, dns_ok, dns_ms,
-        tcp_ok, tcp_ms, tls_ok, tls_ms, tls_version, peer_cert_sha256,
-        identity_ok, identity_reason, download_ok, download_ms, rows_returned,
-        rows_expected, commitment_verified, assignment_verified, phase,
-        outcome, classification, classification_reason, raw_error,
-        total_duration_ms, raw_json, attested
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+    ms = kw["ms"] if "ms" in kw else duration_ms(v, rows, ok)
+    PROBE_ROWS.append((at, (
         key, "eu1", pub["ph"], pub["cm"], 0, ts(pub["msu"]), 800_000,
         v["cons"], kw.get("host", v["host"]), 1, rows, label, ts(at), ts(at),
-        ts(at + timedelta(milliseconds=kw.get("ms", 400))), rnd.randint(0, 900),
+        ts(at + timedelta(milliseconds=ms)), rnd.randint(0, 900),
         kw.get("dns", 1), rnd.randint(1, 30), kw.get("tcp", 1), rnd.randint(4, 60),
         kw.get("tls", 1), rnd.randint(8, 90), "TLS1.3" if kw.get("tls", 1) else "",
         hashlib.sha256(f"cert{v['i']}".encode()).hexdigest() if kw.get("tls", 1) else "",
         kw.get("idok", 1), kw.get("idreason", ""), 1 if ok else 0,
-        rnd.randint(20, 800) if ok else 0, rows if ok else kw.get("got", 0), rows,
+        int(ms * 0.8) if ok else 0, rows if ok else kw.get("got", 0), rows,
         1 if ok or kw.get("cv") else 0, 1 if ok else 0,
         phase, outcome, cls, kw.get("reason", ""), kw.get("err", ""),
-        kw.get("ms", 400), "{}", kw.get("attested", 1)))
+        ms, "{}", kw.get("attested", 1))))
+
+# What actually happened on the wire for validator v at time `at`, independent
+# of whether the chain proves it was obliged. Attestation decides the class, not
+# the wire, and keeping the two separate here is what stops the fixture from
+# recording a clean TLS handshake for an endpoint that was refusing
+# connections: the heartbeat and the probe history are two views of the same
+# minute, and they have to agree.
+def wire(b, v, at, frac):
+    if b == "unreachable" and impaired(v["i"], at):
+        return ("TCP_REFUSED", dict(tcp=0, tls=0, idok=0, ms=0,
+                                    err=f"dial tcp {v['host']}: connect: connection refused"))
+    if b == "identity" and impaired(v["i"], at):
+        return ("IDENTITY_FAIL", dict(idok=0, idreason="certificate validity window has lapsed"))
+    if b == "prunes_early" and frac >= 0.72 and impaired(v["i"], at):
+        return ("NOT_FOUND", {})
+    if b == "faulty" and rnd.random() < 0.30:
+        return ("NOT_FOUND", {})
+    if b == "flaky" and rnd.random() < 0.05:
+        return ("NOT_FOUND", {})
+    if rnd.random() < 0.003:
+        return ("TCP_TIMEOUT", dict(tcp=0, tls=0, idok=0, err="dial tcp: i/o timeout"))
+    return ("SERVED_OK", {})
+
+# A port of probe.Classify, branch for branch, over the outcomes this fixture
+# emits. Written out rather than approximated because the ORDER is the whole
+# point: identity is judged before attestation, so an unattested validator with
+# a lapsed certificate is IDENTITY_EXPIRED and not UNATTESTED, and a fixture
+# that gets that backwards teaches the design to expect a class mix the real
+# taxonomy never produces.
+REACH_FAIL = {"DNS_FAIL", "TCP_REFUSED", "TCP_TIMEOUT", "TCP_UNREACHABLE",
+              "TLS_HANDSHAKE_FAIL", "RPC_UNAVAILABLE", "RPC_ERROR"}
+
+def classify(outcome, phase, attested):
+    if outcome == "IDENTITY_FAIL":
+        return "IDENTITY_EXPIRED"            # this fixture only lapses certificates
+    if outcome == "NO_REGISTERED_HOST":
+        return "NOT_REGISTERED"
+    if not attested:
+        return "UNATTESTED"
+    if phase == "in_window":
+        if outcome == "SERVED_OK":     return "HEALTHY"
+        if outcome == "NOT_FOUND":     return "FAULT"
+        if outcome in REACH_FAIL:      return "UNREACHABLE"
+        return "PROBE_ERROR"
+    if phase == "grace":
+        if outcome == "SERVED_OK":     return "HEALTHY"
+        return "TOLERATED"               # not found, unreachable: prune lag
+    if outcome == "NOT_FOUND":         return "EXPECTED_GONE"
+    if outcome == "SERVED_OK":         return "SERVED_PAST_WINDOW"
+    if outcome in REACH_FAIL:          return "UNREACHABLE_POST_WINDOW"
+    return "EXPECTED_GONE"
+
+REASONS = {
+    "UNATTESTED": "the settled promise carries no verified signature from this validator",
+    "FAULT": "no such shard while the promise still held",
+    "TOLERATED": "not found just after must_serve_until, within the measured prune lag",
+    "EXPECTED_GONE": "not found after the window plus tolerance; correct behaviour",
+    "NOT_REGISTERED": "no Fibre host registered in x/valaddr when the probe ran",
+}
+
+def emit(pub, v, rows, label, at, phase, outcome, kw, attested):
+    cls = classify(outcome, phase, attested)
+    kw = dict(kw, attested=1 if attested else 0)
+    if cls in REASONS:
+        kw.setdefault("reason", REASONS[cls])
+    add_probe(pub, v, rows, label, at, phase, outcome, cls, **kw)
 
 for pub in pubs:
     window = (pub["msu"] - pub["created"]).total_seconds()
     for v, rows in pub["assigned"]:
         b = BEHAVIOUR[v["i"]]
+        att = pub["attested"][v["cons"]]
         if b == "unregistered":
             for label, frac in POINTS:
-                add_probe(pub, v, rows, label, pub["created"] + timedelta(seconds=window*frac),
-                          "in_window", "NO_REGISTERED_HOST", "NOT_REGISTERED", host="", dns=0, tcp=0, tls=0, idok=0,
-                          reason="no Fibre host registered in x/valaddr when the probe ran")
-            continue
-        if not pub["attested"][v["cons"]]:
-            for label, frac in POINTS:
-                add_probe(pub, v, rows, label, pub["created"] + timedelta(seconds=window*frac),
-                          "in_window", "SERVED_OK", "UNATTESTED", attested=0,
-                          reason="the settled promise carries no verified signature from this validator")
-            continue
-        if b == "unreachable":
-            for label, frac in POINTS:
-                at = pub["created"] + timedelta(seconds=window*frac)
-                if impaired(v["i"], at):
-                    add_probe(pub, v, rows, label, at, "in_window", "TCP_REFUSED",
-                              "UNREACHABLE", tcp=0, tls=0, idok=0, ms=0,
-                              err=f"dial tcp {v['host']}: connect: connection refused")
-                else:
-                    add_probe(pub, v, rows, label, at, "in_window", "SERVED_OK", "HEALTHY")
-            add_probe(pub, v, rows, "grace", pub["msu"] + timedelta(seconds=120),
-                      "grace", "TCP_REFUSED", "UNREACHABLE", tcp=0, tls=0, idok=0, ms=0,
-                      err=f"dial tcp {v['host']}: connect: connection refused")
-            continue
-        if b == "identity":
-            for label, frac in POINTS:
-                at = pub["created"] + timedelta(seconds=window*frac)
-                if impaired(v["i"], at):
-                    add_probe(pub, v, rows, label, at, "in_window", "IDENTITY_FAIL",
-                              "IDENTITY_EXPIRED", idok=0,
-                              idreason="certificate validity window has lapsed")
-                else:
-                    add_probe(pub, v, rows, label, at, "in_window", "SERVED_OK", "HEALTHY")
+                emit(pub, v, rows, label, pub["created"] + timedelta(seconds=window*frac),
+                     "in_window", "NO_REGISTERED_HOST",
+                     dict(host="", dns=0, tcp=0, tls=0, idok=0), att)
             continue
         for label, frac in POINTS:
             at = pub["created"] + timedelta(seconds=window*frac)
-            if b == "prunes_early" and frac >= 0.72 and impaired(v["i"], at):
-                add_probe(pub, v, rows, label, at, "in_window", "NOT_FOUND", "FAULT",
-                          reason="no such shard while the promise still held")
-            elif b == "faulty" and rnd.random() < 0.30:
-                add_probe(pub, v, rows, label, at, "in_window", "NOT_FOUND", "FAULT",
-                          reason="no such shard while the promise still held")
-            elif b == "flaky" and rnd.random() < 0.05:
-                add_probe(pub, v, rows, label, at, "in_window", "NOT_FOUND", "FAULT",
-                          reason="no such shard while the promise still held")
-            elif rnd.random() < 0.003:
-                add_probe(pub, v, rows, label, at, "in_window", "TCP_TIMEOUT", "UNREACHABLE",
-                          tcp=0, tls=0, idok=0, err="dial tcp: i/o timeout")
-            else:
-                add_probe(pub, v, rows, label, at, "in_window", "SERVED_OK", "HEALTHY")
-        # grace, then post
+            outcome, kw = wire(b, v, at, frac)
+            emit(pub, v, rows, label, at, "in_window", outcome, kw, att)
+        # grace: an honest server prunes on a one-minute loop, so a shard that
+        # is gone here is a shard pruned on time.
         g = pub["msu"] + timedelta(seconds=120)
-        if b in ("faulty",) and rnd.random() < 0.5:
-            add_probe(pub, v, rows, "grace", g, "grace", "NOT_FOUND", "TOLERATED",
-                      reason="not found just after must_serve_until, within the measured prune lag")
-        else:
-            add_probe(pub, v, rows, "grace", g, "grace", "SERVED_OK", "HEALTHY")
+        outcome, kw = wire(b, v, g, 1.0)
+        if outcome == "SERVED_OK" and rnd.random() < (0.5 if b == "faulty" else 0.0):
+            outcome = "NOT_FOUND"
+        emit(pub, v, rows, "grace", g, "grace", outcome, kw, att)
+        # post: everyone should be pruned by now, so a healthy wire means the
+        # shard is gone rather than that it was served.
         p_at = pub["msu"] + timedelta(minutes=30)
-        add_probe(pub, v, rows, "post", p_at, "post", "NOT_FOUND", "EXPECTED_GONE",
-                  reason="not found after the window plus tolerance; correct behaviour")
+        outcome, kw = wire(b, v, p_at, 1.0)
+        if outcome == "SERVED_OK":
+            outcome = "NOT_FOUND"
+        emit(pub, v, rows, "post", p_at, "post", outcome, kw, att)
+
+PROBE_ROWS.sort(key=lambda r: r[0])
+db.executemany("""INSERT INTO probes (
+    dedupe_key, vantage, promise_hash, commitment, blob_version,
+    must_serve_until, validator_set_height, validator_address,
+    validator_host, assigned, assigned_row_count, schedule_label,
+    scheduled_at, started_at, finished_at, lateness_ms, dns_ok, dns_ms,
+    tcp_ok, tcp_ms, tls_ok, tls_ms, tls_version, peer_cert_sha256,
+    identity_ok, identity_reason, download_ok, download_ms, rows_returned,
+    rows_expected, commitment_verified, assignment_verified, phase,
+    outcome, classification, classification_reason, raw_error,
+    total_duration_ms, raw_json, attested
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    [r[1] for r in PROBE_ROWS])
 
 # --- reachability heartbeats ---------------------------------------------
+# The real heartbeat dials every registered endpoint every ten minutes without
+# downloading, for as long as the endpoint is registered. That is 144 samples a
+# day per validator regardless of what the chain assigned or attested, which is
+# why it is the one stability figure on the site whose coverage does not depend
+# on a quorum — and it is the reason the history is generated here at its true
+# cadence over the whole span the fixture covers, rather than as a dozen rows
+# an hour deep. Twelve rows put every validator under the twenty-observation
+# floor, so the uptime column showed "under floor" for the entire set and the
+# design was never actually exercised.
+HEARTBEAT_EVERY = timedelta(minutes=10)
+HEARTBEAT_SPAN = timedelta(days=7)
+# A couple of otherwise healthy endpoints flap, because a fixture where uptime
+# is 100.0% or 0.0% and nothing between never shows what a real reading looks
+# like.
+FLAPPY = {9: 0.004, 26: 0.02}
+beats = int(HEARTBEAT_SPAN / HEARTBEAT_EVERY)
 for v in vals:
-    b = BEHAVIOUR[v["i"]]
+    i = v["i"]
+    b = BEHAVIOUR[i]
     if b == "unregistered":
         continue
-    for r in range(12):
-        at = NOW - timedelta(minutes=5*r)
-        up = b not in ("unreachable",)
+    flap = random.Random(f"flap{i}")
+    # Oldest first. The API finds the latest heartbeat with MAX(rowid) GROUP BY
+    # validator rather than a correlated MAX(started_at), because the real
+    # collector ingests in write order and write order is chronological. A
+    # fixture that inserts newest-first quietly hands every reader the OLDEST
+    # heartbeat as "reachable (latest)", which is how a validator that had been
+    # down for thirty hours came out of the API as reachable: yes.
+    for r in reversed(range(beats)):
+        at = NOW - r * HEARTBEAT_EVERY
+        dark = b == "unreachable" and impaired(i, at)
+        up = not dark and not (i in FLAPPY and flap.random() < FLAPPY[i])
+        # The certificate is endorsed unless this validator's endorsement has
+        # lapsed, and it only lapsed from its own start time onward.
+        endorsed = up and not (b == "identity" and impaired(i, at))
         db.execute("""INSERT INTO reachability VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-            hashlib.sha256(f"reach{v['i']}-{r}".encode()).hexdigest(), "eu1",
+            hashlib.sha256(f"reach{i}-{r}".encode()).hexdigest(), "eu1",
             v["cons"], v["host"], 900_000 - r, ts(at), ts(at),
             1, 1 if up else 0, rnd.randint(4, 40), 1 if up else 0, rnd.randint(8, 90),
-            hashlib.sha256(f"cert{v['i']}".encode()).hexdigest() if up else "",
-            1 if (up and b != "identity") else 0,
-            "certificate validity window has lapsed" if b == "identity" else "",
+            hashlib.sha256(f"cert{i}".encode()).hexdigest() if up else "",
+            1 if endorsed else 0,
+            "certificate validity window has lapsed" if (up and not endorsed) else "",
             "OK" if up else "TCP_REFUSED",
             "" if up else f"dial tcp {v['host']}: connect: connection refused",
             rnd.randint(20, 200), "{}"))

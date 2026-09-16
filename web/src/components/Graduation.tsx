@@ -34,7 +34,15 @@ export default function Graduation({ points }: { points: { key: string; serve_ra
   const at = (i: number) =>
     isDefault ? DEFAULT_FRACTIONS[i] : points.length === 1 ? 0.5 : i / (points.length - 1);
 
-  const W = 720, H = 92, L = 8, R = 56, BASE = 56;
+  // The point labels hang below the rule by the shortfall, so the tallest
+  // possible drop is what decides the height: at 92px a point near 0% pushed
+  // its own label to y = 94, off the bottom of the viewBox and into the axis
+  // captions. The frame is sized from the deepest label rather than guessed.
+  const W = 720, L = 8, R = 56, BASE = 56;
+  const MAX_DROP = 22;                       // the shortfall hairline at 0%
+  const LABEL_Y = BASE + 16;                 // point labels, plus their drop
+  const H = LABEL_Y + MAX_DROP + 18;         // room for the axis captions below
+  const CAPTION_Y = H - 4;
   const x = (f: number) => L + f * (W - L - R);
 
   return (
@@ -45,8 +53,8 @@ export default function Graduation({ points }: { points: { key: string; serve_ra
         aria-label={`Serve rate at each schedule point: ${live.map((p) => `${p.key} ${fmtRate(p.serve_rate)}`).join(", ")}`}>
         {/* the obligation's own lifetime, settled on the left, deadline on the right */}
         <line x1={L} x2={W - R} y1={BASE} y2={BASE} stroke="var(--edge)" strokeWidth="1" />
-        <text x={L} y={H - 6} fontSize="10" fill="var(--text-3)">settled</text>
-        <text x={W - R} y={H - 6} fontSize="10" fill="var(--text-3)" textAnchor="end">must serve until</text>
+        <text x={L} y={CAPTION_Y} fontSize="10" fill="var(--text-3)">settled</text>
+        <text x={W - R} y={CAPTION_Y} fontSize="10" fill="var(--text-3)" textAnchor="end">must serve until</text>
         <line x1={W - R} x2={W - R} y1={BASE - 8} y2={BASE + 4} stroke="var(--text-3)" strokeWidth="1" />
 
         {points.map((p, i) => {
@@ -57,14 +65,14 @@ export default function Graduation({ points }: { points: { key: string; serve_ra
             return (
               <g key={p.key}>
                 <line x1={cx} x2={cx} y1={BASE - 5} y2={BASE} stroke="var(--text-3)" strokeWidth="1" strokeDasharray="1 2" />
-                <text x={cx} y={BASE + 16} fontSize="10" fill="var(--text-3)" textAnchor="middle">{p.key}</text>
+                <text x={cx} y={LABEL_Y} fontSize="10" fill="var(--text-3)" textAnchor="middle">{p.key}</text>
               </g>
             );
           }
           // The fault share hangs below the rule, so the eye reads the shortfall
           // rather than having to subtract it from the rate above.
           const bad = r.value === null ? 0 : 1 - r.value;
-          const drop = Math.max(bad > 0 ? 2 : 0, bad * 22);
+          const drop = Math.max(bad > 0 ? 2 : 0, bad * MAX_DROP);
           return (
             <g key={p.key}>
               <title>{`${p.key}: ${fmtRate(r)} of ${fmtCount(r)} probes`}</title>
@@ -76,7 +84,7 @@ export default function Graduation({ points }: { points: { key: string; serve_ra
               {drop > 0 && (
                 <line x1={cx} x2={cx} y1={BASE} y2={BASE + drop} stroke="var(--fault)" strokeWidth="2" />
               )}
-              <text x={cx} y={BASE + 16 + drop} fontSize="10" fill="var(--text-3)" textAnchor="middle">{p.key}</text>
+              <text x={cx} y={LABEL_Y + drop} fontSize="10" fill="var(--text-3)" textAnchor="middle">{p.key}</text>
             </g>
           );
         })}

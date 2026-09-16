@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -33,7 +34,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -136,6 +137,30 @@ var migrations = []migration{
 				 attested, validator_address, promise_hash, scheduled_at)`,
 		},
 	},
+	{
+		version: 6,
+		note:    "the same covering index led by validator, for the per-validator page",
+		stmts: []string{
+			// probes_window above leads with the two equalities and the range,
+			// which is right for the network aggregates and wrong for a page
+			// about one validator: validator_address sits seventh, so a query
+			// for one validator seeks to the start of the window and then walks
+			// every in-window probe of every validator, discarding all but its
+			// own. On an 85,000-probe store that made /v1/validators/{addr}
+			// 1.4s, and it is the page an operator opens about themselves.
+			//
+			// This is the same column set led by validator_address. Measured on
+			// that store: the per-validator class tally 13.2ms to 0.4ms and the
+			// obligation rate 10.8ms to 0.9ms, with the detail page computing
+			// eight of them (four windows, two queries each).
+			//
+			// probes_validator_time is kept: it orders by started_at directly,
+			// which this one cannot, and the recent-probes list needs that.
+			`CREATE INDEX IF NOT EXISTS probes_validator_window ON probes
+				(validator_address, assigned, phase, started_at, classification,
+				 schedule_label, attested, promise_hash, scheduled_at)`,
+		},
+	},
 }
 
 // Store wraps one SQLite database.
@@ -178,12 +203,47 @@ func OpenReadOnly(path string) (*Store, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("observer database %s: %w (start the collector first)", path, err)
 	}
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	// Tuning, in the order it matters.
+	//
+	// query_only is the safety property this constructor exists for: the file
+	// is still opened read-write at the OS level, which is what keeps WAL
+	// working (a WAL reader writes to the -shm file), and every statement is
+	// refused if it would write.
+	//
+	// cache_size is negative, which SQLite reads as kibibytes rather than
+	// pages: 48 MiB per connection. The aggregates here scan hundreds of
+	// thousands of index entries and the 2 MiB default evicts most of the
+	// index between one query and the next.
+	//
+	// mmap_size lets reads come from the page cache without a copy into
+	// SQLite's own. 1 GiB is a ceiling, not a reservation: only pages actually
+	// touched are mapped.
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=query_only(1)" +
+		"&_pragma=cache_size(-49152)&_pragma=mmap_size(1073741824)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	db.SetMaxOpenConns(1)
+	// Readers run concurrently. The writable Open above pins the pool to one
+	// connection because SQLite serialises writers anyway and a single
+	// connection avoids "database is locked" between our own goroutines; that
+	// reasoning does not carry over here, and copying it did real damage. In
+	// WAL mode any number of readers proceed at once without blocking each
+	// other, and this process never writes. With the pool at one, a background
+	// snapshot refresh — seconds of aggregate over hundreds of thousands of
+	// rows — held the only connection, so every unrelated request behind it
+	// (a blob page, the footer's counts) waited for the whole refresh. Each
+	// connection carries its own page cache, so the count is bounded rather
+	// than left to grow with concurrency.
+	conns := runtime.NumCPU()
+	if conns < 4 {
+		conns = 4
+	}
+	if conns > 8 {
+		conns = 8
+	}
+	db.SetMaxOpenConns(conns)
+	db.SetMaxIdleConns(conns)
 	// Every version from 1 to SchemaVersion must be present, not just the
 	// highest: a database with a gap is missing that migration's columns, and
 	// MAX alone would wave it through.

@@ -15,6 +15,76 @@ and retention end to end.
 - A funded `uploader` account with escrow deposited, for driving a fibre client
   or a Sentinel probe.
 
+## Stake shape, and why it matters more than validator count
+
+By default every validator gets near-equal stake. That is the wrong shape for
+most of what is worth testing, because almost everything a real network does
+differently follows from the stake being skewed rather than from there being
+more validators.
+
+```bash
+FIBRE_DEVNET_POWERS=fibre-devnet/powers/mocha-5.txt ./multi-node-fibre.sh 30
+```
+
+`fibre-devnet/powers/` holds voting-power snapshots of real networks, one power
+per line, largest first, with the chain, height and time they were taken in the
+header. `snapshot-powers.py <rpc>` refreshes one.
+
+A smaller set is picked by spreading evenly down the curve, tail included, so it
+keeps the shape of the real one. Taking the largest N instead — `FIBRE_DEVNET_POWER_PICK=head` —
+drops the entire class of small validators, and that class is where the
+interesting behaviour lives. Measured against the mocha-5 snapshot (79
+validators, 322,778,683 total power):
+
+| pick | share range | lifted to the 148-row floor |
+|---|---|---|
+| largest 20 | 2.33% – 13.1% | **0 of 20** |
+| spread 20 | 0.0000003% – 26.1% | 2 of 20 |
+| largest 30 | 1.89% – 10.6% | **0 of 30** |
+| spread 30 | 0.0000003% – 18.9% | 9 of 30 |
+| all 79 | 0.0000003% – 7.2% | **33 of 79** |
+
+Two thirds of the real network's validators are small enough that the clamp
+decides their row count, and on mocha the smallest has a voting power of **1**.
+A run that never lifts anyone to the floor has not tested the branch 42% of the
+network lives on.
+
+Twelve validators spread down that curve give a 27-fold range in assigned rows
+and trip both clamps at once — the largest is cut to the 4,096 ceiling, the
+smallest lifted to the 148 floor:
+
+```
+  power        share      rows
+  23110000     39.4225%   4096   <- ceiling (raw 4841)
+  ...
+  1             0.0000%    148   <- floor (raw 1)
+```
+
+Spreading preserves the shape but not the shares: sampling 12 of 79 pulls the
+largest from 7.2% up to 39%. For mocha's actual shares, run all 79 — at the
+measured 445 MB per validator (315 MB for the node, 130 MB for its fibre
+server) that needs about 35 GB of RAM.
+
+### Two thirds, and why most validators have no signature on chain
+
+The publisher stops collecting signatures once **two thirds of voting power**
+has answered (`fibre/validator/signature_set.go`), and the chain's own check
+uses the same threshold. Validators past that point still receive the shard —
+delivery continues in the background — but their signature never reaches the
+chain, so nothing on chain proves they hold it.
+
+It is a race, not a fixed list: membership follows arrival order, so the same
+validator is in some quorums and not others. Simulated against the mocha
+snapshot over 20,000 random arrival orders, the quorum holds a median of 53 of
+79 validators, and the chance of being in it is flat across stake — 68.9% for
+the largest ten, 66.5% for the smallest twenty-four. The floor on quorum size
+is 30, the case where the largest validators all answer first, and that is a
+bound rather than an expectation.
+
+The observer classifies those probes `UNATTESTED` and holds them out of the
+serve rate in both directions. A devnet with equal stake barely produces the
+class; one on a real curve produces it the way the real network will.
+
 ## Why a multi-node devnet
 
 `celestia-app/scripts/single-node-fibre.sh` brings up one validator — and with
