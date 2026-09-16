@@ -89,9 +89,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: bash -n (syntax)
-        run: for f in fibre-devnet/*.sh fibre-sentinel/*.sh; do bash -n "$f"; done
+        run: for f in fibre-devnet/*.sh fibre-sentinel/*.sh deploy/test/*.sh; do bash -n "$f"; done
+      - name: python syntax (deploy helpers)
+        run: for f in deploy/test/*.py; do python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$f"; done
       - name: shellcheck (errors only)
-        run: shellcheck --severity=error fibre-devnet/*.sh fibre-sentinel/*.sh
+        run: shellcheck --severity=error fibre-devnet/*.sh fibre-sentinel/*.sh deploy/test/*.sh
 
   # ---- the dashboard: static Next.js export ----
   web:

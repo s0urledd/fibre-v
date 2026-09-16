@@ -19,6 +19,7 @@ export type ClassCounts = Record<string, number>;
 export type Meta = {
   api_version: string;
   vantage: string;
+  vantage_info: VantageInfo;
   vantage_count: number;
   observed_from_one_location: boolean;
   chain_id: string;
@@ -33,6 +34,18 @@ export type Meta = {
   last_probe_at: string | null;
   server_time: string;
 };
+/** where this observer watches from; the first three are operator-declared */
+export type VantageInfo = {
+  name: string;
+  location?: string;
+  provider?: string;
+  asn?: string;
+  egress_addresses?: string[];
+  /** per-field: what a reader can actually check, and how */
+  verifiability: Record<string, string>;
+  complete: boolean;
+};
+
 export type RunStatus = { run_id: number; started_at: string; last_heartbeat_at: string; stopped_at: string | null; alive: boolean };
 
 export type Network = {

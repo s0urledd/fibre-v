@@ -31,7 +31,7 @@ export function Banner() {
     <div className="banner">
       <div className="wrap">
         {one ? (
-          <>Observed from one location{meta ? ` (vantage “${meta.vantage}”)` : ""}. A failed probe means this vantage could not fetch the rows at that time; it is not proof the validator is down. A successful probe is not proof of availability from elsewhere. <Link href="/methodology/#vantage">How probing works →</Link></>
+          <>Observed from one location{meta ? ` (vantage “${meta.vantage}”${meta.vantage_info?.location ? `, ${meta.vantage_info.location}` : ""}${meta.vantage_info?.asn ? `, ${meta.vantage_info.asn}` : ""})` : ""}. A failed probe means this vantage could not fetch the rows at that time; it is not proof the validator is down. A successful probe is not proof of availability from elsewhere. <Link href="/about/">Where this watches from →</Link> <Link href="/methodology/#vantage">How probing works →</Link></>
         ) : (
           <>Observed from {meta?.vantage_count} locations. <Link href="/methodology/#vantage">How probing works →</Link></>
         )}

@@ -28,10 +28,56 @@ import (
 // Version is reported in /v1/meta.
 const Version = "0.1.0"
 
+// VantageInfo describes where this observer watches from.
+//
+// Every reachability observation on the site is a statement about a network
+// path, and half that path is ours. A reader cannot judge an UNREACHABLE
+// without knowing where it was measured from, and a validator operator cannot
+// check our traffic against their own logs without knowing which addresses to
+// look for.
+//
+// These fields are not equally trustworthy, and the response says so rather
+// than presenting them as one thing:
+//
+//   - EgressAddresses is the anchor. An operator who sees connections from
+//     these addresses on their Fibre port can match them against this record,
+//     and one who sees connections from anywhere else knows they are not this
+//     observer.
+//   - ASN is checkable from those addresses by anyone, through public routing
+//     data (RIPEstat, whois, bgp.tools). It identifies the network our
+//     traffic is routed through, not a place: one provider can hold several
+//     autonomous systems, and one autonomous system can span countries.
+//   - Provider usually follows from the ASN, so it is checkable in the same
+//     way, just less precisely.
+//   - Location is the only genuinely unverifiable field. Geolocating an
+//     address is a guess, so this is the operator's word and nothing more.
+type VantageInfo struct {
+	// Name is the short label every response already carries.
+	Name string `json:"name"`
+	// Location is where the machine physically sits, e.g. "Helsinki,
+	// Finland". Operator's word; an address cannot prove it.
+	Location string `json:"location,omitempty"`
+	// Provider is the hosting company, e.g. "Hetzner".
+	Provider string `json:"provider,omitempty"`
+	// ASN is the autonomous system our traffic is routed through, e.g.
+	// "AS24940". Anyone can check it against EgressAddresses.
+	ASN string `json:"asn,omitempty"`
+	// EgressAddresses are the source addresses probes leave from, and the
+	// thing everything else here is checked against.
+	EgressAddresses []string `json:"egress_addresses,omitempty"`
+	// Verifiability says, per field, what a reader can check and how, so the
+	// page rendering these cannot present a guess as a fact.
+	Verifiability map[string]string `json:"verifiability"`
+	// Complete is false while the operator has not filled this in, which is
+	// what the dashboard checks before claiming the vantage is described.
+	Complete bool `json:"complete"`
+}
+
 // Server serves the API over a store.
 type Server struct {
 	st      *store.Store
 	vantage string
+	info    VantageInfo
 	mux     *http.ServeMux
 	log     *scan.Logger // may be nil (tests)
 }
@@ -42,7 +88,20 @@ func New(st *store.Store, vantage string) *Server { return NewWithLogger(st, van
 // NewWithLogger is New with somewhere to put the detail of an internal error
 // that the response deliberately withholds.
 func NewWithLogger(st *store.Store, vantage string, log *scan.Logger) *Server {
-	s := &Server{st: st, vantage: vantage, mux: http.NewServeMux(), log: log}
+	return NewWithVantage(st, VantageInfo{Name: vantage}, log)
+}
+
+// NewWithVantage is NewWithLogger with the vantage described rather than only
+// named.
+func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger) *Server {
+	info.Verifiability = map[string]string{
+		"egress_addresses": "the anchor: match these against the source addresses hitting your Fibre port",
+		"asn":              "check it against egress_addresses through public routing data (whois, RIPEstat, bgp.tools); it names the network, not a place",
+		"provider":         "usually follows from the asn, so checkable the same way",
+		"location":         "the operator's word: geolocating an address is a guess, so nothing here proves it",
+	}
+	info.Complete = info.Location != "" && info.Provider != "" && info.ASN != "" && len(info.EgressAddresses) > 0
+	s := &Server{st: st, vantage: info.Name, info: info, mux: http.NewServeMux(), log: log}
 	s.mux.HandleFunc("GET /v1/meta", s.handleMeta)
 	s.mux.HandleFunc("GET /v1/network", s.handleNetwork)
 	s.mux.HandleFunc("GET /v1/validators", s.handleValidators)
@@ -184,6 +243,7 @@ func rate(num, den int64) Rate {
 type metaResponse struct {
 	APIVersion             string       `json:"api_version"`
 	Vantage                string       `json:"vantage"`
+	VantageInfo            VantageInfo  `json:"vantage_info"`
 	VantageCount           int          `json:"vantage_count"`
 	ObservedFromOneVantage bool         `json:"observed_from_one_location"`
 	ChainID                string       `json:"chain_id"`
@@ -269,7 +329,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	var pinned string
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT pinned_celestia_app FROM publications ORDER BY settlement_height DESC LIMIT 1`).Scan(&pinned)
 	writeJSON(w, 200, metaResponse{
-		APIVersion: Version, Vantage: s.vantage, VantageCount: vantages, ObservedFromOneVantage: vantages == 1,
+		APIVersion: Version, Vantage: s.vantage, VantageInfo: s.info,
+		VantageCount: vantages, ObservedFromOneVantage: vantages == 1,
 		ChainID: meta["chain_id"], LastScannedHeight: meta["last_scanned_height"], EndpointsHeight: meta["endpoints_height"],
 		ProtocolParamsFinger: meta["protocol_params_fingerprint"], PinnedCelestiaApp: pinned,
 		Counts: counts, Collector: col, Prober: pr, LastProbeAt: lastProbe, Meta: meta, ServerTime: now.UTC(),

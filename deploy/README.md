@@ -28,11 +28,51 @@ collector. Back up the JSONL files and the database (see "Backups").
   keeps following blocks, retrying the params query every 100 heights;
   the collector and heartbeat log the missing registry and carry on. This
   is the expected state on mocha-5 until the v10 upgrade.
-- Outbound TCP to validators' Fibre ports (default 7980).
+- Outbound TCP to validators' Fibre ports (default 7980). Nothing more is
+  needed to observe them: `DownloadShard` performs no caller authorization
+  (celestia-app `fibre/server_download.go`), and the Fibre server's TLS config
+  sets no `ClientAuth`, so it never asks for a client certificate
+  (`fibre/server.go`). This observer is an ordinary client and can watch every
+  validator that registers a Fibre endpoint, not only its operator's own.
 - If the same host also runs your own validator and Fibre server: celestia-app
   main (#7848, 15 Sep 2026) recommends separate disks for Fibre shards and
   the node's data; the observer's data directory should not share the Fibre
   shard disk either.
+
+## 1a. Describe the vantage before you publish anything
+
+Every reachability verdict on the site is a statement about a network path,
+and half that path is yours. A reader cannot judge an `UNREACHABLE` without
+knowing where it was measured from, and a validator operator cannot check
+your traffic against their own logs without knowing which addresses to look
+for. So `observer.env` has four settings that a public vantage must fill in,
+and the API logs a warning at startup if it does not.
+
+```bash
+curl -4 https://ifconfig.co    # every address probes can leave from
+curl -6 https://ifconfig.co
+whois -h whois.radb.net "$(curl -4 -s https://ifconfig.co)" | grep -i origin
+```
+
+`VANTAGE_EGRESS` is the anchor and the only one that has to be exactly right:
+an operator who sees connections from those addresses on their Fibre port can
+match them against `/v1/meta`, and one who sees connections from anywhere
+else knows they are not you. Include every address the host can leave from,
+including IPv6, or a validator will see traffic it cannot attribute.
+
+`VANTAGE_ASN` is the one that earns its place. It names the network your
+traffic is routed through, not a place: one provider can hold several
+autonomous systems and one autonomous system can span countries. It matters
+because the most likely cause of a systematic false `UNREACHABLE` is a
+peering or rate-limiting problem between your network and a validator's. With
+the ASN published, an operator can look at their own peering and recognise
+it; without it, the same evidence reads as the validator's fault. It is also
+the field a third party can confirm from your egress addresses through public
+routing data, which is what makes the rest of the block more than a claim.
+
+`VANTAGE_PROVIDER` usually follows from the ASN. `VANTAGE_LOCATION` is the
+only one nothing proves, because geolocating an address is a guess, and
+`/v1/meta` says so per field rather than presenting all four as equal.
 
 ## 2. Build
 
@@ -142,10 +182,56 @@ counts match.
 
 ## 8. Checks after deploy
 
+Run the smoke test first. It installs nothing and changes nothing: it parses
+every unit, runs each one's own `ExecStart` with its own `EnvironmentFile` as
+its own `User`, and checks that each reaches the chain and writes where it
+should. That catches a binary in the wrong place, a flag that no longer
+exists, a variable the env file never sets, and a directory the service user
+cannot write, which is most of what actually goes wrong on a first deploy.
+
 ```bash
+sudo deploy/test/smoke.sh http://127.0.0.1:26657
+```
+
+It does not test the sandboxing directives, which is what the
+`systemd-analyze verify` step inside it is for, and it does not replace
+starting the units for real:
+
+```bash
+sudo systemctl start fibre-scan fibre-heartbeat fibre-collector fibre-probe fibre-api
+systemctl --no-pager status 'fibre-*' | grep -E 'Active|Loaded'
 curl -s https://observer.example.org/api/v1/meta | jq .collector.alive   # true
 curl -s https://observer.example.org/api/v1/network | jq .registered_endpoints
 ```
 
+Then check the site says where it watches from. If `complete` is false the
+dashboard is publishing reachability verdicts without telling a reader which
+network they were measured on, and the API will have logged a warning at
+startup:
+
+```bash
+curl -s https://observer.example.org/api/v1/meta | jq .vantage_info
+```
+
+Confirm the ASN you declared is the one your traffic actually carries, since
+that is the claim a reader will check:
+
+```bash
+whois -h whois.radb.net "$(curl -4 -s https://ifconfig.co)" | grep -i origin
+```
+
 Before Fibre activates on the chain, `publications` stays 0 and the site
 shows the "0 Fibre publications" notice; that is the expected state.
+
+## 9. What has been exercised
+
+The units, the environment file, the Caddyfile and the whole process chain
+were run against a local four-validator devnet on 16 September 2026: six
+units verified by `systemd-analyze`, scanner, heartbeat, collector, prober
+and API each started from their own unit as `fibre-observer`, writing to
+`/var/lib/fibre-observer/data`, with `/v1/meta` serving the vantage block.
+Both Caddyfiles validate under Caddy 2.8.4.
+
+What has **not** been exercised anywhere: a real domain, a real certificate,
+systemd as PID 1 actually supervising and restarting these units, and
+litestream replicating to real object storage. Those need a host.
