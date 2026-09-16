@@ -99,7 +99,8 @@ function Page() {
       </div>
       <p className="coverage">
         Reachability and endorsement are measured on a fixed heartbeat, so they speak for every validator with a registered
-        endpoint. Serving speaks only for obligations the chain proves, which is a smaller set and not the same one each window.{" "}
+        endpoint. Serving speaks only for obligations the chain proves, which is a smaller set, not the same one each window,
+        and selected by which validators answered the publisher fast enough.{" "}
         <Link href="/methodology/#quorum">Why most validators are unproven →</Link>
       </p>
 
