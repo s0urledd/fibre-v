@@ -1598,8 +1598,12 @@ func (s *Server) handleBlobs(w http.ResponseWriter, r *http.Request) {
 
 type assignmentRow struct {
 	ValidatorAddress string `json:"validator_address"`
-	VotingPower      int64  `json:"voting_power"`
-	RowCount         int    `json:"row_count"`
+	// Moniker is the name from the staking module, so this table reads like
+	// a list of validators rather than a list of hashes. Empty when the chain
+	// has no validator at this consensus address.
+	Moniker     string `json:"moniker,omitempty"`
+	VotingPower int64  `json:"voting_power"`
+	RowCount    int    `json:"row_count"`
 	// Attested: the settled promise carries a signature from this validator
 	// that verified against its consensus key, which is proof it stored the
 	// shard. false means unproven, null means the record predates
@@ -1619,7 +1623,11 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no publication with this promise hash")
 		return
 	}
-	rows, err := s.st.DB().QueryContext(ctx, `SELECT validator_address, voting_power, row_count, attested FROM assignments WHERE promise_hash = ? ORDER BY voting_power DESC, validator_address`, hash)
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT a.validator_address, a.voting_power, a.row_count, a.attested,
+			COALESCE(i.moniker, '')
+		FROM assignments a
+		LEFT JOIN validator_identities i ON i.cons_address = a.validator_address
+		WHERE a.promise_hash = ? ORDER BY a.voting_power DESC, a.validator_address`, hash)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
@@ -1628,7 +1636,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a assignmentRow
 		var att sql.NullInt64
-		if err := rows.Scan(&a.ValidatorAddress, &a.VotingPower, &a.RowCount, &att); err != nil {
+		if err := rows.Scan(&a.ValidatorAddress, &a.VotingPower, &a.RowCount, &att, &a.Moniker); err != nil {
 			rows.Close()
 			s.writeInternal(w, r.URL.Path, err)
 			return

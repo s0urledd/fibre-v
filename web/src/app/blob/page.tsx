@@ -9,7 +9,7 @@ import Timeline from "@/components/Timeline";
 type Detail = {
   blob: Blob;
   params: { shard_retention_s: number; payment_promise_timeout_s: number };
-  assignments: { validator_address: string; voting_power: number; row_count: number; attested: boolean | null }[];
+  assignments: { validator_address: string; moniker?: string; voting_power: number; row_count: number; attested: boolean | null }[];
   probes: Probe[];
 };
 
@@ -90,7 +90,10 @@ function Page() {
               const p = lastByVal.get(a.validator_address);
               return (
                 <tr key={a.validator_address}>
-                  <td className="mono"><Link href={`/validator/?addr=${a.validator_address}`}>{a.validator_address.slice(0, 12)}…</Link></td>
+                  <td>
+                    <Link href={`/validator/?addr=${a.validator_address}`}>{a.moniker || <span className="mono">{a.validator_address.slice(0, 12)}…</span>}</Link>
+                    {a.moniker && <div className="faint mono">{a.validator_address.slice(0, 12)}…</div>}
+                  </td>
                   <td className="right mono">{a.voting_power.toLocaleString("en-US")}</td>
                   <td className="right mono">{a.row_count}</td>
                   <td className={a.attested === false ? "muted" : ""} title={a.attested === true

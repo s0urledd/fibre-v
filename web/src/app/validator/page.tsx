@@ -21,8 +21,20 @@ function Page() {
   const v = data.validator;
   return (
     <>
-      <h1 className="mono">{v.cons_address || v.address}</h1>
+      {/* The operator's own name first; the consensus address is the key
+          every number below is joined on, so it stays directly underneath. */}
+      <h1>{v.moniker || <span className="mono">{v.cons_address || v.address}</span>}</h1>
+      {v.moniker && <p className="mono faint">{v.cons_address || v.address}</p>}
+      {v.jailed && (
+        <p className="notice">
+          The chain has jailed this validator. That is the chain&rsquo;s own status, not something this site measured, and it does not
+          release the validator from the shards it already signed for, so its rows below stand.
+        </p>
+      )}
       <dl className="kv">
+        {v.operator_address && <><dt>operator address</dt><dd className="mono">{v.operator_address}</dd></>}
+        {v.bond_status && <><dt>bond status</dt><dd className="mono" title="The chain's own status for this validator, not a measurement of this site.">{v.bond_status.replace("BOND_STATUS_", "").toLowerCase()}</dd></>}
+        {v.website && <><dt>website</dt><dd><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website}</a></dd></>}
         <dt>consensus address (hex)</dt><dd className="mono">{v.address}</dd>
         {v.cons_address && <><dt>consensus address</dt><dd className="mono">{v.cons_address}</dd></>}
         <dt>registered Fibre endpoint</dt><dd className="mono">{v.host || "— not registered"}{v.endpoint_since && <span className="muted"> since {utc(v.endpoint_since)}</span>}</dd>
