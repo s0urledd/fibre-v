@@ -74,7 +74,15 @@ function Page() {
                 <td className="mono">{p.schedule_label}</td>
                 <td>{p.phase.replace("_", " ")}</td>
                 <td><Badge cls={p.classification} title={p.classification_reason} /></td>
-                <td className="mono">{p.outcome}{p.attested === false && <span className="muted" title="No verified signature on this promise, so the obligation is unproven and this probe is outside the serve rate."> (unproven)</span>}</td>
+                <td className="mono">
+                  {p.outcome}
+                  {p.attested === false && <span className="muted" title="No verified signature on this promise, so the obligation is unproven and this probe is outside the serve rate."> (unproven)</span>}
+                  {p.retry_first_outcome && (
+                    <span className="faint" title={`The first attempt was ${p.retry_first_outcome}. The retry went to the same address from the same vantage, so a repeat is one observation twice, not two that agree.`}>
+                      {" "}(retried after {p.retry_first_outcome})
+                    </span>
+                  )}
+                </td>
                 <td className="right mono">{p.rows_expected ? `${p.rows_returned}/${p.rows_expected}` : "—"}</td>
                 <td className="right mono">{p.total_duration_ms}</td>
                 <td className="muted" style={{ whiteSpace: "normal", maxWidth: 360 }}>{p.raw_error || p.classification_reason}</td>

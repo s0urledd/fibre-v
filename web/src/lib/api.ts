@@ -59,6 +59,7 @@ export type Network = {
   probe_gaps: number;
   probe_gaps_by_outcome: ClassCounts;
   vantage_health: VantageHealth;
+  serve_rate_by_point: { key: string; serve_rate: Rate }[];
 };
 
 /** the most correlated failure in the window: likely ours, not theirs */

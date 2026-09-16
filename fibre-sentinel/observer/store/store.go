@@ -33,7 +33,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -65,6 +65,20 @@ var migrations = []migration{
 			`ALTER TABLE publications ADD COLUMN signatures_unmatched INTEGER`,
 			`ALTER TABLE publications ADD COLUMN signatures_out_of_position INTEGER`,
 			`CREATE INDEX IF NOT EXISTS assignments_attested ON assignments (promise_hash, attested)`,
+		},
+	},
+	{
+		version: 3,
+		note:    "endpoint rows say why they closed: the observer cannot tell deregistration from unbonding",
+		stmts: []string{
+			// The only signal behind a closure is that the (validator, host)
+			// pair stopped appearing in AllBondedFibreProviders. That happens
+			// on every jailing and every unbonding without the operator
+			// touching its Fibre registration, and x/valaddr has no
+			// deregistration message at all, so "closed" never meant
+			// "deregistered". The column says what was actually observed.
+			`ALTER TABLE endpoints ADD COLUMN closed_reason TEXT`,
+			`UPDATE endpoints SET closed_reason = 'left_bonded_provider_list' WHERE closed_at IS NOT NULL AND closed_reason IS NULL`,
 		},
 	},
 }
@@ -495,6 +509,14 @@ func probeAttested(m probe.Measurement) any {
 // endpoint history: unseen (validator, host) pairs open a row, pairs seen
 // again extend last_seen, open rows missing from the snapshot are closed.
 // Returns how many rows were opened and closed.
+//
+// "Closed" means only that the pair stopped appearing in the bonded provider
+// list, which is what closed_reason records. It is not deregistration:
+// x/valaddr has no message for that, and its msg server rejects an empty
+// host, so a registration once made stays on chain. Jailing and unbonding
+// both remove a provider from the bonded list while the entry survives, so
+// treating a closure as the operator withdrawing its endpoint would be
+// reading an event that cannot happen.
 func (s *Store) ObserveEndpoints(ctx context.Context, providers []scan.FibreProvider, height int64, now time.Time) (opened, closed int, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -539,7 +561,8 @@ func (s *Store) ObserveEndpoints(ctx context.Context, providers []scan.FibreProv
 		if seen[k] {
 			continue
 		}
-		if _, err := tx.Exec(`UPDATE endpoints SET closed_at = ?, closed_height = ? WHERE id = ?`, ts(now), height, id); err != nil {
+		if _, err := tx.Exec(`UPDATE endpoints SET closed_at = ?, closed_height = ?, closed_reason = ? WHERE id = ?`,
+			ts(now), height, "left_bonded_provider_list", id); err != nil {
 			return 0, 0, err
 		}
 		closed++

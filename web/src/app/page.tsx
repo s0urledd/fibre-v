@@ -110,6 +110,18 @@ export default function Overview() {
           {net.attestation.unknown_probes > 0 && <> {net.attestation.unknown_probes.toLocaleString("en-US")} probes predate signature verification and are counted under the older rules.</>}
         </div>
       )}
+      {net && net.serve_rate_by_point?.some((p) => p.serve_rate.den > 0) && (
+        <p className="muted">
+          By schedule point (the four in-window probes sit at 12%, 45%, 72% and 92% of each retention window, so they are not
+          interchangeable):{" "}
+          {net.serve_rate_by_point
+            .filter((p) => p.serve_rate.den > 0)
+            .map((p) => `${p.key} ${fmtRate(p.serve_rate)}`)
+            .join(" · ")}
+          . A rate that is fine early and poor late means shards pruned before the deadline; one that is poor throughout means
+          something else. The pooled number above cannot tell those apart.
+        </p>
+      )}
       <h2>Validators</h2>
       {vals ? <ValidatorTable rows={vals.validators} caption={`Every validator with a registered Fibre endpoint or at least one probe. Rates over the ${win} window; counts are probes.`} /> : <p className="muted">Loading validators…</p>}
       <Legend />

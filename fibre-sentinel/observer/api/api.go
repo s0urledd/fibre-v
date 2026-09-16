@@ -369,6 +369,11 @@ type networkResponse struct {
 	// twenty operators going down together, and a reader has to be able to
 	// see that rather than infer it.
 	VantageHealth vantageHealth `json:"vantage_health"`
+	// ByPoint is the serve rate per schedule point. The points sit at
+	// different fractions of the retention window, so a rate that is fine
+	// early and poor late is a different finding from one that is uniformly
+	// poor, and the pooled number cannot tell them apart.
+	ByPoint []stratum `json:"serve_rate_by_point"`
 }
 
 func (s *Server) classCountsWhere(ctx context.Context, where string, args ...any) (classCounts, int64, error) {
@@ -528,6 +533,42 @@ func (s *Server) worstCorrelatedPoint(ctx context.Context, win Window) (vantageH
 	return out, rows.Err()
 }
 
+// byPoint breaks a rate down by schedule point. The four in-window points are
+// deliberately packed toward the deadline (0.12, 0.45, 0.72, 0.92 of the
+// window), so they are not interchangeable: a validator that prunes early
+// fails late points and passes early ones, and a validator with a broken disk
+// fails all four. Pooling them hides which of those two a low rate is, and
+// two validators probed over different mixes of blob sizes and points can
+// have their pooled rates reverse relative to their per-stratum ones. The
+// breakdown is published so a reader can look rather than assume.
+func (s *Server) rateByPoint(ctx context.Context, where string, args ...any) ([]stratum, error) {
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT schedule_label,
+			COALESCE(SUM(CASE WHEN classification = 'HEALTHY' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END), 0)
+		FROM probes WHERE `+where+` GROUP BY schedule_label ORDER BY schedule_label`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []stratum{}
+	for rows.Next() {
+		var st stratum
+		var ok, bad int64
+		if err := rows.Scan(&st.Key, &ok, &bad); err != nil {
+			return nil, err
+		}
+		st.Rate = rate(ok, ok+bad)
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+// stratum is one slice of a rate's population, with the rate over that slice.
+type stratum struct {
+	Key  string `json:"key"`
+	Rate Rate   `json:"serve_rate"`
+}
+
 // coverage is how much of the rate's own population produced a verdict.
 // Without it a reader cannot tell a rate resting on twelve probes from one
 // resting on four hundred scheduled slots, and the probe and gap counts
@@ -625,6 +666,11 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp.VantageHealth, err = s.worstCorrelatedPoint(ctx, win); err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	if resp.ByPoint, err = s.rateByPoint(ctx,
+		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
