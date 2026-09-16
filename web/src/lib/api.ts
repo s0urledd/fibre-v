@@ -128,6 +128,12 @@ export type Validator = {
   expected_load_band: string;
   /** newest publication: true proven to have stored it, false unproven, null not recorded */
   attested_last: boolean | null;
+  /**
+   * The height whose validator set the row counts and voting power above were
+   * computed from. A validator that has left the active set keeps its last
+   * figures, and this says how stale they are.
+   */
+  assignment_height?: number;
 };
 
 export type Probe = {

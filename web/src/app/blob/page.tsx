@@ -3,8 +3,9 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useApi, type Blob, type Probe, utc, ago, bytes, nsDisplay } from "@/lib/api";
-import Badge, { Legend } from "@/components/Badge";
+import Verdict from "@/components/Verdict";
 import Timeline from "@/components/Timeline";
+import Square from "@/components/Square";
 
 type Detail = {
   blob: Blob;
@@ -16,30 +17,29 @@ type Detail = {
 function Recon({ b }: { b: Blob }) {
   const r = b.reconstructable;
   if (!r || r.status === "unknown") {
-    return <div className="card"><strong>Reconstructable: unknown.</strong> <span className="muted">{b.probe_count === 0 ? "No probe has run for this blob yet." : "Row lists were not recorded for this publication, or no in-window point has been probed."}</span></div>;
+    return <div className="notice"><strong>Reconstructable: unknown.</strong> <span className="muted">{b.probe_count === 0 ? "No probe has run for this blob yet." : "Row lists were not recorded for this publication, or no in-window point has been probed."}</span></div>;
   }
   if (r.status === "pending") {
-    return <div className="card"><strong>Reconstructable: pending.</strong> <span className="muted">No in-window point is complete yet: {r.probed_validators} of {r.assigned_validators} assigned validators have a result at point <span className="mono">{r.point}</span>. A validator without a row is a gap in observation, not a failure to serve.</span></div>;
+    return <div className="notice"><strong>Reconstructable: pending.</strong> <span className="muted">No in-window point is complete yet: {r.probed_validators} of {r.assigned_validators} assigned validators have a result at point <span className="mono">{r.point}</span>. A validator without a row is a gap in observation, not a failure to serve.</span></div>;
   }
-  // the encoded row count comes from the API (blob v0: 16384); never assume a ratio
+  // The encoded row count comes from the API (blob v0: 16,384); never assume a
+  // ratio. The square is the figure; the sentence under it is the qualification.
   const total = r.total_rows > 0 ? r.total_rows : r.needed_rows;
-  const colour = r.status === "no" ? "var(--status-fault)" : r.window_over ? "var(--status-expected-gone)" : "var(--status-healthy)";
   return (
-    <div className="card">
-      <strong>Reconstructable: {r.status}</strong>
-      {" — "}<span className="mono">{r.served_distinct_rows.toLocaleString("en-US")}</span> distinct rows observed served of <span className="mono">{total.toLocaleString("en-US")}</span>; <span className="mono">{r.needed_rows.toLocaleString("en-US")}</span> needed; {r.served_by_validators} of {r.assigned_validators} assigned validators served at point <span className="mono">{r.point}</span>
-      {r.attestation_known && <>, {r.served_by_attested} of the {r.attested_validators} the promise proves stored it</>}.
-      <div className="bar" style={{ ["--c" as string]: colour, marginTop: 6 }}>
-        <div className="fill" style={{ width: `${Math.min(100, (r.served_distinct_rows / total) * 100)}%` }} />
-        <div className="tick" style={{ left: `${(r.needed_rows / total) * 100}%` }} title={`${r.needed_rows} needed`} />
-      </div>
-      <p className="faint" style={{ marginTop: 6 }}>
-        Based on rows observed from one location at the last in-window probe ({utc(r.point_at)}). Rows not probed are not counted.
-        {r.window_over && " The retention window has since ended; shards may be pruned as specified."}
-        {" "}Degraded means enough rows were served but not every validator that was proven to owe this blob answered.
+    <div className="figure">
+      <span className="label">Reconstructable: {r.status}</span>
+      <Square served={r.served_distinct_rows} needed={r.needed_rows} total={total}
+        label={`at point ${r.point}`} />
+      <p className="sample">
+        {r.served_by_validators} of {r.assigned_validators} assigned validators served at point{" "}
+        <span className="mono">{r.point}</span>
+        {r.attestation_known && <>, {r.served_by_attested} of the {r.attested_validators} the promise proves stored it</>}.
+        {" "}Based on rows observed from one location at the last in-window probe ({utc(r.point_at)}); rows not probed are not counted.
+        {r.window_over && " The retention window has since ended, so shards may be pruned as specified."}
+        {" "}Degraded means enough rows were served but not every validator proven to owe this blob answered.
         {r.attestation_known && r.attested_validators < r.assigned_validators && (
-          <> {r.assigned_validators - r.attested_validators} of the {r.assigned_validators} assigned validators carry no verified signature on this
-          promise, so nothing proves they ever stored it. They cannot demote this verdict by staying quiet.</>
+          <> {r.assigned_validators - r.attested_validators} of the {r.assigned_validators} assigned validators carry no verified
+          signature on this promise, so nothing proves they ever stored it. They cannot demote this verdict by staying quiet.</>
         )}
       </p>
     </div>
@@ -79,7 +79,7 @@ function Page() {
       {data.probes.length === 0 ? <p className="muted">No probes yet.</p> : (
         <Timeline probes={data.probes} validators={byPower.map((a) => ({ address: a.validator_address, row_count: a.row_count, moniker: a.moniker }))} settled={b.settlement_time} mustServeUntil={b.must_serve_until} graceEnd={graceEnd} />
       )}
-      <Legend />
+      
       <h2>Assigned validators</h2>
       <div className="tablewrap">
         <table>
@@ -103,7 +103,7 @@ function Page() {
                       : "Recorded before the observer verified signatures."}>
                     {a.attested === true ? "proven" : a.attested === false ? "unproven" : "—"}
                   </td>
-                  <td>{p ? <Badge cls={p.classification} title={p.classification_reason} /> : <Badge cls="NOT_PROBED" />}</td>
+                  <td>{p ? <Verdict cls={p.classification} title={p.classification_reason} /> : <Verdict cls="NOT_PROBED" />}</td>
                   <td className="mono">{p ? `${utc(p.started_at)} (${p.schedule_label})` : "—"}</td>
                   <td className="right mono">{p && p.rows_expected ? `${p.rows_returned}/${p.rows_expected}` : "—"}</td>
                 </tr>

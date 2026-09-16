@@ -1,137 +1,203 @@
 "use client";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { type Validator, shortBech, utc, ago, enoughToRank, fmtCount, MIN_RATED } from "@/lib/api";
 import RateCell from "./Rate";
+import { Count, Mark } from "./Verdict";
 
-const IDENT: Record<string, string> = {
-  verified: "TLS identity verified against the consensus key",
-  mismatch: "TLS certificate is not endorsed by this validator's consensus key",
-  no_tls: "TLS handshake failed",
-  unverified: "TLS fine, no identity verdict recorded yet",
-  unreachable: "endpoint unreachable at the last probe",
-  unknown: "never probed",
-};
+/**
+ * Eight columns here; the rest are on the validator's own page. The previous
+ * table carried thirteen and measured 1,638px inside a 1,128px column, which
+ * put the serve rate and the fault count — the two numbers this product exists
+ * to publish — behind a horizontal scroll on a laptop. They are now columns two
+ * and three, immediately beside the pinned identity column, so no viewport can
+ * hide them.
+ *
+ * One column is gone rather than moved: "Tolerated" was always zero. TOLERATED
+ * is a grace-phase class and every rate query filters phase = 'in_window', so
+ * the count could never be anything else.
+ */
 
-// Rank by how bad the evidence is, not by whether any bad evidence exists.
-// The old rule put every validator with a single fault at the top, so one
-// unlucky probe outranked a hundred real ones, and that is the row a reader
-// screenshots. A validator with too few rated probes to state a rate is not
-// ranked among the worst at all: it is listed with its counts.
+// Rank by how bad the evidence is, not by whether any bad evidence exists. A
+// validator with too few rated probes to state a rate is not ranked among the
+// worst at all: it is listed with its counts.
 function severity(v: Validator): number {
-  const c = v.classes;
-  const faults = c.FAULT ?? 0;
+  const faults = v.classes.FAULT ?? 0;
   if (faults > 0 && enoughToRank(v.serve_rate)) return 0;
   if (faults > 0) return 1; // real faults, but too little evidence to rate
   if (v.reachable === false) return 2;
-  if ((c.UNREACHABLE ?? 0) > 0) return 3;
-  if ((c.TOLERATED ?? 0) > 0) return 4;
-  if (v.probe_count === 0) return 6;
-  return 5;
+  if ((v.classes.UNREACHABLE ?? 0) > 0) return 3;
+  if (v.probe_count === 0) return 5;
+  return 4;
 }
 
-// Within a severity band, worse rate first, then more evidence first.
+// Within a band, worse rate first, then more evidence first.
 function worse(a: Validator, b: Validator): number {
   const av = enoughToRank(a.serve_rate) ? (a.serve_rate.value ?? 2) : 2;
   const bv = enoughToRank(b.serve_rate) ? (b.serve_rate.value ?? 2) : 2;
   return av - bv || b.serve_rate.den - a.serve_rate.den;
 }
 
-// What the promise proves about this validator's obligation, for the column
-// and its tooltip. "unproven" is never an accusation: it says the chain is
-// silent, not that the validator failed.
-function attestedCell(v: Validator): { text: string; title: string } {
-  const a = v.attestation;
-  if (v.attested_last === true) return { text: "proven", title: "The newest publication carries this validator's signature, verified against its consensus key. A Fibre server writes the shard before it signs, so that signature is proof of storage." };
-  if (v.attested_last === false) {
-    const n = a?.unattested_probes ?? 0;
-    return { text: "unproven", title: `The newest publication carries no verified signature from this validator, so nothing on chain proves it stored that shard. The publisher stops collecting signatures once it has a safe quorum, so this is silence, not absence.${n ? ` ${n} probes in this window are excluded from the serve rate for that reason.` : ""}` };
+// What the promise proves about this validator's obligation. "unproven" is
+// never an accusation: it says the chain is silent, not that the validator
+// failed. Three states, because null means "predates verification".
+function attested(v: Validator): { text: string; cls: string; title: string } {
+  if (v.attested_last === true) {
+    return { text: "proven", cls: "", title: "The newest publication carries this validator's signature, verified against its consensus key. A Fibre server writes the shard before it signs, so that signature is proof of storage." };
   }
-  return { text: "—", title: "No publication with attestation recorded for this validator yet." };
+  if (v.attested_last === false) {
+    const n = v.attestation?.unattested_probes ?? 0;
+    return { text: "unproven", cls: "muted", title: `The newest publication carries no verified signature from this validator, so nothing on chain proves it stored that shard. The publisher stops collecting signatures once it has a safe quorum, so this is silence, not absence.${n ? ` ${n} probes in this window are held out of the serve rate for that reason.` : ""}` };
+  }
+  return { text: "—", cls: "faint", title: "No publication with attestation recorded for this validator yet." };
+}
+
+// The state word on the identity line, so a reader learns the endpoint's
+// condition without a column of its own. Never --fault: none of these is an
+// accusation, and the observer's own reach is half of every one of them.
+function endpointState(v: Validator): { word: string; title: string } | null {
+  if (v.reachable === null) return { word: "never probed", title: "No reachability probe has completed for this endpoint." };
+  if (!v.host) return { word: "no host", title: "No Fibre host registered in x/valaddr, so nobody could fetch this validator's rows." };
+  if (v.reachable === false) return { word: "unreachable now", title: `This site could not reach ${v.host} at the last heartbeat. From one location that is not distinguishable from a problem on this site's own path.` };
+  if (v.identity_status === "mismatch") return { word: "identity mismatch", title: v.identity_reason || "The TLS certificate is not endorsed by this validator's consensus key." };
+  if (v.identity_status === "no_tls") return { word: "no tls", title: v.identity_reason || "The TLS handshake failed." };
+  return null;
 }
 
 export default function ValidatorTable({ rows, caption }: { rows: Validator[]; caption: string }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<"severity" | "power" | "rate">("severity");
+
   const needle = q.trim().toLowerCase();
-  let list = rows.filter((v) => !needle
+  const matched = rows.filter((v) => !needle
     || v.address.includes(needle)
     || v.cons_address.includes(needle)
     || (v.moniker ?? "").toLowerCase().includes(needle)
     || (v.operator_address ?? "").toLowerCase().includes(needle)
     || v.host.toLowerCase().includes(needle));
-  list = [...list].sort((a, b) => {
+
+  const ranked = [...matched].sort((a, b) => {
     if (sort === "power") return b.voting_power - a.voting_power || a.address.localeCompare(b.address);
     if (sort === "rate") return worse(a, b) || b.voting_power - a.voting_power;
     return severity(a) - severity(b) || worse(a, b) || b.voting_power - a.voting_power;
   });
+
+  /**
+   * The order is frozen while the reader is looking at it.
+   *
+   * This page polls every thirty seconds and publishes accusations against
+   * named operators. A row that moves under the cursor mid-read — because a
+   * probe landed and a validator changed severity band — can hand a reader the
+   * wrong name, which is the same class of error as the ones the taxonomy
+   * exists to prevent. So a new ranking is computed but not applied: the table
+   * keeps the order it had and says the order has changed, and the reader
+   * decides when to take it.
+   */
+  const [frozen, setFrozen] = useState<string[] | null>(null);
+  const key = ranked.map((v) => v.address).join(",");
+  const sig = useRef(key);
+  const [moved, setMoved] = useState(false);
+  useEffect(() => {
+    if (sig.current === key) return;
+    sig.current = key;
+    if (frozen === null) return;     // nothing pinned yet: take the new order
+    setMoved(true);
+  }, [key, frozen]);
+  // The first completed render pins the order; changing sort or search retakes it.
+  useEffect(() => { setFrozen(null); setMoved(false); }, [sort, needle]);
+  useEffect(() => { if (frozen === null && ranked.length) setFrozen(ranked.map((v) => v.address)); },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [frozen, key]);
+
+  let list = ranked;
+  if (frozen && moved) {
+    const pos = new Map(frozen.map((a, i) => [a, i]));
+    list = [...ranked].sort((a, b) => (pos.get(a.address) ?? 1e9) - (pos.get(b.address) ?? 1e9));
+  }
+  const total = rows.reduce((s, v) => s + v.voting_power, 0);
+
   return (
     <>
       <div className="controls">
-        <input type="search" placeholder="moniker, consensus address, operator address, host" value={q} onChange={(e) => setQ(e.target.value)} aria-label="search validators" />
-        <span className="muted">sort:</span>
+        <input type="search" placeholder="moniker, consensus address, operator address, host"
+          value={q} onChange={(e) => setQ(e.target.value)} aria-label="search validators" />
+        <span className="faint">sort</span>
         {(["severity", "power", "rate"] as const).map((s) => (
-          <button key={s} className={sort === s ? "on" : ""} onClick={() => setSort(s)}>{s === "severity" ? "worst first" : s === "power" ? "voting power" : "serve rate"}</button>
+          <button key={s} aria-pressed={sort === s} onClick={() => setSort(s)}>
+            {s === "severity" ? "worst first" : s === "power" ? "voting power" : "serve rate"}
+          </button>
         ))}
+        {moved && (
+          <button onClick={() => { setMoved(false); setFrozen(ranked.map((v) => v.address)); }}
+            title="New probes have changed the ranking. The table is holding its previous order so a row does not move while you are reading it.">
+            order changed — reorder
+          </button>
+        )}
       </div>
       <div className="tablewrap">
         <table>
-          <caption>{caption}{needle && ` · ${list.length} of ${rows.length} match`}</caption>
+          <caption>
+            {caption}{needle && ` · ${list.length} of ${rows.length} match`}
+          </caption>
           <thead>
             <tr>
-              <th>Validator</th>
-              <th>Fibre endpoint</th>
-              <th>Reachable</th>
-              <th>TLS identity</th>
+              <th className="col-pin">Validator</th>
               <th className="right">Serve rate</th>
-              <th>Obligation</th>
               <th className="right">Fault</th>
               <th className="right">Unreachable</th>
-              <th className="right">Tolerated</th>
-              <th className="right">Not probed</th>
+              <th className="right">Unattested</th>
+              <th>Obligation</th>
               <th className="right">Voting power</th>
-              <th className="right">Rows (band)</th>
               <th className="right">Last probe</th>
             </tr>
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr><td colSpan={13} className="muted">{rows.length === 0 ? "No validators seen yet: no registered Fibre endpoint and no probe." : `No validator matches “${q}”. Try the consensus address or the Fibre host.`}</td></tr>
+              <tr><td colSpan={8} className="muted">
+                {rows.length === 0
+                  ? "No validators seen yet: no registered Fibre endpoint and no probe."
+                  : `No validator matches “${q}”. Try the consensus address or the Fibre host.`}
+              </td></tr>
             )}
-            {list.map((v) => (
-              <tr key={v.address}>
-                <td>
-                  {/* The name the operator chose comes first. A reader knows a
-                      validator as "P-OPS Team", not as twenty hex characters,
-                      and every Celestia explorer they use shows it that way.
-                      The consensus address stays underneath, because it is
-                      the identifier every number on this row is keyed by. */}
-                  <Link href={`/validator/?addr=${v.address}`}>
-                    {v.moniker || (v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 8) + " ••• " + v.address.slice(-8))}
-                  </Link>
-                  {v.jailed && <span className="faint" title="The chain has jailed this validator. It still owes the shards it signed for, so it stays in this table."> jailed</span>}
-                  <div className="faint mono" title={v.cons_address || v.address}>
-                    {v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 12) + "…"}
-                  </div>
-                </td>
-                <td className="mono">{v.host || <span className="muted">— not registered</span>}</td>
-                <td>{v.reachable === null ? <span className="muted">not probed</span> : v.reachable ? "yes" : <span className="err">no</span>}</td>
-                <td title={v.identity_reason || IDENT[v.identity_status]}>{v.identity_status === "mismatch" || v.identity_status === "no_tls" ? <span className="err">{v.identity_status}</span> : v.identity_status}</td>
-                <td className="right mono" title={enoughToRank(v.serve_rate)
-                  ? `${fmtCount(v.serve_rate)} probes the validator was proven to owe`
-                  : `only ${v.serve_rate.den} rated probes: too few to state as a percentage (floor ${MIN_RATED})`}>
-                  <RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation} />
-                </td>
-                <td className={attestedCell(v).text === "unproven" ? "muted" : ""} title={attestedCell(v).title}>{attestedCell(v).text}</td>
-                <td className="right mono">{v.classes.FAULT ?? 0}</td>
-                <td className="right mono" title="Probes where this site could not complete a conversation with the endpoint. From one location that is not distinguishable from a problem on this site's own path, so it is kept out of the serve rate.">{v.classes.UNREACHABLE ?? 0}</td>
-                <td className="right mono" title="Not found or unreachable within the measured prune lag after must_serve_until. Never counted against the validator.">{v.classes.TOLERATED ?? 0}</td>
-                <td className="right mono">{(v.classes.NOT_PROBED ?? 0) + (v.classes.PROBE_ERROR ?? 0)}</td>
-                <td className="right mono">{v.voting_power.toLocaleString("en-US")}</td>
-                <td className="right mono">{v.assigned_rows_last ? `${v.assigned_rows_last} (${v.expected_load_band})` : "—"}</td>
-                <td className="right mono" title={utc(v.last_seen_at)}>{v.last_seen_at ? ago(v.last_seen_at) : "—"}</td>
-              </tr>
-            ))}
+            {list.map((v) => {
+              const a = attested(v);
+              const st = endpointState(v);
+              const share = total > 0 ? (v.voting_power / total) * 100 : 0;
+              return (
+                <tr key={v.address}>
+                  <td className="col-pin">
+                    <Link className="name" href={`/validator/?addr=${v.address}`}>
+                      {v.moniker || (v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 8) + " ••• " + v.address.slice(-8))}
+                    </Link>
+                    {v.jailed && <span className="chip" title="The chain has jailed this validator. It still owes the shards it signed for, so it stays in this table.">jailed</span>}
+                    {st && <span className="chip" title={st.title}><Mark tier="hold" /> {st.word}</span>}
+                    <span className="addr" title={v.cons_address || v.address}>
+                      {v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 12) + "…"}
+                    </span>
+                  </td>
+                  <td className="right" title={enoughToRank(v.serve_rate)
+                    ? `${fmtCount(v.serve_rate)} probes the chain proves the validator owed`
+                    : `only ${v.serve_rate.den} rated probes: too few to state as a percentage (floor ${MIN_RATED})`}>
+                    <RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation} />
+                  </td>
+                  <td className="right" title="Reached, and failed to hand over a shard the chain proves it stored. The only class counted against a validator.">
+                    <Count n={v.classes.FAULT} tier="fault" />
+                  </td>
+                  <td className="right" title="This site could not complete a conversation with the endpoint while the validator was under obligation. Half of that path is ours, so it is held out of the rate.">
+                    <Count n={v.classes.UNREACHABLE} tier="hold" />
+                  </td>
+                  <td className="right" title="Probes of a settled promise that carries no verified signature from this validator. Nothing proves it was ever sent the shard, so the probe is held out of the rate in both directions.">
+                    <Count n={v.serve_rate_held_out?.UNATTESTED} tier="held" />
+                  </td>
+                  <td className={a.cls} title={a.title}>{a.text}</td>
+                  <td className="right mono" title={`${share.toFixed(2)}% of the voting power in this table`}>
+                    {v.voting_power.toLocaleString("en-US")}
+                    <span className="n faint"> {share.toFixed(1)}%</span>
+                  </td>
+                  <td className="right mono faint" title={utc(v.last_seen_at)}>{v.last_seen_at ? ago(v.last_seen_at) : "—"}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
