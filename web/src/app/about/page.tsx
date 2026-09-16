@@ -2,7 +2,7 @@ export const metadata = { title: "About · Fibre observer" };
 
 export default function About() {
   return (
-    <>
+    <div className="prose">
       <h1>About</h1>
       <p>An independent observer for Celestia Fibre (CIP-51). It reads what it needs from the chain, recomputes the rest, and probes validators&rsquo; registered Fibre endpoints from outside as an ordinary client. Nothing here trusts a validator&rsquo;s self-report.</p>
       <h2>Why it exists</h2>
@@ -26,6 +26,6 @@ export default function About() {
         <li>Before Fibre activates on this chain there are no publications, and the site shows exactly that.</li>
         <li>Probes are timed but not judged: throughput is published with no threshold, because from one location part of every millisecond is this site&rsquo;s own path.</li>
       </ul>
-    </>
+    </div>
   );
 }

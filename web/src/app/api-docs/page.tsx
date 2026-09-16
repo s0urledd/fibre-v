@@ -16,7 +16,7 @@ const ROUTES: [string, string][] = [
 
 export default function ApiDocs() {
   return (
-    <>
+    <div className="prose">
       <h1>API</h1>
       <p className="muted">Read-only JSON, versioned under <code>/v1/</code>. Base URL for this deployment: <code>{API_BASE}</code>. CORS is open; responses carry <code>Cache-Control: public, max-age=15</code>. No authentication, no rate limit yet; be reasonable.</p>
       <div className="tablewrap">
@@ -45,6 +45,6 @@ export default function ApiDocs() {
         <li>Each probe carries <code>clock_offset_ms</code> (the observer&apos;s clock against chain time) and, when it was retried after a transport timeout, <code>retry_first_outcome</code>.</li>
         <li>The underlying files are also plain: <code>publications.jsonl</code>, <code>measurements.jsonl</code> and <code>reachability.jsonl</code> are append-only records the store ingests; the SQLite file can be copied and queried directly.</li>
       </ul>
-    </>
+    </div>
   );
 }

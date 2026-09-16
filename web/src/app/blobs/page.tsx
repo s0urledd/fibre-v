@@ -29,21 +29,26 @@ function recon(b: Blob): { word: string; tier: Tier; title: string } {
 function Page() {
   const nsParam = useSearchParams().get("namespace") ?? "";
   const [ns, setNs] = useState(nsParam);
-  const q = ns.trim() ? `/v1/blobs?limit=200&namespace=${encodeURIComponent(ns.trim())}` : "/v1/blobs?limit=200";
+  const [limit, setLimit] = useState(50);
+  const q = ns.trim() ? `/v1/blobs?limit=${limit}&namespace=${encodeURIComponent(ns.trim())}` : `/v1/blobs?limit=${limit}`;
   const { data, error, loading } = useApi<{ blobs: Blob[] }>(q);
   return (
     <>
-      <h1>Blobs</h1>
-      <p className="muted">One row per <code>MsgPayForFibre</code> settled on chain. Newest first. Reconstructable means at least the needed number of distinct rows were served at the last in-window probe.</p>
-      <div className="controls">
-        <input type="search" placeholder="namespace (56 hex)" value={ns} onChange={(e) => setNs(e.target.value)} aria-label="namespace filter" />
+      <div className="section-head">
+        <h1>Blobs</h1>
+        <span className="sample">one row per <code>MsgPayForFibre</code>, newest first</span>
+        <span className="spacer" />
+        <input type="search" placeholder="Filter by namespace (56 hex)" value={ns} onChange={(e) => setNs(e.target.value)} aria-label="namespace filter" />
       </div>
       {error && <p className="notice err">{error}</p>}
       {loading && !data && <p className="muted">Loading…</p>}
       {data && (
         <div className="tablewrap">
           <table>
-            <caption>{data.blobs.length} publications{ns.trim() && ` in namespace ${ns.trim()}`}</caption>
+            <caption>
+              {data.blobs.length} publications{ns.trim() && ` in namespace ${ns.trim()}`}
+              {data.blobs.length >= limit && limit < 500 && <> · <button className="btn" onClick={() => setLimit(Math.min(500, limit * 4))}>show more</button></>}
+            </caption>
             <thead><tr><th>promise</th><th>settled (UTC)</th><th className="right">height</th><th>namespace</th><th className="right">size</th><th className="right">validators</th><th className="right">probes</th><th>serve until</th><th>reconstructable</th></tr></thead>
             <tbody>
               {data.blobs.length === 0 && <tr><td colSpan={9} className="muted">No publications recorded{ns.trim() ? " in this namespace" : ""}.</td></tr>}

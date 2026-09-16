@@ -4,7 +4,7 @@ export const metadata = { title: "Methodology · Fibre observer" };
 
 export default function Methodology() {
   return (
-    <>
+    <div className="prose">
       <h1>Methodology</h1>
       <p className="muted">What is measured, from where, and what each word on this site means. The source of truth is <code>docs/verdicts.md</code> and <code>docs/research/R4-probe-etiquette.md</code> in the repository; this page restates them.</p>
 
@@ -92,6 +92,6 @@ export default function Methodology() {
         <li>It does not extrapolate: rows not probed are not counted as served.</li>
         <li>It does not rank validators by anything other than the stored probe rows you can download from the API.</li>
       </ul>
-    </>
+    </div>
   );
 }
