@@ -32,7 +32,9 @@ export default function ApiDocs() {
         <li>Windows are fixed lookbacks from the server's clock; the response echoes <code>window.start</code> and <code>window.end</code>.</li>
         <li>Classes are the prober's classification strings (see Methodology). <code>NOT_PROBED</code> and <code>PROBE_ERROR</code> are gaps and are never in a rate.</li>
         <li>A blob's <code>reconstructable.status</code> is <code>yes</code>, <code>degraded</code>, <code>no</code>, <code>pending</code> (no in-window probe point is complete yet) or <code>unknown</code>; <code>pending</code> and <code>unknown</code> blobs are left out of the network rate.</li>
-        <li><code>limit</code> outside 1..500 (blobs) or 1..1000 (probes) is a 400, never a silent default.</li>
+        <li><code>limit</code> outside 1..500 (blobs) or 1..1000 (probes) is a 400, never a silent default. Errors are <code>no-store</code>; only 200s are cacheable.</li>
+        <li>Blob pagination is a two-part cursor: <code>before_height</code> plus <code>before_tx_index</code>, because one block can settle several publications.</li>
+        <li>Each probe carries <code>clock_offset_ms</code> (the observer&apos;s clock against chain time) and, when it was retried after a transport timeout, <code>retry_first_outcome</code>.</li>
         <li>The underlying files are also plain: <code>publications.jsonl</code>, <code>measurements.jsonl</code> and <code>reachability.jsonl</code> are append-only records the store ingests; the SQLite file can be copied and queried directly.</li>
       </ul>
     </>

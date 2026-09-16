@@ -51,6 +51,7 @@ bound and sets `must_serve_until_ambiguous` on the publication.
 | `RPC_DEADLINE` | the download did not finish within the observer's own deadline (base plus shard size at 1 MiB/s); the observer gave up, the validator was not judged |
 | `RPC_ERROR` | any other gRPC error |
 | `NO_REGISTERED_HOST` | the validator has no fibre host in `x/valaddr`, so nobody can fetch its rows; treated as unreachable |
+| `PROBE_ERROR` (no coder) | the observer could not build the verifier for this blob's `(original_rows, total_rows)`, so no download was attempted |
 | `REACHABLE` | TCP, TLS and identity passed and the download was deliberately skipped (heartbeat, or policy backoff); no retention verdict |
 | `PROBE_ERROR` | the observer's own probe failed (bug or config), not the target |
 | `MISSED` | the scheduled point elapsed before the prober ran it |
@@ -101,6 +102,11 @@ One sentence each, and what a reader should conclude.
   validator once.
 - `PROBE_ERROR`, `NOT_PROBED` and `MISSED` are excluded from every rate and
   rendered as gaps.
+- Every measurement carries `clock_offset_ms`, the observer's clock minus the
+  chain's latest block time when the probe ran. Phases are decided against the
+  local clock and the grace span is only a few minutes wide, so a vantage
+  whose offset is large can be discounted after the fact. The prober logs a
+  warning past 30 seconds.
 
 ## Adding a class
 

@@ -129,6 +129,12 @@ type Input struct {
 	// (ShardBytes); it scales the download deadline. 0 = base deadline only.
 	ExpectedShardBytes int64
 
+	// ClockOffsetMS is the observer's wall clock minus the chain's latest
+	// block time, in milliseconds, as measured by the caller. Every phase
+	// decision is made against the local clock, so the offset is recorded
+	// with the probe: a reader can discount a vantage whose clock drifted.
+	ClockOffsetMS int64
+
 	// SkipDownload stops after the identity step (L1-L3 only). Used by the
 	// reachability heartbeat and by the probe policy's backoff, where the
 	// expensive DownloadShard would only repeat a transport failure.
@@ -159,6 +165,7 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		ScheduledAt:        in.SchedulePoint.At.UTC(),
 		StartedAt:          now,
 		Phase:              phase,
+		ClockOffsetMS:      in.ClockOffsetMS,
 		LatenessMS:         now.Sub(in.SchedulePoint.At).Milliseconds(),
 	}
 	defer func() {
@@ -167,6 +174,14 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		m.Classification, m.ClassificationReason = Classify(m.Assigned, m.Phase, m.Outcome)
 	}()
 
+	if !in.SkipDownload && coder == nil {
+		// A download needs the rsema1d coder for this (K, N); without it the
+		// returned rows could not be verified, so there is nothing to judge
+		// and no reason to open a connection.
+		m.Outcome = OutcomeProbeError
+		m.RawError = "no coder for this blob version (originalRows/totalRows); cannot verify rows"
+		return m
+	}
 	if in.Target.Host == "" {
 		// A validator with no x/valaddr registration cannot be reached by
 		// anyone; that is a fact about the validator, not about the probe.
@@ -290,7 +305,9 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		m.Identity.ClaimedNotBefore = claimed.NotBefore.UTC().Format(time.RFC3339)
 		m.Identity.ClaimedNotAfter = claimed.NotAfter.UTC().Format(time.RFC3339)
 	}
-	verr := tlsverify.VerifyCertificateAt(peerCert, in.Target.PubKey, in.ChainID, time.Now())
+	// The identity check is pure computation on the peer cert; the timeout
+	// bounds it anyway so a pathological certificate cannot stall a probe.
+	verr := verifyWithin(peerCert, in.Target.PubKey, in.ChainID, to.Identity)
 	m.Identity.DurationMS = sinceMS(t0)
 	m.Identity.OK = verr == nil
 	if verr != nil {
@@ -491,6 +508,23 @@ func classifyDownloadError(err error) Outcome {
 		return OutcomeTLSFail
 	default:
 		return OutcomeRPCError
+	}
+}
+
+// verifyWithin runs the identity verification under a timeout. Verification is
+// CPU-bound (ASN.1 parse plus one ed25519 verify) and normally takes
+// microseconds; the bound exists so that no single probe step is unbounded.
+func verifyWithin(cert *x509.Certificate, expected ed25519.PublicKey, chainID string, timeout time.Duration) error {
+	type result struct{ err error }
+	ch := make(chan result, 1)
+	go func() { ch <- result{tlsverify.VerifyCertificateAt(cert, expected, chainID, time.Now())} }()
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case r := <-ch:
+		return r.err
+	case <-t.C:
+		return fmt.Errorf("identity verification did not finish within %s", timeout)
 	}
 }
 

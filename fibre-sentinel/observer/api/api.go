@@ -21,6 +21,7 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
 
@@ -32,11 +33,16 @@ type Server struct {
 	st      *store.Store
 	vantage string
 	mux     *http.ServeMux
+	log     *scan.Logger // may be nil (tests)
 }
 
 // New builds a Server. vantage is the label rendered on every response.
-func New(st *store.Store, vantage string) *Server {
-	s := &Server{st: st, vantage: vantage, mux: http.NewServeMux()}
+func New(st *store.Store, vantage string) *Server { return NewWithLogger(st, vantage, nil) }
+
+// NewWithLogger is New with somewhere to put the detail of an internal error
+// that the response deliberately withholds.
+func NewWithLogger(st *store.Store, vantage string, log *scan.Logger) *Server {
+	s := &Server{st: st, vantage: vantage, mux: http.NewServeMux(), log: log}
 	s.mux.HandleFunc("GET /v1/meta", s.handleMeta)
 	s.mux.HandleFunc("GET /v1/network", s.handleNetwork)
 	s.mux.HandleFunc("GET /v1/validators", s.handleValidators)
@@ -49,10 +55,56 @@ func New(st *store.Store, vantage string) *Server {
 }
 
 // ServeHTTP implements http.Handler with the headers every response shares.
+// Only successful responses are cacheable: a 400 or a 404 held for 15 seconds
+// by a proxy outlives the mistake that caused it.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Cache-Control", "public, max-age=15")
-	s.mux.ServeHTTP(w, r)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	rec := &statusWriter{ResponseWriter: w}
+	s.mux.ServeHTTP(rec, r)
+}
+
+// statusWriter sets Cache-Control from the status code as the handler writes
+// its header, and answers an unmatched route in the JSON shape the rest of
+// the API uses.
+type statusWriter struct {
+	http.ResponseWriter
+	wrote bool
+	// swallow is set when this writer supplied the body itself (the JSON 404
+	// in place of ServeMux's text/plain one), so the handler's own bytes are
+	// dropped instead of being appended to it.
+	swallow bool
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	if w.wrote {
+		return
+	}
+	w.wrote = true
+	if status >= 200 && status < 300 {
+		w.Header().Set("Cache-Control", "public, max-age=15")
+	} else {
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	if status == http.StatusNotFound && !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+		w.swallow = true
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.ResponseWriter.WriteHeader(status)
+		_, _ = w.ResponseWriter.Write([]byte(`{"error":"no such endpoint; see /v1/meta"}` + "\n"))
+		return
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.swallow {
+		return len(b), nil
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -65,6 +117,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"error": msg})
+}
+
+// writeInternal logs the real error and tells the client only that something
+// went wrong: SQLite errors carry the database path and schema details that a
+// public endpoint has no business publishing.
+func (s *Server) writeInternal(w http.ResponseWriter, where string, err error) {
+	if s.log != nil {
+		s.log.Printf("api: %s: %v", where, err)
+	}
+	writeJSON(w, 500, map[string]any{"error": "internal error"})
 }
 
 // Window is a fixed lookback the dashboard offers.
@@ -179,13 +241,13 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	counts, err := s.st.Count(ctx)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	meta := map[string]string{}
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT key, value FROM meta`)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	for rows.Next() {
@@ -235,7 +297,7 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.DB().QueryContext(r.Context(), `SELECT id, component, vantage, version, started_at, last_heartbeat_at, stopped_at, stop_reason
 		FROM observer_runs WHERE last_heartbeat_at >= ? ORDER BY started_at`, win.startArg())
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	defer rows.Close()
@@ -243,7 +305,7 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var rr runRow
 		if err := rows.Scan(&rr.ID, &rr.Component, &rr.Vantage, &rr.Version, &rr.StartedAt, &rr.LastHeartbeat, &rr.StoppedAt, &rr.StopReason); err != nil {
-			writeErr(w, 500, err.Error())
+			s.writeInternal(w, r.URL.Path, err)
 			return
 		}
 		out = append(out, rr)
@@ -313,7 +375,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 
 	classes, total, err := s.classCountsWhere(ctx, `started_at >= ? AND assigned = 1 AND phase IN ('in_window','grace')`, win.startArg())
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	resp.Classes = classes
@@ -324,7 +386,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 
 	reach, err := s.reachabilityNow(ctx)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	var reachable int64
@@ -339,7 +401,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 
 	recon, err := s.reconstructableCount(ctx, win)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	resp.Reconstructable = recon
@@ -435,7 +497,9 @@ func identityStatus(st *reachState) string {
 	if st.identityReason != "" {
 		return "mismatch"
 	}
-	return "no_tls"
+	// TCP and TLS both succeeded, but no identity verdict was recorded (an
+	// older row, or a probe that stopped before the identity step).
+	return "unverified"
 }
 
 func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]validatorRow, error) {
@@ -564,9 +628,15 @@ func sortRows(v []validatorRow) {
 }
 
 func consHex(bech string) (string, error) {
-	_, raw, err := bech32.DecodeAndConvert(bech)
+	hrp, raw, err := bech32.DecodeAndConvert(bech)
 	if err != nil {
 		return "", err
+	}
+	// An operator address (…valoper1…) and an account address decode to 20
+	// bytes just as well, and would silently be looked up as a consensus
+	// address that can never match.
+	if !strings.HasSuffix(hrp, "valcons") {
+		return "", fmt.Errorf("address prefix %q is not a consensus address (…valcons1…)", hrp)
 	}
 	if len(raw) != 20 {
 		return "", fmt.Errorf("consensus address %d bytes, want 20", len(raw))
@@ -593,7 +663,7 @@ func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.validatorRows(r.Context(), win, "")
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"window": win, "vantage": s.vantage, "validators": rows})
@@ -608,9 +678,11 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	ctx := r.Context()
 	type span struct {
-		Window  Window      `json:"window"`
-		Rate    Rate        `json:"serve_rate"`
-		Count   int64       `json:"probe_count"`
+		Window Window `json:"window"`
+		Rate   Rate   `json:"serve_rate"`
+		// Count is the assigned in-window+grace probes this window's rate is
+		// built from, not every row for the validator (validator.probe_count).
+		Count   int64       `json:"rated_probe_count"`
 		Classes classCounts `json:"classes"`
 	}
 	var spans []span
@@ -618,14 +690,14 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		win := Window{Name: name, Span: windows[name], Start: now.Add(-windows[name]), End: now}
 		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND assigned = 1 AND phase IN ('in_window','grace')`, addr, win.startArg())
 		if err != nil {
-			writeErr(w, 500, err.Error())
+			s.writeInternal(w, r.URL.Path, err)
 			return
 		}
 		spans = append(spans, span{Window: win, Rate: serveRate(classes), Count: total, Classes: classes})
 	}
 	rows, err := s.validatorRows(ctx, Window{Name: "24h", Span: 24 * time.Hour, Start: now.Add(-24 * time.Hour), End: now}, addr)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	if len(rows) == 0 {
@@ -634,7 +706,7 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	}
 	probes, err := s.probeRows(ctx, `validator_address = ?`, 50, addr)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"validator": rows[0], "windows": spans, "recent_probes": probes, "vantage": s.vantage})
@@ -676,6 +748,9 @@ type reconstruct struct {
 	NeededRows    int    `json:"needed_rows"`
 	ServedBy      int    `json:"served_by_validators"`
 	AssignedTotal int    `json:"assigned_validators"`
+	// TotalRows is the blob's encoded row count (16384 for blob v0): the
+	// denominator a reader should draw the served rows against.
+	TotalRows int `json:"total_rows"`
 	// ProbedValidators is how many assigned validators have a real result
 	// (not a gap) at the point. Status is "pending" while it is short of
 	// assigned_validators: the sweep is still running or was skipped by the
@@ -732,9 +807,11 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct, error) {
 	db := s.st.DB()
 	var assigned int
-	var needed sql.NullInt64
-	err := db.QueryRowContext(ctx, `SELECT validators_with_rows, json_extract(raw_json, '$.assignment.protocol_params.original_rows')
-		FROM publications WHERE promise_hash = ?`, hash).Scan(&assigned, &needed)
+	var needed, total sql.NullInt64
+	err := db.QueryRowContext(ctx, `SELECT validators_with_rows,
+			json_extract(raw_json, '$.assignment.protocol_params.original_rows'),
+			json_extract(raw_json, '$.assignment.protocol_params.total_rows')
+		FROM publications WHERE promise_hash = ?`, hash).Scan(&assigned, &needed, &total)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &reconstruct{Status: "unknown"}, nil
 	}
@@ -816,7 +893,7 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 		}
 	}
 	rc := &reconstruct{Point: label, PointAt: pointAt, WindowOver: windowOver, NeededRows: int(needed.Int64),
-		ServedBy: servedBy, AssignedTotal: assigned, ServedRows: len(served), ProbedValidators: probed}
+		TotalRows: int(total.Int64), ServedBy: servedBy, AssignedTotal: assigned, ServedRows: len(served), ProbedValidators: probed}
 	switch {
 	case !rowsKnown || !needed.Valid || needed.Int64 == 0:
 		rc.Status = "unknown"
@@ -866,20 +943,32 @@ func (s *Server) handleBlobs(w http.ResponseWriter, r *http.Request) {
 		where, args = `namespace = ?`, []any{strings.ToLower(ns)}
 	}
 	if before := r.URL.Query().Get("before_height"); before != "" {
+		// The cursor is (height, tx_index) because a block can carry several
+		// publications: "< height" alone drops the rest of the block the page
+		// boundary fell inside. before_tx_index defaults to 0, which with
+		// the tuple comparison means "everything before this height".
 		h, err := strconv.ParseInt(before, 10, 64)
 		if err != nil {
 			writeErr(w, 400, "before_height must be an integer")
 			return
 		}
+		idx := int64(0)
+		if raw := r.URL.Query().Get("before_tx_index"); raw != "" {
+			idx, err = strconv.ParseInt(raw, 10, 64)
+			if err != nil || idx < 0 {
+				writeErr(w, 400, "before_tx_index must be a non-negative integer")
+				return
+			}
+		}
 		if where != "" {
 			where += " AND "
 		}
-		where += `settlement_height < ?`
-		args = append(args, h)
+		where += `(settlement_height < ? OR (settlement_height = ? AND settlement_tx_index < ?))`
+		args = append(args, h, h, idx)
 	}
 	blobs, err := s.blobRows(r.Context(), where, limit, args...)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	if blobs == nil {
@@ -899,7 +988,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	blobs, err := s.blobRows(ctx, `promise_hash = ?`, 1, hash)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	if len(blobs) == 0 {
@@ -908,7 +997,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT validator_address, voting_power, row_count FROM assignments WHERE promise_hash = ? ORDER BY voting_power DESC, validator_address`, hash)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	var assigns []assignmentRow
@@ -916,7 +1005,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		var a assignmentRow
 		if err := rows.Scan(&a.ValidatorAddress, &a.VotingPower, &a.RowCount); err != nil {
 			rows.Close()
-			writeErr(w, 500, err.Error())
+			s.writeInternal(w, r.URL.Path, err)
 			return
 		}
 		assigns = append(assigns, a)
@@ -924,7 +1013,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 	probes, err := s.probeRows(ctx, `promise_hash = ?`, 1000, hash)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	var params struct {
@@ -957,11 +1046,17 @@ type probeRow struct {
 	TLSOK            bool   `json:"tls_ok"`
 	IdentityOK       bool   `json:"identity_ok"`
 	RawError         string `json:"raw_error,omitempty"`
+	// RetryFirstOutcome is set when this probe was the second attempt after a
+	// transport timeout; it is the first attempt's outcome, so a reader can
+	// see "the first try timed out" rather than only the final verdict.
+	RetryFirstOutcome string `json:"retry_first_outcome,omitempty"`
+	ClockOffsetMS     int64  `json:"clock_offset_ms,omitempty"`
 }
 
 func (s *Server) probeRows(ctx context.Context, where string, limit int, args ...any) ([]probeRow, error) {
 	q := `SELECT vantage, promise_hash, validator_address, validator_host, assigned, assigned_row_count, schedule_label, scheduled_at,
-		started_at, phase, outcome, classification, classification_reason, rows_returned, rows_expected, total_duration_ms, tls_ok, identity_ok, raw_error
+		started_at, phase, outcome, classification, classification_reason, rows_returned, rows_expected, total_duration_ms, tls_ok, identity_ok, raw_error,
+		COALESCE(json_extract(raw_json, '$.retry.first_outcome'), ''), COALESCE(json_extract(raw_json, '$.clock_offset_ms'), 0)
 		FROM probes`
 	if where != "" {
 		q += " WHERE " + where
@@ -978,7 +1073,7 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 		var assigned, tls, id int
 		if err := rows.Scan(&p.Vantage, &p.PromiseHash, &p.ValidatorAddress, &p.ValidatorHost, &assigned, &p.AssignedRowCount, &p.ScheduleLabel,
 			&p.ScheduledAt, &p.StartedAt, &p.Phase, &p.Outcome, &p.Classification, &p.Reason, &p.RowsReturned, &p.RowsExpected,
-			&p.TotalDurationMS, &tls, &id, &p.RawError); err != nil {
+			&p.TotalDurationMS, &tls, &id, &p.RawError, &p.RetryFirstOutcome, &p.ClockOffsetMS); err != nil {
 			return nil, err
 		}
 		p.Assigned, p.TLSOK, p.IdentityOK = assigned == 1, tls == 1, id == 1
@@ -1020,7 +1115,7 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.probeRows(r.Context(), strings.Join(conds, " AND "), limit, args...)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"vantage": s.vantage, "probes": rows})

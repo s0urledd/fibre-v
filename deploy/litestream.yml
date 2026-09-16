@@ -1,5 +1,12 @@
-# litestream replicate -config /etc/litestream.yml
-# Continuous SQLite replication to an S3-compatible bucket (R2 works).
+# Copy to /etc/fibre-observer/litestream.yml and enable fibre-litestream.service
+# (deploy/systemd/fibre-litestream.service), which runs
+# `litestream replicate -config /etc/fibre-observer/litestream.yml`.
+#
+# This replicates the DERIVED database only. The JSONL files in the same
+# directory are the record the database is rebuilt from, and litestream does
+# not copy them: back them up separately (rsync/restic) or accept that a lost
+# disk costs the raw evidence. Restoring: stop fibre-collector AND fibre-api
+# (both hold the WAL) before `litestream restore`.
 dbs:
   - path: /var/lib/fibre-observer/data/observer.db
     replicas:

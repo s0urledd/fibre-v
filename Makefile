@@ -4,7 +4,7 @@ export GOTOOLCHAIN
 
 .PHONY: verify build test-tlsverify test-assign test-reftest test-sentinel test-scripts web clean
 
-verify: test-tlsverify test-assign test-reftest test-sentinel test-scripts web
+verify: test-tlsverify test-assign test-reftest test-sentinel test-scripts shellcheck web
 	@echo "verify: all checks passed"
 
 test-tlsverify:
@@ -18,6 +18,15 @@ test-reftest:
 
 test-sentinel:
 	cd fibre-sentinel && go vet ./... && go build ./... && go test -shuffle=on ./...
+
+# CI runs shellcheck; run it here too when it is installed, so a local
+# "make verify" cannot pass a change that CI then rejects.
+shellcheck:
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck --severity=error fibre-devnet/*.sh fibre-sentinel/*.sh; \
+	else \
+		echo "shellcheck not installed; CI runs it (severity=error) — install it to catch script errors locally"; \
+	fi
 
 test-scripts:
 	for f in fibre-devnet/*.sh fibre-sentinel/*.sh; do bash -n "$$f"; done

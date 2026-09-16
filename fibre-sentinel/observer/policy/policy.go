@@ -100,6 +100,24 @@ func (c Config) validate() error {
 	if c.Caps.PerValidator.BytesPerHourFraction <= 0 || c.Caps.Global.BytesPerHour <= 0 {
 		return errors.New("caps: bytes_per_hour_fraction and global.bytes_per_hour must be positive")
 	}
+	// A zero or negative value here does not fail loudly at startup, it makes
+	// every probe fail a budget check (or divide by zero in the sampler), so
+	// the observer would quietly record nothing at all.
+	if c.Caps.PerValidator.BytesPerDayFraction <= 0 || c.Caps.Global.BytesPerDay <= 0 {
+		return errors.New("caps: bytes_per_day_fraction and global.bytes_per_day must be positive")
+	}
+	if c.Caps.PerValidator.RequestsPerMinute < 0 {
+		return errors.New("caps: requests_per_minute must not be negative (0 = no limit)")
+	}
+	if c.Caps.PerValidator.MinRequestSpacing < 0 {
+		return errors.New("caps: min_request_spacing must not be negative")
+	}
+	if c.Sampling.ProjectionLookback <= 0 {
+		return errors.New("sampling: projection_lookback must be positive")
+	}
+	if c.Backoff.SkipWindow < 0 || c.Backoff.SkipDownloadAfter < 0 {
+		return errors.New("backoff: skip_window and skip_download_after must not be negative")
+	}
 	return nil
 }
 
@@ -341,11 +359,27 @@ func (p *Policy) Admit(pub scan.Publication, alreadyStarted bool) (bool, string)
 	prob, binding := p.projectedP(now)
 	p.lastP, p.lastCap = prob, binding
 	in := p.Sampled(pub.PromiseHash, pub.SettlementTime, prob)
+	p.forgetOldDecisions()
 	p.decisions[pub.PromiseHash] = in
 	if in {
 		return true, ""
 	}
 	return false, p.lastReason(pub)
+}
+
+// maxDecisions bounds the sticky admit/deny map. A decision only matters
+// while a publication still has schedule points; keeping every hash for the
+// life of the process is a slow leak on a long-running vantage.
+const maxDecisions = 20000
+
+// forgetOldDecisions drops the whole map once it grows past the bound. The
+// map is a cache of "did we admit this publication", and a publication whose
+// points are all recorded is never asked about again, so a reset costs at
+// most one re-decision for the few still in flight.
+func (p *Policy) forgetOldDecisions() {
+	if len(p.decisions) >= maxDecisions {
+		p.decisions = make(map[string]bool, 1024)
+	}
 }
 
 func (p *Policy) lastReason(pub scan.Publication) string {

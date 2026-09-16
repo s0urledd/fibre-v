@@ -87,6 +87,15 @@ type Identity struct {
 	Signature []byte
 }
 
+// Signature verification uses crypto/ed25519, which enforces canonical
+// encodings. CometBFT verifies consensus-key signatures under ZIP-215, which
+// accepts some non-canonical R/A encodings this package rejects. An honest
+// signer never produces such a signature, so the two agree on every
+// certificate a correct Fibre server presents; a signature that the network
+// would accept and this package would not is recorded as IDENTITY_FAIL with
+// reason signature_invalid. Revisit if celestia-app ever publishes a vector
+// for it.
+//
 // VerifyCertificateAt checks that cert carries a Fibre identity extension validly
 // endorsed by the expected validator consensus key for chainID, and that the
 // certificate is internally consistent with the signed binding at instant now.

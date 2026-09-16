@@ -224,3 +224,39 @@ func TestShippedPoliciesLoad(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateRejectsBadConfig(t *testing.T) {
+	bad := []struct {
+		name  string
+		mutfn func(*Config)
+	}{
+		{"zero day fraction", func(c *Config) { c.Caps.PerValidator.BytesPerDayFraction = 0 }},
+		{"zero global day", func(c *Config) { c.Caps.Global.BytesPerDay = 0 }},
+		{"negative requests", func(c *Config) { c.Caps.PerValidator.RequestsPerMinute = -1 }},
+		{"negative spacing", func(c *Config) { c.Caps.PerValidator.MinRequestSpacing = -time.Second }},
+		{"zero lookback", func(c *Config) { c.Sampling.ProjectionLookback = 0 }},
+		{"negative skip window", func(c *Config) { c.Backoff.SkipWindow = -time.Minute }},
+		{"zero floor rows", func(c *Config) { c.Capacity.FloorRows = 0 }},
+	}
+	for _, b := range bad {
+		cfg := Default()
+		b.mutfn(&cfg)
+		if err := cfg.validate(); err == nil {
+			t.Errorf("%s: validate accepted it", b.name)
+		}
+	}
+	if err := Default().validate(); err != nil {
+		t.Fatalf("the defaults must validate: %v", err)
+	}
+}
+
+func TestDecisionsAreBounded(t *testing.T) {
+	p := newTest(t, Default())
+	for i := 0; i < maxDecisions+10; i++ {
+		p.decisions[string(rune(i))+"x"] = true
+		p.forgetOldDecisions()
+	}
+	if len(p.decisions) >= maxDecisions {
+		t.Fatalf("decisions grew to %d, bound is %d", len(p.decisions), maxDecisions)
+	}
+}

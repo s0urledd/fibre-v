@@ -66,12 +66,17 @@ traffic on the right side of it.
 
 ```bash
 sudo useradd --system --home /var/lib/fibre-observer --create-home fibre-observer
-sudo install -d -o fibre-observer /var/lib/fibre-observer/data
+sudo install -d -o fibre-observer -m 0750 /var/lib/fibre-observer/data
 sudo install -m 0755 fibre-sentinel/bin/* /usr/local/bin/
 sudo cp deploy/systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now fibre-scan fibre-probe fibre-heartbeat fibre-collector fibre-api
 ```
+
+The units are hardened (`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+an empty `CapabilityBoundingSet`, `SystemCallFilter=@system-service`) and can
+write only `/var/lib/fibre-observer/data`. The sampling secret must therefore
+sit under the data directory, not under `/etc`.
 
 Each unit runs one binary with the flags from `observer.env`. Order does
 not matter: the collector tolerates missing files, and before Fibre is
@@ -112,10 +117,13 @@ month. The JSONL files are the record and are never rotated by the tools;
 move them off the box when the disk fills and rebuild the database from
 them if ever needed. Two options for copies:
 
-- **litestream** (recommended for SQLite): `deploy/litestream.yml`
-  replicates `observer.db` continuously to an S3-compatible bucket
-  (Cloudflare R2 works). Restore with
-  `litestream restore -config deploy/litestream.yml /var/lib/fibre-observer/data/observer.db`.
+- **litestream** (recommended for SQLite): copy `deploy/litestream.yml` to
+  `/etc/fibre-observer/litestream.yml`, put the bucket keys in
+  `/etc/fibre-observer/litestream.env` (mode 0600), and enable
+  `deploy/systemd/fibre-litestream.service`. It replicates the **derived**
+  database only, not the JSONL files it is rebuilt from. To restore, stop
+  both `fibre-collector` and `fibre-api` first (each holds the WAL), then
+  `litestream restore -config /etc/fibre-observer/litestream.yml /var/lib/fibre-observer/data/observer.db`.
 - **rsync** the whole data directory nightly. The JSONL files are
   append-only, so incremental copies are cheap, and the database can be
   rebuilt from them.

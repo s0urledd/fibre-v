@@ -218,6 +218,11 @@ tried, IPv4 first, and the download talks to the address the TLS check
 passed on. A validator with no `x/valaddr` host is `NO_REGISTERED_HOST`,
 which counts as unreachable.
 
+Every measurement records `clock_offset_ms` (the observer's clock minus the
+chain's latest block time). Phase boundaries are seconds to minutes wide and
+are judged against the local clock, so a drifted vantage would mislabel
+probes silently; past 30 seconds of offset the prober logs a warning.
+
 ### Restart / no hangs
 
 The pending-probe queue is **never persisted** — it is re-derived every cycle

@@ -289,3 +289,65 @@ func TestOrderAddrsAndDownloadDeadline(t *testing.T) {
 		t.Errorf("maxRecvMsgSize = %d, must exceed grpc's 4 MiB default", maxRecvMsgSize)
 	}
 }
+
+func TestRun_NilCoderIsProbeErrorNotFault(t *testing.T) {
+	in := Input{
+		Vantage: "t", ChainID: "c", PromiseHash: "aa", MustServeUntil: time.Now().Add(time.Hour),
+		Target:        Target{AddressHex: "aa", Host: "192.0.2.1:7980", Assigned: true, RowCount: 148, PubKey: make([]byte, 32)},
+		SchedulePoint: SchedulePoint{Label: "w1", At: time.Now()},
+	}
+	m := Run(context.Background(), in, nil, StepTimeouts{})
+	if m.Outcome != OutcomeProbeError {
+		t.Fatalf("outcome = %s, want %s", m.Outcome, OutcomeProbeError)
+	}
+	if m.Classification != ClassProbeError {
+		t.Fatalf("classification = %s, want %s", m.Classification, ClassProbeError)
+	}
+	if m.TCP.Attempted {
+		t.Error("a probe with no coder must not open a connection")
+	}
+	// the same input with the download skipped is a normal reachability probe
+	in.SkipDownload = true
+	m = Run(context.Background(), in, nil, StepTimeouts{TCP: 10 * time.Millisecond})
+	if m.Outcome == OutcomeProbeError {
+		t.Errorf("reachability probe must not need a coder: %s (%s)", m.Outcome, m.RawError)
+	}
+}
+
+func TestRun_StampsClockOffset(t *testing.T) {
+	in := Input{
+		Vantage: "t", PromiseHash: "aa", MustServeUntil: time.Now().Add(time.Hour),
+		Target:        Target{AddressHex: "aa", Host: "", Assigned: true},
+		SchedulePoint: SchedulePoint{Label: "w1", At: time.Now()},
+		ClockOffsetMS: -4200,
+	}
+	m := Run(context.Background(), in, nil, StepTimeouts{})
+	if m.ClockOffsetMS != -4200 {
+		t.Fatalf("ClockOffsetMS = %d, want -4200", m.ClockOffsetMS)
+	}
+}
+
+func TestScheduleFor_DegenerateWindowUsesRecordParams(t *testing.T) {
+	msu := time.Now().UTC()
+	p := pub(msu.Add(time.Minute), msu) // settled after must_serve_until
+	p.ParamsAtPublication.ShardRetentionSeconds = 4 * 3600
+	p.ParamsAtPublication.PaymentPromiseTimeoutSeconds = 3600
+	pts := ScheduleFor(p, DefaultScheduleConfig())
+	if len(pts) == 0 {
+		t.Fatal("no points")
+	}
+	first := pts[0].At
+	if span := msu.Sub(first); span < 3*time.Hour || span > 4*time.Hour {
+		t.Fatalf("fallback window spans %s, want close to the 4h retention", span)
+	}
+	// a record with no params at all still gets a usable window
+	p.ParamsAtPublication.ShardRetentionSeconds = 0
+	p.ParamsAtPublication.PaymentPromiseTimeoutSeconds = 0
+	pts = ScheduleFor(p, DefaultScheduleConfig())
+	if len(pts) == 0 {
+		t.Fatal("no points without params")
+	}
+	if span := msu.Sub(pts[0].At); span > 10*time.Minute {
+		t.Fatalf("no-params fallback spans %s, want <= 10m", span)
+	}
+}

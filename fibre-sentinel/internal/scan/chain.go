@@ -209,6 +209,18 @@ func (c *Chain) ChainID(parent context.Context) (string, error) {
 	return id, err
 }
 
+// LatestBlockTime returns the timestamp of the chain's latest block, for
+// comparing the observer's own clock against the chain's.
+func (c *Chain) LatestBlockTime(parent context.Context) (time.Time, error) {
+	ctx, cancel := c.ctx(parent)
+	defer cancel()
+	s, err := c.rpc.Status(ctx)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("status: %w", err)
+	}
+	return s.SyncInfo.LatestBlockTime, nil
+}
+
 // ABCIError is a non-zero ABCI query response code.
 type ABCIError struct {
 	Path      string
