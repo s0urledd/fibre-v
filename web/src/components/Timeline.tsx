@@ -8,7 +8,7 @@ import { badgeDef } from "./Badge";
 // dashed outlines. No animation.
 export default function Timeline({ probes, validators, settled, mustServeUntil, graceEnd }: {
   probes: Probe[];
-  validators: { address: string; row_count: number }[];
+  validators: { address: string; row_count: number; moniker?: string }[];
   settled: string;
   mustServeUntil: string;
   graceEnd: string;
@@ -42,7 +42,8 @@ export default function Timeline({ probes, validators, settled, mustServeUntil, 
           return (
             <g key={v.address}>
               <text x={4} y={y + 14} fontSize="11" fontFamily="ui-monospace, Menlo, monospace" fill="var(--text)">
-                <a href={`/validator/?addr=${v.address}`}>{v.address.slice(0, 10)}…</a>
+                <title>{v.address}</title>
+                <a href={`/validator/?addr=${v.address}`}>{label(v)}</a>
                 <tspan fill="var(--text-2)"> {v.row_count}r</tspan>
               </text>
               <line x1={L} x2={W - R} y1={y + 10} y2={y + 10} stroke="var(--border)" />
@@ -68,4 +69,14 @@ export default function Timeline({ probes, validators, settled, mustServeUntil, 
       <p className="faint">Rows: assigned validators, ordered by voting power. Hover a cell for the probe's outcome, rows and error. <Link href="/methodology/#verdicts">Verdict definitions</Link>.</p>
     </div>
   );
+}
+
+// label names the row the way the table below it does: the validator's own
+// moniker when the chain gives us one, the address otherwise. The label column
+// is 150px of monospace, so a long moniker is cut; the full address is in the
+// <title> either way, so nothing here is the only place a row is identified.
+function label(v: { address: string; moniker?: string }) {
+  const m = (v.moniker ?? "").trim();
+  if (!m) return v.address.slice(0, 10) + "\u2026";
+  return m.length > 14 ? m.slice(0, 13) + "\u2026" : m;
 }

@@ -77,7 +77,7 @@ function Page() {
       <Recon b={b} />
       <h2>Probe timeline</h2>
       {data.probes.length === 0 ? <p className="muted">No probes yet.</p> : (
-        <Timeline probes={data.probes} validators={byPower.map((a) => ({ address: a.validator_address, row_count: a.row_count }))} settled={b.settlement_time} mustServeUntil={b.must_serve_until} graceEnd={graceEnd} />
+        <Timeline probes={data.probes} validators={byPower.map((a) => ({ address: a.validator_address, row_count: a.row_count, moniker: a.moniker }))} settled={b.settlement_time} mustServeUntil={b.must_serve_until} graceEnd={graceEnd} />
       )}
       <Legend />
       <h2>Assigned validators</h2>
