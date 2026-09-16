@@ -184,20 +184,29 @@ download that started and then ran out of time is not retried.
 ### Error-class taxonomy
 
 Classification is a fact about one probe (given whether the validator is
-assigned this shard and which phase the probe's *actual start time* falls in),
-never an aggregate:
+assigned this shard, whether the settled promise *proves* it stored the shard,
+and which phase the probe's *actual start time* falls in), never an aggregate:
 
-| assigned | phase | outcome | classification |
-|---|---|---|---|
-| yes | in-window (`t < must_serve_until`) | `NOT_FOUND` / unreachable / bad identity / wrong or invalid rows | **FAULT** |
-| yes | in-window | `SERVED_OK` | **HEALTHY** |
-| yes | grace (`msu` … `msu + prune-tolerance`) | `NOT_FOUND` / unreachable | **TOLERATED** |
-| yes | post (`> msu + prune-tolerance`) | `NOT_FOUND` | **EXPECTED_GONE** |
-| yes | post | unreachable | **UNREACHABLE_POST_WINDOW** (not a fault; obligation over) |
-| yes | post | `SERVED_OK` | **SERVED_PAST_WINDOW** (fine; affects disk accounting) |
-| no | any | `NOT_FOUND` | **EXPECTED_UNASSIGNED** |
-| no | any | `SERVED_OK` | **SERVING_UNASSIGNED** (flagged for review) |
-| any | any | probe could not run / slot elapsed | **PROBE_ERROR** / **NOT_PROBED** |
+| assigned | attested | phase | outcome | classification |
+|---|---|---|---|---|
+| yes | no | any | any | **UNATTESTED** (no proof this validator ever stored the shard; outside every rate, in both directions) |
+| yes | yes | in-window (`t < must_serve_until`) | `NOT_FOUND` / unreachable / bad identity / wrong or invalid rows | **FAULT** |
+| yes | yes | in-window | `SERVED_OK` | **HEALTHY** |
+| yes | yes | grace (`msu` … `msu + prune-tolerance`) | `NOT_FOUND` / unreachable | **TOLERATED** |
+| yes | yes | post (`> msu + prune-tolerance`) | `NOT_FOUND` | **EXPECTED_GONE** |
+| yes | yes | post | unreachable | **UNREACHABLE_POST_WINDOW** (not a fault; obligation over) |
+| yes | yes | post | `SERVED_OK` | **SERVED_PAST_WINDOW** (fine; affects disk accounting) |
+| no | — | any | `NOT_FOUND` | **EXPECTED_UNASSIGNED** |
+| no | — | any | `SERVED_OK` | **SERVING_UNASSIGNED** (flagged for review) |
+| any | — | any | probe could not run / slot elapsed | **PROBE_ERROR** / **NOT_PROBED** |
+
+"Attested" means the observer verified a signature from that validator over the
+settled promise against its consensus key. A Fibre server writes the shard to
+its store before it signs, so a verified signature proves storage. The absence
+of one does not prove the opposite: the publisher stops collecting signatures at
+the safety threshold and keeps delivering in the background, so absence means
+*unproven*. `internal/scan/attest.go` explains why the observer verifies rather
+than counting the entries the transaction carries.
 
 ### Load shape
 

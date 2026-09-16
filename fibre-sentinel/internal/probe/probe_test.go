@@ -3,6 +3,7 @@ package probe
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,6 +134,9 @@ func TestClassify_Taxonomy(t *testing.T) {
 		outcome  Outcome
 		want     Classification
 	}
+	// Every existing row describes an ATTESTED validator: one the settled
+	// promise proves stored the shard. The unattested rows are a separate
+	// table below, because the obligation itself differs.
 	rows := []row{
 		// assigned, in obligation
 		{true, PhaseInWindow, OutcomeServedOK, ClassHealthy},
@@ -179,12 +183,59 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{true, PhaseInWindow, OutcomeMissed, ClassNotProbed},
 	}
 	for _, r := range rows {
-		got, reason := Classify(r.assigned, r.phase, r.outcome)
+		got, reason := Classify(r.assigned, true, r.phase, r.outcome)
 		if got != r.want {
-			t.Errorf("Classify(assigned=%v, %s, %s) = %s (%q), want %s", r.assigned, r.phase, r.outcome, got, reason, r.want)
+			t.Errorf("Classify(assigned=%v, attested, %s, %s) = %s (%q), want %s", r.assigned, r.phase, r.outcome, got, reason, r.want)
 		}
 		if reason == "" {
 			t.Errorf("Classify(%v,%s,%s): empty reason", r.assigned, r.phase, r.outcome)
+		}
+	}
+}
+
+// An assigned validator whose signature is not in the settled promise is never
+// accused: nothing proves it was ever sent the shard. It is never credited
+// either, so the serve rate cannot be gamed by publishing blobs nobody signed.
+func TestClassify_UnattestedIsNeverAFault(t *testing.T) {
+	outcomes := []Outcome{
+		OutcomeNotFound, OutcomeTCPRefused, OutcomeTCPTimeout, OutcomeTLSFail,
+		OutcomeRPCUnavailable, OutcomeRPCError, OutcomeNoHost, OutcomeWrongRows,
+		OutcomeInvalidRows, OutcomePartial, OutcomeServedOK,
+	}
+	for _, phase := range []Phase{PhaseInWindow, PhaseGrace, PhasePost} {
+		for _, o := range outcomes {
+			got, reason := Classify(true, false, phase, o)
+			if got != ClassUnattested {
+				t.Errorf("Classify(assigned, UNattested, %s, %s) = %s, want %s", phase, o, got, ClassUnattested)
+			}
+			if reason == "" {
+				t.Errorf("Classify(assigned, UNattested, %s, %s): empty reason", phase, o)
+			}
+		}
+	}
+	// serving anyway is reported as such: it proves the validator does hold it
+	_, reason := Classify(true, false, PhaseInWindow, OutcomeServedOK)
+	if !strings.Contains(reason, "served") {
+		t.Errorf("a served shard from an unattested validator should say so: %q", reason)
+	}
+
+	// identity is a property of the endpoint, not of one shard, so it is a
+	// fault even with no attestation for this blob
+	if got, _ := Classify(true, false, PhaseInWindow, OutcomeIdentityFail); got != ClassFault {
+		t.Errorf("unattested IDENTITY_FAIL = %s, want %s", got, ClassFault)
+	}
+	// observer-side classes are unchanged by attestation
+	for _, o := range []Outcome{OutcomeProbeError, OutcomeMissed, OutcomeRPCDeadline, OutcomeReachable} {
+		a, _ := Classify(true, true, PhaseInWindow, o)
+		b, _ := Classify(true, false, PhaseInWindow, o)
+		if a != b {
+			t.Errorf("attestation changed an observer-side class for %s: %s vs %s", o, a, b)
+		}
+	}
+	// an UNassigned validator is judged as before, attested or not
+	for _, att := range []bool{true, false} {
+		if got, _ := Classify(false, att, PhaseInWindow, OutcomeNotFound); got != ClassExpectedUnassigned {
+			t.Errorf("unassigned attested=%v NOT_FOUND = %s", att, got)
 		}
 	}
 }

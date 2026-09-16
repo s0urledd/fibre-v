@@ -16,12 +16,17 @@ import (
 
 // Target is one validator to probe for a given publication.
 type Target struct {
-	Address      assign.Address // 20-byte consensus address
-	AddressHex   string
-	PubKey       ed25519.PublicKey // consensus key, for the TLS identity check
-	Host         string            // host:port registered in x/valaddr (may be "")
-	VotingPower  int64
-	Assigned     bool
+	Address     assign.Address // 20-byte consensus address
+	AddressHex  string
+	PubKey      ed25519.PublicKey // consensus key, for the TLS identity check
+	Host        string            // host:port registered in x/valaddr (may be "")
+	VotingPower int64
+	Assigned    bool
+	// Attested mirrors the publication's per-validator attestation: the
+	// settled promise carries a signature from this validator that verified
+	// against its consensus key. Only an attested validator is provably under
+	// the retention obligation for this blob.
+	Attested     bool
 	AssignedRows []int // recomputed by fibre-assign; empty if unassigned
 	RowCount     int
 }
@@ -156,15 +161,22 @@ func (r *Resolver) TargetsFor(ctx context.Context, p scan.Publication, includeUn
 		return nil, fmt.Errorf("recompute assignment: %w", err)
 	}
 
-	// cross-check recomputed counts against the record.
+	// cross-check recomputed counts against the record, and carry the
+	// scanner's per-validator attestation across: the observer verified those
+	// signatures once, at scan time, against the consensus keys at the promise
+	// height, and the result is part of the record.
 	recByAddr := map[string]int{}
 	for a, rows := range sm {
 		recByAddr[a.String()] = len(rows)
 	}
+	attestedByAddr := map[string]bool{}
 	for _, v := range p.Assignment.Validators {
 		if recByAddr[v.Address] != v.RowCount {
 			return nil, fmt.Errorf("assignment mismatch for %s: record says %d rows, recompute says %d — record and chain disagree",
 				v.Address, v.RowCount, recByAddr[v.Address])
+		}
+		if v.Attested {
+			attestedByAddr[strings.ToLower(v.Address)] = true
 		}
 	}
 
@@ -183,6 +195,7 @@ func (r *Resolver) TargetsFor(ctx context.Context, p scan.Publication, includeUn
 			Host:         hosts[addrHex],
 			VotingPower:  powerByAddr[v.Address],
 			Assigned:     assigned,
+			Attested:     attestedByAddr[strings.ToLower(addrHex)],
 			AssignedRows: append([]int(nil), rows...),
 			RowCount:     len(rows),
 		})

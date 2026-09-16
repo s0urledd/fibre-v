@@ -6,6 +6,13 @@ import { useEffect, useState } from "react";
 export const API_BASE = (process.env.NEXT_PUBLIC_API_BASE ?? "/api").replace(/\/$/, "");
 
 export type Rate = { num: number; den: number; value: number | null };
+/** How much of the serve rate's population the chain actually proves is obliged. */
+export type Attestation = {
+  attested_probes: number;
+  unattested_probes: number;
+  unknown_probes: number;
+  coverage: Rate;
+};
 export type Window = { name: string; start: string; end: string };
 export type ClassCounts = Record<string, number>;
 
@@ -36,6 +43,7 @@ export type Network = {
   validators_probed: number;
   reachability: Rate;
   serve_rate: Rate;
+  attestation: Attestation;
   probe_count: number;
   classes: ClassCounts;
   publications: number;
@@ -55,10 +63,13 @@ export type Validator = {
   identity_status: string;
   identity_reason?: string;
   serve_rate: Rate;
+  attestation: Attestation;
   probe_count: number;
   classes: ClassCounts;
   assigned_rows_last: number;
   expected_load_band: string;
+  /** newest publication: true proven to have stored it, false unproven, null not recorded */
+  attested_last: boolean | null;
 };
 
 export type Probe = {
@@ -67,6 +78,8 @@ export type Probe = {
   validator_address: string;
   validator_host: string;
   assigned: boolean;
+  /** true proven obliged, false unproven, null recorded before verification existed */
+  attested: boolean | null;
   assigned_row_count: number;
   schedule_label: string;
   scheduled_at: string;
@@ -96,6 +109,10 @@ export type Reconstruct = {
   probed_validators: number;
   /** the blob's encoded row count (16384 for blob v0) */
   total_rows: number;
+  /** assigned validators the settled promise proves stored the blob: the denominator for "yes" */
+  attested_validators: number;
+  attestation_known: boolean;
+  served_by_attested: number;
 };
 
 export type Blob = {

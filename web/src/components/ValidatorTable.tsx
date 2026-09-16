@@ -22,6 +22,19 @@ function severity(v: Validator): number {
   return 3;
 }
 
+// What the promise proves about this validator's obligation, for the column
+// and its tooltip. "unproven" is never an accusation: it says the chain is
+// silent, not that the validator failed.
+function attestedCell(v: Validator): { text: string; title: string } {
+  const a = v.attestation;
+  if (v.attested_last === true) return { text: "proven", title: "The newest publication carries this validator's signature, verified against its consensus key. A Fibre server writes the shard before it signs, so that signature is proof of storage." };
+  if (v.attested_last === false) {
+    const n = a?.unattested_probes ?? 0;
+    return { text: "unproven", title: `The newest publication carries no verified signature from this validator, so nothing on chain proves it stored that shard. The publisher stops collecting signatures once it has a safe quorum, so this is silence, not absence.${n ? ` ${n} probes in this window are excluded from the serve rate for that reason.` : ""}` };
+  }
+  return { text: "—", title: "No publication with attestation recorded for this validator yet." };
+}
+
 export default function ValidatorTable({ rows, caption }: { rows: Validator[]; caption: string }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<"severity" | "power" | "rate">("severity");
@@ -51,6 +64,7 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
               <th>Reachable</th>
               <th>TLS identity</th>
               <th className="right">Serve rate</th>
+              <th>Obligation</th>
               <th className="right">Fault</th>
               <th className="right">Tolerated</th>
               <th className="right">Not probed</th>
@@ -61,7 +75,7 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr><td colSpan={11} className="muted">{rows.length === 0 ? "No validators seen yet: no registered Fibre endpoint and no probe." : `No validator matches “${q}”. Try the consensus address or the Fibre host.`}</td></tr>
+              <tr><td colSpan={12} className="muted">{rows.length === 0 ? "No validators seen yet: no registered Fibre endpoint and no probe." : `No validator matches “${q}”. Try the consensus address or the Fibre host.`}</td></tr>
             )}
             {list.map((v) => (
               <tr key={v.address}>
@@ -73,6 +87,7 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
                 <td>{v.reachable === null ? <span className="muted">not probed</span> : v.reachable ? "yes" : <span className="err">no</span>}</td>
                 <td title={v.identity_reason || IDENT[v.identity_status]}>{v.identity_status === "mismatch" || v.identity_status === "no_tls" ? <span className="err">{v.identity_status}</span> : v.identity_status}</td>
                 <td className="right mono"><RateCell r={v.serve_rate} /></td>
+                <td className={attestedCell(v).text === "unproven" ? "muted" : ""} title={attestedCell(v).title}>{attestedCell(v).text}</td>
                 <td className="right mono">{v.classes.FAULT ?? 0}</td>
                 <td className="right mono">{v.classes.TOLERATED ?? 0}</td>
                 <td className="right mono">{(v.classes.NOT_PROBED ?? 0) + (v.classes.PROBE_ERROR ?? 0)}</td>

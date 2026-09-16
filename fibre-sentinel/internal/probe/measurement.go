@@ -13,7 +13,20 @@ import (
 )
 
 // MeasurementSchemaVersion is bumped when the Measurement JSON shape changes.
-const MeasurementSchemaVersion = 1
+//
+// 1: initial shape.
+// 2: Attested, and the UNATTESTED classification it can produce.
+const MeasurementSchemaVersion = 2
+
+// AttestationSchemaVersion is the first measurement version whose Attested
+// field carries evidence. A record below it was written by a prober that did
+// not know about attestation: its Attested is false because the field did not
+// exist, and its classification can never be UNATTESTED. Consumers must treat
+// that as unknown rather than as "did not attest".
+const AttestationSchemaVersion = 2
+
+// HasAttestation reports whether Attested carries evidence.
+func (m Measurement) HasAttestation() bool { return m.SchemaVersion >= AttestationSchemaVersion }
 
 // Measurement is one probe's raw result: which vantage, when, each network
 // layer timed and judged separately, plus the raw error text. No scores — a
@@ -33,7 +46,14 @@ type Measurement struct {
 	ValidatorAddress string `json:"validator_address"` // 20-byte consensus addr, hex
 	ValidatorHost    string `json:"validator_host"`    // host:port as registered
 	Assigned         bool   `json:"assigned"`
-	AssignedRowCount int    `json:"assigned_row_count"`
+	// Attested: the settled promise carries a signature from this validator
+	// that the observer verified against its consensus key. That is the only
+	// on-chain proof the validator ever stored this shard, because a Fibre
+	// server writes the shard before it signs. False means unproven, not
+	// absent: the publisher stops collecting signatures at the safety
+	// threshold and keeps delivering in the background.
+	Attested         bool `json:"attested"`
+	AssignedRowCount int  `json:"assigned_row_count"`
 
 	// scheduling
 	ScheduleLabel string    `json:"schedule_label"` // w1..wN, grace, post

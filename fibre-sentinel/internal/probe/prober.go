@@ -625,7 +625,7 @@ func (p *Prober) recordNotProbedTarget(pub scan.Publication, pt SchedulePoint, t
 		BlobVersion: pub.Promise.BlobVersion, MustServeUntil: pub.MustServeUntil,
 		ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
 		ValidatorAddress:   t.AddressHex, ValidatorHost: t.Host,
-		Assigned: t.Assigned, AssignedRowCount: t.RowCount,
+		Assigned: t.Assigned, Attested: t.Attested, AssignedRowCount: t.RowCount,
 		ScheduleLabel: pt.Label, ScheduledAt: pt.At.UTC(),
 		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
 		Phase: PhaseAt(pt.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,

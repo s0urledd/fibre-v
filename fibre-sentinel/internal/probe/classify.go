@@ -65,6 +65,14 @@ const (
 	ClassProbeError Classification = "PROBE_ERROR"
 	// ClassNotProbed: the scheduled point elapsed before it could be probed.
 	ClassNotProbed Classification = "NOT_PROBED"
+
+	// ClassUnattested: the validator is assigned rows for this blob, but the
+	// settled promise carries no verified signature from it, so there is no
+	// proof it ever received the shard. Absence of a signature is not proof
+	// that it did not: the publisher stops collecting at the safety threshold
+	// and keeps delivering in the background. These probes are reported
+	// separately and are counted neither for nor against the validator.
+	ClassUnattested Classification = "UNATTESTED"
 )
 
 // served reports whether an outcome means "the shard came back".
@@ -84,8 +92,11 @@ func (o Outcome) reachFailure() bool {
 }
 
 // Classify applies the taxonomy. assigned is whether this validator holds rows
-// for this commitment; phase is derived from the ACTUAL probe start time.
-func Classify(assigned bool, phase Phase, o Outcome) (Classification, string) {
+// for this commitment; attested is whether the settled promise carries a
+// signature from it that the observer verified against its consensus key,
+// which is the only on-chain proof that it ever stored the shard; phase is
+// derived from the ACTUAL probe start time.
+func Classify(assigned, attested bool, phase Phase, o Outcome) (Classification, string) {
 	if o == OutcomeProbeError {
 		return ClassProbeError, "probe could not be carried out"
 	}
@@ -100,14 +111,27 @@ func Classify(assigned bool, phase Phase, o Outcome) (Classification, string) {
 		// was attempted. Recorded as an observer-side gap for the shard.
 		return ClassNotProbed, "reachable; download skipped by policy"
 	}
+	// Identity is a property of the endpoint, not of one shard, so it is
+	// judged before anything that depends on holding this blob.
+	if o == OutcomeIdentityFail {
+		return ClassFault, "TLS identity is not the endorsed consensus key"
+	}
+
+	if assigned && !attested {
+		// No verified signature over this promise, so nothing proves this
+		// validator was ever sent the shard. Serving it anyway proves it has
+		// it; failing to serve it proves nothing at all. Counted neither for
+		// nor against: excluding only the failures would inflate every rate.
+		if o.served() {
+			return ClassUnattested, "served the shard although the settled promise carries no verified signature from this validator"
+		}
+		return ClassUnattested, "assigned rows, but the settled promise carries no verified signature from this validator: nothing proves it ever received the shard"
+	}
 
 	if !assigned {
 		switch {
 		case o == OutcomeNotFound:
 			return ClassExpectedUnassigned, "validator not assigned this shard; NOT_FOUND expected"
-		case o == OutcomeIdentityFail:
-			// identity is a property of the endpoint, not of one shard.
-			return ClassFault, "TLS identity is not the endorsed consensus key"
 		case o.served() || o == OutcomeWrongRows || o == OutcomeInvalidRows:
 			return ClassServingUnassigned, "validator returned data for a shard it was not assigned — misassignment or over-serving"
 		case o.reachFailure():

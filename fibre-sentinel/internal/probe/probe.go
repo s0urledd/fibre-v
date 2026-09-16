@@ -160,6 +160,7 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		ValidatorAddress:   in.Target.AddressHex,
 		ValidatorHost:      in.Target.Host,
 		Assigned:           in.Target.Assigned,
+		Attested:           in.Target.Attested,
 		AssignedRowCount:   in.Target.RowCount,
 		ScheduleLabel:      in.SchedulePoint.Label,
 		ScheduledAt:        in.SchedulePoint.At.UTC(),
@@ -171,7 +172,7 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 	defer func() {
 		m.FinishedAt = time.Now().UTC()
 		m.TotalDurationMS = m.FinishedAt.Sub(m.StartedAt).Milliseconds()
-		m.Classification, m.ClassificationReason = Classify(m.Assigned, m.Phase, m.Outcome)
+		m.Classification, m.ClassificationReason = Classify(m.Assigned, m.Attested, m.Phase, m.Outcome)
 	}()
 
 	if !in.SkipDownload && coder == nil {

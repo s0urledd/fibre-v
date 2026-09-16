@@ -318,19 +318,24 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 type classCounts map[string]int64
 
 type networkResponse struct {
-	Window                 Window      `json:"window"`
-	Vantage                string      `json:"vantage"`
-	ObservedFromOneVantage bool        `json:"observed_from_one_location"`
-	RegisteredEndpoints    int64       `json:"registered_endpoints"`
-	ValidatorsProbed       int64       `json:"validators_probed"`
-	Reachability           Rate        `json:"reachability"` // endpoints whose latest heartbeat or probe reached TLS
-	ServeRate              Rate        `json:"serve_rate"`   // HEALTHY / (HEALTHY + FAULT), assigned, in-window + grace
-	ProbeCount             int64       `json:"probe_count"`  // all probe rows in window
-	Classes                classCounts `json:"classes"`
-	Publications           int64       `json:"publications"`
-	PublicationBytes       int64       `json:"publication_bytes"`
-	Reconstructable        Rate        `json:"reconstructable"` // publications whose latest probed point held >= OriginalRows distinct served rows
-	Gaps                   int64       `json:"probe_gaps"`      // NOT_PROBED + PROBE_ERROR rows in window
+	Window                 Window `json:"window"`
+	Vantage                string `json:"vantage"`
+	ObservedFromOneVantage bool   `json:"observed_from_one_location"`
+	RegisteredEndpoints    int64  `json:"registered_endpoints"`
+	ValidatorsProbed       int64  `json:"validators_probed"`
+	Reachability           Rate   `json:"reachability"` // endpoints whose latest heartbeat or probe reached TLS
+	// ServeRate is HEALTHY / (HEALTHY + FAULT) over assigned probes in the
+	// in-window and grace phases. Probes of validators whose storage the
+	// settled promise does not prove are classified UNATTESTED and fall out
+	// of both sides of this fraction: see Attestation for how many.
+	ServeRate        Rate             `json:"serve_rate"`
+	Attestation      attestationStats `json:"attestation"`
+	ProbeCount       int64            `json:"probe_count"` // all probe rows in window
+	Classes          classCounts      `json:"classes"`
+	Publications     int64            `json:"publications"`
+	PublicationBytes int64            `json:"publication_bytes"`
+	Reconstructable  Rate             `json:"reconstructable"` // publications whose latest probed point held >= OriginalRows distinct served rows
+	Gaps             int64            `json:"probe_gaps"`      // NOT_PROBED + PROBE_ERROR rows in window
 }
 
 func (s *Server) classCountsWhere(ctx context.Context, where string, args ...any) (classCounts, int64, error) {
@@ -353,8 +358,48 @@ func (s *Server) classCountsWhere(ctx context.Context, where string, args ...any
 	return out, total, rows.Err()
 }
 
+// attestationStats discloses what the serve rate left out. A validator is
+// only obliged to serve a blob it stored, and the only on-chain proof it
+// stored one is a signature on the settled promise that this observer
+// verified against the validator's consensus key. Where that proof is
+// missing the probe is classified UNATTESTED and excluded from the serve
+// rate — in both directions, so neither a success nor a failure can move a
+// rate the validator was never proven to owe.
+type attestationStats struct {
+	// Attested and Unattested are probes of assigned validators in the
+	// in-window and grace phases: proven obliged, and not proven obliged.
+	Attested   int64 `json:"attested_probes"`
+	Unattested int64 `json:"unattested_probes"`
+	// Coverage is Attested / (Attested + Unattested). Well below 1 means the
+	// publisher stopped collecting signatures once it had a safe quorum, so
+	// most of the set is unproven and the serve rate speaks for a minority.
+	Coverage Rate `json:"coverage"`
+	// Unknown counts probes from records written before the observer verified
+	// signatures. Their attestation is absent, not negative, so they stay in
+	// the serve rate under the older taxonomy and out of Coverage.
+	Unknown int64 `json:"unknown_probes"`
+}
+
+// serveRate is HEALTHY over HEALTHY + FAULT. UNATTESTED is a class of its
+// own, so an unproven obligation never reaches either side of this fraction.
 func serveRate(c classCounts) Rate {
 	return rate(c["HEALTHY"], c["HEALTHY"]+c["FAULT"])
+}
+
+// attestationWhere counts proven, unproven and unknown obligations over the
+// probe rows matching where.
+func (s *Server) attestationWhere(ctx context.Context, where string, args ...any) (attestationStats, error) {
+	var st attestationStats
+	err := s.st.DB().QueryRowContext(ctx, `SELECT
+			COALESCE(SUM(CASE WHEN attested = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN attested = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN attested IS NULL THEN 1 ELSE 0 END), 0)
+		FROM probes WHERE `+where, args...).Scan(&st.Attested, &st.Unattested, &st.Unknown)
+	if err != nil {
+		return attestationStats{}, err
+	}
+	st.Coverage = rate(st.Attested, st.Attested+st.Unattested)
+	return st, nil
 }
 
 func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
@@ -381,6 +426,11 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	resp.Classes = classes
 	resp.ServeRate = serveRate(classes)
 	_ = total
+	if resp.Attestation, err = s.attestationWhere(ctx,
+		`started_at >= ? AND assigned = 1 AND phase IN ('in_window','grace')`, win.startArg()); err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ?`, win.startArg()).Scan(&resp.ProbeCount)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`, win.startArg()).Scan(&resp.Gaps)
 
@@ -453,20 +503,30 @@ func (s *Server) reachabilityNow(ctx context.Context) (map[string]reachState, er
 // ---- validators ----
 
 type validatorRow struct {
-	Address          string      `json:"address"`      // 20-byte consensus address, hex
-	ConsAddress      string      `json:"cons_address"` // celestiavalcons1... when known from the registry
-	Host             string      `json:"host"`
-	EndpointSince    *string     `json:"endpoint_since"`
-	VotingPower      int64       `json:"voting_power"` // from the latest assignment seen
-	LastSeenAt       *string     `json:"last_seen_at"`
-	Reachable        *bool       `json:"reachable"`       // latest heartbeat or probe; null if never probed
-	IdentityStatus   string      `json:"identity_status"` // verified | mismatch | no_tls | unreachable | unknown
-	IdentityReason   string      `json:"identity_reason,omitempty"`
-	ServeRate        Rate        `json:"serve_rate"`
-	ProbeCount       int64       `json:"probe_count"`
-	Classes          classCounts `json:"classes"`
-	AssignedRowsLast int         `json:"assigned_rows_last"`
-	ExpectedLoadBand string      `json:"expected_load_band"` // floor | low | mid | high, by assigned rows
+	Address        string  `json:"address"`      // 20-byte consensus address, hex
+	ConsAddress    string  `json:"cons_address"` // celestiavalcons1... when known from the registry
+	Host           string  `json:"host"`
+	EndpointSince  *string `json:"endpoint_since"`
+	VotingPower    int64   `json:"voting_power"` // from the latest assignment seen
+	LastSeenAt     *string `json:"last_seen_at"`
+	Reachable      *bool   `json:"reachable"`       // latest heartbeat or probe; null if never probed
+	IdentityStatus string  `json:"identity_status"` // verified | mismatch | no_tls | unreachable | unknown
+	IdentityReason string  `json:"identity_reason,omitempty"`
+	// ServeRate is HEALTHY / (HEALTHY + FAULT) over this validator's assigned
+	// probes in the in-window and grace phases. Probes where the settled
+	// promise does not prove this validator stored the blob are UNATTESTED
+	// and sit outside the fraction, so an unproven obligation can neither
+	// reward nor punish it. Attestation says how many those were.
+	ServeRate        Rate             `json:"serve_rate"`
+	Attestation      attestationStats `json:"attestation"`
+	ProbeCount       int64            `json:"probe_count"`
+	Classes          classCounts      `json:"classes"`
+	AssignedRowsLast int              `json:"assigned_rows_last"`
+	ExpectedLoadBand string           `json:"expected_load_band"` // floor | low | mid | high, by assigned rows
+	// AttestedLast reports whether the newest publication proves this
+	// validator stored it: true, false (assigned but unproven) or null
+	// (recorded before the observer verified signatures).
+	AttestedLast *bool `json:"attested_last"`
 }
 
 func loadBand(rows int) string {
@@ -532,7 +592,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	// The newest publication carries the whole bonded set with its voting
 	// power and row counts; one indexed lookup instead of a correlated
 	// subquery per assignment row.
-	rows, err := db.QueryContext(ctx, `SELECT validator_address, voting_power, row_count FROM assignments
+	rows, err := db.QueryContext(ctx, `SELECT validator_address, voting_power, row_count, attested FROM assignments
 		WHERE promise_hash = (SELECT promise_hash FROM publications ORDER BY settlement_height DESC, settlement_tx_index DESC LIMIT 1)`)
 	if err != nil {
 		return nil, err
@@ -541,12 +601,17 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		var addr string
 		var vp int64
 		var rc int
-		if err := rows.Scan(&addr, &vp, &rc); err != nil {
+		var att sql.NullInt64
+		if err := rows.Scan(&addr, &vp, &rc, &att); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		v := get(addr)
 		v.VotingPower, v.AssignedRowsLast, v.ExpectedLoadBand = vp, rc, loadBand(rc)
+		if att.Valid {
+			b := att.Int64 == 1
+			v.AttestedLast = &b
+		}
 	}
 	rows.Close()
 	// classes per validator in window
@@ -564,6 +629,28 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		}
 		v := get(addr)
 		v.Classes[c] = n
+	}
+	rows.Close()
+	// proven / unproven / unknown obligations per validator, same scope as
+	// the classes above so the serve rate and its exclusions line up.
+	rows, err = db.QueryContext(ctx, `SELECT validator_address,
+			COALESCE(SUM(CASE WHEN attested = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN attested = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN attested IS NULL THEN 1 ELSE 0 END), 0)
+		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase IN ('in_window','grace')
+		GROUP BY validator_address`, win.startArg())
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var addr string
+		var at, un, unk int64
+		if err := rows.Scan(&addr, &at, &un, &unk); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		v := get(addr)
+		v.Attestation = attestationStats{Attested: at, Unattested: un, Unknown: unk, Coverage: rate(at, at+un)}
 	}
 	rows.Close()
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, COUNT(*), MAX(started_at) FROM probes WHERE started_at >= ? GROUP BY validator_address`, win.startArg())
@@ -756,6 +843,17 @@ type reconstruct struct {
 	// assigned_validators: the sweep is still running or was skipped by the
 	// policy, and an absent row is a gap, never a zero.
 	ProbedValidators int `json:"probed_validators"`
+	// AttestedValidators is how many of the assigned validators the settled
+	// promise proves stored the blob. It is the denominator for "yes": a
+	// validator with no proof of storage cannot demote the verdict by not
+	// serving. AttestationKnown is false for publications recorded before the
+	// observer verified signatures, where the whole assigned set is used
+	// instead.
+	AttestedValidators int  `json:"attested_validators"`
+	AttestationKnown   bool `json:"attestation_known"`
+	// ServedByAttested is how many proven-obliged validators served correctly
+	// at the point.
+	ServedByAttested int `json:"served_by_attested"`
 }
 
 func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...any) ([]blobRow, error) {
@@ -819,6 +917,17 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 		return nil, err
 	}
 
+	// How many assigned validators the promise proves stored the blob.
+	// COUNT(attested) skips NULLs, so knownAtt = 0 means this publication
+	// predates signature verification and attestation says nothing here.
+	var knownAtt, attested int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(attested), COALESCE(SUM(attested), 0) FROM assignments WHERE promise_hash = ? AND row_count > 0`,
+		hash).Scan(&knownAtt, &attested); err != nil {
+		return nil, err
+	}
+	attestationKnown := knownAtt > 0
+
 	// in-window points with real results, newest first, with how many
 	// distinct assigned validators answered at each.
 	rows, err := db.QueryContext(ctx, `SELECT scheduled_at, schedule_label, must_serve_until, COUNT(DISTINCT validator_address) FROM probes
@@ -862,7 +971,7 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 
 	// distinct validators that served correctly at the point (any vantage
 	// counts once) and the union of their assigned rows.
-	srows, err := db.QueryContext(ctx, `SELECT DISTINCT p.validator_address, a.rows_json FROM probes p
+	srows, err := db.QueryContext(ctx, `SELECT DISTINCT p.validator_address, a.rows_json, a.attested FROM probes p
 		JOIN assignments a ON a.promise_hash = p.promise_hash AND a.validator_address = p.validator_address
 		WHERE p.promise_hash = ? AND p.scheduled_at = ? AND p.assigned = 1 AND p.outcome = 'SERVED_OK'`, hash, pointAt)
 	if err != nil {
@@ -870,15 +979,22 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 	}
 	defer srows.Close()
 	served := map[int]struct{}{}
-	servedBy := 0
+	servedBy, servedAtt := 0, 0
 	rowsKnown := true
 	for srows.Next() {
 		var addr string
 		var rj sql.NullString
-		if err := srows.Scan(&addr, &rj); err != nil {
+		var att sql.NullInt64
+		if err := srows.Scan(&addr, &rj, &att); err != nil {
 			return nil, err
 		}
 		servedBy++
+		if att.Valid && att.Int64 == 1 {
+			servedAtt++
+		}
+		// A shard this validator served counts toward reconstruction whether
+		// or not its storage was proven: the rows came back, so the data was
+		// there. Attestation decides blame, never availability.
 		if !rj.Valid {
 			rowsKnown = false
 			continue
@@ -893,13 +1009,23 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 		}
 	}
 	rc := &reconstruct{Point: label, PointAt: pointAt, WindowOver: windowOver, NeededRows: int(needed.Int64),
-		TotalRows: int(total.Int64), ServedBy: servedBy, AssignedTotal: assigned, ServedRows: len(served), ProbedValidators: probed}
+		TotalRows: int(total.Int64), ServedBy: servedBy, AssignedTotal: assigned, ServedRows: len(served),
+		ProbedValidators: probed, AttestedValidators: attested, AttestationKnown: attestationKnown,
+		ServedByAttested: servedAtt}
+
+	// "yes" means nobody who was proven to owe this blob failed to serve it.
+	// Without proof of storage, a validator that stayed quiet is not a fault,
+	// so it must not demote a blob whose rows all came back.
+	whole := servedBy == assigned
+	if attestationKnown {
+		whole = servedAtt == attested
+	}
 	switch {
 	case !rowsKnown || !needed.Valid || needed.Int64 == 0:
 		rc.Status = "unknown"
 	case !complete:
 		rc.Status = "pending"
-	case len(served) >= rc.NeededRows && servedBy == assigned:
+	case len(served) >= rc.NeededRows && whole:
 		rc.Status = "yes"
 	case len(served) >= rc.NeededRows:
 		rc.Status = "degraded"
@@ -981,6 +1107,11 @@ type assignmentRow struct {
 	ValidatorAddress string `json:"validator_address"`
 	VotingPower      int64  `json:"voting_power"`
 	RowCount         int    `json:"row_count"`
+	// Attested: the settled promise carries a signature from this validator
+	// that verified against its consensus key, which is proof it stored the
+	// shard. false means unproven, null means the record predates
+	// verification. Never "did not store".
+	Attested *bool `json:"attested"`
 }
 
 func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
@@ -995,7 +1126,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no publication with this promise hash")
 		return
 	}
-	rows, err := s.st.DB().QueryContext(ctx, `SELECT validator_address, voting_power, row_count FROM assignments WHERE promise_hash = ? ORDER BY voting_power DESC, validator_address`, hash)
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT validator_address, voting_power, row_count, attested FROM assignments WHERE promise_hash = ? ORDER BY voting_power DESC, validator_address`, hash)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
@@ -1003,10 +1134,15 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 	var assigns []assignmentRow
 	for rows.Next() {
 		var a assignmentRow
-		if err := rows.Scan(&a.ValidatorAddress, &a.VotingPower, &a.RowCount); err != nil {
+		var att sql.NullInt64
+		if err := rows.Scan(&a.ValidatorAddress, &a.VotingPower, &a.RowCount, &att); err != nil {
 			rows.Close()
 			s.writeInternal(w, r.URL.Path, err)
 			return
+		}
+		if att.Valid {
+			b := att.Int64 == 1
+			a.Attested = &b
 		}
 		assigns = append(assigns, a)
 	}
@@ -1032,6 +1168,10 @@ type probeRow struct {
 	ValidatorAddress string `json:"validator_address"`
 	ValidatorHost    string `json:"validator_host"`
 	Assigned         bool   `json:"assigned"`
+	// Attested: the settled promise proves this validator stored the blob.
+	// false means unproven (so this probe is UNATTESTED and outside the serve
+	// rate), null means the measurement predates signature verification.
+	Attested         *bool  `json:"attested"`
 	AssignedRowCount int    `json:"assigned_row_count"`
 	ScheduleLabel    string `json:"schedule_label"`
 	ScheduledAt      string `json:"scheduled_at"`
@@ -1054,7 +1194,7 @@ type probeRow struct {
 }
 
 func (s *Server) probeRows(ctx context.Context, where string, limit int, args ...any) ([]probeRow, error) {
-	q := `SELECT vantage, promise_hash, validator_address, validator_host, assigned, assigned_row_count, schedule_label, scheduled_at,
+	q := `SELECT vantage, promise_hash, validator_address, validator_host, assigned, attested, assigned_row_count, schedule_label, scheduled_at,
 		started_at, phase, outcome, classification, classification_reason, rows_returned, rows_expected, total_duration_ms, tls_ok, identity_ok, raw_error,
 		COALESCE(json_extract(raw_json, '$.retry.first_outcome'), ''), COALESCE(json_extract(raw_json, '$.clock_offset_ms'), 0)
 		FROM probes`
@@ -1071,12 +1211,17 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 	for rows.Next() {
 		var p probeRow
 		var assigned, tls, id int
-		if err := rows.Scan(&p.Vantage, &p.PromiseHash, &p.ValidatorAddress, &p.ValidatorHost, &assigned, &p.AssignedRowCount, &p.ScheduleLabel,
+		var att sql.NullInt64
+		if err := rows.Scan(&p.Vantage, &p.PromiseHash, &p.ValidatorAddress, &p.ValidatorHost, &assigned, &att, &p.AssignedRowCount, &p.ScheduleLabel,
 			&p.ScheduledAt, &p.StartedAt, &p.Phase, &p.Outcome, &p.Classification, &p.Reason, &p.RowsReturned, &p.RowsExpected,
 			&p.TotalDurationMS, &tls, &id, &p.RawError, &p.RetryFirstOutcome, &p.ClockOffsetMS); err != nil {
 			return nil, err
 		}
 		p.Assigned, p.TLSOK, p.IdentityOK = assigned == 1, tls == 1, id == 1
+		if att.Valid {
+			b := att.Int64 == 1
+			p.Attested = &b
+		}
 		out = append(out, p)
 	}
 	return out, rows.Err()

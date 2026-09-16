@@ -32,6 +32,41 @@ promise height and the settlement tx; the scanner evaluates both ends of that
 interval and, if a params change landed in between, records the earlier
 bound and sets `must_serve_until_ambiguous` on the publication.
 
+## Who is actually obliged
+
+A validator is assigned rows by `fibre-assign`, but assignment is the
+publisher's arithmetic, not the validator's consent. The validator becomes
+obliged only once it has the shard. The only on-chain evidence of that is a
+signature from the validator on the settled `MsgPayForFibre`, because the
+Fibre server writes the shard to its store **before** it signs
+(celestia-app `fibre/server_upload.go`).
+
+The observer verifies those signatures itself rather than counting them. The
+chain's own check runs in the ante handler and is skipped in
+`ExecModeFinalize` and on a node-local cache hit (`x/fibre/ante/ante.go`),
+and the message server never repeats it, so a settled transaction carries no
+state-machine guarantee that its signature entries are valid. Each entry is
+tried first against the validator at the same position in the set at the
+promise height (the reference implementation builds the list positionally,
+with nil entries for non-signers) and then, if that fails, against every
+other member. Verification decides; position is only a hint.
+
+The absence of a signature is **not** evidence the validator did not store
+the shard. The reference client snapshots the signature list the moment the
+safety threshold is reached and keeps delivering to the rest in the
+background (`fibre/client_upload.go`), so a validator can hold a shard whose
+signature never reached the chain. Absence means *unproven*, never *absent*.
+
+That is why an assigned but unattested probe becomes `UNATTESTED` whatever
+the wire outcome was, and sits outside the serve rate in both directions: a
+failure the validator was never proven to owe cannot count against it, and a
+success it was never proven to owe cannot count for it. The outcome field
+still records exactly what happened.
+
+Source: `fibre-sentinel/internal/scan/attest.go`, tested in
+`attest_test.go`; the classification in `internal/probe/classify.go`, tested
+by `TestClassify_UnattestedIsNeverAFault`.
+
 ## Outcomes (one per probe, mechanism level)
 
 | outcome | meaning |
@@ -70,14 +105,19 @@ One sentence each, and what a reader should conclude.
 | `UNREACHABLE_POST_WINDOW` | assigned validator, post phase: unreachable | not a retention fault; the obligation was over. It still feeds the reachability view |
 | `EXPECTED_UNASSIGNED` | validator not assigned this shard answered `NOT_FOUND` or was unreachable | normal; only probed when `-probe-unassigned` is on |
 | `SERVING_UNASSIGNED` | validator not assigned this shard returned data for it (`SERVED_OK`, `PARTIAL`, `WRONG_ROWS` or `INVALID_ROWS`) | unexpected; either the observer's assignment is wrong or the validator over-serves. Shown for review, never as a fault |
+| `UNATTESTED` | assigned validator, any phase and any outcome, where no verified signature from that validator appears on the settled promise | nothing on chain proves this validator ever stored the shard, so no verdict is owed either way. Outside every rate, in both directions |
 | `PROBE_ERROR` | the observer could not carry out the probe, or gave up on it (`PROBE_ERROR`, `RPC_DEADLINE`) | an observer problem, shown as a gap |
 | `NOT_PROBED` | the slot elapsed unprobed (observer down or late), or the download was skipped by policy (`MISSED`, `REACHABLE`) | a gap in observation, never a zero |
 
 ## How the dashboard derives its numbers
 
 - **Serve rate** for a validator over a window = `HEALTHY / (HEALTHY + FAULT)`,
-  counting only in-window and grace probes of assigned shards. The probe count
-  is shown next to every rate.
+  counting only in-window and grace probes of assigned shards whose
+  obligation the promise proves. The probe count is shown next to every rate,
+  and the number of probes held out as `UNATTESTED` is published alongside it
+  (`attestation.unattested_probes`) so a reader can see how much of the
+  population the rate speaks for. A rate with high `UNATTESTED` coverage is a
+  statement about a minority of the set.
 - **Reachability** on the overview and validator pages is the latest
   evidence per endpoint: the newest heartbeat or probe (any phase, assigned
   or not, gaps excluded) with TCP and TLS both successful. It is "reachable
@@ -94,14 +134,25 @@ One sentence each, and what a reader should conclude.
   least that many with every assigned validator serving; degraded means fewer
   than the full assignment answered but still at least `OriginalRows`; not
   reconstructable means fewer than `OriginalRows` distinct rows were observed
-  served. While no in-window point is complete (a sweep still running, or
+  served. "Every assigned validator" means every **attested** assigned
+  validator: a validator with no proof of storage cannot demote a blob by
+  staying quiet. A row that was served counts toward reconstruction whether
+  or not the server's storage was proven, because the rows came back either
+  way; attestation decides blame, never availability. While no in-window point is complete (a sweep still running, or
   validators skipped by the policy) the status is `pending` and the blob is
   left out of the network rate: an absent row is a gap, never a zero. The
   threshold is the row count from `fibre-assign`'s pinned protocol params,
   not a hard-coded fraction of validators. Rows from several vantages count a
   validator once.
 - `PROBE_ERROR`, `NOT_PROBED` and `MISSED` are excluded from every rate and
-  rendered as gaps.
+  rendered as gaps. `UNATTESTED` is also excluded, but it is not a gap: the
+  probe ran and its outcome is recorded. It is excluded because no obligation
+  was proven, which is a different statement and is labelled differently.
+- Records written before the observer verified signatures carry no
+  attestation at all. Their `attested` column is NULL, not 0, and they are
+  counted under the older taxonomy and reported separately as
+  `attestation.unknown_probes`. "Not recorded" is never rendered as "did not
+  attest".
 - Every measurement carries `clock_offset_ms`, the observer's clock minus the
   chain's latest block time when the probe ran. Phases are decided against the
   local clock and the grace span is only a few minutes wide, so a vantage

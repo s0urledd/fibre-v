@@ -8,6 +8,7 @@ const BADGES: Record<string, { label: string; glyph: string; token: string; def:
   UNREACHABLE_POST_WINDOW: { label: "unreachable after window", glyph: "◇", token: "var(--status-post-window)", def: "Unreachable after the obligation ended. Not a retention fault." },
   EXPECTED_UNASSIGNED: { label: "unassigned", glyph: "○", token: "var(--status-expected-gone)", def: "Validator was not assigned this shard." },
   SERVING_UNASSIGNED: { label: "serving unassigned", glyph: "◈", token: "var(--status-post-window)", def: "Validator returned a shard it was not assigned. Flagged for review." },
+  UNATTESTED: { label: "unattested", glyph: "◌", token: "var(--text-3)", def: "The settled promise carries no verified signature from this validator, so nothing on chain proves it ever stored the shard. Whatever the probe found is recorded but kept out of the serve rate, in both directions." },
   PROBE_ERROR: { label: "probe error", glyph: "—", token: "var(--text-3)", def: "The observer's own probe failed. A gap, not a verdict." },
   NOT_PROBED: { label: "not probed", glyph: "—", token: "var(--text-3)", def: "The slot elapsed unprobed, or the policy sampled it out. A gap, not a verdict." },
 };
@@ -18,7 +19,7 @@ export function badgeDef(cls: string) {
 
 export default function Badge({ cls, title }: { cls: string; title?: string }) {
   const b = badgeDef(cls);
-  const notProbed = cls === "NOT_PROBED" || cls === "PROBE_ERROR";
+  const notProbed = cls === "NOT_PROBED" || cls === "PROBE_ERROR" || cls === "UNATTESTED";
   return (
     <span className={"badge" + (notProbed ? " not-probed" : "")} style={{ ["--c" as string]: b.token }} title={title ?? b.def}>
       <span className="g" aria-hidden="true">{b.glyph}</span>
@@ -28,7 +29,7 @@ export default function Badge({ cls, title }: { cls: string; title?: string }) {
 }
 
 export function Legend({ classes }: { classes?: string[] }) {
-  const list = classes ?? ["HEALTHY", "TOLERATED", "FAULT", "EXPECTED_GONE", "UNREACHABLE_POST_WINDOW", "NOT_PROBED"];
+  const list = classes ?? ["HEALTHY", "TOLERATED", "FAULT", "UNATTESTED", "EXPECTED_GONE", "UNREACHABLE_POST_WINDOW", "NOT_PROBED"];
   return (
     <div className="legend">
       {list.map((c) => (

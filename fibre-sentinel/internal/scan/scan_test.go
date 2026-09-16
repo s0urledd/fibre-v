@@ -154,7 +154,14 @@ func TestBuildAssignmentTable(t *testing.T) {
 	var commit [32]byte
 	commit[0] = 0xAB
 
-	tbl := buildAssignmentTable(commit, 0, 51, vals, true)
+	// mark the first two validators attested, so the table's attested counts
+	// are exercised alongside the assignment itself
+	att := Attestation{Attested: map[string]bool{
+		vals[0].Address.String(): true,
+		vals[1].Address.String(): true,
+	}, Entries: 2, Verified: 2, AttestedPower: 2_000_000, TotalPower: 4_000_000}
+
+	tbl := buildAssignmentTable(commit, 0, 51, vals, true, att)
 	if tbl.Error != "" {
 		t.Fatalf("unexpected error: %s", tbl.Error)
 	}
@@ -171,12 +178,24 @@ func TestBuildAssignmentTable(t *testing.T) {
 	if sum != tbl.Sigma {
 		t.Errorf("sigma %d != sum %d", tbl.Sigma, sum)
 	}
+	attested := 0
+	for _, v := range tbl.Validators {
+		if v.Attested {
+			attested++
+		}
+	}
+	if attested != 2 || tbl.AttestedWithRows != 2 {
+		t.Errorf("attested = %d, AttestedWithRows = %d, want 2 and 2", attested, tbl.AttestedWithRows)
+	}
+	if tbl.AttestedVotingPower != 2_000_000 || tbl.SignaturesVerified != 2 {
+		t.Errorf("attested power %d, verified %d", tbl.AttestedVotingPower, tbl.SignaturesVerified)
+	}
 	if tbl.ProtocolParams.Fingerprint != assign.ParamsV10BlobV0.Fingerprint() {
 		t.Errorf("fingerprint mismatch")
 	}
 
 	// unknown blob version -> explicit error, no assignment.
-	bad := buildAssignmentTable(commit, 7, 51, vals, true)
+	bad := buildAssignmentTable(commit, 7, 51, vals, true, Attestation{})
 	if bad.Error == "" {
 		t.Fatal("expected error for blob version 7")
 	}

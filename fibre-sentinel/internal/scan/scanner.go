@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,6 +58,9 @@ type Scanner struct {
 	fibreInactive bool
 
 	valSetCache map[int64][]assign.Validator
+	// memberCache keeps the raw set (with consensus public keys) for the same
+	// heights, so promise signatures can be verified without a second fetch.
+	memberCache map[int64][]ValSetMember
 }
 
 // New builds a Scanner. It opens the store and dials the RPC lazily in Run.
@@ -84,6 +88,7 @@ func New(cfg Config, log *Logger) (*Scanner, error) {
 		chain:       ch,
 		store:       st,
 		valSetCache: map[int64][]assign.Validator{},
+		memberCache: map[int64][]ValSetMember{},
 	}, nil
 }
 
@@ -521,10 +526,25 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 	}); verr != nil {
 		return Publication{}, fmt.Errorf("validator set at height %d: %w", pp.Height, verr)
 	}
+
+	// Which validators does this promise PROVE stored their shard? The chain
+	// does not answer that: its signature check runs in the ante handler and
+	// is skipped in ExecModeFinalize, so the observer verifies the signatures
+	// itself against the consensus keys at the promise height.
+	signBytes, sberr := internal.SignBytes()
+	if sberr != nil {
+		return Publication{}, fmt.Errorf("promise sign bytes: %w", sberr)
+	}
+	att := verifyAttestations(signBytes, msg.ValidatorSignatures, s.memberCache[pp.Height])
+	if att.Unmatched > 0 || att.OutOfPosition > 0 {
+		s.log.Printf("h=%d tx=%d promise %s: %d signature entries, %d verified, %d matched no validator, %d out of position",
+			blk.Height, txIndex, hexstr(hash)[:12], att.Entries, att.Verified, att.Unmatched, att.OutOfPosition)
+	}
+
 	{
 		var commitment [32]byte
 		copy(commitment[:], pp.Commitment)
-		table = buildAssignmentTable(commitment, pp.BlobVersion, pp.Height, vals, s.cfg.StoreRows)
+		table = buildAssignmentTable(commitment, pp.BlobVersion, pp.Height, vals, s.cfg.StoreRows, att)
 	}
 
 	return Publication{
@@ -557,6 +577,7 @@ func (s *Scanner) validatorSet(ctx context.Context, height int64) ([]assign.Vali
 	if err != nil {
 		return nil, err
 	}
+	s.rememberMembers(height, members)
 	if len(members) == 0 {
 		return nil, fmt.Errorf("empty validator set")
 	}
@@ -574,9 +595,47 @@ func (s *Scanner) validatorSet(ctx context.Context, height int64) ([]assign.Vali
 		}
 		out = append(out, assign.Validator{Address: a, VotingPower: m.VotingPower})
 	}
-	if len(s.valSetCache) >= 256 {
-		s.valSetCache = map[int64][]assign.Validator{} // bounded
-	}
 	s.valSetCache[height] = out
+	s.evictValSetCaches(height)
 	return out, nil
+}
+
+// maxValSetHeights bounds the per-height validator-set caches. Publications
+// arrive at many distinct promise heights, so an unbounded map would grow for
+// the life of the process.
+const maxValSetHeights = 256
+
+func (s *Scanner) rememberMembers(height int64, members []ValSetMember) {
+	s.memberCache[height] = members
+	s.evictValSetCaches(height)
+}
+
+// evictValSetCaches drops the oldest heights once either cache is over the
+// bound, keeping the most recent ones: a publication's promise height is
+// always at or below the block being scanned, and the scan moves forward, so
+// the lowest heights are the ones that will not be asked for again.
+func (s *Scanner) evictValSetCaches(current int64) {
+	evict := func(heights []int64, drop func(int64)) {
+		if len(heights) <= maxValSetHeights {
+			return
+		}
+		sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+		for _, h := range heights[:len(heights)-maxValSetHeights] {
+			drop(h)
+		}
+	}
+	if len(s.valSetCache) > maxValSetHeights {
+		hs := make([]int64, 0, len(s.valSetCache))
+		for h := range s.valSetCache {
+			hs = append(hs, h)
+		}
+		evict(hs, func(h int64) { delete(s.valSetCache, h) })
+	}
+	if len(s.memberCache) > maxValSetHeights {
+		hs := make([]int64, 0, len(s.memberCache))
+		for h := range s.memberCache {
+			hs = append(hs, h)
+		}
+		evict(hs, func(h int64) { delete(s.memberCache, h) })
+	}
 }

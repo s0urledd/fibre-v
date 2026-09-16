@@ -27,8 +27,47 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-// SchemaVersion is bumped whenever schema.sql changes shape.
-const SchemaVersion = 1
+// SchemaVersion is the schema this binary expects. schema.sql is the frozen
+// version-1 baseline; every later version is a numbered entry in migrations,
+// applied in order. A fresh database therefore takes exactly the same path as
+// an upgraded one — baseline, then every migration — so the two end up
+// identical in shape and the migration code is exercised by every test run
+// rather than only on upgrade day.
+const SchemaVersion = 2
+
+// migration is one numbered step above the baseline. The statements run in a
+// single transaction: SQLite supports transactional DDL, so a failed step
+// leaves the database at the previous version rather than half-migrated.
+type migration struct {
+	version int
+	note    string
+	stmts   []string
+}
+
+// migrations must stay append-only and in ascending order. Never edit a
+// released entry: a database that already applied it will not re-run it.
+var migrations = []migration{
+	{
+		version: 2,
+		note:    "verified attestation: which validators a settled promise proves stored the blob",
+		stmts: []string{
+			// Nullable on purpose. A row written before this migration, or
+			// ingested from a record whose schema_version predates the
+			// attestation field, has no attestation evidence either way.
+			// NULL is "unknown"; 0 would claim the validator did not attest,
+			// which the record does not say.
+			`ALTER TABLE assignments ADD COLUMN attested INTEGER`,
+			`ALTER TABLE probes ADD COLUMN attested INTEGER`,
+			`ALTER TABLE publications ADD COLUMN attested_with_rows INTEGER`,
+			`ALTER TABLE publications ADD COLUMN attested_voting_power INTEGER`,
+			`ALTER TABLE publications ADD COLUMN signature_entries INTEGER`,
+			`ALTER TABLE publications ADD COLUMN signatures_verified INTEGER`,
+			`ALTER TABLE publications ADD COLUMN signatures_unmatched INTEGER`,
+			`ALTER TABLE publications ADD COLUMN signatures_out_of_position INTEGER`,
+			`CREATE INDEX IF NOT EXISTS assignments_attested ON assignments (promise_hash, attested)`,
+		},
+	},
+}
 
 // Store wraps one SQLite database.
 type Store struct {
@@ -76,14 +115,19 @@ func OpenReadOnly(path string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	var version int
-	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+	// Every version from 1 to SchemaVersion must be present, not just the
+	// highest: a database with a gap is missing that migration's columns, and
+	// MAX alone would wave it through.
+	var highest, distinct int
+	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0), COUNT(DISTINCT version) FROM schema_migrations WHERE version <= ?`,
+		SchemaVersion).Scan(&highest, &distinct); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("read schema version: %w (is this an observer database?)", err)
 	}
-	if version != SchemaVersion {
+	if highest != SchemaVersion || distinct != SchemaVersion {
 		db.Close()
-		return nil, fmt.Errorf("schema version %d, this binary expects %d", version, SchemaVersion)
+		return nil, fmt.Errorf("schema version %d (%d of %d migrations applied), this binary expects %d: "+
+			"run the collector once to migrate, or upgrade this binary", highest, distinct, SchemaVersion, SchemaVersion)
 	}
 	return &Store{db: db}, nil
 }
@@ -95,32 +139,112 @@ func (s *Store) DB() *sql.DB { return s.db }
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate() error {
-	// Drop SQL comments before splitting on ";" so a semicolon inside a
-	// comment cannot cut a statement in half.
-	var sb strings.Builder
-	for _, line := range strings.Split(schemaSQL, "\n") {
-		sb.WriteString(stripSQLComment(line))
-		sb.WriteByte('\n')
-	}
-	for _, stmt := range strings.Split(sb.String(), ";") {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
+	// The baseline is idempotent (every statement is CREATE ... IF NOT
+	// EXISTS), so running it against an existing database is a no-op and
+	// against a new one creates version 1.
+	for _, stmt := range splitSQL(schemaSQL) {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("schema: %w\n%s", err, stmt)
 		}
 	}
-	var version int
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?)`,
+		ts(time.Now())); err != nil {
+		return fmt.Errorf("record baseline: %w", err)
+	}
+
+	applied, err := s.appliedVersions()
+	if err != nil {
 		return err
 	}
-	if version > SchemaVersion {
-		return fmt.Errorf("database schema version %d is newer than this binary's %d", version, SchemaVersion)
+	var highest int
+	for v := range applied {
+		if v > highest {
+			highest = v
+		}
 	}
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
-		SchemaVersion, ts(time.Now()))
-	return err
+	if highest > SchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than this binary's %d: "+
+			"upgrade the binary, or point it at a different database", highest, SchemaVersion)
+	}
+
+	for _, m := range migrations {
+		if m.version > SchemaVersion {
+			return fmt.Errorf("migration %d is above SchemaVersion %d: bump the constant", m.version, SchemaVersion)
+		}
+		if applied[m.version] {
+			continue
+		}
+		if err := s.applyMigration(m); err != nil {
+			return err
+		}
+	}
+
+	// Every version from 1 to SchemaVersion must now be recorded. A gap means
+	// migrations is missing an entry, which would let OpenReadOnly's version
+	// check pass over a database that never got the columns.
+	applied, err = s.appliedVersions()
+	if err != nil {
+		return err
+	}
+	for v := 1; v <= SchemaVersion; v++ {
+		if !applied[v] {
+			return fmt.Errorf("schema version %d is missing from migrations", v)
+		}
+	}
+	return nil
+}
+
+func (s *Store) appliedVersions() (map[int]bool, error) {
+	rows, err := s.db.Query(`SELECT version FROM schema_migrations`)
+	if err != nil {
+		return nil, fmt.Errorf("read schema versions: %w", err)
+	}
+	defer rows.Close()
+	out := map[int]bool{}
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out[v] = true
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) applyMigration(m migration) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range m.stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migration %d (%s): %w\n%s", m.version, m.note, err, stmt)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
+		m.version, ts(time.Now())); err != nil {
+		return fmt.Errorf("migration %d: record: %w", m.version, err)
+	}
+	return tx.Commit()
+}
+
+// splitSQL turns a schema file into executable statements. Comments are
+// stripped before splitting on ";" so a semicolon inside a comment cannot cut
+// a statement in half.
+func splitSQL(src string) []string {
+	var sb strings.Builder
+	for _, line := range strings.Split(src, "\n") {
+		sb.WriteString(stripSQLComment(line))
+		sb.WriteByte('\n')
+	}
+	var out []string
+	for _, stmt := range strings.Split(sb.String(), ";") {
+		if stmt = strings.TrimSpace(stmt); stmt != "" {
+			out = append(out, stmt)
+		}
+	}
+	return out
 }
 
 // TimeLayout is the fixed-width UTC layout every timestamp column uses, so
@@ -262,14 +386,26 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 	defer tx.Rollback()
 
 	a := p.Assignment
+	// A record written before AttestationSchemaVersion has no attestation
+	// evidence, so these columns stay NULL. Writing 0 would assert that no
+	// validator attested, which the record does not say.
+	att := func(v int64) any {
+		if !p.HasAttestation() {
+			return nil
+		}
+		return v
+	}
 	res, err := tx.Exec(`INSERT INTO publications
 		(promise_hash, commitment, blob_version, blob_size, namespace, chain_id, promise_height, creation_timestamp,
 		 signer, signer_public_key, validator_signature_count, settlement_height, settlement_time, settlement_tx_hash,
 		 settlement_tx_index, settlement_tx_code, must_serve_until, must_serve_until_basis, shard_retention_s,
 		 payment_promise_timeout_s, assignment_error, protocol_params_fingerprint, pinned_celestia_app,
 		 validator_set_height, total_voting_power, sigma_rows, distinct_rows, wrap_overlaps, validators_with_rows,
-		 recorded_at, raw_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 recorded_at, raw_json,
+		 attested_with_rows, attested_voting_power, signature_entries, signatures_verified,
+		 signatures_unmatched, signatures_out_of_position)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		        ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(promise_hash) DO NOTHING`,
 		p.PromiseHash, p.Promise.Commitment, p.Promise.BlobVersion, p.Promise.BlobSize, p.Promise.Namespace,
 		p.Promise.ChainID, p.Promise.Height, ts(p.Promise.CreationTimestamp),
@@ -278,7 +414,9 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 		p.ParamsAtPublication.ShardRetentionSeconds, p.ParamsAtPublication.PaymentPromiseTimeoutSeconds,
 		a.Error, a.ProtocolParams.Fingerprint, a.ProtocolParams.PinnedCelestiaApp,
 		a.ValidatorSetHeight, a.TotalVotingPower, a.Sigma, a.Distinct, a.WrapOverlaps, a.ValidatorsWithRows,
-		ts(p.RecordedAt), string(raw))
+		ts(p.RecordedAt), string(raw),
+		att(int64(a.AttestedWithRows)), att(a.AttestedVotingPower), att(int64(a.SignatureEntries)),
+		att(int64(a.SignaturesVerified)), att(int64(a.SignaturesUnmatched)), att(int64(a.SignaturesOutOfPosition)))
 	if err != nil {
 		return false, fmt.Errorf("publication %s: %w", p.PromiseHash, err)
 	}
@@ -295,9 +433,13 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 			}
 			rowsJSON = string(b)
 		}
-		if _, err := tx.Exec(`INSERT INTO assignments (promise_hash, validator_address, voting_power, row_count, rows_json)
-			VALUES (?, ?, ?, ?, ?) ON CONFLICT(promise_hash, validator_address) DO NOTHING`,
-			p.PromiseHash, v.Address, v.VotingPower, v.RowCount, rowsJSON); err != nil {
+		var attested any
+		if p.HasAttestation() {
+			attested = b2i(v.Attested)
+		}
+		if _, err := tx.Exec(`INSERT INTO assignments (promise_hash, validator_address, voting_power, row_count, rows_json, attested)
+			VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(promise_hash, validator_address) DO NOTHING`,
+			p.PromiseHash, v.Address, v.VotingPower, v.RowCount, rowsJSON, attested); err != nil {
 			return false, fmt.Errorf("assignment %s/%s: %w", p.PromiseHash, v.Address, err)
 		}
 	}
@@ -314,8 +456,10 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		 validator_address, validator_host, assigned, assigned_row_count, schedule_label, scheduled_at, started_at,
 		 finished_at, lateness_ms, dns_ok, dns_ms, tcp_ok, tcp_ms, tls_ok, tls_ms, tls_version, peer_cert_sha256,
 		 identity_ok, identity_reason, download_ok, download_ms, rows_returned, rows_expected, commitment_verified,
-		 assignment_verified, phase, outcome, classification, classification_reason, raw_error, total_duration_ms, raw_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 assignment_verified, phase, outcome, classification, classification_reason, raw_error, total_duration_ms, raw_json,
+		 attested)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		        ?)
 		ON CONFLICT(dedupe_key) DO NOTHING`,
 		m.DedupeKey(), m.Vantage, m.PromiseHash, m.Commitment, m.BlobVersion, ts(m.MustServeUntil), m.ValidatorSetHeight,
 		m.ValidatorAddress, m.ValidatorHost, b2i(m.Assigned), m.AssignedRowCount, m.ScheduleLabel, ts(m.ScheduledAt),
@@ -325,12 +469,24 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		b2i(m.Download.OK), m.Download.DurationMS, m.Download.RowsReturned, m.Download.RowsExpected,
 		b2i(m.Download.CommitmentVerified), b2i(m.Download.AssignmentVerified),
 		string(m.Phase), string(m.Outcome), string(m.Classification), m.ClassificationReason, m.RawError,
-		m.TotalDurationMS, string(raw))
+		m.TotalDurationMS, string(raw),
+		probeAttested(m))
 	if err != nil {
 		return false, fmt.Errorf("probe %s: %w", m.DedupeKey(), err)
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// probeAttested maps a measurement's attestation to its nullable column. A
+// record written before AttestationSchemaVersion carries no evidence, so the
+// column stays NULL: its Attested is false only because the field did not
+// exist, and the API must not read that as "this validator did not attest".
+func probeAttested(m probe.Measurement) any {
+	if !m.HasAttestation() {
+		return nil
+	}
+	return b2i(m.Attested)
 }
 
 // ---- endpoints ----
