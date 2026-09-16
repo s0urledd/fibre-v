@@ -419,6 +419,33 @@ dl.kv dd { margin: 0; word-break: break-all; }
 .layers .sample { display: block; margin-top: var(--s1); }
 .layers .what { display: block; font-size: var(--t-sample); color: var(--text-2); margin-top: var(--s2); line-height: var(--lh-text); }
 
+/* ------------------------------------------------------------------ info --- */
+/* The mark is deliberately quiet: it sits at the size of a label, in the
+   dimmest ink that still passes AA, and only darkens on hover and focus. A
+   reader scanning the numbers should not see a row of blue circles; a reader
+   looking for a definition should find one next to every figure. */
+.info {
+  appearance: none; border: 1px solid var(--edge); background: transparent;
+  color: var(--text-3); font: inherit; font-size: 10px; line-height: 1;
+  width: 14px; height: 14px; border-radius: 50%; padding: 0; margin-left: var(--s2);
+  cursor: pointer; vertical-align: 1px; font-family: var(--mono);
+}
+.info:hover, .info:focus-visible { color: var(--text); border-color: var(--text-3); }
+.info[aria-expanded="true"] { color: var(--paper); background: var(--accent); border-color: var(--accent); }
+
+/* Portalled to <body>, so a mark in a scrolling table header is not clipped by
+   the table's own overflow. Fixed rather than absolute for the same reason. */
+.info-pop {
+  position: fixed; z-index: 50; width: 300px; max-width: calc(100vw - 24px);
+  background: var(--paper); border: 1px solid var(--edge); border-radius: var(--radius-control);
+  padding: var(--s3) var(--s4); box-shadow: 0 6px 24px rgb(var(--ink) / .12);
+  font-size: var(--t-sample); line-height: var(--lh-text); color: var(--text-2);
+}
+.info-pop .label { display: block; margin-bottom: var(--s2); }
+.info-pop p { margin: 0 0 var(--s2); }
+.info-pop p:last-child { margin-bottom: 0; }
+.info-pop code { font-size: inherit; }
+
 /* Screen-reader-only text, for state a sighted reader gets from the skeleton. */
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;

@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -33,13 +35,34 @@ type Chain struct {
 
 // NewChain dials rpcURL (e.g. http://127.0.0.1:26657). It does not verify
 // connectivity; the first real call will surface a dead endpoint.
+//
+// The HTTP client is ours rather than CometBFT's default, for one reason: the
+// default builds a Transport with a hand-rolled dialer and no Proxy function,
+// so it ignores HTTPS_PROXY and connects straight out. On a host that only has
+// egress through a proxy — a corporate network, a locked-down VPS, a CI
+// sandbox — every call fails with something that looks like the chain refusing
+// us rather than like a proxy we never asked. http.ProxyFromEnvironment is the
+// standard library's own rule and is a no-op when no proxy is configured, so
+// the common case is unchanged.
 func NewChain(rpcURL string, timeout time.Duration, log *Logger) (*Chain, error) {
-	c, err := rpchttp.New(rpcURL, "/websocket")
-	if err != nil {
-		return nil, fmt.Errorf("rpc client for %s: %w", rpcURL, err)
-	}
 	if timeout <= 0 {
 		timeout = 15 * time.Second
+	}
+	httpc := &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   timeout,
+			ResponseHeaderTimeout: timeout,
+			MaxIdleConns:          16,
+			MaxIdleConnsPerHost:   16,
+			IdleConnTimeout:       90 * time.Second,
+		},
+	}
+	c, err := rpchttp.NewWithClient(rpcURL, "/websocket", httpc)
+	if err != nil {
+		return nil, fmt.Errorf("rpc client for %s: %w", rpcURL, err)
 	}
 	return &Chain{rpc: c, timeout: timeout, log: log}, nil
 }
@@ -58,6 +81,25 @@ func (c *Chain) Status(parent context.Context) (string, int64, error) {
 	}
 	return s.NodeInfo.Network, s.SyncInfo.LatestBlockHeight, nil
 }
+
+// AppVersion is the application version the chain is currently running, from
+// ABCIInfo. It is the one number that says whether Fibre exists here at all:
+// x/fibre and x/valaddr are introduced in app version 10, so on a chain below
+// that every Fibre query fails for a reason that has nothing to do with any
+// validator. An observer that cannot tell "the module is not there" from "the
+// module is there and empty" will publish the second when the first is true.
+func (c *Chain) AppVersion(parent context.Context) (uint64, error) {
+	ctx, cancel := c.ctx(parent)
+	defer cancel()
+	info, err := c.rpc.ABCIInfo(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("abci_info: %w", err)
+	}
+	return info.Response.AppVersion, nil
+}
+
+// FibreAppVersion is the app version x/fibre and x/valaddr first exist at.
+const FibreAppVersion = 10
 
 // Block holds only what the scanner needs from one block.
 type Block struct {

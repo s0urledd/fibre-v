@@ -43,6 +43,15 @@ func main() {
 		blobBytes = flag.Int("blob", 96*1024, "blob payload size")
 		gap       = flag.Duration("gap", 6*time.Second, "delay between publishes")
 		nsHex     = flag.String("ns", "", "namespace id suffix bytes (hex, <=10); default random-ish per run")
+		// Off by default, which is what the protocol does: the publisher stops
+		// at two thirds of voting power and the rest of the set is left with no
+		// signature on chain. This used to be hardcoded ON, so every devnet blob
+		// came back with a full signature set — and UNATTESTED, which is about a
+		// third of every real assignment, was never produced by a devnet run at
+		// all. It also makes a publish fail outright when any validator is down,
+		// since "all" cannot be reached, which is not how a real publisher
+		// behaves and is not a failure the observer should have to model.
+		awaitAll = flag.Bool("await-all", false, "wait for EVERY validator's signature rather than stopping at the protocol's safety threshold")
 	)
 	flag.Parse()
 
@@ -110,7 +119,11 @@ func main() {
 		t0 := time.Now()
 		// Upload collects validator signatures; then broadcast the settling
 		// MsgPayForFibre ourselves (this is what fibre.Put does internally).
-		sp, err := fc.Upload(ctx, ns, blob, celfibre.WithKeyName("pub"), celfibre.WithAwaitAllSignatures())
+		opts := []celfibre.UploadOption{celfibre.WithKeyName("pub")}
+		if *awaitAll {
+			opts = append(opts, celfibre.WithAwaitAllSignatures())
+		}
+		sp, err := fc.Upload(ctx, ns, blob, opts...)
 		must(err, fmt.Sprintf("upload %d", i))
 
 		promiseProto, err := sp.ToProto()

@@ -6,6 +6,7 @@ import ValidatorTable from "@/components/ValidatorTable";
 import { Reading } from "@/components/Rate";
 import Graduation from "@/components/Graduation";
 import { Mark } from "@/components/Verdict";
+import Info from "@/components/Info";
 
 const WINDOWS = ["24h", "7d", "30d", "all"];
 
@@ -87,8 +88,15 @@ export default function Overview() {
 
       <section className="plate">
         <div className="plate-head">
-          <span className="label">Serve rate</span>
-          <span className="label">Faults</span>
+          <span className="label">Serve rate<Info label="Serve rate">
+            <p>Probes where the chain proves the validator stored the shard and this observer reached it, over every probe of an assigned shard while the obligation held.</p>
+            <p>Everything the rate does not speak for is published under its own name rather than folded in.</p>
+            <p><Link href="/methodology/#verdicts">How a verdict is reached →</Link></p>
+          </Info></span>
+          <span className="label">Faults<Info label="Fault">
+            <p><strong>A fault is two things and nothing less:</strong> this site reached the validator, and it failed to hand over a shard the chain proves it stored.</p>
+            <p>It is the only class counted against anyone. Unreachable, unproven and unregistered each have their own name.</p>
+          </Info></span>
         </div>
         <div className="plate-body">
           <div className="plate-main">
@@ -98,11 +106,6 @@ export default function Overview() {
                 ? <>{fmtCount(net.serve_rate)} probes · {net.serve_rate_by_obligation.den.toLocaleString("en-US")} obligations</>
                 : <>&nbsp;</>}
             </span>
-            <p className="lead">
-              Probes where the chain proves the validator stored the shard and this observer reached
-              it. A fault is those two things and nothing less.{" "}
-              <Link href="/methodology/#verdicts">How a verdict is reached</Link>
-            </p>
           </div>
           <div className="plate-side">
             {/* Three states, not two. "none" is a claim — it says every probe
@@ -139,20 +142,47 @@ export default function Overview() {
 
       {net && (
         <p className="coverage">
-          This rate speaks for {fmtCount(net.serve_rate_coverage)} in-window probes of an assigned shard.{" "}
-          <Link href="/methodology/#what-this-excludes">What it leaves out →</Link>
+          This rate speaks for {fmtCount(net.serve_rate_coverage)} in-window probes of an assigned shard.
+          <Info label="What the rate leaves out">
+            <p>Probes of an assigned shard that produced no verdict, each under its own name:</p>
+            <p><strong>Unattested</strong> — the chain proves no obligation. <strong>Unreachable</strong> — this site could not complete a conversation, and half that path is ours. <strong>Not registered</strong> — no Fibre host on chain at the time. <strong>Shadowed shard</strong> — rows of this blob from another promise over it. <strong>Identity expired</strong> — the right key, a lapsed validity window.</p>
+            <p><Link href="/methodology/#what-this-excludes">Each one, and why it is out →</Link></p>
+          </Info>
         </p>
       )}
 
+      {/*
+        Two different states used to share one sentence ending in "x/valaddr is
+        empty or not active on this chain". They are not the same thing at all:
+        on a chain below app version 10 the module does not exist, so an empty
+        registry is a fact about the chain, and saying "no validator has
+        registered" implies a fact about validators that nobody has established.
+        The collector records the app version, so the page can say which.
+      */}
       {noPubs && (
         <div className="plate-note">
-          <span className="label">Nothing to measure yet</span>
+          <span className="label">
+            {meta.app_version && !meta.fibre_active ? "Fibre is not live on this chain yet" : "Nothing to measure yet"}
+          </span>
           <p>
-            No Fibre publication recorded. Collector at height {meta.last_scanned_height || "?"}, following{" "}
-            chain {meta.chain_id || "?"}.{" "}
-            {meta.counts.OpenEndpoints === 0
-              ? "No validator has registered a Fibre endpoint yet — x/valaddr is empty or not active on this chain."
-              : `${meta.counts.OpenEndpoints} validators have registered a Fibre endpoint; reachability is probed every 10 minutes.`}
+            {meta.app_version && !meta.fibre_active ? (
+              <>
+                {meta.chain_id || "This chain"} is on app version {meta.app_version}. Fibre needs{" "}
+                {meta.fibre_app_version || "10"}, so <code>x/fibre</code> and <code>x/valaddr</code> do not exist here
+                and there is nothing yet for any validator to have registered or failed. This observer is following the
+                chain at height {meta.chain_height || meta.last_scanned_height || "?"} and will start measuring at the upgrade.
+                {vals && vals.validators.length > 0 &&
+                  ` The ${vals.validators.length} bonded validators below are already listed by name, read from the chain's own staking module, with every measured column empty because nothing has been measured.`}
+              </>
+            ) : (
+              <>
+                No Fibre publication recorded. Collector at height {meta.last_scanned_height || "?"}, following{" "}
+                chain {meta.chain_id || "?"}.{" "}
+                {meta.counts.OpenEndpoints === 0
+                  ? "The Fibre modules are live and no validator has registered an endpoint yet."
+                  : `${meta.counts.OpenEndpoints} validators have registered a Fibre endpoint; reachability is probed every 10 minutes.`}
+              </>
+            )}
           </p>
         </div>
       )}
@@ -202,10 +232,14 @@ export default function Overview() {
           one number is missing is worse than one missing the number. */}
       {net && net.serve_latency_p50_ms != null && (
         <p className="coverage">
-          A shard that came back took {net.serve_latency_p50_ms.toLocaleString("en-US")} ms typically and{" "}
+          A shard that came back took {net.serve_latency_p50_ms.toLocaleString("en-US")} ms typically,{" "}
           {(net.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at the 95th percentile, over{" "}
-          {net.serve_latency_sample.toLocaleString("en-US")} probes: dial, TLS, download and verification against the commitment.
-          No threshold is attached to that — this site watches from one place, so part of every millisecond is its own path.
+          {net.serve_latency_sample.toLocaleString("en-US")} probes.
+          <Info label="Service time">
+            <p>The whole probe: dial, TLS handshake, <code>DownloadShard</code>, and verification of every returned row against the blob commitment.</p>
+            <p>Failed probes are excluded — how long a failure took is not a service time.</p>
+            <p><strong>No threshold is attached.</strong> This site watches from one place, so part of every millisecond is its own path.</p>
+          </Info>
         </p>
       )}
 
@@ -224,9 +258,15 @@ export default function Overview() {
       )}
 
       <h2>Validators</h2>
+      {/* Guarded on app_version, not on fibre_active alone: a store whose
+          collector has not reached a node yet has neither, and "Fibre is not
+          live here" is a claim about the chain that this site would then be
+          making without having looked. */}
       {vals
         ? <ValidatorTable rows={vals.validators}
-            caption={`Every validator with a registered Fibre endpoint or at least one probe, over the ${win} window. Six further columns are on each validator's page.`} />
+            caption={meta?.app_version && !meta.fibre_active
+              ? `Every bonded validator on ${meta.chain_id || "this chain"}, from the staking module. Nothing has been measured about any of them yet: Fibre is not live here.`
+              : `Every bonded validator, plus any with a registered Fibre endpoint or at least one probe, over the ${win} window. Six further columns are on each validator's page.`} />
         : <p className="muted">Loading validators…</p>}
     </>
   );

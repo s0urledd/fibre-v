@@ -65,6 +65,46 @@ largest from 7.2% up to 39%. For mocha's actual shares, run all 79 — at the
 measured 445 MB per validator (315 MB for the node, 130 MB for its fibre
 server) that needs about 35 GB of RAM.
 
+### Producing each verdict class on purpose
+
+The taxonomy has nine classes and a devnet that just runs produces two of them.
+The rest come from doing something to it, and the two that matter most come from
+the same action at different times:
+
+```bash
+# 1. start the devnet on a real curve, publish a few blobs
+FIBRE_DEVNET_POWERS=powers/mocha-5.txt ./multi-node-fibre.sh 12
+sentinel-pub -count 6 -gap 20s
+
+# 2. stop two fibre servers and leave them down
+awk '$1==10 || $1==11 {print $2}' ~/.fibre-devnet/logs/fibre-pids | xargs kill
+
+# 3. keep publishing
+sentinel-pub -count 6 -gap 20s
+```
+
+Blobs from step 1 were uploaded to those two validators and signed by them, so
+the chain proves they held the shard: a probe that cannot reach them afterwards
+is **UNREACHABLE**. Blobs from step 3 never reached them, so they never signed
+and nothing proves they were ever sent anything: a probe is **UNATTESTED**,
+whatever happened on the wire. Same two validators, same downtime, two different
+classes, and only one of them is ever held against anyone — which is the
+distinction the whole taxonomy exists to make.
+
+`IDENTITY_EXPIRED` needs a certificate whose signed validity window has lapsed;
+`NOT_REGISTERED` needs a validator with no `x/valaddr` entry; `TOLERATED` and
+`EXPECTED_GONE` arrive on their own once a blob's retention window closes.
+
+**`sentinel-pub` publishes at the protocol's safety threshold by default.** It
+used to pass `WithAwaitAllSignatures()` unconditionally, which waits for every
+validator rather than stopping at two thirds of voting power. That had two
+consequences worth knowing about if you read older runs: every devnet blob came
+back with a full signature set, so `UNATTESTED` — about a third of every real
+assignment — was never produced at all; and a publish FAILED outright the moment
+any validator was down, with `not enough voting power: collected X, required Y`
+where Y is the whole set rather than two thirds. Pass `-await-all` if you
+deliberately want every signature.
+
 ### Two thirds, and why most validators have no signature on chain
 
 The publisher stops collecting signatures once **two thirds of voting power**

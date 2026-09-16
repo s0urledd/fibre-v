@@ -120,21 +120,53 @@ func main() {
 			}
 		}
 		if pollEndpoints && chain != nil {
-			_, height, err := chain.Status(ctx)
+			// Whether Fibre exists on this chain at all, recorded rather than
+			// inferred. x/fibre and x/valaddr are introduced in app version
+			// 10, so below that every Fibre query fails for a reason that has
+			// nothing to do with any validator — and a site that cannot tell
+			// "the module is not there" from "the module is there and nobody
+			// registered" will show the second while the first is true. Both
+			// the version and the verdict are stored, so the page can say
+			// which chain it is watching and what state that chain is in.
+			if av, err := chain.AppVersion(ctx); err != nil {
+				log.Printf("app version: %v", err)
+			} else {
+				_ = st.SetMeta("app_version", itoa(int64(av)), now)
+				active := "no"
+				if av >= scan.FibreAppVersion {
+					active = "yes"
+				}
+				_ = st.SetMeta("fibre_active", active, now)
+				_ = st.SetMeta("fibre_app_version", itoa(scan.FibreAppVersion), now)
+			}
+			chainID, height, err := chain.Status(ctx)
 			if err != nil {
 				log.Printf("endpoints: status: %v", err)
-			} else if provs, err := chain.BondedFibreProviders(ctx); err != nil {
-				// Before v10 the module does not exist; that is a normal
-				// state, logged but not fatal.
-				log.Printf("endpoints: %v", err)
-			} else if opened, closed, err := st.ObserveEndpoints(ctx, provs, height, now); err != nil {
-				log.Printf("endpoints: store: %v", err)
 			} else {
-				if opened > 0 || closed > 0 {
-					log.Printf("endpoints: h=%d registered=%d opened=%d closed=%d", height, len(provs), opened, closed)
+				// The chain's own identity and tip, recorded here rather than
+				// only by the scanner: before Fibre activates there are no
+				// publications to carry them, and "which chain is this, and how
+				// far along is it" is the whole content of the site until then.
+				// Kept separate from last_scanned_height, which is how far the
+				// SCANNER has read; conflating the two would report the chain's
+				// progress as our own.
+				_ = st.SetMeta("chain_id", chainID, now)
+				_ = st.SetMeta("chain_height", itoa(height), now)
+
+				if provs, err := chain.BondedFibreProviders(ctx); err != nil {
+					// Before v10 the module does not exist; that is a normal
+					// state, logged but not fatal. fibre_active above says
+					// which of the two this is.
+					log.Printf("endpoints: %v", err)
+				} else if opened, closed, err := st.ObserveEndpoints(ctx, provs, height, now); err != nil {
+					log.Printf("endpoints: store: %v", err)
+				} else {
+					if opened > 0 || closed > 0 {
+						log.Printf("endpoints: h=%d registered=%d opened=%d closed=%d", height, len(provs), opened, closed)
+					}
+					_ = st.SetMeta("endpoints_height", itoa(height), now)
+					_ = st.SetMeta("endpoints_registered", itoa(int64(len(provs))), now)
 				}
-				_ = st.SetMeta("endpoints_height", itoa(height), now)
-				_ = st.SetMeta("endpoints_registered", itoa(int64(len(provs))), now)
 			}
 			// Validator names, from the chain's own staking module rather
 			// than from an explorer's API. A reader recognises a validator by

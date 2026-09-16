@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { useApi, type Validator, type Probe, type Window, type Rate, type ClassCounts, fmtRate, fmtCount, enoughToRank, utc, ago, shortHex } from "@/lib/api";
 import Verdict from "@/components/Verdict";
 import RateCell from "@/components/Rate";
+import Info from "@/components/Info";
 import Graduation from "@/components/Graduation";
 
 type Detail = {
@@ -35,19 +36,18 @@ function Figure({ label, value, unit, what, sample }: {
   label: string;
   value: number | null | undefined;
   unit: string;
-  what: string;
+  what: React.ReactNode;
   sample?: string;
 }) {
   const absent = value === null || value === undefined;
   return (
     <div>
-      <span className="label">{label}</span>
+      <span className="label">{label}<Info label={label}>{what}</Info></span>
       <span className={absent ? "fig absent" : "fig"}>
         {absent ? "—" : value.toLocaleString("en-US")}
         {!absent && <span className="unit"> {unit}</span>}
       </span>
       <span className="sample">{absent ? "not observed in this window" : (sample ?? "")}</span>
-      <span className="what">{what}</span>
     </div>
   );
 }
@@ -55,18 +55,17 @@ function Figure({ label, value, unit, what, sample }: {
 function Layer({ label, r, what, sample }: {
   label: string;
   r: Rate | null | undefined;
-  what: string;
+  what: React.ReactNode;
   sample?: string;
 }) {
   const absent = !r || r.den === 0;
   return (
     <div>
-      <span className="label">{label}</span>
+      <span className="label">{label}<Info label={label}>{what}</Info></span>
       <span className={absent ? "fig absent" : "fig"}>{absent ? "—" : fmtRate(r)}</span>
       <span className="sample">
         {absent ? "not observed in this window" : enoughToRank(r) ? (sample ?? fmtCount(r)) : "under floor"}
       </span>
-      <span className="what">{what}</span>
     </div>
   );
 }
@@ -109,18 +108,39 @@ function Page() {
       {/* The window these four figures cover, said rather than implied. The
           serve-rate table below lists all four spans, so without this the
           reader has no way to tell which one the readings above are from. */}
-      <h2>Service <span className="chip" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name}</span></h2>
+      <h2>
+        Service <span className="chip" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name}</span>
+        <Info label="These five figures">
+          <p>Five ways a Fibre service fails, in the order you would debug them. Each is measured separately, because each has a different fix.</p>
+          <p>The first two come from a heartbeat that dials every registered endpoint every ten minutes, whether or not anything was assigned, so they speak for every validator.</p>
+          <p>The last three speak only for obligations the chain proves — a smaller set, not the same one each window, and selected by which validators answered the publisher fast enough.</p>
+          <p><strong>No figure here carries a threshold.</strong> This site watches from one place, so part of every millisecond and every failed dial is its own path.</p>
+        </Info>
+      </h2>
       <div className="layers">
         <Layer label="Reachable" r={v.reachability_window}
           sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} checks` : undefined}
-          what="This site completed TLS with the registered endpoint. Every ten minutes, whether or not anything was assigned." />
+          what={<>
+            <p>How often this site completed a TLS handshake with the registered endpoint.</p>
+            <p>Sampled every ten minutes for every validator with a host in <code>x/valaddr</code>, assigned or not — so unlike the serve rate, its coverage does not depend on the chain proving an obligation.</p>
+            <p>Half of every path measured here is this site&rsquo;s own, so a dip is not by itself a statement about the operator.</p>
+          </>} />
         <Layer label="Endorsed" r={v.identity_rate_window}
-          what="Of the checks that saw a certificate, how many were signed by this validator's consensus key. A client refuses the rest." />
+          what={<>
+            <p>Of the checks that saw a certificate, how many carried an extension signed by this validator&rsquo;s consensus key. A client refuses the rest.</p>
+            <p>The denominator excludes checks that never completed TLS: an endpoint that was down presented nothing to judge, and counting it here would report one outage twice.</p>
+          </>} />
         <Layer label="Served" r={v.serve_rate}
-          what="Of the shards the chain proves this validator stored, how many it handed over when asked." />
+          what={<>
+            <p>Of the shards the chain proves this validator stored, how many it handed over when asked.</p>
+            <p>A validator only owes a shard it stored, and the only on-chain proof of that is a verified signature on the settled promise. Where that is missing the probe sits outside this rate in both directions.</p>
+          </>} />
         <Layer label="Held to the end" r={last?.serve_rate}
           sample={last ? `${fmtCount(last.serve_rate)} at ${last.key}` : undefined}
-          what="The same, at the last point of the window that produced a verdict. Below the earlier points means pruning before the deadline." />
+          what={<>
+            <p>The same rate, at the last point of the retention window that produced a verdict.</p>
+            <p>Below the earlier points means shards pruned before the deadline — a different failure, with a different fix, from being poor throughout. The pooled rate cannot tell them apart.</p>
+          </>} />
         {/*
           Throughput, not duration. Assignments run from 148 rows to 4,096, so
           a validator carrying eight times the rows takes longer for the same
@@ -134,15 +154,12 @@ function Page() {
           sample={v.serve_latency_p50_ms != null
             ? `${v.serve_latency_p50_ms.toLocaleString("en-US")} ms typical, ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at p95`
             : undefined}
-          what="Rows handed over per second, from dial to rows verified against the commitment. Comparable between validators; the milliseconds are not." />
+          what={<>
+            <p>Rows handed over per second, from dial to rows verified against the blob commitment, over the probes that came back healthy.</p>
+            <p>Rows per second rather than milliseconds because assignments run from 148 rows to 4,096: a validator carrying more rows takes longer for the same service, so a duration column would name the busiest rather than the slowest.</p>
+            <p>Failed probes are excluded. How long a failure took is not a service time.</p>
+          </>} />
       </div>
-      <p className="coverage">
-        Reachability and endorsement are measured on a fixed heartbeat, so they speak for every validator with a registered
-        endpoint. Serving and throughput speak only for obligations the chain proves, which is a smaller set, not the same one
-        each window, and selected by which validators answered the publisher fast enough. No figure here carries a threshold:
-        this site watches from one place, so part of every millisecond is its own path.{" "}
-        <Link href="/methodology/#quorum">Why most validators are unproven →</Link>
-      </p>
 
       {v.last_unreachable_at && (
         <p className="coverage">
@@ -174,16 +191,21 @@ function Page() {
         their own name reads an accusation where the chain is merely silent.
       */}
       {(unattested > 0 || unknown > 0) && (
-        <div className="notice">
-          <strong>{unattested.toLocaleString("en-US")} blob{unattested === 1 ? "" : "s"} in this window are outside the rates below.</strong>{" "}
-          A validator only owes a shard it stored, and the only on-chain proof it stored one is a signature on the settled promise
-          that this observer verified against its consensus key. The publisher stops collecting signatures once two thirds of
-          voting power has answered, so most of the set is left unproven on most blobs, by design and not by fault. Those
-          obligations are excluded in both directions: a failure the validator was never proven to owe cannot count against it,
-          and a success it was never proven to owe cannot count for it.{" "}
-          <Link href="/methodology/#quorum">How the quorum works →</Link>
-          {unknown > 0 && <> {unknown.toLocaleString("en-US")} further blob{unknown === 1 ? "" : "s"} predate signature verification and are counted under the older rules.</>}
-        </div>
+        <p className="coverage">
+          {unattested.toLocaleString("en-US")} blob{unattested === 1 ? "" : "s"} in this window are outside these rates: the chain
+          proves no obligation.
+          <Info label="Outside the rates">
+            <p>A validator only owes a shard it stored, and the only on-chain proof of that is a signature on the settled promise
+              that this observer verified against the validator&rsquo;s consensus key.</p>
+            <p>The publisher stops collecting signatures once two thirds of voting power has answered, so most of the set is left
+              unproven on most blobs — <strong>by design, not by fault</strong>.</p>
+            <p>Those obligations are excluded in both directions: a failure the validator was never proven to owe cannot count
+              against it, and a success it was never proven to owe cannot count for it.</p>
+            {unknown > 0 && <p>{unknown.toLocaleString("en-US")} further blob{unknown === 1 ? "" : "s"} predate signature
+              verification and are counted under the older rules.</p>}
+            <p><Link href="/methodology/#quorum">How the quorum works →</Link></p>
+          </Info>
+        </p>
       )}
       <div className="tablewrap">
         <table>

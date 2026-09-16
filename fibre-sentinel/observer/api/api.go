@@ -276,19 +276,35 @@ func rate(num, den int64) Rate {
 // ---- meta ----
 
 type metaResponse struct {
-	APIVersion             string       `json:"api_version"`
-	Vantage                string       `json:"vantage"`
-	VantageInfo            VantageInfo  `json:"vantage_info"`
-	VantageCount           int          `json:"vantage_count"`
-	ObservedFromOneVantage bool         `json:"observed_from_one_location"`
-	ChainID                string       `json:"chain_id"`
-	LastScannedHeight      string       `json:"last_scanned_height"`
-	EndpointsHeight        string       `json:"endpoints_height"`
-	ProtocolParamsFinger   string       `json:"protocol_params_fingerprint"`
-	PinnedCelestiaApp      string       `json:"pinned_celestia_app_commit"`
-	Counts                 store.Counts `json:"counts"`
-	Collector              *runStatus   `json:"collector"`
-	Prober                 *runStatus   `json:"prober"`
+	APIVersion             string      `json:"api_version"`
+	Vantage                string      `json:"vantage"`
+	VantageInfo            VantageInfo `json:"vantage_info"`
+	VantageCount           int         `json:"vantage_count"`
+	ObservedFromOneVantage bool        `json:"observed_from_one_location"`
+	ChainID                string      `json:"chain_id"`
+	// AppVersion is the chain's current application version, and FibreActive
+	// is whether that is high enough for x/fibre and x/valaddr to exist. Below
+	// FibreAppVersion the modules are not there, so an empty registry and an
+	// empty publication list say nothing about any validator — and a site that
+	// cannot tell "the module is absent" from "the module is empty" will imply
+	// the second while the first is true. Empty when the collector has not
+	// reached a node yet, which is itself worth showing.
+	AppVersion      string `json:"app_version,omitempty"`
+	FibreAppVersion string `json:"fibre_app_version,omitempty"`
+	FibreActive     bool   `json:"fibre_active"`
+	// ChainHeight is the chain's tip as the collector last saw it, which is not
+	// LastScannedHeight: that is how far the SCANNER has read, and before Fibre
+	// activates there is nothing for it to read, so it stays empty while the
+	// chain is plainly making blocks. Reporting the chain's progress as our own,
+	// or ours as the chain's, would be wrong in opposite directions.
+	ChainHeight          string       `json:"chain_height,omitempty"`
+	LastScannedHeight    string       `json:"last_scanned_height"`
+	EndpointsHeight      string       `json:"endpoints_height"`
+	ProtocolParamsFinger string       `json:"protocol_params_fingerprint"`
+	PinnedCelestiaApp    string       `json:"pinned_celestia_app_commit"`
+	Counts               store.Counts `json:"counts"`
+	Collector            *runStatus   `json:"collector"`
+	Prober               *runStatus   `json:"prober"`
 	// LastProbeAt is the newest measurement's start time. The prober writes
 	// JSONL only (it never touches this database), so this is the only live
 	// signal of it; a quiet chain makes it old without anything being wrong.
@@ -403,6 +419,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		APIVersion: Version, Vantage: s.vantage, VantageInfo: s.info,
 		VantageCount: vantages, ObservedFromOneVantage: vantages == 1,
 		ChainID: meta["chain_id"], LastScannedHeight: meta["last_scanned_height"], EndpointsHeight: meta["endpoints_height"],
+		AppVersion: meta["app_version"], FibreAppVersion: meta["fibre_app_version"], FibreActive: meta["fibre_active"] == "yes",
+		ChainHeight:          meta["chain_height"],
 		ProtocolParamsFinger: meta["protocol_params_fingerprint"], PinnedCelestiaApp: pinned,
 		Counts: counts, Collector: col, Prober: pr, LastProbeAt: lastProbe, Meta: meta, ServerTime: now.UTC(),
 	})
@@ -1473,26 +1491,55 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			v.LastSeenAt = &at
 		}
 	}
-	// Names from the staking module, joined last so every row that exists by
-	// now gets one. Only validators this observer already has a reason to
-	// show are named: a name on its own is not evidence of anything, and
-	// listing every validator on the chain would bury the ones that
-	// registered a Fibre endpoint.
-	irows, err := db.QueryContext(ctx, `SELECT cons_address, operator_address, moniker, identity, website, jailed, status
+	// Names from the staking module, and a row for every bonded validator
+	// whether or not anything has been measured about it yet.
+	//
+	// This used to name only validators the observer already had a reason to
+	// show, on the grounds that a name is not evidence and listing the whole
+	// chain would bury the ones with a Fibre endpoint. That reasoning holds
+	// after Fibre activates — and before it, it leaves the page empty. On a
+	// chain below app version 10 there is no x/valaddr to register in and no
+	// publication to be assigned, so nothing produces a row, and the site that
+	// exists to watch these validators cannot say which ones it is watching.
+	//
+	// Seeding from the bonded set fixes that without becoming a second mode:
+	// every bonded validator is assigned every blob, so after activation these
+	// rows are a subset of what the assignment table produces anyway. Before
+	// it, they are the whole answer to "am I in your list", with every measured
+	// column honestly empty.
+	irows, err := db.QueryContext(ctx, `SELECT cons_address, operator_address, moniker, identity, website, jailed, status, tokens
 		FROM validator_identities`)
 	if err != nil {
 		return nil, err
 	}
 	for irows.Next() {
-		var addr, op, moniker, identity, website, status string
+		var addr, op, moniker, identity, website, status, tokens string
 		var jailed int
-		if err := irows.Scan(&addr, &op, &moniker, &identity, &website, &jailed, &status); err != nil {
+		if err := irows.Scan(&addr, &op, &moniker, &identity, &website, &jailed, &status, &tokens); err != nil {
 			irows.Close()
 			return nil, err
 		}
-		if v, ok := byAddr[strings.ToLower(addr)]; ok {
-			v.Moniker, v.Operator, v.KeybaseIdentity, v.Website = moniker, op, identity, website
-			v.Jailed, v.BondStatus = jailed == 1, status
+		hexAddr := strings.ToLower(addr)
+		v, known := byAddr[hexAddr]
+		if !known {
+			// Only the active set gets a row of its own: an unbonded validator
+			// with nothing measured has no Fibre obligation to report on, and
+			// one WITH something measured is already in byAddr from its probes.
+			if status != "BOND_STATUS_BONDED" || (only != "" && hexAddr != only) {
+				continue
+			}
+			v = get(hexAddr)
+		}
+		v.Moniker, v.Operator, v.KeybaseIdentity, v.Website = moniker, op, identity, website
+		v.Jailed, v.BondStatus = jailed == 1, status
+		// Voting power from the staking module, only where no assignment has
+		// given one. After activation the assignment's figure wins: it is the
+		// power the shard split was actually computed from, at a height this
+		// row publishes, rather than the power right now.
+		if v.VotingPower == 0 {
+			if n, err := strconv.ParseInt(tokens, 10, 64); err == nil {
+				v.VotingPower = n / 1_000_000
+			}
 		}
 	}
 	irows.Close()

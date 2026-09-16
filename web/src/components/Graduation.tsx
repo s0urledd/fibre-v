@@ -1,4 +1,5 @@
 import { type Rate, fmtRate, fmtCount, enoughToRank } from "@/lib/api";
+import Info from "./Info";
 
 /**
  * The retention window, drawn as a graduated scale.
@@ -47,7 +48,13 @@ export default function Graduation({ points }: { points: { key: string; serve_ra
 
   return (
     <section className="grad">
-      <span className="label">Through the retention window</span>
+      <span className="label">Through the retention window<Info label="Through the retention window">
+        {isDefault
+          ? <p>Ticks at 12%, 45%, 72% and 92% of each retention window, packed toward the deadline where early pruning shows. They are not interchangeable.</p>
+          : <p>{points.length} schedule points, drawn in order: this chain&rsquo;s probe schedule is not the default set and the API does not publish the positions.</p>}
+        <p>A rate that is sound early and poor late means shards pruned before the deadline — a different failure from one that is poor throughout, and the pooled rate cannot tell them apart.</p>
+        <p>The red hairline under each tick is the shortfall. A dashed tick is a point with no rated probe: a gap, never a zero.</p>
+      </Info></span>
       <div className="grad-scroll">
       <svg viewBox={`0 0 ${W} ${H}`} className="grad-svg" role="img"
         aria-label={`Serve rate at each schedule point: ${live.map((p) => `${p.key} ${fmtRate(p.serve_rate)}`).join(", ")}`}>
@@ -91,12 +98,6 @@ export default function Graduation({ points }: { points: { key: string; serve_ra
         <text x={W - R + 6} y={BASE - 14} fontSize="10" fill="var(--text-3)">100%</text>
       </svg>
       </div>
-      <p className="sample">
-        {isDefault
-          ? "Ticks at 12%, 45%, 72% and 92% of each retention window, so they are not interchangeable."
-          : `${points.length} schedule points, drawn in order: this chain's probe schedule is not the default set, and the API does not publish the positions.`}
-        {" "}A rate that is sound early and poor late means shards pruned before the deadline. The red hairline under each tick is the shortfall.
-      </p>
     </section>
   );
 }
