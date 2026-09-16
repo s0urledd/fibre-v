@@ -43,12 +43,24 @@ make build            # fibre-sentinel/bin/* and web/out/
 
 ## 3. Configure
 
-Copy `deploy/observer.env.example` to `/etc/fibre-observer/observer.env`
-and set `RPC`, `VANTAGE`, `DATA_DIR`. Copy
-`fibre-sentinel/observer/policy/policy.example.yaml` to
-`/etc/fibre-observer/policy.yaml` and set `sampling.master_secret_file`
-to a path under `/etc/fibre-observer/` so the sampling secret survives
-restarts (the prober creates it with mode 0600 on first run).
+```bash
+sudo install -d -m 0755 /etc/fibre-observer
+sudo cp deploy/observer.env.example /etc/fibre-observer/observer.env
+sudo cp fibre-sentinel/observer/policy/policy.mocha.yaml /etc/fibre-observer/policy.yaml   # mocha-5; policy.example.yaml for mainnet
+```
+
+Edit `observer.env`: set `RPC`, `VANTAGE`, `DATA_DIR`. In `policy.yaml`
+set `sampling.master_secret_file: /var/lib/fibre-observer/master.secret`
+so the sampling secret survives restarts; the prober creates it with mode
+0600 on first run. The file must live under the data directory: the units
+mount `/etc/fibre-observer` read-only, and the service user cannot write
+there.
+
+Leave `-probe-unassigned` off on a public vantage. The read-path rate
+limiting Celestia is designing (forum topic 2295) treats requests for
+shards a validator was never assigned as illegitimate; probing only real,
+in-window, correctly assigned commitments is what keeps the observer's
+traffic on the right side of it.
 
 ## 4. systemd
 
@@ -92,8 +104,13 @@ Data lives in the `observer-data` volume.
 
 ## 7. Backups
 
-The raw files and the database are small (a few GB per month at the
-stress scenario in R6). Two options:
+Budget for disk: one measurement is about 1.5 KB in `measurements.jsonl`
+and about twice that again in the database. At the R4 stress scenario
+(60 publications an hour, 100 validators, 6 points) that is about 1.3 GB a
+day of JSONL plus the database; at a realistic mocha rate it is a few GB a
+month. The JSONL files are the record and are never rotated by the tools;
+move them off the box when the disk fills and rebuild the database from
+them if ever needed. Two options for copies:
 
 - **litestream** (recommended for SQLite): `deploy/litestream.yml`
   replicates `observer.db` continuously to an S3-compatible bucket

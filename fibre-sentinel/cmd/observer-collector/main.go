@@ -91,18 +91,33 @@ func main() {
 		}
 		if r, err := ingest.Publications(st, *pubsPath, now); err != nil {
 			log.Printf("publications: %v", err)
-		} else if r.Inserted > 0 {
-			log.Printf("publications: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		} else {
+			if r.Inserted > 0 {
+				log.Printf("publications: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
+			}
+			if r.Skipped > 0 {
+				log.Printf("publications: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
+			}
 		}
 		if r, err := ingest.Measurements(st, *measPath, now); err != nil {
 			log.Printf("measurements: %v", err)
-		} else if r.Inserted > 0 {
-			log.Printf("measurements: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		} else {
+			if r.Inserted > 0 {
+				log.Printf("measurements: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
+			}
+			if r.Skipped > 0 {
+				log.Printf("measurements: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
+			}
 		}
 		if r, err := ingest.Reachability(st, *reachPath, now); err != nil {
 			log.Printf("reachability: %v", err)
-		} else if r.Inserted > 0 {
-			log.Printf("reachability: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		} else {
+			if r.Inserted > 0 {
+				log.Printf("reachability: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
+			}
+			if r.Skipped > 0 {
+				log.Printf("reachability: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
+			}
 		}
 		if pollEndpoints && chain != nil {
 			_, height, err := chain.Status(ctx)

@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"math"
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
@@ -49,6 +50,28 @@ type ScheduleConfig struct {
 // deadline.
 var DefaultInWindowFractions = []float64{0.12, 0.45, 0.72, 0.92}
 
+// InWindowFractions returns n in-window probe positions in (0,1). n == 4 is
+// the documented default set; other n spread x^0.7 over (0,1] with the last
+// reading pinned at 0.92, so the final in-window probe always sits close to
+// the deadline where a retention breach is most likely to show. A single
+// probe sits at 0.6.
+func InWindowFractions(n int) []float64 {
+	switch {
+	case n <= 0:
+		return nil
+	case n == 1:
+		return []float64{0.6}
+	case n == len(DefaultInWindowFractions):
+		return append([]float64(nil), DefaultInWindowFractions...)
+	}
+	out := make([]float64, n)
+	for i := 0; i < n; i++ {
+		x := float64(i+1) / float64(n)
+		out[i] = 0.92 * math.Pow(x, 0.7)
+	}
+	return out
+}
+
 // DefaultScheduleConfig fills the zero value.
 func DefaultScheduleConfig() ScheduleConfig {
 	return ScheduleConfig{
@@ -74,7 +97,7 @@ func (c ScheduleConfig) withDefaults() ScheduleConfig {
 	if c.PostMargin <= 0 {
 		c.PostMargin = d.PostMargin
 	}
-	if c.MinSpacing < 0 {
+	if c.MinSpacing <= 0 {
 		c.MinSpacing = d.MinSpacing
 	}
 	return c

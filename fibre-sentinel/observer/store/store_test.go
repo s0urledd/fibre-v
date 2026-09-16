@@ -157,3 +157,47 @@ func TestRuns(t *testing.T) {
 		t.Fatal("stopped_at not set")
 	}
 }
+
+func TestTimestampOrdering(t *testing.T) {
+	base := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	a := store.TS(base)                             // zero nanoseconds
+	b := store.TS(base.Add(500 * time.Millisecond)) // half a second later
+	c := store.TS(base.Add(time.Second))
+	if !(a < b && b < c) {
+		t.Fatalf("not chronological as text: %q %q %q", a, b, c)
+	}
+	if len(a) != len(b) || len(b) != len(c) {
+		t.Fatalf("not fixed width: %q %q %q", a, b, c)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, b); err != nil {
+		t.Fatalf("not RFC 3339: %v", err)
+	}
+}
+
+func TestOpenReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.db")
+	if _, err := store.OpenReadOnly(path); err == nil {
+		t.Fatal("read-only open of a missing database must fail")
+	}
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ingest.Publications(st, filepath.Join(sampleDir, "publications.jsonl"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	ro, err := store.OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	c, err := ro.Count(context.Background())
+	if err != nil || c.Publications == 0 {
+		t.Fatalf("counts via read-only handle: %+v err=%v", c, err)
+	}
+	if _, err := ro.DB().Exec(`INSERT INTO meta (key, value, updated_at) VALUES ('x','y','z')`); err == nil {
+		t.Fatal("write through a read-only handle succeeded")
+	}
+}

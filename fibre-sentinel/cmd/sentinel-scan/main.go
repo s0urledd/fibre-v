@@ -29,7 +29,7 @@ func main() {
 		startHeight = flag.Int64("start-height", 0, "fresh-scan start height (0 = tip at startup); ignored on resume")
 		maxHeight   = flag.Int64("max-height", 0, "stop after this height (0 = run to tip)")
 		follow      = flag.Bool("follow", false, "keep scanning new blocks after reaching the tip")
-		followTO    = flag.Duration("follow-timeout", 2*time.Minute, "in follow mode, fail if no new block within this")
+		followTO    = flag.Duration("follow-timeout", 0, "in follow mode, fail if no new block within this (0 = never; a halted chain is warned about every 5 minutes)")
 		pollEvery   = flag.Duration("poll", 2*time.Second, "follow-mode tip poll interval")
 		rpcTO       = flag.Duration("rpc-timeout", 15*time.Second, "per-RPC-call timeout")
 		deadline    = flag.Duration("deadline", 0, "whole-run wall-clock cap (0 = none)")

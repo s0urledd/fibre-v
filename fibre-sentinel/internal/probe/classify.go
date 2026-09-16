@@ -17,10 +17,16 @@ const (
 	OutcomeTLSFail        Outcome = "TLS_HANDSHAKE_FAIL"
 	OutcomeIdentityFail   Outcome = "IDENTITY_FAIL"   // handshake ok, consensus-key binding rejected
 	OutcomeRPCUnavailable Outcome = "RPC_UNAVAILABLE" // gRPC Unavailable after a good TLS handshake
-	OutcomeRPCError       Outcome = "RPC_ERROR"       // some other gRPC error
-	OutcomeProbeError     Outcome = "PROBE_ERROR"     // the probe itself failed (bug / config), not the target
-	OutcomeMissed         Outcome = "MISSED"          // scheduled point elapsed before the prober could run it
-	OutcomeReachable      Outcome = "REACHABLE"       // DNS/TCP/TLS/identity all fine; download deliberately skipped (heartbeat or policy backoff)
+	// OutcomeRPCDeadline: the download did not finish within the observer's
+	// own deadline (base + size-scaled). Never a verdict about the validator.
+	OutcomeRPCDeadline Outcome = "RPC_DEADLINE"
+	// OutcomeNoHost: the validator has no fibre host registered in x/valaddr,
+	// so nobody can fetch its rows.
+	OutcomeNoHost     Outcome = "NO_REGISTERED_HOST"
+	OutcomeRPCError   Outcome = "RPC_ERROR"   // some other gRPC error
+	OutcomeProbeError Outcome = "PROBE_ERROR" // the probe itself failed (bug / config), not the target
+	OutcomeMissed     Outcome = "MISSED"      // scheduled point elapsed before the prober could run it
+	OutcomeReachable  Outcome = "REACHABLE"   // DNS/TCP/TLS/identity all fine; download deliberately skipped (heartbeat or policy backoff)
 )
 
 // Classification is the Sentinel's verdict on one measurement, given the probe
@@ -71,7 +77,7 @@ func (o Outcome) served() bool {
 func (o Outcome) reachFailure() bool {
 	switch o {
 	case OutcomeDNSFail, OutcomeTCPRefused, OutcomeTCPTimeout, OutcomeTCPUnreachable,
-		OutcomeTLSFail, OutcomeRPCUnavailable, OutcomeRPCError:
+		OutcomeTLSFail, OutcomeRPCUnavailable, OutcomeRPCError, OutcomeNoHost:
 		return true
 	}
 	return false
@@ -86,6 +92,9 @@ func Classify(assigned bool, phase Phase, o Outcome) (Classification, string) {
 	if o == OutcomeMissed {
 		return ClassNotProbed, "scheduled point elapsed before the prober ran it"
 	}
+	if o == OutcomeRPCDeadline {
+		return ClassProbeError, "download did not finish within the observer's deadline; no retention verdict"
+	}
 	if o == OutcomeReachable {
 		// The endpoint answered and proved its identity; no retention verdict
 		// was attempted. Recorded as an observer-side gap for the shard.
@@ -96,8 +105,11 @@ func Classify(assigned bool, phase Phase, o Outcome) (Classification, string) {
 		switch {
 		case o == OutcomeNotFound:
 			return ClassExpectedUnassigned, "validator not assigned this shard; NOT_FOUND expected"
-		case o.served():
-			return ClassServingUnassigned, "validator returned a shard it was not assigned — misassignment or over-serving"
+		case o == OutcomeIdentityFail:
+			// identity is a property of the endpoint, not of one shard.
+			return ClassFault, "TLS identity is not the endorsed consensus key"
+		case o.served() || o == OutcomeWrongRows || o == OutcomeInvalidRows:
+			return ClassServingUnassigned, "validator returned data for a shard it was not assigned — misassignment or over-serving"
 		case o.reachFailure():
 			return ClassExpectedUnassigned, "validator not assigned this shard; reachability not required"
 		default:
@@ -133,7 +145,7 @@ func Classify(assigned bool, phase Phase, o Outcome) (Classification, string) {
 			return ClassTolerated, "NOT_FOUND within prune-lag tolerance after must_serve_until"
 		case o == OutcomeIdentityFail:
 			return ClassFault, "TLS identity is not the endorsed consensus key"
-		case o == OutcomeWrongRows || o == OutcomeInvalidRows:
+		case o == OutcomeWrongRows || o == OutcomeInvalidRows || o == OutcomePartial:
 			return ClassFault, "served bad data"
 		case o.reachFailure():
 			return ClassTolerated, "unreachable within prune-lag tolerance"
@@ -150,7 +162,9 @@ func Classify(assigned bool, phase Phase, o Outcome) (Classification, string) {
 		case o == OutcomeIdentityFail:
 			return ClassFault, "TLS identity is not the endorsed consensus key"
 		case o == OutcomeWrongRows || o == OutcomeInvalidRows:
-			return ClassServedPastWindow, "serving data past the window, and it does not verify"
+			return ClassFault, "served bad data after the window: wrong or unverifiable rows"
+		case o == OutcomePartial:
+			return ClassServedPastWindow, "still serving (part of the shard) after the obligation ended"
 		case o.reachFailure():
 			return ClassUnreachablePostWindow, "unreachable after the obligation ended"
 		default:

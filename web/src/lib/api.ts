@@ -22,6 +22,8 @@ export type Meta = {
   counts: { Publications: number; Assignments: number; Probes: number; OpenEndpoints: number; Runs: number };
   collector: RunStatus | null;
   prober: RunStatus | null;
+  /** newest measurement's start time; the prober's only live signal (it writes JSONL, never this database) */
+  last_probe_at: string | null;
   server_time: string;
 };
 export type RunStatus = { run_id: number; started_at: string; last_heartbeat_at: string; stopped_at: string | null; alive: boolean };
@@ -82,7 +84,7 @@ export type Probe = {
 };
 
 export type Reconstruct = {
-  status: "yes" | "degraded" | "no" | "unknown";
+  status: "yes" | "degraded" | "no" | "pending" | "unknown";
   point: string;
   point_at: string;
   window_over: boolean;
@@ -90,6 +92,8 @@ export type Reconstruct = {
   needed_rows: number;
   served_by_validators: number;
   assigned_validators: number;
+  /** assigned validators with a real result at the point; "pending" while short of assigned_validators */
+  probed_validators: number;
 };
 
 export type Blob = {

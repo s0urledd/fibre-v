@@ -1,0 +1,8 @@
+# keep the build context small; the image builds from source
+.git
+**/node_modules
+web/out
+web/.next
+fibre-sentinel/bin
+**/sentinel-data
+**/*.db

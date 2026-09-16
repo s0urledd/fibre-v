@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	fibretypes "github.com/celestiaorg/celestia-app/v10/x/fibre/types"
@@ -155,7 +156,8 @@ func (c *Chain) FibreParamsAt(parent context.Context, height int64) (fibretypes.
 		return fibretypes.Params{}, fmt.Errorf("abci query params h=%d: %w", height, err)
 	}
 	if res.Response.Code != 0 {
-		return fibretypes.Params{}, fmt.Errorf("abci query params h=%d: code=%d log=%s", height, res.Response.Code, res.Response.Log)
+		return fibretypes.Params{}, &ABCIError{Path: "/celestia.fibre.v1.Query/Params", Height: height,
+			Code: res.Response.Code, Codespace: res.Response.Codespace, Log: res.Response.Log}
 	}
 	var resp fibretypes.QueryParamsResponse
 	if err := resp.Unmarshal(res.Response.Value); err != nil {
@@ -205,4 +207,27 @@ func (c *Chain) BondedFibreProviders(parent context.Context) ([]FibreProvider, e
 func (c *Chain) ChainID(parent context.Context) (string, error) {
 	id, _, err := c.Status(parent)
 	return id, err
+}
+
+// ABCIError is a non-zero ABCI query response code.
+type ABCIError struct {
+	Path      string
+	Height    int64
+	Code      uint32
+	Codespace string
+	Log       string
+}
+
+func (e *ABCIError) Error() string {
+	return fmt.Sprintf("abci query %s h=%d: code=%d codespace=%s log=%s", e.Path, e.Height, e.Code, e.Codespace, e.Log)
+}
+
+// IsResultsNotPersisted reports the block_results error of a node that runs
+// with storage.discard_abci_responses = true. Retrying never helps.
+func IsResultsNotPersisted(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "not persisted") || strings.Contains(s, "discard_abci_responses")
 }

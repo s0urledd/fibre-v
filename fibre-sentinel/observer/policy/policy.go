@@ -121,20 +121,10 @@ func (c Config) bytesPerDayCap(rows int) int64 {
 	return int64(capBytes)
 }
 
-// ShardBytes estimates the wire size of one validator's shard for a blob:
-// rows × (row + 14 proof hashes + protobuf framing) + the fixed RLC vector.
-// Inputs are the padded upload size (promise.blob_size) and the protocol
-// params. Framing is 36 bytes per row: 14 proof entries × 2 (tag, length),
-// the row data tag and 4-byte length, and the index field. The numbers match
-// the table in docs/research/R4-probe-etiquette.md section 1.3.
+// ShardBytes is probe.ShardBytes; kept here because the policy is where the
+// byte budget is reasoned about.
 func ShardBytes(blobSize uint32, originalRows, rows int) int64 {
-	if originalRows <= 0 {
-		return 0
-	}
-	rowSize := int64(blobSize) / int64(originalRows)
-	const proofBytes = 14 * 32
-	const framing = 36
-	return int64(rows)*(rowSize+proofBytes+framing) + int64(originalRows)*16 + 4
+	return probe.ShardBytes(blobSize, originalRows, rows)
 }
 
 // downloadsPerBlob is how many schedule points transfer bytes (in-window

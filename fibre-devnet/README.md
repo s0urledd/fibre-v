@@ -47,7 +47,7 @@ API `1317+i·10`, privval gRPC `26669+i·100`, core BlockAPI gRPC `19098+i·100`
 
 `celestia-appd` and `fibre` on `PATH`, plus `curl` (`jq` optional, only for
 prettier output). Build them from a celestia-app checkout at the pinned commit
-`0b69316466c3ba02f708c0e2a101f834d5d1827f` (v10; `x/fibre` and `x/valaddr` are
+`fa5b523b7e3b2b83bd16bc072a45cbd3819fa369` (v10; `x/fibre` and `x/valaddr` are
 live from block 1, no upgrade):
 
 ```

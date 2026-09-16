@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"strconv"
 	"time"
 
 	fibretypes "github.com/celestiaorg/celestia-app/v10/x/fibre/types"
@@ -140,16 +141,57 @@ func (h *ParamHistory) MustServeUntil(creation time.Time, settlementHeight int64
 	if e == nil {
 		return time.Time{}, ParamsSnapshot{}, "", false
 	}
-	timeout := e.Params.PaymentPromiseTimeout
-	retention := e.Params.ShardRetention
+	msu, basis := windowFrom(e.Params, creation)
+	return msu, e.ParamsJSON, basis, true
+}
+
+// MustServeUntilForPromise is MustServeUntil with the upload-time ambiguity
+// resolved conservatively. The Fibre server computes its prune time from the
+// params it reads when the shard is UPLOADED (fibre/server_upload.go: the
+// ValidatePaymentPromise query at latest state), which happens somewhere
+// between the promise height and the settlement tx. The observer only sees
+// the chain, so it evaluates the params at both ends of that interval. When
+// they agree (the normal case) the answer is exact. When a params change
+// landed in between, the EARLIER must_serve_until is used, so the observer
+// never calls a FAULT past a window the server may legitimately have used,
+// and the record is marked ambiguous. If no history entry covers the promise
+// height (the scan started after it), only the settlement params are used.
+func (h *ParamHistory) MustServeUntilForPromise(creation time.Time, promiseHeight, settlementHeight int64, settlementTxIndex int) (msu time.Time, snap ParamsSnapshot, basis string, ambiguous bool, ok bool) {
+	at := h.at(settlementHeight, settlementTxIndex)
+	if at == nil {
+		return time.Time{}, ParamsSnapshot{}, "", false, false
+	}
+	msu, basis = windowFrom(at.Params, creation)
+	snap = at.ParamsJSON
+
+	// params at the end of the promise-height block (any tx index)
+	before := h.at(promiseHeight, int(^uint(0)>>1))
+	if before == nil || before == at || paramsEqual(before.Params, at.Params) {
+		return msu, snap, basis, false, true
+	}
+	early, earlyBasis := windowFrom(before.Params, creation)
+	if early.Before(msu) {
+		msu, basis, snap = early, earlyBasis, before.ParamsJSON
+	}
+	basis += "; AMBIGUOUS: fibre params changed between promise height " + itoa64(promiseHeight) +
+		" and settlement height " + itoa64(settlementHeight) +
+		"; the server uses the params at upload time, which lies in that interval; the earlier bound is recorded"
+	return msu, snap, basis, true, true
+}
+
+func windowFrom(p fibretypes.Params, creation time.Time) (time.Time, string) {
+	timeout := p.PaymentPromiseTimeout
+	retention := p.ShardRetention
 	window := timeout
 	if retention > window {
 		window = retention
 	}
 	basis := "creation_timestamp + max(payment_promise_timeout=" + timeout.String() +
 		", shard_retention=" + retention.String() + ") = creation + " + window.String()
-	return creation.Add(window).UTC(), e.ParamsJSON, basis, true
+	return creation.Add(window).UTC(), basis
 }
+
+func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
 
 func paramsEqual(a, b fibretypes.Params) bool {
 	return a.WithdrawalDelay == b.WithdrawalDelay &&

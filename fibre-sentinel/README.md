@@ -199,6 +199,25 @@ never an aggregate:
 | no | any | `SERVED_OK` | **SERVING_UNASSIGNED** (flagged for review) |
 | any | any | probe could not run / slot elapsed | **PROBE_ERROR** / **NOT_PROBED** |
 
+### Load shape
+
+Probes run on `-concurrency` (8) workers across validators, never more than
+one connection to a validator at a time (R4 section 3.5). `publications.jsonl`
+is tailed incrementally and a publication is forgotten once its whole
+schedule is older than `-backfill-missed` (1h); on a (re)start only slots
+newer than that get `NOT_PROBED` rows, older gaps are left without a row.
+A publication whose settlement tx failed, or whose promise names another
+chain than the RPC's, is skipped with one log line.
+
+The gRPC receive limit matches the reference client
+(`ProtocolParams.MaxMessageSize()`, about 139 MB), and the download deadline
+grows with the expected shard size (`-download-timeout` plus one second per
+MiB); a download that still does not finish is `RPC_DEADLINE`, a
+`PROBE_ERROR`-class gap, never a fault. Every resolved address of a host is
+tried, IPv4 first, and the download talks to the address the TLS check
+passed on. A validator with no `x/valaddr` host is `NO_REGISTERED_HOST`,
+which counts as unreachable.
+
 ### Restart / no hangs
 
 The pending-probe queue is **never persisted** — it is re-derived every cycle
@@ -206,7 +225,9 @@ from `publications.jsonl` + `measurements.jsonl`, so a restart resumes exactly.
 Each measurement's dedupe key is `(vantage, promise_hash, validator,
 scheduled_at)`. Every wait is bounded: the loop sleeps at most `-max-sleep`
 (30s) between cycles, every probe layer has its own timeout, a schedule point
-older than `-max-lateness` is recorded `MISSED` instead of probed, and
+older than `-max-lateness` is recorded `MISSED` instead of probed (the check
+is repeated right before each probe, so a slow cycle never probes a slot in
+a later phase than it was planned for), and
 SIGINT/SIGTERM stops cleanly. `-once` probes everything currently due and exits;
 `-drain` runs until every schedule is in the past; `-deadline` caps the run.
 

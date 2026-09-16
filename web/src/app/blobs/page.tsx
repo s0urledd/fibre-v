@@ -7,6 +7,7 @@ import { useApi, type Blob, utc, ago, shortHex, nsDisplay, bytes } from "@/lib/a
 function recon(b: Blob): string {
   const r = b.reconstructable;
   if (!r || r.status === "unknown") return b.probe_count === 0 ? "not probed" : "unknown";
+  if (r.status === "pending") return `pending (${r.probed_validators}/${r.assigned_validators})`;
   return r.status + (r.window_over ? " (window over)" : "");
 }
 

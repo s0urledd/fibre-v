@@ -22,14 +22,18 @@ func main() {
 		dataDir = flag.String("data-dir", "./sentinel-data", "dir holding observer.db")
 		dbPath  = flag.String("db", "", "SQLite database path (default <data-dir>/observer.db)")
 		listen  = flag.String("listen", "127.0.0.1:8080", "HTTP listen address")
+		check   = flag.String("check", "", "health check: GET this URL, exit 0 on HTTP 200 (for container healthchecks; the image has no curl)")
 		vantage = flag.String("vantage", "local", "vantage name rendered on every response")
 	)
 	flag.Parse()
+	if *check != "" {
+		os.Exit(healthCheck(*check))
+	}
 	if *dbPath == "" {
 		*dbPath = filepath.Join(*dataDir, "observer.db")
 	}
 	log := scan.NewLogger(200)
-	st, err := store.Open(*dbPath)
+	st, err := store.OpenReadOnly(*dbPath)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
@@ -55,4 +59,20 @@ func main() {
 		log.Fatalf("serve: %v", err)
 	}
 	log.Printf("stopped")
+}
+
+// healthCheck GETs url and returns a process exit code: 0 on HTTP 200.
+func healthCheck(url string) int {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		os.Stderr.WriteString("check: " + err.Error() + "\n")
+		return 1
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		os.Stderr.WriteString("check: HTTP " + resp.Status + "\n")
+		return 1
+	}
+	return 0
 }

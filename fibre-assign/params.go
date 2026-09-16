@@ -14,7 +14,7 @@ import (
 // files at its release tag. See ProtocolParams and Fingerprint.
 const (
 	PinnedCelestiaAppVersion = "v10"
-	PinnedCelestiaAppCommit  = "0b69316466c3ba02f708c0e2a101f834d5d1827f"
+	PinnedCelestiaAppCommit  = "fa5b523b7e3b2b83bd16bc072a45cbd3819fa369"
 )
 
 // Fraction is a rational number. It matches cometbft/libs/math.Fraction: both

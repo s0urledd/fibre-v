@@ -3,7 +3,7 @@ import { API_BASE } from "@/lib/api";
 export const metadata = { title: "API · Fibre observer" };
 
 const ROUTES: [string, string][] = [
-  ["GET /v1/meta", "chain id, collector height, pinned celestia-app commit, protocol-params fingerprint, row counts, latest collector and prober run with liveness, vantage count."],
+  ["GET /v1/meta", "chain id, collector height, pinned celestia-app commit, protocol-params fingerprint, row counts, latest collector run with liveness, time of the newest measurement, vantage count."],
   ["GET /v1/network?window=24h|7d|30d|all", "registered endpoints, validators probed, reachability, serve rate, verdict counts, probe count, gap count, publications and bytes, reconstructable count."],
   ["GET /v1/validators?window=…", "one row per validator with a registered endpoint or at least one probe: endpoint, reachability, identity status, serve rate with counts, voting power, assigned rows and load band."],
   ["GET /v1/validators/{addr}", "addr is the 40-hex consensus address or celestiavalcons1…; adds 24h/7d/30d serve rates and the 50 most recent probes."],
@@ -31,6 +31,8 @@ export default function ApiDocs() {
         <li>Timestamps are RFC 3339 UTC. Identifiers are lower-case hex; consensus addresses are the 20-byte address in hex, with the bech32 form where the registry knows it.</li>
         <li>Windows are fixed lookbacks from the server's clock; the response echoes <code>window.start</code> and <code>window.end</code>.</li>
         <li>Classes are the prober's classification strings (see Methodology). <code>NOT_PROBED</code> and <code>PROBE_ERROR</code> are gaps and are never in a rate.</li>
+        <li>A blob's <code>reconstructable.status</code> is <code>yes</code>, <code>degraded</code>, <code>no</code>, <code>pending</code> (no in-window probe point is complete yet) or <code>unknown</code>; <code>pending</code> and <code>unknown</code> blobs are left out of the network rate.</li>
+        <li><code>limit</code> outside 1..500 (blobs) or 1..1000 (probes) is a 400, never a silent default.</li>
         <li>The underlying files are also plain: <code>publications.jsonl</code>, <code>measurements.jsonl</code> and <code>reachability.jsonl</code> are append-only records the store ingests; the SQLite file can be copied and queried directly.</li>
       </ul>
     </>

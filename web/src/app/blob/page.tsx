@@ -18,6 +18,9 @@ function Recon({ b }: { b: Blob }) {
   if (!r || r.status === "unknown") {
     return <div className="card"><strong>Reconstructable: unknown.</strong> <span className="muted">{b.probe_count === 0 ? "No probe has run for this blob yet." : "Row lists were not recorded for this publication, or no in-window point has been probed."}</span></div>;
   }
+  if (r.status === "pending") {
+    return <div className="card"><strong>Reconstructable: pending.</strong> <span className="muted">No in-window point is complete yet: {r.probed_validators} of {r.assigned_validators} assigned validators have a result at point <span className="mono">{r.point}</span>. A validator without a row is a gap in observation, not a failure to serve.</span></div>;
+  }
   const total = r.needed_rows * 4;
   const colour = r.status === "no" ? "var(--status-fault)" : r.window_over ? "var(--status-expected-gone)" : "var(--status-healthy)";
   return (
