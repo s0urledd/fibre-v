@@ -57,6 +57,17 @@ export type Network = {
   publication_bytes: number;
   reconstructable: Reconstructable;
   probe_gaps: number;
+  probe_gaps_by_outcome: ClassCounts;
+  vantage_health: VantageHealth;
+};
+
+/** the most correlated failure in the window: likely ours, not theirs */
+export type VantageHealth = {
+  worst_point: Rate;
+  at?: string;
+  label?: string;
+  correlated: boolean;
+  threshold: number;
 };
 
 export type Reconstructable = {

@@ -336,7 +336,7 @@ assumed with no validator count stated at all.
 (Per-round observer total: `Σ rows × 33,252 B/row + V × 65,540 B RLC` =
 `14,800 × 33,252 + 100 × 65,540` = 498,683,600 B ≈ 499 MB, where 33,252 B/row
 and the 65,540 B per-validator RLC constant are fit from the two 128 MiB
-shard sizes in the Appendix — `(122,665,664 − 4,986,836) / (3687 − 148)` and
+shard sizes in the Appendix: `(122,665,664 − 4,986,836) / (3687 − 148)` and
 `4,986,836 − 148 × 33,252`.)
 
 **Scenario B — 10 blobs/min of 1 MiB (600/h):**
@@ -365,6 +365,21 @@ the design, not a fallback: at any publication rate above ≈ 0.2 % of the
 network's sized ingest (≈ 4.4 MB/s ≈ 2 × 128 MiB/min), a 5-download schedule
 on every blob would exceed a 1 % budget.
 
+**But the global cap binds harder than that 0.2 % figure.** 0.2 % is only
+the *per-validator* byte cap. The **global** cap (`policy.go:72-73`, shipped
+as `50 << 30` = 50 GiB/h = 53.7 GB/h per vantage, see §3.5 on the GiB/GB
+gap) applies to the sum of shard bytes pulled from all V = 100 bonded
+validators (§3.4 above), not one. At the same ≈ 16 × 128 MiB blobs/second
+worst-case publication rate, a full-schedule observer would pull, per hour,
+`blobs/h × 5 × (Σ rows × 33,252 B/row + V × 65,540 B RLC)` =
+`57,600 × 5 × 498,683,600 B` ≈ **143,620 GB/h, i.e. ≈ 143.6 TB/h** across all
+validators combined. Against the 53.7 GB/h global cap, that requires
+*p* = 53.7 / 143,620 ≈ **0.037 %**, about **5.3×** tighter than the 0.2 %
+the per-validator cap alone would allow. At the mainnet-November publication
+rate, the sampling rate the shipped code actually enforces is the smaller of
+the two caps' requirements, i.e. **≈ 0.037 %**, not the 0.2 % a per-validator-only
+reading of this section gives.
+
 **Expected case (near-term mainnet ramp-up, Scenario A-ish):** 0.5 % of a
 validator's assumed capacity, 6 requests/min, one connection at a time. This
 is well inside "a small single-digit percentage or less".
@@ -378,14 +393,14 @@ is well inside "a small single-digit percentage or less".
 | Max requests per validator per minute | **30** | Scenario A uses 6; Scenario B (60) triggers *p* = 0.5. Chosen because each probe currently costs **two** TCP+TLS handshakes (raw TLS at `probe.go:178-216`, then a fresh gRPC dial at `probe.go:268`); raise to 60 once the probe reuses one connection for L3+L4. |
 | Max bytes per validator per hour | **1 % of assumed capacity × rows/148** → floor **2.93 GB/h**; 30 % validator 72.9 GB/h; 4096-row validator 81 GB/h | 0.01 × 292.5 GB/h. Scenario A floor uses 1.50 GB/h (51 % of cap). |
 | Max bytes per validator per day | **0.75 % average** → floor **52.7 GB/day**, scaled by rows | 0.0075 × 81.25 MB/s × 86,400 s. Scenario A floor uses 35.9 GB/day (68 %). |
-| Max global egress (observer ingress) per hour, per vantage | **50 GB/h** (≈ 111 Mbps) | Observer-side cost knob. Scenario A needs 125 GB/h → *p* = 0.40; Scenario B needs 47 GB/h → fits. |
-| Max global per day, per vantage | **600 GB/day** | 12 × hourly, forces a lower sustained average. |
+| Max global egress (observer ingress) per hour, per vantage | **53.7 GB/h** (50 GiB/h; ≈ 119 Mbps) | Observer-side cost knob. `policy.go:72` ships `50 << 30` bytes, i.e. 50 GiB (53,687,091,200 B), not 50 GB, which is 7.37 % larger. Scenario A needs 150 GB/h → *p* ≈ 0.36; Scenario B needs 52.5 GB/h → fits (98 % of cap). |
+| Max global per day, per vantage | **644 GB/day** (600 GiB/day) | 12 × hourly. `policy.go:73` ships `600 << 30` bytes = 644,245,094,400 B, the same GiB/GB gap as the hourly cap, forcing a lower sustained average. |
 | Global concurrency | **8** in-flight probes across all validators | Keeps the observer's own NIC and CPU (proof verification) bounded. |
-| Vantages | ≤ **3**, each with its own budget; the per-validator caps above are **per vantage**, so 3 vantages = 1.5 % hourly per validator worst case | More vantages multiply load; add them by lowering per-vantage caps, not by adding budget. |
+| Vantages | ≤ **3**, each with its own budget; the per-validator caps above are **per vantage**, so 3 vantages is **3 %** hourly per validator worst case (3 times the 1 % per-vantage cap, not 1.5 %, which was the 0.5 % *expected*-case figure tripled instead of the 1 % worst case) | More vantages multiply load; add them by lowering per-vantage caps, not by adding budget. |
 
 The per-validator caps are the ones that protect operators; the global caps
 protect the observer's bill. In Scenario A the **global** cap binds first
-(*p* = 0.40) while every validator is at half its hourly cap; in Scenario B
+(*p* ≈ 0.36) while every validator is at half its hourly cap; in Scenario B
 the **request** cap binds (*p* = 0.5). Both are shown as NOT_PROBED gaps on
 the dashboard (§4).
 
@@ -531,8 +546,8 @@ caps:
     keepalive_pings: false                    # server enforces >= 10 s between pings; we send none
   global:
     concurrency: 8
-    bytes_per_hour: 50GB                      # observer-side cost knob; binds first in the 128 MiB/min scenario (p ~ 0.40)
-    bytes_per_day: 600GB
+    bytes_per_hour: 53687091200                # 50 GiB, not 50 GB; observer-side cost knob; binds first in the 128 MiB/min scenario (p ~ 0.36)
+    bytes_per_day: 644245094400                 # 600 GiB
     requests_per_second: 20
 
 sampling:
@@ -607,9 +622,14 @@ matters for the same reason: the observer must never hold a slot.
 1. **0.65 Gbps / 1.18 TB provenance** — UNVERIFIED (§2.5). If core's number
    is egress rather than ingress, or differs, only `capacity_model` changes;
    the fractions in §3.4 scale linearly.
-2. **Real validator count and stake distribution** at Fibre launch — the global
-   totals assume 100 validators and Σ rows ≈ 12,288 (`3 × 4096`, matching the
-   devnet's zero-overlap assignment in `docs/fibre-operational-notes.md`).
+2. **Real stake distribution** at Fibre launch: §3.4 now uses R2 §2a's
+   sourced mainnet count, V = 100 bonded validators, and derives
+   Σ rows = max(12,288, 148 × V) = 14,800 from the `MinRowsPerValidator`
+   floor in `fibre-assign/assign.go:138`, on the simplifying assumption of
+   roughly equal stake. The real distribution is uneven (R2 §2a's P-OPS
+   example holds 7.53 % and 926 rows, well above the floor), so the true
+   Σ rows sits somewhere between 12,288 and 14,800; 14,800 is the
+   upper-bound estimate the arithmetic in §3.4 uses.
 3. **Whether the planned download limiter will be per-IP** — if so, the
    observer's fixed vantage IPs are trivially throttled and the policy URL /
    user agent is the only way to ask for an allowance. Thread 2295 argues for

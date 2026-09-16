@@ -345,6 +345,10 @@ type Policy interface {
 	BeforeProbe(pub scan.Publication, t Target, now time.Time) (allow, skipDownload bool, reason string)
 	// AfterProbe accounts the bytes and requests a probe consumed.
 	AfterProbe(pub scan.Publication, m Measurement)
+	// SamplingFor reports what this publication's admission decision was made
+	// with, so every row can carry it and the sample can be audited after the
+	// day secret is revealed.
+	SamplingFor(pub scan.Publication) (prob float64, binding, commitment string)
 	// Forget releases whatever the policy holds for a publication whose
 	// schedule is finished. Without it the sticky admit/deny map grows for
 	// the life of the process and its bound is reached by history rather
@@ -613,6 +617,7 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 	}
 	lock.Unlock()
 
+	p.stampSampling(&m, pub)
 	if err := p.store.Append(m); err != nil {
 		p.log.Fatalf("append measurement: %v", err)
 	}
@@ -631,11 +636,22 @@ func (p *Prober) recordNotProbed(ctx context.Context, j job, reason string) {
 	key := pointKey(p.cfg.Vantage, pub.PromiseHash, j.point.At)
 	targets, err := p.resolver.TargetsFor(ctx, pub, p.cfg.IncludeUnassigned)
 	if err != nil {
-		// No targets, so no per-validator row can be written. The point is
-		// marked handled in memory and ages past the backfill horizon on a
-		// restart; a row with no validator address would only be a record
-		// nothing downstream can attribute.
-		p.log.Printf("not-probed %s %s: targets unresolved: %v (%s)", short(pub.PromiseHash), j.point.Label, err, reason)
+		// The chain call failed, but the publication record already names
+		// every assigned validator and its row count, so a row per validator
+		// can still be written without touching the chain. Writing nothing
+		// made the publication disappear: no probe row, and no gap counter
+		// moved either, so a reader saw a clean window with no sign that a
+		// whole publication had gone unobserved.
+		p.log.Printf("not-probed %s %s: targets unresolved: %v (%s); recording from the publication record instead",
+			short(pub.PromiseHash), j.point.Label, err, reason)
+		for _, v := range pub.Assignment.Validators {
+			p.recordNotProbedTarget(pub, j.point, Target{
+				AddressHex: v.Address,
+				Assigned:   v.RowCount > 0,
+				Attested:   v.Attested,
+				RowCount:   v.RowCount,
+			}, reason+"; targets could not be resolved: "+err.Error())
+		}
 		p.complete[key] = true
 		return
 	}
@@ -662,10 +678,22 @@ func (p *Prober) recordNotProbedTarget(pub scan.Publication, pt SchedulePoint, t
 		Phase: PhaseAt(pt.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,
 		Classification: ClassNotProbed, ClassificationReason: reason,
 	}
+	p.stampSampling(&m, pub)
 	if err := p.store.AppendDeferred(m); err != nil {
 		p.log.Fatalf("append not-probed measurement: %v", err)
 	}
 	p.logMeasurement(m)
+}
+
+// stampSampling records the admission decision on a row. Without it the
+// commit-and-reveal audit could only be carried out against the publications
+// that were denied, which is the half that needs it least.
+func (p *Prober) stampSampling(m *Measurement, pub scan.Publication) {
+	if p.cfg.Policy == nil {
+		return
+	}
+	prob, binding, commitment := p.cfg.Policy.SamplingFor(pub)
+	m.Sampling = &SamplingDecision{P: prob, Binding: binding, DayCommitment: commitment}
 }
 
 func (p *Prober) logMeasurement(m Measurement) {

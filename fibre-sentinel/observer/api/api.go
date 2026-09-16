@@ -51,6 +51,7 @@ func NewWithLogger(st *store.Store, vantage string, log *scan.Logger) *Server {
 	s.mux.HandleFunc("GET /v1/blobs/{hash}", s.handleBlob)
 	s.mux.HandleFunc("GET /v1/probes", s.handleProbes)
 	s.mux.HandleFunc("GET /v1/runs", s.handleRuns)
+	s.mux.HandleFunc("GET /v1/sampling", s.handleSampling)
 	return s
 }
 
@@ -352,6 +353,22 @@ type networkResponse struct {
 	PublicationBytes int64              `json:"publication_bytes"`
 	Reconstructable  reconstructSummary `json:"reconstructable"`
 	Gaps             int64              `json:"probe_gaps"` // NOT_PROBED + PROBE_ERROR rows in window
+	// GapsByOutcome breaks the gaps down by what actually happened, because
+	// they are not all the same thing. RPC_DEADLINE in particular is "the
+	// download did not finish in time", and the observer's deadline scales
+	// with shard size: a validator that is alive but slow lands there rather
+	// than in the rate, and that population is concentrated among exactly the
+	// validators most likely to be struggling. Publishing the breakdown is
+	// what lets a reader see how big it is.
+	GapsByOutcome map[string]int64 `json:"probe_gaps_by_outcome"`
+	// VantageHealth is the worst single schedule point in the window: how
+	// many distinct validators were unreachable there out of how many were
+	// probed. Validators fail independently; this observer's own network does
+	// not. A point where nearly every validator was unreachable at once is
+	// far more likely to be a route, resolver or peering problem here than
+	// twenty operators going down together, and a reader has to be able to
+	// see that rather than infer it.
+	VantageHealth vantageHealth `json:"vantage_health"`
 }
 
 func (s *Server) classCountsWhere(ctx context.Context, where string, args ...any) (classCounts, int64, error) {
@@ -457,6 +474,60 @@ func (s *Server) obligationRate(ctx context.Context, where string, args ...any) 
 	return rate(kept, kept+broken), nil
 }
 
+// vantageHealth reports the most correlated failure the window contains.
+type vantageHealth struct {
+	// WorstPoint is the fraction unreachable at the worst schedule point.
+	WorstPoint Rate `json:"worst_point"`
+	// At and Label identify that point, so it can be looked up in /v1/probes.
+	At    string `json:"at,omitempty"`
+	Label string `json:"label,omitempty"`
+	// Correlated is true when that fraction is at or above the threshold
+	// below, which is the observer saying it does not trust its own reading
+	// at that point.
+	Correlated bool `json:"correlated"`
+	// Threshold is published so the judgement is not a hidden constant.
+	Threshold float64 `json:"threshold"`
+}
+
+// correlatedUnreachableThreshold: above this share of the validators probed at
+// one schedule point being unreachable, the likeliest explanation is this
+// observer's own network rather than that many independent operators.
+const correlatedUnreachableThreshold = 0.5
+
+// worstCorrelatedPoint finds the schedule point in the window with the highest
+// share of distinct validators unreachable at once.
+func (s *Server) worstCorrelatedPoint(ctx context.Context, win Window) (vantageHealth, error) {
+	out := vantageHealth{Threshold: correlatedUnreachableThreshold}
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT scheduled_at, schedule_label,
+			COUNT(DISTINCT CASE WHEN classification = 'UNREACHABLE' THEN validator_address END),
+			COUNT(DISTINCT validator_address)
+		FROM probes
+		WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
+		GROUP BY scheduled_at HAVING COUNT(DISTINCT validator_address) > 1`, win.startArg())
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	var best float64
+	for rows.Next() {
+		var at, label string
+		var bad, all int64
+		if err := rows.Scan(&at, &label, &bad, &all); err != nil {
+			return out, err
+		}
+		if all == 0 {
+			continue
+		}
+		if f := float64(bad) / float64(all); f > best || out.At == "" {
+			best = f
+			out.WorstPoint = rate(bad, all)
+			out.At, out.Label = at, label
+		}
+	}
+	out.Correlated = out.WorstPoint.Den > 0 && best >= correlatedUnreachableThreshold
+	return out, rows.Err()
+}
+
 // coverage is how much of the rate's own population produced a verdict.
 // Without it a reader cannot tell a rate resting on twelve probes from one
 // resting on four hundred scheduled slots, and the probe and gap counts
@@ -539,6 +610,24 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ?`, win.startArg()).Scan(&resp.ProbeCount)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`, win.startArg()).Scan(&resp.Gaps)
+	resp.GapsByOutcome = map[string]int64{}
+	if grows, gerr := db.QueryContext(ctx,
+		`SELECT outcome, COUNT(*) FROM probes WHERE started_at >= ? AND classification IN ('NOT_PROBED','PROBE_ERROR') GROUP BY outcome`,
+		win.startArg()); gerr == nil {
+		for grows.Next() {
+			var o string
+			var n int64
+			if err := grows.Scan(&o, &n); err == nil {
+				resp.GapsByOutcome[o] = n
+			}
+		}
+		grows.Close()
+	}
+
+	if resp.VantageHealth, err = s.worstCorrelatedPoint(ctx, win); err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
 
 	reach, err := s.reachabilityNow(ctx)
 	if err != nil {
@@ -938,25 +1027,48 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	ctx := r.Context()
+	// The embedded validator object is built over a window like every other
+	// response, and the window it was built over is echoed at the top level.
+	// It used to be pinned to 24h with nothing saying so, so a caller reading
+	// the raw JSON had a rate with no window attached to it.
+	win, err := parseWindow(r, now)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	type span struct {
 		Window Window `json:"window"`
 		Rate   Rate   `json:"serve_rate"`
-		// Count is the assigned in-window+grace probes this window's rate is
-		// built from, not every row for the validator (validator.probe_count).
-		Count   int64       `json:"rated_probe_count"`
-		Classes classCounts `json:"classes"`
+		// Count is the assigned in-window probes this window's rate is built
+		// from, not every row for the validator (validator.probe_count).
+		Count        int64            `json:"rated_probe_count"`
+		Coverage     Rate             `json:"serve_rate_coverage"`
+		ByObligation Rate             `json:"serve_rate_by_obligation"`
+		HeldOut      map[string]int64 `json:"serve_rate_held_out"`
+		Classes      classCounts      `json:"classes"`
 	}
 	var spans []span
-	for _, name := range []string{"24h", "7d", "30d"} {
-		win := Window{Name: name, Span: windows[name], Start: now.Add(-windows[name]), End: now}
-		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND assigned = 1 AND phase = 'in_window'`, addr, win.startArg())
+	for _, name := range []string{"24h", "7d", "30d", "all"} {
+		sw := Window{Name: name, Span: windows[name], End: now}
+		if sw.Span > 0 {
+			sw.Start = now.Add(-sw.Span)
+		}
+		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND assigned = 1 AND phase = 'in_window'`, addr, sw.startArg())
 		if err != nil {
 			s.writeInternal(w, r.URL.Path, err)
 			return
 		}
-		spans = append(spans, span{Window: win, Rate: serveRate(classes), Count: total, Classes: classes})
+		obl, err := s.obligationRate(ctx, `validator_address = ? AND started_at >= ? AND assigned = 1 AND phase = 'in_window'`, addr, sw.startArg())
+		if err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		spans = append(spans, span{
+			Window: sw, Rate: serveRate(classes), Count: total,
+			Coverage: coverage(classes), ByObligation: obl, HeldOut: heldOut(classes), Classes: classes,
+		})
 	}
-	rows, err := s.validatorRows(ctx, Window{Name: "24h", Span: 24 * time.Hour, Start: now.Add(-24 * time.Hour), End: now}, addr)
+	rows, err := s.validatorRows(ctx, win, addr)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
@@ -970,7 +1082,14 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"validator": rows[0], "windows": spans, "recent_probes": probes, "vantage": s.vantage})
+	writeJSON(w, 200, map[string]any{
+		"window":                      win,
+		"validator":                   rows[0],
+		"windows":                     spans,
+		"recent_probes":               probes,
+		"serve_rate_excluded_classes": excludedFromRate,
+		"vantage":                     s.vantage,
+	})
 }
 
 // ---- blobs ----
@@ -1379,6 +1498,69 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT shard_retention_s, payment_promise_timeout_s FROM publications WHERE promise_hash = ?`, hash).Scan(&params.ShardRetentionS, &params.PaymentPromiseTimeoutS)
 	writeJSON(w, 200, map[string]any{"blob": blobs[0], "params": params, "assignments": assigns, "probes": probes, "vantage": s.vantage})
+}
+
+// ---- sampling ----
+
+// handleSampling publishes the load policy's admission decisions so the
+// commit-and-reveal audit the methodology page describes can actually be
+// carried out. Each row is one day's commitment to the secret the draws used,
+// with the publications decided under it and the probability each was drawn
+// at. Once the day's secret is revealed, anyone can recompute
+// H(promise_hash || secret) < p * 2^64 for every promise hash of that day and
+// check this observer's sample against their own.
+func (s *Server) handleSampling(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	win, err := parseWindow(r, time.Now())
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	type day struct {
+		DayCommitment string  `json:"day_commitment"`
+		Binding       string  `json:"binding"`
+		P             float64 `json:"p"`
+		Publications  int64   `json:"publications"`
+		Probed        int64   `json:"publications_probed"`
+		SampledOut    int64   `json:"publications_sampled_out"`
+	}
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT
+			COALESCE(json_extract(raw_json, '$.sampling.day_commitment'), '') AS c,
+			COALESCE(json_extract(raw_json, '$.sampling.binding'), '') AS b,
+			COALESCE(json_extract(raw_json, '$.sampling.p'), 1.0) AS p,
+			COUNT(DISTINCT promise_hash),
+			COUNT(DISTINCT CASE WHEN classification != 'NOT_PROBED' THEN promise_hash END),
+			COUNT(DISTINCT CASE WHEN classification = 'NOT_PROBED' AND classification_reason LIKE 'budget:%' THEN promise_hash END)
+		FROM probes WHERE started_at >= ?
+		GROUP BY c, b, p ORDER BY c, p`, win.startArg())
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	defer rows.Close()
+	days := []day{}
+	for rows.Next() {
+		var d day
+		if err := rows.Scan(&d.DayCommitment, &d.Binding, &d.P, &d.Publications, &d.Probed, &d.SampledOut); err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		days = append(days, d)
+	}
+	if err := rows.Err(); err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"window":    win,
+		"vantage":   s.vantage,
+		"decisions": days,
+		"how_to_audit": "Each row commits to that day's secret as SHA256(secret). " +
+			"Once the secret is published, recompute H(promise_hash || secret) < p * 2^64 " +
+			"for every MsgPayForFibre settled that day: the promise hashes that pass are the ones " +
+			"this observer should have probed, and /v1/probes says which ones it did.",
+		"secret_published": false,
+	})
 }
 
 // ---- probes ----

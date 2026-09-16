@@ -17,7 +17,14 @@ caps:
     bytes_per_day: 644245094400       # 600 GiB
 
 sampling:
-  master_secret_file: ""            # empty: a process-local random secret (fine for devnet; set a path for a public vantage)
+  # A public vantage MUST set this. The commitments published at /v1/sampling
+  # are SHA256 of a per-day secret derived from this master; with an empty
+  # value the master is random per process, so every restart changes the
+  # commitments and the sample can never be audited against them. Point it at
+  # a file of at least 32 random bytes, mode 0600, and keep it out of backups
+  # that anyone else can read: knowing it in advance would let a publisher
+  # predict which of its blobs get probed.
+  master_secret_file: "/var/lib/fibre-observer/sampling-master.key"
   projection_lookback: 1h
   always_probe: []                  # promise hashes exempt from sampling, e.g. a blob under dispute
 

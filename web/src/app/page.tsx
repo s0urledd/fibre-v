@@ -73,6 +73,15 @@ export default function Overview() {
           Verdicts in window (assigned, in-window and grace): {Object.entries(net.classes).sort().map(([k, v]) => `${k.toLowerCase().replace(/_/g, " ")} ${v}`).join(" · ") || "none"}. Serve rate = <RateCell r={net.serve_rate} obligations={net.serve_rate_by_obligation} />, counted over {net.serve_rate_by_obligation.den.toLocaleString("en-US")} obligations (one validator, one blob) rather than over probes, because the four in-window probes of one obligation are near copies of each other.
         </p>
       )}
+      {net && net.vantage_health?.correlated && (
+        <div className="notice err">
+          <strong>Treat this window&rsquo;s reachability with suspicion.</strong>{" "}
+          At {utc(net.vantage_health.at)} ({net.vantage_health.label}), {fmtCount(net.vantage_health.worst_point)} of the validators probed at
+          that moment were unreachable at once. Validators fail independently; this site&rsquo;s own network does not. A whole set failing
+          together is far more likely to be a route, resolver or peering problem here than that many operators going down at the same time.
+          None of it counts against any validator, but the reachability figures on this page are not worth much until it is explained.
+        </div>
+      )}
       {net && net.serve_rate_held_out && Object.keys(net.serve_rate_held_out).length > 0 && (
         <div className="notice">
           <strong>What the serve rate does not say.</strong>{" "}

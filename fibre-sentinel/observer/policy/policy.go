@@ -469,6 +469,21 @@ func (p *Policy) lastReason(pub scan.Publication) string {
 	return fmt.Sprintf("budget:p=%.3f:%s:day_commitment=%s", p.lastP, p.lastCap, p.DayCommitment(pub.SettlementTime))
 }
 
+// SamplingFor returns what this publication's admission decision was made
+// with: the probability it was sampled at, the cap that bound that
+// probability, and the commitment to the day secret the draw used.
+//
+// The prober stamps these on every row it writes, admitted or denied, which
+// is what makes the sample auditable at all. Recording them only on denials
+// left the admitted side with no record: the commit-and-reveal audit the
+// methodology page describes could not be carried out against half the
+// decisions it was supposed to cover.
+func (p *Policy) SamplingFor(pub scan.Publication) (prob float64, binding, commitment string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastP, p.lastCap, p.DayCommitment(pub.SettlementTime)
+}
+
 // State returns the last computed admission probability and binding cap,
 // for logs and the API.
 func (p *Policy) State() (prob float64, binding string) {

@@ -84,6 +84,15 @@ type Measurement struct {
 	RawError             string         `json:"raw_error,omitempty"`
 	TotalDurationMS      int64          `json:"total_duration_ms"`
 
+	// Sampling records the admission decision this publication was probed (or
+	// not probed) under: the probability, the cap that bound it, and the
+	// commitment to that day's secret. Every row carries it, admitted or
+	// denied, so that once the secret for a day is published anyone can
+	// recompute which publications should have been in the sample and check
+	// this observer against it. Empty when no policy was configured, which
+	// means everything was probed.
+	Sampling *SamplingDecision `json:"sampling,omitempty"`
+
 	// ClockOffsetMS is the observer's clock minus the chain's latest block
 	// time when the probe ran. Phases are decided by the local clock, so a
 	// reader can judge how much to trust a vantage. Additive, omitempty.
@@ -126,6 +135,19 @@ type TLSResult struct {
 	PeerCertSHA256   string `json:"peer_cert_sha256,omitempty"`
 	PeerCertNotAfter string `json:"peer_cert_not_after,omitempty"`
 	Error            string `json:"error,omitempty"`
+}
+
+// SamplingDecision is the load-policy decision a row was produced under.
+type SamplingDecision struct {
+	// P is the admission probability at the moment the publication was first
+	// seen. 1 means no cap was binding and nothing was sampled out.
+	P float64 `json:"p"`
+	// Binding names the cap that produced P ("none" when P is 1).
+	Binding string `json:"binding,omitempty"`
+	// DayCommitment is SHA256 of the day secret the draw used. It can be
+	// published in advance; revealing the secret afterwards lets anyone
+	// recompute the draw for every promise hash of that day.
+	DayCommitment string `json:"day_commitment,omitempty"`
 }
 
 // IdentityResult is the fibre-tlsverify consensus-key binding check on the peer

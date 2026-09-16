@@ -166,17 +166,39 @@ func TestValidatorsAndBlobs(t *testing.T) {
 		t.Fatalf("want at least 3 verified identities, got %d", verified)
 	}
 	var one struct {
+		Window    struct{ Name string }    `json:"window"`
 		Validator struct{ Address string } `json:"validator"`
 		Windows   []struct {
-			Count int64 `json:"probe_count"`
+			Window struct{ Name string }    `json:"window"`
+			Count  int64                    `json:"rated_probe_count"`
+			Oblig  struct{ Num, Den int64 } `json:"serve_rate_by_obligation"`
 		} `json:"windows"`
-		Recent []any `json:"recent_probes"`
+		Recent   []any            `json:"recent_probes"`
+		Excluded []map[string]any `json:"serve_rate_excluded_classes"`
 	}
-	if code := get(t, ts, "/v1/validators/"+vals.Validators[0].Address, &one); code != 200 {
+	// The embedded validator object is built over a window like every other
+	// response, and the window it was built over is echoed at the top level.
+	if code := get(t, ts, "/v1/validators/"+vals.Validators[0].Address+"?window=all", &one); code != 200 {
 		t.Fatalf("validator detail: %d", code)
 	}
-	if len(one.Windows) != 3 || len(one.Recent) == 0 {
-		t.Fatalf("detail: %+v", one)
+	if one.Window.Name != "all" {
+		t.Fatalf("detail did not echo its window: %+v", one.Window)
+	}
+	if len(one.Windows) != 4 || len(one.Recent) == 0 {
+		t.Fatalf("detail: %d spans, %d probes", len(one.Windows), len(one.Recent))
+	}
+	if one.Windows[3].Window.Name != "all" {
+		t.Fatalf("the spans must offer the same 'all' the overview does, got %q", one.Windows[3].Window.Name)
+	}
+	// the fixture is older than 30 days, so only "all" carries its probes
+	if one.Windows[3].Count == 0 || one.Windows[3].Oblig.Den == 0 {
+		t.Fatalf("the 'all' span has no rated probes or obligations: %+v", one.Windows[3])
+	}
+	if len(one.Excluded) == 0 {
+		t.Fatal("the detail response must say which classes the rate leaves out")
+	}
+	if code := get(t, ts, "/v1/validators/"+vals.Validators[0].Address+"?window=bogus", nil); code != 400 {
+		t.Fatalf("bad window on the detail endpoint should be a 400")
 	}
 	if code := get(t, ts, "/v1/validators/zzz", nil); code != 400 {
 		t.Fatalf("bad address: %d", code)
