@@ -4,17 +4,15 @@ import Link from "next/link";
 import { useApi, type Network, type Validator, type Meta, fmtCount, fmtRate, bytes, utc, ago, enoughToRank } from "@/lib/api";
 import ValidatorTable from "@/components/ValidatorTable";
 import Tile from "@/components/Tile";
-import Graduation from "@/components/Graduation";
 import { Mark } from "@/components/Verdict";
-import Info from "@/components/Info";
 import { boundTitle } from "@/components/Rate";
 
 const WINDOWS = ["24h", "7d", "30d", "all"];
 
 /**
- * The overview, in the order a reader asks: did the network serve (rate,
- * faults), is it up (uptime, endpoints), what did it carry (publications,
- * recoverable), then who — the validator table.
+ * The overview: six network figures, then the validator table. Everything
+ * else (per-point rates, latency, the census bar) lives on the validator and
+ * methodology pages.
  */
 export default function Overview() {
   const [win, setWin] = useState("24h");
@@ -28,17 +26,6 @@ export default function Overview() {
   const list = vals?.validators ?? [];
   const faulted = list.filter((v) => (v.classes.FAULT ?? 0) > 0).length;
   const busy = loading && !net;
-
-  // Census of validators by their state now, each in exactly one segment.
-  const unusable = (v: Validator) => v.reachable === false || v.identity_status === "mismatch" || v.identity_status === "no_tls";
-  const seg = {
-    fault: faulted,
-    hold: list.filter((v) => (v.classes.FAULT ?? 0) === 0 && unusable(v)).length,
-    gap: list.filter((v) => (v.classes.FAULT ?? 0) === 0 && !unusable(v) && v.probe_count === 0).length,
-    unproven: list.filter((v) => (v.classes.FAULT ?? 0) === 0 && !unusable(v) && v.probe_count > 0 && v.serve_rate.den === 0).length,
-  };
-  const served = Math.max(0, list.length - seg.fault - seg.hold - seg.gap - seg.unproven);
-  const pct = (n: number) => (list.length ? (n / list.length) * 100 : 0);
 
   const sr = net?.serve_rate;
   const rated = !!sr && sr.den > 0;
@@ -102,17 +89,6 @@ export default function Overview() {
           </>} />
       </div>
 
-      {net && (
-        <p className="coverage">
-          Serve rate covers {fmtCount(net.serve_rate_coverage)} in-window probes.
-          {net.serve_latency_p50_ms != null && <> Typical fetch {net.serve_latency_p50_ms.toLocaleString("en-US")} ms, p95 {(net.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms ({net.serve_latency_sample.toLocaleString("en-US")} probes).</>}
-          <Info label="Not in the serve rate">
-            <p><strong>Unattested:</strong> no signature from the validator on chain. <strong>Unreachable:</strong> no connection. <strong>Not registered:</strong> no Fibre host on chain. <strong>Shadowed shard:</strong> rows from another promise for the same blob. <strong>Identity expired:</strong> right key, expired certificate.</p>
-            <p><Link href="/methodology/#what-this-excludes">Details</Link></p>
-          </Info>
-        </p>
-      )}
-
       {noPubs && (
         <div className="note">
           <span className="label">{notLive ? "Fibre is not live on this chain yet" : "Nothing to measure yet"}</span>
@@ -143,36 +119,6 @@ export default function Overview() {
             That pattern usually means a network problem at the observer. It is not counted against anyone.
           </p>
         </div>
-      )}
-
-      {net && list.length > 0 && (
-        <section className="card">
-          <div className="card-head">
-            <h2>Validators by state</h2>
-            <span className="sample">{list.length} validators · last check</span>
-          </div>
-          <div className="bar" role="img"
-            aria-label={`${served} serving, ${seg.hold} unreachable or unendorsed, ${seg.unproven} nothing proven owed, ${seg.gap} not probed, ${seg.fault} faulted`}>
-            {served > 0 && <i className="seg--served" style={{ width: `${pct(served)}%` }} />}
-            {seg.hold > 0 && <i className="seg--hold" style={{ width: `${pct(seg.hold)}%` }} />}
-            {seg.unproven > 0 && <i className="seg--unproven" style={{ width: `${pct(seg.unproven)}%` }} />}
-            {seg.gap > 0 && <i className="seg--gap" style={{ width: `${pct(seg.gap)}%` }} />}
-            {seg.fault > 0 && <i className="seg--fault" style={{ width: `${pct(seg.fault)}%` }} />}
-          </div>
-          <ul className="bar-key">
-            <li><Mark tier="kept" /> <b>{served}</b> serving</li>
-            <li title="No answer, or a certificate not signed by the validator's consensus key."><Mark tier="hold" /> <b>{seg.hold}</b> unreachable or bad certificate</li>
-            <li title="Probed, but none of its signatures reached the chain in this window."><Mark tier="held" /> <b>{seg.unproven}</b> nothing signed for</li>
-            <li><Mark tier="gap" /> <b>{seg.gap}</b> not probed</li>
-            <li><Mark tier="fault" /> <b>{seg.fault}</b> faulted</li>
-          </ul>
-        </section>
-      )}
-
-      {net?.serve_rate_by_point && net.serve_rate_by_point.some((p) => p.serve_rate.den > 0) && (
-        <section className="card">
-          <Graduation points={net.serve_rate_by_point} />
-        </section>
       )}
 
       <div className="section-head" id="validators" style={{ marginTop: "var(--s6)" }}>
