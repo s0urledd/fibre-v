@@ -2,14 +2,17 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/api"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
@@ -177,7 +180,7 @@ func TestValidatorsAndBlobs(t *testing.T) {
 			if b.Reconstructable.NeededRows != 4096 {
 				t.Fatalf("needed rows = %d", b.Reconstructable.NeededRows)
 			}
-			// three of four validators served the grace point; 3 × ~3000
+			// three of four validators served at the last complete in-window point; 3 × ~3000
 			// distinct rows > 4096 needed, but not everyone answered.
 			if b.Reconstructable.Status != "degraded" || b.Reconstructable.ServedRows < 4096 {
 				t.Fatalf("blob %s reconstructable = %+v", b.PromiseHash, b.Reconstructable)
@@ -366,5 +369,144 @@ func TestLimitsAndMethods(t *testing.T) {
 	get(t, ts, "/v1/meta", &meta)
 	if meta.LastProbeAt == nil || *meta.LastProbeAt == "" {
 		t.Error("last_probe_at missing")
+	}
+}
+
+// Errors never carry the internal detail, and only successes are cacheable.
+func TestErrorsAreOpaqueAndUncached(t *testing.T) {
+	ts := serverWithSample(t)
+	resp, err := http.Get(ts.URL + "/v1/blobs?limit=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("400 Cache-Control = %q, want no-store", cc)
+	}
+	ok, err := http.Get(ts.URL + "/v1/meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok.Body.Close()
+	if cc := ok.Header.Get("Cache-Control"); cc == "no-store" || cc == "" {
+		t.Errorf("200 Cache-Control = %q, want a cacheable value", cc)
+	}
+	// unknown path answers JSON, not text/plain
+	nf, err := http.Get(ts.URL + "/v1/nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nf.Body.Close()
+	if nf.StatusCode != 404 {
+		t.Fatalf("unknown path -> %d", nf.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(nf.Body).Decode(&body); err != nil {
+		t.Fatalf("404 body is not JSON: %v", err)
+	}
+	if body["error"] == "" {
+		t.Errorf("404 body = %v", body)
+	}
+	if ct := nf.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("404 Content-Type = %q", ct)
+	}
+	// a handler's own 404 keeps its specific message
+	hr, err := http.Get(ts.URL + "/v1/validators/" + strings.Repeat("ab", 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hr.Body.Close()
+	if hr.StatusCode != 404 {
+		t.Fatalf("unknown validator -> %d", hr.StatusCode)
+	}
+	var hb map[string]any
+	if err := json.NewDecoder(hr.Body).Decode(&hb); err != nil {
+		t.Fatalf("handler 404 body: %v", err)
+	}
+	if msg, _ := hb["error"].(string); !strings.Contains(msg, "validator") {
+		t.Errorf("handler 404 lost its message: %v", hb)
+	}
+}
+
+// An operator or account address must not be accepted as a consensus address.
+func TestValidatorAddressRequiresConsensusPrefix(t *testing.T) {
+	ts := serverWithSample(t)
+	for _, addr := range []string{
+		"celestiavaloper1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqfk0xdj",
+		"celestia1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+	} {
+		if code := get(t, ts, "/v1/validators/"+addr, nil); code != 400 {
+			t.Errorf("%s -> %d, want 400", addr, code)
+		}
+	}
+	if code := get(t, ts, "/v1/probes?validator=celestiavaloper1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqfk0xdj", nil); code != 400 {
+		t.Errorf("probes with an operator address -> %d, want 400", code)
+	}
+}
+
+// Pagination must not drop the rest of a block when the page boundary falls
+// inside a height that carries several publications.
+func TestBlobsPaginationKeepsSameHeightRows(t *testing.T) {
+	ts, st := serverAndStore(t)
+	var pubs struct {
+		Blobs []struct {
+			PromiseHash      string `json:"promise_hash"`
+			SettlementHeight int64  `json:"settlement_height"`
+		} `json:"blobs"`
+	}
+	get(t, ts, "/v1/blobs", &pubs)
+	if len(pubs.Blobs) == 0 {
+		t.Fatal("fixture has no publications")
+	}
+	// add a second publication at the same height as the newest one
+	raw, err := os.ReadFile(filepath.Join(sampleDir, "publications.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first scan.Publication
+	if err := json.Unmarshal([]byte(strings.SplitN(string(raw), "\n", 2)[0]), &first); err != nil {
+		t.Fatal(err)
+	}
+	twin := first
+	twin.PromiseHash = "dead" + first.PromiseHash[4:]
+	twin.SettlementTxHash = "beef" + first.SettlementTxHash[4:]
+	twin.SettlementTxIndex = first.SettlementTxIndex + 1
+	tw, _ := json.Marshal(twin)
+	if _, err := st.UpsertPublication(twin, tw); err != nil {
+		t.Fatal(err)
+	}
+
+	var page1 struct {
+		Blobs []struct {
+			PromiseHash       string `json:"promise_hash"`
+			SettlementHeight  int64  `json:"settlement_height"`
+			SettlementTxIndex int    `json:"settlement_tx_index"`
+		} `json:"blobs"`
+	}
+	get(t, ts, "/v1/blobs?limit=1", &page1)
+	if len(page1.Blobs) != 1 {
+		t.Fatalf("page 1: %d rows", len(page1.Blobs))
+	}
+	cur := page1.Blobs[0]
+	var page2 struct {
+		Blobs []struct {
+			PromiseHash string `json:"promise_hash"`
+		} `json:"blobs"`
+	}
+	get(t, ts, fmt.Sprintf("/v1/blobs?limit=5&before_height=%d&before_tx_index=%d", cur.SettlementHeight, cur.SettlementTxIndex), &page2)
+	for _, b := range page2.Blobs {
+		if b.PromiseHash == cur.PromiseHash {
+			t.Fatal("the cursor row appeared again on page 2")
+		}
+	}
+	if len(page2.Blobs) == 0 {
+		t.Fatal("page 2 is empty; the rest of the block was dropped")
+	}
+	// bad cursor values are rejected, not ignored
+	if code := get(t, ts, "/v1/blobs?before_height=abc", nil); code != 400 {
+		t.Error("before_height=abc should be 400")
+	}
+	if code := get(t, ts, "/v1/blobs?before_height=10&before_tx_index=-1", nil); code != 400 {
+		t.Error("negative before_tx_index should be 400")
 	}
 }

@@ -21,7 +21,8 @@ function Recon({ b }: { b: Blob }) {
   if (r.status === "pending") {
     return <div className="card"><strong>Reconstructable: pending.</strong> <span className="muted">No in-window point is complete yet: {r.probed_validators} of {r.assigned_validators} assigned validators have a result at point <span className="mono">{r.point}</span>. A validator without a row is a gap in observation, not a failure to serve.</span></div>;
   }
-  const total = r.needed_rows * 4;
+  // the encoded row count comes from the API (blob v0: 16384); never assume a ratio
+  const total = r.total_rows > 0 ? r.total_rows : r.needed_rows;
   const colour = r.status === "no" ? "var(--status-fault)" : r.window_over ? "var(--status-expected-gone)" : "var(--status-healthy)";
   return (
     <div className="card">

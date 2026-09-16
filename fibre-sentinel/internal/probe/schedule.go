@@ -103,6 +103,21 @@ func (c ScheduleConfig) withDefaults() ScheduleConfig {
 	return c
 }
 
+// fallbackSpan is the window length used when a record's settlement time is
+// not before its must_serve_until: the publication's own retention (or
+// promise timeout, whichever the deadline was built from), and 10 minutes
+// only when the record carries neither.
+func fallbackSpan(p scan.Publication) time.Duration {
+	span := time.Duration(p.ParamsAtPublication.ShardRetentionSeconds) * time.Second
+	if t := time.Duration(p.ParamsAtPublication.PaymentPromiseTimeoutSeconds) * time.Second; t > span {
+		span = t
+	}
+	if span <= 0 {
+		span = 10 * time.Minute
+	}
+	return span
+}
+
 // SchedulePoint is one moment the Sentinel should probe a publication's
 // assigned validators.
 type SchedulePoint struct {
@@ -122,9 +137,12 @@ func ScheduleFor(p scan.Publication, cfg ScheduleConfig) []SchedulePoint {
 	start := p.SettlementTime
 	msu := p.MustServeUntil
 	if !msu.After(start) {
-		// Degenerate record (params or clocks odd): fall back to a 10m window
-		// anchored at must_serve_until so we still get useful points.
-		start = msu.Add(-10 * time.Minute)
+		// Degenerate record (the promise's creation timestamp is later than
+		// the block that settled it, which the chain allows within its skew
+		// window): anchor a window of the publication's own retention at
+		// must_serve_until, so the fallback follows the chain params rather
+		// than a constant.
+		start = msu.Add(-fallbackSpan(p))
 	}
 	span := msu.Sub(start)
 

@@ -41,7 +41,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           api.New(st, *vantage),
+		Handler:           api.NewWithLogger(st, *vantage, log),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,

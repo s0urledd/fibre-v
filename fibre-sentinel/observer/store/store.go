@@ -99,10 +99,7 @@ func (s *Store) migrate() error {
 	// comment cannot cut a statement in half.
 	var sb strings.Builder
 	for _, line := range strings.Split(schemaSQL, "\n") {
-		if i := strings.Index(line, "--"); i >= 0 {
-			line = line[:i]
-		}
-		sb.WriteString(line)
+		sb.WriteString(stripSQLComment(line))
 		sb.WriteByte('\n')
 	}
 	for _, stmt := range strings.Split(sb.String(), ";") {
@@ -136,6 +133,24 @@ const TimeLayout = "2006-01-02T15:04:05.000000000Z"
 func TS(t time.Time) string { return t.UTC().Format(TimeLayout) }
 
 func ts(t time.Time) string { return TS(t) }
+
+// stripSQLComment removes a trailing "--" comment from one SQL line, ignoring
+// a "--" that falls inside a single-quoted string literal (a DEFAULT or a
+// CHECK constraint may legitimately contain one).
+func stripSQLComment(line string) string {
+	inStr := false
+	for i := 0; i < len(line); i++ {
+		switch {
+		case line[i] == '\'':
+			// '' inside a literal is an escaped quote, which this toggle
+			// handles correctly: it closes and immediately reopens.
+			inStr = !inStr
+		case !inStr && line[i] == '-' && i+1 < len(line) && line[i+1] == '-':
+			return line[:i]
+		}
+	}
+	return line
+}
 
 func b2i(b bool) int {
 	if b {

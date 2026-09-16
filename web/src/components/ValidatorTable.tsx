@@ -8,6 +8,7 @@ const IDENT: Record<string, string> = {
   verified: "TLS identity verified against the consensus key",
   mismatch: "TLS certificate is not endorsed by this validator's consensus key",
   no_tls: "TLS handshake failed",
+  unverified: "TLS fine, no identity verdict recorded yet",
   unreachable: "endpoint unreachable at the last probe",
   unknown: "never probed",
 };

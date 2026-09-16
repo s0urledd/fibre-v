@@ -85,13 +85,20 @@ func tail(st *store.Store, path string, fn handler, now time.Time) (Result, erro
 			}
 			return res, err
 		}
-		if len(raw) > maxLine {
-			return res, fmt.Errorf("%s line %d: record longer than %d bytes", path, res.Line+1, maxLine)
-		}
 		trimmed := bytes.TrimSpace(raw)
 		res.Read++
 		res.Line++
 		res.Offset += int64(len(raw))
+		if len(raw) > maxLine {
+			// Too long to be one of our records: step over it like any other
+			// undecodable line rather than stalling the file forever.
+			res.Skipped++
+			res.LastSkipped = fmt.Sprintf("%s line %d: record longer than %d bytes", path, res.Line, maxLine)
+			if err := st.SetCursor(path, res.Offset, res.Line, now); err != nil {
+				return res, err
+			}
+			continue
+		}
 		if len(trimmed) == 0 {
 			continue
 		}

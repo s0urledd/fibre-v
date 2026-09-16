@@ -41,6 +41,9 @@ func main() {
 	flag.Parse()
 
 	log := scan.NewLogger(*logLines)
+	if !*storeRows {
+		log.Printf("WARNING: -rows=false omits the per-validator row lists, so the observer cannot compute which distinct rows were served; the dashboard's reconstructability verdict will read \"unknown\" for every blob recorded in this run")
+	}
 
 	s, err := scan.New(scan.Config{
 		RPCURL:          *rpc,

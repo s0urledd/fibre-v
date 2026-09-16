@@ -94,6 +94,8 @@ export type Reconstruct = {
   assigned_validators: number;
   /** assigned validators with a real result at the point; "pending" while short of assigned_validators */
   probed_validators: number;
+  /** the blob's encoded row count (16384 for blob v0) */
+  total_rows: number;
 };
 
 export type Blob = {
@@ -117,29 +119,61 @@ export type Blob = {
 
 export type Fetch<T> = { data: T | null; error: string | null; loading: boolean };
 
+// One in-flight request and one timer per (path, interval), however many
+// components ask for it: the header, the banner, the footer and the page all
+// want /v1/meta, which was four requests per interval per viewer.
+type Sub = { subs: Set<(f: Fetch<unknown>) => void>; timer: ReturnType<typeof setInterval> | null; last: Fetch<unknown> };
+const streams = new Map<string, Sub>();
+
+async function fetchOnce(path: string): Promise<Fetch<unknown>> {
+  try {
+    const r = await fetch(API_BASE + path, { cache: "no-store" });
+    if (!r.ok) {
+      let msg = `${r.status}`;
+      try { msg = (await r.json()).error ?? msg; } catch { /* keep status */ }
+      return { data: null, error: msg, loading: false };
+    }
+    return { data: await r.json(), error: null, loading: false };
+  } catch (e) {
+    return { data: null, error: e instanceof Error ? e.message : String(e), loading: false };
+  }
+}
+
+function subscribe(key: string, path: string, refreshMs: number, fn: (f: Fetch<unknown>) => void): () => void {
+  let st = streams.get(key);
+  if (!st) {
+    st = { subs: new Set(), timer: null, last: { data: null, error: null, loading: true } };
+    streams.set(key, st);
+    const load = async () => {
+      const next = await fetchOnce(path);
+      const cur = streams.get(key);
+      if (!cur) return;
+      cur.last = next;
+      cur.subs.forEach((s) => s(next));
+    };
+    load();
+    if (refreshMs > 0) st.timer = setInterval(load, refreshMs);
+  } else if (!st.last.loading) {
+    // a later subscriber gets the current value at once
+    fn(st.last);
+  }
+  st.subs.add(fn);
+  return () => {
+    const cur = streams.get(key);
+    if (!cur) return;
+    cur.subs.delete(fn);
+    if (cur.subs.size === 0) {
+      if (cur.timer) clearInterval(cur.timer);
+      streams.delete(key);
+    }
+  };
+}
+
 export function useApi<T>(path: string | null, refreshMs = 30000): Fetch<T> {
   const [state, setState] = useState<Fetch<T>>({ data: null, error: null, loading: !!path });
   useEffect(() => {
     if (!path) return;
-    let stop = false;
-    const load = async () => {
-      try {
-        const r = await fetch(API_BASE + path, { cache: "no-store" });
-        if (!r.ok) {
-          let msg = `${r.status}`;
-          try { msg = (await r.json()).error ?? msg; } catch { /* keep status */ }
-          if (!stop) setState({ data: null, error: msg, loading: false });
-          return;
-        }
-        const j = (await r.json()) as T;
-        if (!stop) setState({ data: j, error: null, loading: false });
-      } catch (e) {
-        if (!stop) setState({ data: null, error: e instanceof Error ? e.message : String(e), loading: false });
-      }
-    };
-    load();
-    const id = refreshMs > 0 ? setInterval(load, refreshMs) : undefined;
-    return () => { stop = true; if (id) clearInterval(id); };
+    return subscribe(`${refreshMs}|${path}`, path, refreshMs, (f) => setState(f as Fetch<T>));
   }, [path, refreshMs]);
   return state;
 }

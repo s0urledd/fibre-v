@@ -8,7 +8,7 @@ import RateCell from "@/components/Rate";
 
 type Detail = {
   validator: Validator;
-  windows: { window: Window; serve_rate: Rate; probe_count: number; classes: ClassCounts }[];
+  windows: { window: Window; serve_rate: Rate; rated_probe_count: number; classes: ClassCounts }[];
   recent_probes: Probe[];
 };
 
@@ -42,7 +42,7 @@ function Page() {
               <tr key={w.window.name}>
                 <td className="mono">{w.window.name} <span className="faint">{utc(w.window.start)} →</span></td>
                 <td className="right mono"><RateCell r={w.serve_rate} /></td>
-                <td className="right mono">{w.probe_count}</td>
+                <td className="right mono">{w.rated_probe_count}</td>
                 <td>{Object.entries(w.classes).sort().map(([k, n]) => <span key={k} style={{ marginRight: 8 }}><Badge cls={k} /> <span className="mono">{n}</span></span>)}{Object.keys(w.classes).length === 0 && <span className="muted">— (0 probes)</span>}</td>
               </tr>
             ))}

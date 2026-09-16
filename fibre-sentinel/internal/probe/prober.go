@@ -112,6 +112,9 @@ type Prober struct {
 	feed     *pubFeed
 	chainID  string
 
+	clockMu     sync.Mutex
+	clockOffset time.Duration // observer clock - latest block time
+
 	coders map[[2]int]*Coder // keyed by (originalRows, totalRows)
 
 	// complete marks (vantage, promise, point) slots every target of which
@@ -191,6 +194,7 @@ func (p *Prober) Run(parent context.Context) error {
 		p.log.Fatalf("initial status: %v", err)
 	}
 	p.chainID = id
+	p.measureClock(ctx)
 	p.log.Printf("prober up: vantage=%s chain_id=%s tip=%d rpc=%s pubs=%s data=%s concurrency=%d",
 		p.cfg.Vantage, id, tip, p.cfg.RPCURL, p.cfg.PublicationsPath, p.store.Path(), p.cfg.Concurrency)
 
@@ -204,6 +208,8 @@ func (p *Prober) Run(parent context.Context) error {
 			p.log.Fatalf("run deadline hit: %v", err)
 		}
 
+		p.measureClock(ctx)
+
 		if added, err := p.feed.refresh(); err != nil {
 			p.log.Fatalf("load publications: %v", err)
 		} else if added > 0 {
@@ -214,10 +220,10 @@ func (p *Prober) Run(parent context.Context) error {
 		due, future, missed, dropped, finished := p.plan(p.feed.all(), now)
 
 		for _, mj := range missed {
-			p.recordNotProbed(mj, "scheduled point elapsed before the prober ran it")
+			p.recordNotProbed(ctx, mj, "scheduled point elapsed before the prober ran it")
 		}
 		for _, d := range dropped {
-			p.recordNotProbed(d.job, d.reason)
+			p.recordNotProbed(ctx, d.job, d.reason)
 		}
 		if len(missed)+len(dropped) > 0 {
 			if err := p.store.Sync(); err != nil {
@@ -263,6 +269,44 @@ func (p *Prober) Run(parent context.Context) error {
 			return nil
 		}
 	}
+}
+
+// clockSkewWarn is the offset from chain time past which every verdict this
+// vantage produces is suspect: the phase boundaries are only 30 s (grace
+// offset) and 150 s (prune tolerance) wide.
+const clockSkewWarn = 30 * time.Second
+
+// measureClock records the observer's clock offset against the chain's latest
+// block time. Every phase decision uses the local clock, so a drifted vantage
+// would silently mislabel probes; the offset is stamped on every measurement
+// and a large one is logged.
+func (p *Prober) measureClock(ctx context.Context) {
+	blockTime, err := p.chain.LatestBlockTime(ctx)
+	if err != nil {
+		p.log.Printf("clock check: %v (keeping previous offset)", err)
+		return
+	}
+	offset := time.Since(blockTime)
+	p.clockMu.Lock()
+	prev := p.clockOffset
+	p.clockOffset = offset
+	p.clockMu.Unlock()
+	if abs(offset) > clockSkewWarn && abs(prev) <= clockSkewWarn {
+		p.log.Printf("WARNING: observer clock is %s from the chain's latest block time; phase boundaries are seconds wide, check NTP", offset.Round(time.Second))
+	}
+}
+
+func (p *Prober) clockOffsetMS() int64 {
+	p.clockMu.Lock()
+	defer p.clockMu.Unlock()
+	return p.clockOffset.Milliseconds()
+}
+
+func abs(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 func (p *Prober) sleep(ctx context.Context, d time.Duration) bool {
@@ -524,6 +568,7 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 		PruneTolerance:     p.schedCfg().PruneTolerance,
 		SkipDownload:       skipDL,
 		ExpectedShardBytes: ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, t.RowCount),
+		ClockOffsetMS:      p.clockOffsetMS(),
 	}
 
 	lock := p.validatorLock(t.AddressHex)
@@ -550,22 +595,16 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 // recordNotProbed marks one (publication, point) slot NOT_PROBED for every
 // target, with the given reason (elapsed, or a policy decision). Rows are
 // appended without fsync; the caller syncs once per batch.
-func (p *Prober) recordNotProbed(j job, reason string) {
+func (p *Prober) recordNotProbed(ctx context.Context, j job, reason string) {
 	pub := j.pub
 	key := pointKey(p.cfg.Vantage, pub.PromiseHash, j.point.At)
-	targets, err := p.resolver.TargetsFor(context.Background(), pub, p.cfg.IncludeUnassigned)
+	targets, err := p.resolver.TargetsFor(ctx, pub, p.cfg.IncludeUnassigned)
 	if err != nil {
-		// cannot resolve targets for the slot: record one bare marker
-		// against the publication so the slot is not retried forever.
-		m := Measurement{
-			SchemaVersion: MeasurementSchemaVersion, Vantage: p.cfg.Vantage,
-			PromiseHash: pub.PromiseHash, Commitment: pub.Promise.Commitment,
-			MustServeUntil: pub.MustServeUntil, ScheduleLabel: j.point.Label,
-			ScheduledAt: j.point.At.UTC(), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
-			Phase: PhaseAt(j.point.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,
-			Classification: ClassNotProbed, ClassificationReason: reason + "; targets unresolved: " + err.Error(),
-		}
-		_ = p.store.AppendDeferred(m)
+		// No targets, so no per-validator row can be written. The point is
+		// marked handled in memory and ages past the backfill horizon on a
+		// restart; a row with no validator address would only be a record
+		// nothing downstream can attribute.
+		p.log.Printf("not-probed %s %s: targets unresolved: %v (%s)", short(pub.PromiseHash), j.point.Label, err, reason)
 		p.complete[key] = true
 		return
 	}

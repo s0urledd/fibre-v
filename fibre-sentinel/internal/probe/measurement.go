@@ -57,6 +57,11 @@ type Measurement struct {
 	RawError             string         `json:"raw_error,omitempty"`
 	TotalDurationMS      int64          `json:"total_duration_ms"`
 
+	// ClockOffsetMS is the observer's clock minus the chain's latest block
+	// time when the probe ran. Phases are decided by the local clock, so a
+	// reader can judge how much to trust a vantage. Additive, omitempty.
+	ClockOffsetMS int64 `json:"clock_offset_ms,omitempty"`
+
 	// Retry is set when this measurement is the second attempt after a
 	// transport timeout (see Config.RetryTransportTimeout). Absent on
 	// single-attempt measurements; additive, so the schema version is unchanged.

@@ -1,0 +1,26 @@
+[Unit]
+Description=Fibre observer: continuous SQLite replication (litestream)
+After=network-online.target fibre-collector.service
+Wants=network-online.target
+
+[Service]
+User=fibre-observer
+# LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY live here, mode 0600
+EnvironmentFile=/etc/fibre-observer/litestream.env
+ExecStart=/usr/local/bin/litestream replicate -config /etc/fibre-observer/litestream.yml
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/fibre-observer/data
+
+[Install]
+WantedBy=multi-user.target
