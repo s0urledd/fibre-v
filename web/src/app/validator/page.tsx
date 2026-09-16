@@ -74,6 +74,12 @@ function Page() {
           <dt>last heartbeat</dt><dd>{v.reachable == null ? "not probed" : v.reachable ? "reached" : <span className="err">unreachable</span>}{v.last_seen_at && <span className="muted"> · {utc(v.last_seen_at)} ({ago(v.last_seen_at)})</span>}{v.last_unreachable_at && <span className="muted"> · last failed {ago(v.last_unreachable_at)}</span>}</dd>
           <dt>TLS identity</dt><dd>{v.identity_status}{v.identity_reason && <span className="muted"> ({v.identity_reason})</span>}</dd>
           <dt>voting power</dt><dd className="mono">{v.voting_power.toLocaleString("en-US")}{v.assigned_rows_last ? <span className="muted"> · {v.assigned_rows_last} rows per blob ({v.expected_load_band})</span> : null}</dd>
+          {v.attestation && v.attestation.blob_coverage.den > 0 && (
+            <><dt>signed blobs</dt><dd className="mono" title="Assigned blobs in this window whose settled promise carries this validator's signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected.">
+              {v.attestation.attested_blobs.toLocaleString("en-US")} of {v.attestation.blob_coverage.den.toLocaleString("en-US")}
+              <span className="muted"> · {fmtRate(v.attestation.blob_coverage)}</span>
+            </dd></>
+          )}
           {v.operator_address && <><dt>operator</dt><dd className="mono">{v.operator_address}</dd></>}
           <dt>consensus (hex)</dt><dd className="mono">{v.address}</dd>
           {v.website && <><dt>website</dt><dd><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website}</a></dd></>}

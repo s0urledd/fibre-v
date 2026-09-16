@@ -19,7 +19,7 @@ export function Header() {
   return (
     <header className="top blur">
       <div className="wrap">
-        <Link className="brand" href="/"><i aria-hidden="true" />Muninn<span className="brand-sub">Fibre observer</span></Link>
+        <Link className="brand" href="/"><i aria-hidden="true" />Fibrescope<span className="brand-sub">Celestia Fibre observer · by Huginn Tech</span></Link>
         <nav>
           {NAV.map(([href, name]) => (
             <Link key={href} href={href} className={(href === "/" ? path === "/" : path.startsWith(href)) ? "on" : ""}>{name}</Link>

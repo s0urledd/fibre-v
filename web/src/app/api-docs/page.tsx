@@ -1,6 +1,6 @@
 import { API_BASE } from "@/lib/api";
 
-export const metadata = { title: "API · Muninn" };
+export const metadata = { title: "API · Fibrescope" };
 
 const ROUTES: [string, string][] = [
   ["GET /v1/meta", "chain id, chain height, app version and whether Fibre is live on this chain, collector height, pinned celestia-app commit, protocol-params fingerprint, row counts, latest collector run with liveness, time of the newest measurement, vantage count and description."],
