@@ -70,7 +70,7 @@ export default function Overview() {
       )}
       {net && (
         <p className="muted">
-          Verdicts in window (assigned, in-window and grace): {Object.entries(net.classes).sort().map(([k, v]) => `${k.toLowerCase().replace(/_/g, " ")} ${v}`).join(" · ") || "none"}. Serve rate = <RateCell r={net.serve_rate} obligations={net.serve_rate_by_obligation} />, counted over {net.serve_rate_by_obligation.den.toLocaleString("en-US")} obligations (one validator, one blob) rather than over probes, because the four in-window probes of one obligation are near copies of each other.
+          Verdicts over the rate&rsquo;s population (an assigned shard, while the validator was under obligation): {Object.entries(net.classes).sort().map(([k, v]) => `${k.toLowerCase().replace(/_/g, " ")} ${v}`).join(" · ") || "none"}. Serve rate = <RateCell r={net.serve_rate} obligations={net.serve_rate_by_obligation} />, counted over {net.serve_rate_by_obligation.den.toLocaleString("en-US")} obligations (one validator, one blob) rather than over probes, because the four in-window probes of one obligation are near copies of each other.
         </p>
       )}
       {net && net.vantage_health?.correlated && (

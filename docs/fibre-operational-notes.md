@@ -234,3 +234,51 @@ probes, same 29/35. The raw files are the record; the database is derived.
    validators, and the planned mainnet blob is 128 MiB. Any client of the
    Fibre read path, an observer included, has to raise gRPC's default 4 MiB
    receive limit and size its timeouts by the shard, not by a constant.
+
+## Run of 16 September 2026: the taxonomy split, on live chain data
+
+A four-validator devnet at `v10.1.0-corto`, two 2.25 MiB blobs, one Fibre
+server killed after the first in-window probe. 48 probes over the full
+schedule. What it establishes:
+
+**Signature verification works against real `MsgPayForFibre`.** Both
+publications carried four signature entries; all four verified positionally
+against the validator set at the promise height, with nothing unmatched and
+nothing out of position. Attested voting power equalled total voting power.
+This is the first time the verification has run on chain-produced signatures
+rather than on constructed test vectors.
+
+**A killed server is reported as unreachable, not as breaking its promise.**
+The six probes of the dead endpoint came back `TCP_REFUSED` and were
+classified `UNREACHABLE`. Under the previous taxonomy they were six `FAULT`
+rows, and the published serve rate was 26/32 = 81%: an accusation against a
+validator when all the observer knew was that it could not reach the host.
+
+| figure | value | what it says |
+|---|---|---|
+| serve rate | 26 / 26 | every probe that produced a verdict was a shard served |
+| verdict coverage | 26 / 32 | six in-window probes produced no verdict, and the page says so |
+| held out | `UNREACHABLE` 6 | named, not hidden |
+| by obligation | 8 / 8 | one observation per (validator, blob), the basis for any interval |
+| by schedule point | w1 8/8, w2 6/6, w3 6/6, w4 6/6 | the drop from 8 to 6 is the moment the server was killed |
+| attestation | 32 / 32 | every probe was of an obligation the chain proves |
+| worst correlated point | 1 of 4 unreachable, below the 0.5 threshold | one validator down is not the observer's own network |
+| reconstructable | 0 fully served, 2 degraded, 2 recoverable | the rows all came back; not everyone obliged answered |
+| reachability | 3 / 4 | |
+
+The reconstructability row is the clearest illustration of why "degraded" is
+now reported separately. Three of four validators held 9,256 distinct rows
+against the 4,096 needed, so both blobs were recoverable in full. Folding
+that into a success rate would have published "100% reconstructable" while a
+validator that was proven to owe the blob served nothing; reporting it as
+zero would have implied the data was lost. Neither is true, so both numbers
+are published.
+
+The dashboard rendered every one of these with no console errors, and the
+database was rebuilt from the JSONL to the same numbers.
+
+What this run does **not** cover: `SHADOWED_SHARD` needs two promises over
+one commitment under different assignments, which needs a validator-set
+change mid-run; `NOT_REGISTERED` with the last-known-host fallback needs a
+jailing, which takes thousands of blocks at the default downtime window.
+Both are covered by unit tests only.

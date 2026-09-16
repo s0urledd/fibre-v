@@ -82,6 +82,7 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
               <th>Obligation</th>
               <th className="right">Fault</th>
               <th className="right">Unreachable</th>
+              <th className="right">Tolerated</th>
               <th className="right">Not probed</th>
               <th className="right">Voting power</th>
               <th className="right">Rows (band)</th>
@@ -90,7 +91,7 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr><td colSpan={12} className="muted">{rows.length === 0 ? "No validators seen yet: no registered Fibre endpoint and no probe." : `No validator matches “${q}”. Try the consensus address or the Fibre host.`}</td></tr>
+              <tr><td colSpan={13} className="muted">{rows.length === 0 ? "No validators seen yet: no registered Fibre endpoint and no probe." : `No validator matches “${q}”. Try the consensus address or the Fibre host.`}</td></tr>
             )}
             {list.map((v) => (
               <tr key={v.address}>
@@ -109,6 +110,7 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
                 <td className={attestedCell(v).text === "unproven" ? "muted" : ""} title={attestedCell(v).title}>{attestedCell(v).text}</td>
                 <td className="right mono">{v.classes.FAULT ?? 0}</td>
                 <td className="right mono" title="Probes where this site could not complete a conversation with the endpoint. From one location that is not distinguishable from a problem on this site's own path, so it is kept out of the serve rate.">{v.classes.UNREACHABLE ?? 0}</td>
+                <td className="right mono" title="Not found or unreachable within the measured prune lag after must_serve_until. Never counted against the validator.">{v.classes.TOLERATED ?? 0}</td>
                 <td className="right mono">{(v.classes.NOT_PROBED ?? 0) + (v.classes.PROBE_ERROR ?? 0)}</td>
                 <td className="right mono">{v.voting_power.toLocaleString("en-US")}</td>
                 <td className="right mono">{v.assigned_rows_last ? `${v.assigned_rows_last} (${v.expected_load_band})` : "—"}</td>
