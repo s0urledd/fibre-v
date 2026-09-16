@@ -195,6 +195,20 @@ export default function Overview() {
 
       {net?.serve_rate_by_point && <Graduation points={net.serve_rate_by_point} />}
 
+      {/* `!= null` on purpose, not `!== null`: a field this build expects and the
+          API it is talking to does not send arrives as undefined, and `!== null`
+          lets undefined through into .toLocaleString(), which throws inside
+          render and blanks the whole page. A dashboard that goes white because
+          one number is missing is worse than one missing the number. */}
+      {net && net.serve_latency_p50_ms != null && (
+        <p className="coverage">
+          A shard that came back took {net.serve_latency_p50_ms.toLocaleString("en-US")} ms typically and{" "}
+          {(net.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at the 95th percentile, over{" "}
+          {net.serve_latency_sample.toLocaleString("en-US")} probes: dial, TLS, download and verification against the commitment.
+          No threshold is attached to that — this site watches from one place, so part of every millisecond is its own path.
+        </p>
+      )}
+
       {net && (
         <p className="coverage">
           {net.publications.toLocaleString("en-US")} publications in this window, {bytes(net.publication_bytes)} of padded upload.{" "}

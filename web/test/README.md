@@ -47,6 +47,14 @@ quorum membership is a race rather than a list. A fixture where everyone signs
 hides the single class most likely to be misread on the dashboard; this one
 produces it at the rate the real network will.
 
+Probe durations are generated rather than constant: they scale with the
+validator's assigned rows, sit on a per-validator floor, and have a long right
+tail, so the median and the 95th percentile are different numbers and the
+throughput column has something to show. One validator (`slow`) serves
+everything at a ninth of everyone else's speed, and one large validator carries
+enough rows that its raw duration is the worst on the network while its
+throughput is the best — which is the case the column exists to get right.
+
 Three modelling rules it follows, all taken from the code rather than invented:
 
 - **Attestation is decided at upload time, serving at probe time.** A validator

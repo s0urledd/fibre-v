@@ -321,3 +321,193 @@ func TestRetentionProfileIsPublishedPerValidator(t *testing.T) {
 		}
 	}
 }
+
+// Latency is the fifth thing an operator needs and the one this site measures
+// but never published. Two properties have to hold for it to be worth
+// publishing at all: it must describe service rather than failure, and it must
+// be comparable between validators of different sizes.
+
+// latencyFixture gives two validators the same service quality at different
+// sizes, and a third that is genuinely slow. v1 carries four times v2's rows
+// and takes four times as long, so their throughput is identical and their
+// durations are not. v3 carries v2's rows at a quarter of the speed.
+func latencyFixture(t *testing.T) *httptest.Server {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	now := time.Now().UTC().Truncate(time.Second)
+	created, msu := now.Add(-time.Hour), now.Add(time.Hour)
+	const hash = "lat1"
+	rowsOf := map[string]int{"v1": 400, "v2": 100, "v3": 100}
+	// Durations chosen so v1 and v2 land on the same rows per second (1,000)
+	// and v3 on a quarter of it.
+	msOf := map[string][]int64{
+		"v1": {400, 400, 400, 1200},
+		"v2": {100, 100, 100, 300},
+		"v3": {400, 400, 400, 1200},
+	}
+
+	pub := scan.Publication{
+		SchemaVersion: scan.AttestationSchemaVersion, PromiseHash: hash,
+		SettlementHeight: 100, SettlementTime: created, MustServeUntil: msu, RecordedAt: now,
+		SettlementTxHash: "tx", Signer: "celestia1pub",
+		Promise:                 scan.PromiseFields{ChainID: "t", Height: 99, Commitment: "cc", CreationTimestamp: created, BlobSize: 4096},
+		ValidatorSignatureCount: 3,
+		Assignment: scan.AssignmentTable{
+			ProtocolParams:     scan.ProtocolParamsSnapshot{OriginalRows: 600, TotalRows: 2400},
+			ValidatorSetHeight: 99, TotalVotingPower: 30, Sigma: 600, Distinct: 600,
+			ValidatorsWithRows: 3, AttestedWithRows: 3, SignatureEntries: 3, SignaturesVerified: 3,
+			AttestedVotingPower: 30,
+			Validators: []scan.ValidatorAssignment{
+				{Address: "v1", VotingPower: 10, RowCount: 400, Rows: []int{0}, Attested: true},
+				{Address: "v2", VotingPower: 10, RowCount: 100, Rows: []int{1}, Attested: true},
+				{Address: "v3", VotingPower: 10, RowCount: 100, Rows: []int{2}, Attested: true},
+			},
+		},
+	}
+	raw, err := json.Marshal(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertPublication(pub, raw); err != nil {
+		t.Fatal(err)
+	}
+
+	points := []string{"w1", "w2", "w3", "w4"}
+	for addr, list := range msOf {
+		for i, ms := range list {
+			at := created.Add(time.Duration(i+1) * time.Minute)
+			class, reason := probe.Classify(probe.Evidence{
+				Assigned: true, Attested: true, Phase: probe.PhaseInWindow, Outcome: probe.OutcomeServedOK,
+			})
+			m := probe.Measurement{
+				SchemaVersion: probe.AttestationSchemaVersion, Vantage: "test",
+				PromiseHash: hash, Commitment: "cc", MustServeUntil: msu, ValidatorSetHeight: 99,
+				ValidatorAddress: addr, ValidatorHost: addr + ":443",
+				Assigned: true, Attested: true, AssignedRowCount: rowsOf[addr],
+				ScheduleLabel: points[i], ScheduledAt: at, StartedAt: at, FinishedAt: at.Add(time.Duration(ms) * time.Millisecond),
+				Phase: probe.PhaseInWindow, Outcome: probe.OutcomeServedOK,
+				Classification: class, ClassificationReason: reason,
+				TotalDurationMS: ms,
+			}
+			m.Download.OK, m.Download.RowsReturned, m.Download.RowsExpected = true, rowsOf[addr], rowsOf[addr]
+			m.Download.CommitmentVerified, m.Download.AssignmentVerified = true, true
+			raw, err := json.Marshal(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.InsertProbe(m, raw); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// One failure per validator, far slower than any success. It must not
+		// reach the percentiles: how long a failure took is not a service time,
+		// and letting it in would make the slowest validator look like the one
+		// that failed most.
+		at := created.Add(5 * time.Minute)
+		class, reason := probe.Classify(probe.Evidence{
+			Assigned: true, Attested: true, Phase: probe.PhaseInWindow, Outcome: probe.OutcomeNotFound,
+		})
+		m := probe.Measurement{
+			SchemaVersion: probe.AttestationSchemaVersion, Vantage: "test",
+			PromiseHash: hash, Commitment: "cc", MustServeUntil: msu, ValidatorSetHeight: 99,
+			ValidatorAddress: addr, ValidatorHost: addr + ":443",
+			Assigned: true, Attested: true, AssignedRowCount: rowsOf[addr],
+			ScheduleLabel: "w4", ScheduledAt: at, StartedAt: at, FinishedAt: at,
+			Phase: probe.PhaseInWindow, Outcome: probe.OutcomeNotFound,
+			Classification: class, ClassificationReason: reason,
+			TotalDurationMS: 60000,
+		}
+		raw, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.InsertProbe(m, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.StartRun("collector", "test", "t", now); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(api.New(st, "test"))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+type latencyValidator struct {
+	Address string `json:"address"`
+	P50     *int64 `json:"serve_latency_p50_ms"`
+	P95     *int64 `json:"serve_latency_p95_ms"`
+	Sample  int64  `json:"serve_latency_sample"`
+	RowsSec *int64 `json:"serve_rows_per_second"`
+}
+
+func TestLatencyIsServiceTimeAndSizeNormalised(t *testing.T) {
+	ts := latencyFixture(t)
+	var resp struct {
+		Validators []latencyValidator `json:"validators"`
+	}
+	if code := get(t, ts, "/v1/validators?window=all", &resp); code != 200 {
+		t.Fatalf("validators: %d", code)
+	}
+	by := map[string]latencyValidator{}
+	for _, v := range resp.Validators {
+		by[v.Address] = v
+	}
+
+	for _, addr := range []string{"v1", "v2", "v3"} {
+		if by[addr].Sample != 4 {
+			t.Errorf("%s latency sample = %d, want 4: the failed probe is not a service time",
+				addr, by[addr].Sample)
+		}
+		if p95 := by[addr].P95; p95 == nil || *p95 >= 60000 {
+			t.Errorf("%s p95 = %v, want the slowest SUCCESS rather than the failure's 60s", addr, p95)
+		}
+	}
+
+	// The whole case for normalising, in three validators.
+	//
+	// v1 carries four times v2's rows and takes four times as long: the same
+	// service at a different size. v3 carries v2's rows at v1's durations: a
+	// quarter of the service. So v1 and v3 have IDENTICAL durations and
+	// opposite meanings, and a milliseconds column cannot tell them apart at
+	// all — it would put both at the bottom and say nothing true about either.
+	v1, v2, v3 := by["v1"], by["v2"], by["v3"]
+	for _, v := range []latencyValidator{v1, v2, v3} {
+		if v.P50 == nil || v.RowsSec == nil {
+			t.Fatalf("%s has no latency figures: %+v", v.Address, v)
+		}
+	}
+	if *v1.P50 != *v3.P50 {
+		t.Errorf("fixture is not exercising the point: v1 p50 %d and v3 p50 %d should be identical",
+			*v1.P50, *v3.P50)
+	}
+	if *v1.RowsSec != *v2.RowsSec {
+		t.Errorf("rows/s = v1 %d, v2 %d: the same service at different sizes must read the same",
+			*v1.RowsSec, *v2.RowsSec)
+	}
+	if *v3.RowsSec >= *v2.RowsSec {
+		t.Errorf("rows/s = v3 %d, v2 %d: at identical durations to v1, v3 carries a quarter of the rows and must read worse",
+			*v3.RowsSec, *v2.RowsSec)
+	}
+
+	// The same figures network-wide.
+	var net struct {
+		P50    *int64 `json:"serve_latency_p50_ms"`
+		P95    *int64 `json:"serve_latency_p95_ms"`
+		Sample int64  `json:"serve_latency_sample"`
+	}
+	if code := get(t, ts, "/v1/network?window=all", &net); code != 200 {
+		t.Fatalf("network: %d", code)
+	}
+	if net.Sample != 12 {
+		t.Errorf("network latency sample = %d, want 12 successful probes", net.Sample)
+	}
+	if net.P95 == nil || *net.P95 >= 60000 {
+		t.Errorf("network p95 = %v, want a success rather than the 60s failures", net.P95)
+	}
+}

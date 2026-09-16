@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cosmos/cosmos-sdk/types/bech32"
@@ -86,6 +87,16 @@ type Server struct {
 	// waits for one and never sees one without its age.
 	net  *snapshotCache[*networkResponse]
 	vals *snapshotCache[[]validatorRow]
+
+	// How many vantages the store holds, and the table watermarks it was
+	// counted at: see vantageCount.
+	vantageMu   sync.Mutex
+	vantageN    int
+	vantageMark [2]int64
+
+	// Per-publication verdicts, keyed by what the publication's probes look
+	// like right now. See blobcache.go.
+	blobs *blobCache
 }
 
 // New builds a Server. vantage is the label rendered on every response.
@@ -107,7 +118,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger) *Server
 		"location":         "the operator's word: geolocating an address is a guess, so nothing here proves it",
 	}
 	info.Complete = info.Location != "" && info.Provider != "" && info.ASN != "" && len(info.EgressAddresses) > 0
-	s := &Server{st: st, vantage: info.Name, info: info, mux: http.NewServeMux(), log: log}
+	s := &Server{st: st, vantage: info.Name, info: info, mux: http.NewServeMux(), log: log, blobs: newBlobCache()}
 	s.net = newSnapshotCache("network", s.computeNetwork)
 	s.vals = newSnapshotCache("validators", func(ctx context.Context, win Window) ([]validatorRow, error) {
 		return s.validatorRows(ctx, win, "")
@@ -115,6 +126,17 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger) *Server
 	// Warm every window now, so the first visitor is not the one who waits.
 	s.net.warm(s.logf(), time.Now())
 	s.vals.warm(s.logf(), time.Now())
+	// And the first page of blobs, for the same reason: with the verdict cache
+	// empty that page costs six queries per row, which is the one cold path
+	// left on the site. It is a single read of what /v1/blobs answers by
+	// default, discarded — the point is the cache it leaves behind.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), snapshotTimeout)
+		defer cancel()
+		if _, err := s.blobRows(ctx, "", blobPageDefault); err != nil && log != nil {
+			log.Printf("warming the blob page: %v", err)
+		}
+	}()
 	s.mux.HandleFunc("GET /v1/meta", s.handleMeta)
 	s.mux.HandleFunc("GET /v1/network", s.handleNetwork)
 	s.mux.HandleFunc("GET /v1/validators", s.handleValidators)
@@ -285,15 +307,51 @@ type runStatus struct {
 
 // vantageCount counts the distinct vantages that ever wrote a probe or a
 // heartbeat (a second location that only runs the heartbeat still counts).
+// vantageCount is how many distinct places the stored observations were made
+// from. It decides one sentence on every page — whether this is a single
+// vantage or several — and it is the most expensive query /v1/meta runs: no
+// index covers `vantage`, so it scans both probe tables in full and unions them
+// through a temp B-tree. Measured on an 85,000-probe store it was 49ms of the
+// endpoint's 58ms of SQL, on the endpoint every page polls.
+//
+// It is also a number that essentially never changes: a second vantage appears
+// once, when a second observer's file is first ingested. So it is computed once
+// and reused until the tables it reads have actually grown. Both are
+// append-only, so the highest rowid in each is an exact watermark — a vantage
+// cannot appear without a row, and a row cannot arrive without raising it — and
+// MAX(rowid) is a single seek to the end of the b-tree rather than a scan.
+//
+// Exact rather than a timer on purpose. The claim this drives is the one-vantage
+// caveat printed above every page, and a cached count is a claim about how much
+// the site's own evidence is worth.
 func (s *Server) vantageCount(ctx context.Context) int {
+	db := s.st.DB()
+	var pr, re sql.NullInt64
+	_ = db.QueryRowContext(ctx, `SELECT MAX(rowid) FROM probes`).Scan(&pr)
+	_ = db.QueryRowContext(ctx, `SELECT MAX(rowid) FROM reachability`).Scan(&re)
+	mark := [2]int64{pr.Int64, re.Int64}
+
+	s.vantageMu.Lock()
+	if s.vantageN > 0 && s.vantageMark == mark {
+		n := s.vantageN
+		s.vantageMu.Unlock()
+		return n
+	}
+	s.vantageMu.Unlock()
+
 	var n int
-	_ = s.st.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT vantage FROM probes UNION SELECT vantage FROM reachability)`).Scan(&n)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT vantage FROM probes UNION SELECT vantage FROM reachability)`).Scan(&n)
 	if n == 0 {
 		n = 1
 	}
+	s.vantageMu.Lock()
+	s.vantageN, s.vantageMark = n, mark
+	s.vantageMu.Unlock()
 	return n
 }
 
+// latestRun is the newest run row for a component, with whether its heartbeat
+// is recent enough to call it alive.
 func (s *Server) latestRun(ctx context.Context, component string, now time.Time) (*runStatus, error) {
 	var rs runStatus
 	err := s.st.DB().QueryRowContext(ctx, `SELECT id, started_at, last_heartbeat_at, stopped_at FROM observer_runs
@@ -460,6 +518,42 @@ type networkResponse struct {
 	// early and poor late is a different finding from one that is uniformly
 	// poor, and the pooled number cannot tell them apart.
 	ByPoint []stratum `json:"serve_rate_by_point"`
+	// LatencyP50 and LatencyP95 are the network's own service times: the
+	// median and 95th percentile of a whole probe, dial to verified rows, over
+	// every probe that came back HEALTHY in this window. See the per-validator
+	// fields for why this is published without a threshold.
+	LatencyP50    *int64 `json:"serve_latency_p50_ms"`
+	LatencyP95    *int64 `json:"serve_latency_p95_ms"`
+	LatencySample int64  `json:"serve_latency_sample"`
+}
+
+// latencyWhere returns the median and 95th percentile of a whole probe over the
+// rows matching where, and how many rows that is.
+func (s *Server) latencyWhere(ctx context.Context, where string, args ...any) (p50, p95 *int64, n int64, err error) {
+	var a, b sql.NullInt64
+	err = s.st.DB().QueryRowContext(ctx, `SELECT
+			MAX(CASE WHEN rn = (c + 1) / 2         THEN ms END),
+			MAX(CASE WHEN rn = (c * 95 + 99) / 100 THEN ms END),
+			COALESCE(MAX(c), 0)
+		FROM (
+			SELECT total_duration_ms AS ms,
+			       ROW_NUMBER() OVER (ORDER BY total_duration_ms) AS rn,
+			       COUNT(*)     OVER ()                           AS c
+			FROM probes WHERE `+where+`
+			  AND classification = 'HEALTHY' AND total_duration_ms > 0
+		)`, args...).Scan(&a, &b, &n)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if a.Valid {
+		x := a.Int64
+		p50 = &x
+	}
+	if b.Valid {
+		x := b.Int64
+		p95 = &x
+	}
+	return p50, p95, n, nil
 }
 
 func (s *Server) classCountsWhere(ctx context.Context, where string, args ...any) (classCounts, int64, error) {
@@ -814,8 +908,12 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
 		return nil, err
 	}
+	if resp.LatencyP50, resp.LatencyP95, resp.LatencySample, err = s.latencyWhere(ctx,
+		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
+		return nil, err
+	}
 
-	reach, err := s.reachabilityNow(ctx)
+	reach, err := s.reachabilityNow(ctx, "")
 	if err != nil {
 		return nil, err
 	}
@@ -856,17 +954,25 @@ type reachState struct {
 	source         string // heartbeat | probe
 }
 
-func (s *Server) reachabilityNow(ctx context.Context) (map[string]reachState, error) {
+// reachabilityNow returns the latest evidence per validator, or for just one
+// when only is set: a request about a single validator has no reason to walk
+// the whole set, and the detail page is the caller that asks for one.
+func (s *Server) reachabilityNow(ctx context.Context, only string) (map[string]reachState, error) {
 	out := map[string]reachState{}
 	// The newest row per validator is the highest rowid: both files are
 	// ingested in write order. MAX(rowid) GROUP BY uses the validator index
 	// instead of a correlated MAX(started_at) per row over the whole table.
+	rf, pf, args := "", "", []any{}
+	if only != "" {
+		rf, pf = " WHERE validator_address = ?", " AND validator_address = ?"
+		args = []any{only, only}
+	}
 	q := `SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'heartbeat' FROM reachability
-	      WHERE rowid IN (SELECT MAX(rowid) FROM reachability GROUP BY validator_address)
+	      WHERE rowid IN (SELECT MAX(rowid) FROM reachability` + rf + ` GROUP BY validator_address)
 	      UNION ALL
 	      SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'probe' FROM probes
-	      WHERE rowid IN (SELECT MAX(rowid) FROM probes WHERE outcome NOT IN ('MISSED','PROBE_ERROR') GROUP BY validator_address)`
-	rows, err := s.st.DB().QueryContext(ctx, q)
+	      WHERE rowid IN (SELECT MAX(rowid) FROM probes WHERE outcome NOT IN ('MISSED','PROBE_ERROR')` + pf + ` GROUP BY validator_address)`
+	rows, err := s.st.DB().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -962,6 +1068,27 @@ type validatorRow struct {
 	Classes          classCounts      `json:"classes"`
 	AssignedRowsLast int              `json:"assigned_rows_last"`
 	ExpectedLoadBand string           `json:"expected_load_band"` // floor | low | mid | high, by assigned rows
+	// Latency is how long this observer waited for a shard it did get: the
+	// median and 95th percentile of the whole probe, dial to verified rows,
+	// over the probes that came back HEALTHY in this window.
+	//
+	// Nothing else on this site measures performance, and Fibre exists to be
+	// fast — a validator that serves everything in twenty seconds is not doing
+	// its job, and every other figure here would call it perfect. The numbers
+	// are published without a threshold and without a word attached: this
+	// observer sits in one place, so part of every millisecond is its own
+	// path, and naming a validator "slow" from one vantage would be the same
+	// mistake as calling one unreachable from one vantage.
+	//
+	// RowsPerSecond is the size-normalised companion. Assignments run from 148
+	// rows to 4,096, so raw duration is not comparable between validators: a
+	// large one legitimately takes longer for the same service. Rows are the
+	// unit this observer actually counts, and every validator is measured over
+	// the same blobs in the same window.
+	LatencyP50    *int64 `json:"serve_latency_p50_ms"`
+	LatencyP95    *int64 `json:"serve_latency_p95_ms"`
+	LatencySample int64  `json:"serve_latency_sample"`
+	RowsPerSecond *int64 `json:"serve_rows_per_second"`
 	// ByPoint is this validator's serve rate per schedule point, the same
 	// breakdown /v1/network publishes for the whole set. The points sit at
 	// different fractions of the retention window, so a validator that serves
@@ -1017,6 +1144,27 @@ func identityStatus(st *reachState) string {
 
 func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]validatorRow, error) {
 	db := s.st.DB()
+	// Every aggregate below groups by validator, and a request for one
+	// validator used to compute all of them and throw the rest away at the
+	// end. On a store with 60 validators that made the detail page 1.4s, and
+	// the cost is in the population, not the window: the assignment join alone
+	// walks every assignment of every publication. With `only` pushed into the
+	// SQL each of these becomes an index seek on validator_address.
+	//
+	// `vfilter` is appended last in every query it appears in, so its argument
+	// is appended last too.
+	vfilter := func(col string) string {
+		if only == "" {
+			return ""
+		}
+		return " AND " + col + " = ?"
+	}
+	vargs := func(base ...any) []any {
+		if only == "" {
+			return base
+		}
+		return append(base, only)
+	}
 	byAddr := map[string]*validatorRow{}
 	get := func(addr string) *validatorRow {
 		v, ok := byAddr[addr]
@@ -1048,14 +1196,20 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	// count, and the table sorts faults to the top: the row that looked worst
 	// was the one we had the least current information about. The height the
 	// figures come from is published with them.
+	innerWhere, outerWhere := "", ""
+	assignArgs := []any{}
+	if only != "" {
+		innerWhere, outerWhere = " WHERE a2.validator_address = ?", " WHERE a.validator_address = ?"
+		assignArgs = []any{only, only}
+	}
 	rows, err := db.QueryContext(ctx, `SELECT a.validator_address, a.voting_power, a.row_count, a.attested, p.settlement_height
 		FROM assignments a
 		JOIN publications p ON p.promise_hash = a.promise_hash
 		JOIN (
 			SELECT a2.validator_address AS va, MAX(p2.settlement_height) AS h
-			FROM assignments a2 JOIN publications p2 ON p2.promise_hash = a2.promise_hash
+			FROM assignments a2 JOIN publications p2 ON p2.promise_hash = a2.promise_hash`+innerWhere+`
 			GROUP BY a2.validator_address
-		) m ON m.va = a.validator_address AND m.h = p.settlement_height`)
+		) m ON m.va = a.validator_address AND m.h = p.settlement_height`+outerWhere, assignArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -1089,7 +1243,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	}
 	// classes per validator in window
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, classification, COUNT(*) FROM probes
-		WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window' GROUP BY validator_address, classification`, win.startArg())
+		WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
+		GROUP BY validator_address, classification`, vargs(win.startArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1112,9 +1267,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, schedule_label,
 			COALESCE(SUM(CASE WHEN classification = 'HEALTHY' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
+		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
 		GROUP BY validator_address, schedule_label
-		ORDER BY validator_address, schedule_label`, win.startArg())
+		ORDER BY validator_address, schedule_label`, vargs(win.startArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1134,6 +1289,60 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// How long a served shard took, per validator. Percentiles rather than a
+	// mean: a mean over a few hundred probes is moved by one timeout, and the
+	// figure a reader wants is "what does it usually take" beside "what does
+	// it take when it is bad".
+	//
+	// HEALTHY only. A probe that failed has a duration too, and it measures
+	// how long a failure took, which is not a service figure. total_duration_ms
+	// is the whole probe — dial, TLS, DownloadShard, row verification against
+	// the commitment — because that is what a client actually waits for.
+	rows, err = db.QueryContext(ctx, `SELECT validator_address,
+			MAX(CASE WHEN rn = (c + 1) / 2         THEN ms END),
+			MAX(CASE WHEN rn = (c * 95 + 99) / 100 THEN ms END),
+			MAX(c),
+			MAX(CASE WHEN rn = (c + 1) / 2         THEN rows_per_s END)
+		FROM (
+			SELECT validator_address AS validator_address,
+			       total_duration_ms AS ms,
+			       rows_returned * 1000 / total_duration_ms AS rows_per_s,
+			       ROW_NUMBER() OVER (PARTITION BY validator_address ORDER BY total_duration_ms) AS rn,
+			       COUNT(*)     OVER (PARTITION BY validator_address)                            AS c
+			FROM probes
+			WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
+			  AND classification = 'HEALTHY' AND total_duration_ms > 0`+vfilter("validator_address")+`
+		) GROUP BY validator_address`, vargs(win.startArg())...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var addr string
+		var p50, p95, rps sql.NullInt64
+		var n int64
+		if err := rows.Scan(&addr, &p50, &p95, &n, &rps); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		v := get(addr)
+		v.LatencySample = n
+		if p50.Valid {
+			x := p50.Int64
+			v.LatencyP50 = &x
+		}
+		if p95.Valid {
+			x := p95.Int64
+			v.LatencyP95 = &x
+		}
+		if rps.Valid {
+			x := rps.Int64
+			v.RowsPerSecond = &x
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	// proven / unproven / unknown per validator, same scope as the classes
 	// above so the serve rate and its exclusions line up. Counted twice: once
 	// per probe, which is what the rate's population is, and once per
@@ -1144,8 +1353,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN attested = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested IS NULL THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
-		GROUP BY validator_address`, win.startArg())
+		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
+		GROUP BY validator_address`, vargs(win.startArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1169,9 +1378,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN a IS NULL THEN 1 ELSE 0 END), 0)
 		FROM (
 			SELECT validator_address AS validator_address, MAX(attested) AS a
-			FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
+			FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
 			GROUP BY validator_address, promise_hash
-		) GROUP BY validator_address`, win.startArg())
+		) GROUP BY validator_address`, vargs(win.startArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1190,7 +1399,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = db.QueryContext(ctx, `SELECT validator_address, COUNT(*), MAX(started_at) FROM probes WHERE started_at >= ? GROUP BY validator_address`, win.startArg())
+	rows, err = db.QueryContext(ctx, `SELECT validator_address, COUNT(*), MAX(started_at) FROM probes
+		WHERE started_at >= ?`+vfilter("validator_address")+` GROUP BY validator_address`, vargs(win.startArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1216,7 +1426,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 AND identity_ok = 1 THEN 1 ELSE 0 END), 0),
 			MAX(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN NULL ELSE started_at END)
-		FROM reachability WHERE started_at >= ? GROUP BY validator_address`, win.startArg())
+		FROM reachability WHERE started_at >= ?`+vfilter("validator_address")+`
+		GROUP BY validator_address`, vargs(win.startArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1243,7 +1454,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	if err := hrows.Err(); err != nil {
 		return nil, err
 	}
-	reach, err := s.reachabilityNow(ctx)
+	reach, err := s.reachabilityNow(ctx, only)
 	if err != nil {
 		return nil, err
 	}
@@ -1298,9 +1509,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			SELECT validator_address, promise_hash,
 			       SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END) AS f,
 			       SUM(CASE WHEN classification IN ('HEALTHY','FAULT') THEN 1 ELSE 0 END) AS rated
-			FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
+			FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
 			GROUP BY validator_address, promise_hash
-		) WHERE rated > 0 GROUP BY validator_address`, win.startArg())
+		) WHERE rated > 0 GROUP BY validator_address`, vargs(win.startArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1553,17 +1764,40 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 	// chosen point is wanted. A page is a few hundred rows at most. The batch
 	// is kept for the network summary, which examines two thousand and
 	// publishes no row count.
+	//
+	// What made the page fast was not batching but not recomputing: both of
+	// these are functions of the publication's probes, which are append-only,
+	// so a settled verdict is settled for good. One query fetches a
+	// fingerprint of every row's probes and the rest is a map lookup. See
+	// blobcache.go.
+	fps, err := s.probeFingerprints(ctx, where, limit, args...)
+	if err != nil {
+		return nil, err
+	}
 	for i := range out {
-		classes, total, err := s.classCountsWhere(ctx, `promise_hash = ?`, out[i].PromiseHash)
+		hash := out[i].PromiseHash
+		fp := fps[hash]
+		if v, ok := s.blobs.get(hash, fp); ok {
+			out[i].Classes, out[i].ProbeCount, out[i].Reconstructable = v.classes, v.total, v.rc
+			continue
+		}
+		classes, total, err := s.classCountsWhere(ctx, `promise_hash = ?`, hash)
 		if err != nil {
 			return nil, err
 		}
 		out[i].Classes, out[i].ProbeCount = classes, total
-		rc, err := s.reconstructable(ctx, out[i].PromiseHash)
+		rc, err := s.reconstructable(ctx, hash)
 		if err != nil {
 			return nil, err
 		}
 		out[i].Reconstructable = rc
+		// Only once the obligation has ended. window_over is the one part of a
+		// verdict that depends on the clock rather than on the store, and
+		// caching it before it flips would freeze "still under obligation" onto
+		// a blob whose deadline has since passed.
+		if rc != nil && rc.WindowOver {
+			s.blobs.put(hash, blobVerdict{fp: fp, classes: classes, total: total, rc: rc})
+		}
 	}
 	return out, nil
 }
@@ -1779,8 +2013,12 @@ func (s *Server) reconstructableCount(ctx context.Context, win Window) (reconstr
 	return out, nil
 }
 
+// blobPageDefault is the page size /v1/blobs answers with when the caller does
+// not ask for one, and the size the startup warm-up fills the verdict cache to.
+const blobPageDefault = 50
+
 func (s *Server) handleBlobs(w http.ResponseWriter, r *http.Request) {
-	limit, err := parseLimit(r, 50, 500)
+	limit, err := parseLimit(r, blobPageDefault, 500)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return

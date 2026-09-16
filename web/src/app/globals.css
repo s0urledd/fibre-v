@@ -409,10 +409,13 @@ dl.kv dd { margin: 0; word-break: break-all; }
    how much evidence stands behind each: the heartbeat samples everyone every
    ten minutes, while the serve rate speaks only for obligations the chain
    proves. */
-.layers { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s5); margin: var(--s5) 0 var(--s6); }
+.layers { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--s5); margin: var(--s5) 0 var(--s6); }
 .layers > div { border-top: 1px solid var(--edge); padding-top: var(--s2); min-width: 0; }
 .layers .fig { display: block; font-family: var(--mono); font-size: var(--t-sub); color: var(--text); margin: var(--s2) 0 0; }
 .layers .fig.absent { color: var(--text-3); }
+/* The unit rides with the figure at the size of the sample, so "2,196 rows/s"
+   reads as one object and the digits stay the thing the eye lands on. */
+.layers .fig .unit { font-size: var(--t-sample); color: var(--text-3); }
 .layers .sample { display: block; margin-top: var(--s1); }
 .layers .what { display: block; font-size: var(--t-sample); color: var(--text-2); margin-top: var(--s2); line-height: var(--lh-text); }
 

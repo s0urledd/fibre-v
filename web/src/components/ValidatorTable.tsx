@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { type Validator, shortBech, utc, ago, enoughToRank, fmtCount, fmtRate, MIN_RATED } from "@/lib/api";
+import { type Validator, shortBech, utc, enoughToRank, fmtCount, fmtRate, MIN_RATED } from "@/lib/api";
 import RateCell from "./Rate";
 import { Count, Mark } from "./Verdict";
 
@@ -33,6 +33,12 @@ import { Count, Mark } from "./Verdict";
  * assigned anything, so it answers "is the Fibre service running" with
  * coverage that does not depend on attestation. That is the question the
  * table exists for.
+ *
+ * "Last probe" went the same way, to make room for Throughput without widening
+ * the table past its column: Uptime already says whether this site is getting
+ * answers from the endpoint, and it says it over the whole window rather than
+ * at one instant, so the timestamp was the weaker of the two. It is still on
+ * the validator's own page.
  */
 
 // Rank by how bad the evidence is, not by whether any bad evidence exists. A
@@ -120,11 +126,34 @@ function uptimeTitle(v: Validator): string {
   return parts.join(" ");
 }
 
+/**
+ * Throughput, and why the column is rows per second rather than milliseconds.
+ *
+ * Assigned rows run from the 148-row floor to the 4,096-row ceiling, so one
+ * validator can be carrying eight times another's bytes for the same blob. On
+ * the measured fixture the validator with the highest median duration (550ms)
+ * was the fastest on the network once its 1,208 rows were accounted for, and
+ * the genuinely slow one — a seventh of everyone else's throughput — sat in the
+ * middle of a duration sort. A milliseconds column would have named the wrong
+ * validator, on a page that publishes accusations.
+ */
+function throughputTitle(v: Validator): string {
+  if (v.serve_rows_per_second == null) {
+    return "No probe of an assigned shard came back in this window, so there is nothing to time.";
+  }
+  const p50 = v.serve_latency_p50_ms?.toLocaleString("en-US") ?? "—";
+  const p95 = v.serve_latency_p95_ms?.toLocaleString("en-US") ?? "—";
+  return `Rows handed over per second, from dial to rows verified against the blob commitment, over ${v.serve_latency_sample.toLocaleString("en-US")} probes that came back healthy. ` +
+    `A whole probe took ${p50} ms typically and ${p95} ms at the 95th percentile. ` +
+    `Rows per second is the comparable figure: assignments run from 148 rows to 4,096, so a validator carrying more rows takes longer for the same service. ` +
+    `No threshold is attached to any of this — part of every millisecond is this site's own path.`;
+}
+
 // The state word on the identity line, so a reader learns the endpoint's
 // condition without a column of its own. Never --fault: none of these is an
 // accusation, and the observer's own reach is half of every one of them.
 function endpointState(v: Validator): { word: string; title: string } | null {
-  if (v.reachable === null) return { word: "never probed", title: "No reachability probe has completed for this endpoint." };
+  if (v.reachable == null) return { word: "never probed", title: "No reachability probe has completed for this endpoint." };
   if (!v.host) return { word: "no host", title: "No Fibre host registered in x/valaddr, so nobody could fetch this validator's rows." };
   if (v.reachable === false) return { word: "unreachable now", title: `This site could not reach ${v.host} at the last heartbeat. From one location that is not distinguishable from a problem on this site's own path.` };
   if (v.identity_status === "mismatch") return { word: "identity mismatch", title: v.identity_reason || "The TLS certificate is not endorsed by this validator's consensus key." };
@@ -213,9 +242,9 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
               <th className="right">Serve rate</th>
               <th className="right">Fault</th>
               <th className="right">Uptime</th>
+              <th className="right">Throughput</th>
               <th>Obligation</th>
               <th className="right">Voting power</th>
-              <th className="right">Last probe</th>
             </tr>
           </thead>
           <tbody>
@@ -253,12 +282,19 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
                   <td className="right" title={uptimeTitle(v)}>
                     <Uptime v={v} />
                   </td>
+                  <td className="right" title={throughputTitle(v)}>
+                    {v.serve_rows_per_second == null
+                      ? <span className="nil" title="no probe of an assigned shard came back in this window">·</span>
+                      : <span className="rate">
+                          <span className="v">{v.serve_rows_per_second.toLocaleString("en-US")}</span>
+                          <span className="n">rows/s</span>
+                        </span>}
+                  </td>
                   <td className={a.cls} title={a.title}>{a.text}</td>
                   <td className="right mono" title={`${share.toFixed(2)}% of the voting power in this table`}>
                     {v.voting_power.toLocaleString("en-US")}
                     <span className="n faint"> {share.toFixed(1)}%</span>
                   </td>
-                  <td className="right mono faint" title={utc(v.last_seen_at)}>{v.last_seen_at ? ago(v.last_seen_at) : "—"}</td>
                 </tr>
               );
             })}

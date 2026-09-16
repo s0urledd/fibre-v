@@ -94,6 +94,10 @@ export type Network = {
   probe_gaps_by_outcome: ClassCounts;
   vantage_health: VantageHealth;
   serve_rate_by_point: { key: string; serve_rate: Rate }[];
+  /** whole-probe duration, dial to verified rows, over HEALTHY probes */
+  serve_latency_p50_ms: number | null;
+  serve_latency_p95_ms: number | null;
+  serve_latency_sample: number;
 };
 
 /** the most correlated failure in the window: likely ours, not theirs */
@@ -160,6 +164,20 @@ export type Validator = {
   expected_load_band: string;
   /** this validator's serve rate per schedule point: early vs late retention */
   serve_rate_by_point: { key: string; serve_rate: Rate }[] | null;
+  /**
+   * How long this observer waited for a shard it did get. The percentiles are
+   * the whole probe — dial, TLS, DownloadShard, row verification — over the
+   * HEALTHY probes of the window.
+   *
+   * serve_rows_per_second is the one to compare between validators.
+   * Assignments run from 148 rows to 4,096, so a large validator legitimately
+   * takes longer for the same quality of service: sorting on raw duration puts
+   * the busiest validators at the top and calls them slow.
+   */
+  serve_latency_p50_ms: number | null;
+  serve_latency_p95_ms: number | null;
+  serve_latency_sample: number;
+  serve_rows_per_second: number | null;
   /** newest publication: true proven to have stored it, false unproven, null not recorded */
   attested_last: boolean | null;
   /**

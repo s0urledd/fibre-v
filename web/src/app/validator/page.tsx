@@ -27,6 +27,31 @@ type Detail = {
  * rests on. A layer with no observations shows a dash and says so — a page
  * about a named operator may not render "0%" where it means "we did not look".
  */
+/**
+ * A layer whose figure is not a rate: the throughput reading. Same shape and
+ * same absent state, so the row still reads as one instrument.
+ */
+function Figure({ label, value, unit, what, sample }: {
+  label: string;
+  value: number | null | undefined;
+  unit: string;
+  what: string;
+  sample?: string;
+}) {
+  const absent = value === null || value === undefined;
+  return (
+    <div>
+      <span className="label">{label}</span>
+      <span className={absent ? "fig absent" : "fig"}>
+        {absent ? "—" : value.toLocaleString("en-US")}
+        {!absent && <span className="unit"> {unit}</span>}
+      </span>
+      <span className="sample">{absent ? "not observed in this window" : (sample ?? "")}</span>
+      <span className="what">{what}</span>
+    </div>
+  );
+}
+
 function Layer({ label, r, what, sample }: {
   label: string;
   r: Rate | null | undefined;
@@ -96,11 +121,26 @@ function Page() {
         <Layer label="Held to the end" r={last?.serve_rate}
           sample={last ? `${fmtCount(last.serve_rate)} at ${last.key}` : undefined}
           what="The same, at the last point of the window that produced a verdict. Below the earlier points means pruning before the deadline." />
+        {/*
+          Throughput, not duration. Assignments run from 148 rows to 4,096, so
+          a validator carrying eight times the rows takes longer for the same
+          quality of service — sorting the set on raw milliseconds puts the
+          busiest validators at the top and calls them slow. Rows per second is
+          what makes two validators comparable; the percentiles are printed
+          underneath because they are what an operator recognises from their
+          own logs.
+        */}
+        <Figure label="Throughput" value={v.serve_rows_per_second} unit="rows/s"
+          sample={v.serve_latency_p50_ms != null
+            ? `${v.serve_latency_p50_ms.toLocaleString("en-US")} ms typical, ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at p95`
+            : undefined}
+          what="Rows handed over per second, from dial to rows verified against the commitment. Comparable between validators; the milliseconds are not." />
       </div>
       <p className="coverage">
         Reachability and endorsement are measured on a fixed heartbeat, so they speak for every validator with a registered
-        endpoint. Serving speaks only for obligations the chain proves, which is a smaller set, not the same one each window,
-        and selected by which validators answered the publisher fast enough.{" "}
+        endpoint. Serving and throughput speak only for obligations the chain proves, which is a smaller set, not the same one
+        each window, and selected by which validators answered the publisher fast enough. No figure here carries a threshold:
+        this site watches from one place, so part of every millisecond is its own path.{" "}
         <Link href="/methodology/#quorum">Why most validators are unproven →</Link>
       </p>
 
@@ -120,7 +160,7 @@ function Page() {
         <dt>consensus address (hex)</dt><dd className="mono">{v.address}</dd>
         {v.cons_address && <><dt>consensus address</dt><dd className="mono">{v.cons_address}</dd></>}
         <dt>registered Fibre endpoint</dt><dd className="mono">{v.host || "— not registered"}{v.endpoint_since && <span className="muted"> since {utc(v.endpoint_since)}</span>}</dd>
-        <dt>reachable (latest)</dt><dd>{v.reachable === null ? "not probed" : v.reachable ? "yes" : <span className="err">no</span>}{v.last_seen_at && <span className="muted"> · {utc(v.last_seen_at)} ({ago(v.last_seen_at)})</span>}</dd>
+        <dt>reachable (latest)</dt><dd>{v.reachable == null ? "not probed" : v.reachable ? "yes" : <span className="err">no</span>}{v.last_seen_at && <span className="muted"> · {utc(v.last_seen_at)} ({ago(v.last_seen_at)})</span>}</dd>
         <dt>TLS identity</dt><dd>{v.identity_status}{v.identity_reason && <span className="muted"> ({v.identity_reason})</span>}</dd>
         <dt>voting power</dt><dd className="mono">{v.voting_power.toLocaleString("en-US")}</dd>
         <dt>assigned rows (last)</dt><dd className="mono">{v.assigned_rows_last || "—"}{v.expected_load_band && <span className="muted"> · expected load band: {v.expected_load_band}</span>}</dd>

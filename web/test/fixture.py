@@ -115,6 +115,7 @@ for v in vals:
     elif i == 28:               BEHAVIOUR[i] = "identity"      # certificate lapsed
     elif i == 41:               BEHAVIOUR[i] = "unattested"    # never signed
     elif i == 33:               BEHAVIOUR[i] = "prunes_early"  # drops late in window
+    elif i == 19:               BEHAVIOUR[i] = "slow"          # serves everything, slowly
     elif i in (37, 52):         BEHAVIOUR[i] = "jailed"
     else:                       BEHAVIOUR[i] = "healthy"
 
@@ -263,24 +264,45 @@ counts = {}
 # makes those queries answer with an arbitrary row.
 PROBE_ROWS = []
 
+# How long a probe took, in milliseconds.
+#
+# The old fixture wrote a flat 400 for every probe, which made the median and
+# the 95th percentile the same number for every validator and the latency
+# columns untestable. A real duration is dominated by the transfer, so it scales
+# with the validator's assigned rows, sits on a per-validator floor (its own
+# path and disk), and has a long right tail: most probes are near the floor and
+# a few are several times it. utku's measurement against a local devnet — p50
+# ~14ms, p95 ~24ms for dial plus DownloadShard plus full row verification — is
+# the shape this imitates, scaled up for a public network.
+def duration_ms(v, rows, ok):
+    if not ok:
+        return rnd.randint(20, 250)          # a failure takes time too
+    base = 25 + (v["i"] % 7) * 6             # this validator's own floor
+    if BEHAVIOUR[v["i"]] == "slow":
+        base *= 9
+    transfer = rows * 0.42                   # dominated by the shard's size
+    jitter = rnd.random() ** 4 * base * 12   # long tail, rarely hit
+    return int(base + transfer + jitter) + 1
+
 def add_probe(pub, v, rows, label, at, phase, outcome, cls, **kw):
     if at > NOW:
         return
     counts[cls] = counts.get(cls, 0) + 1
     key = hashlib.sha256(f"{pub['ph']}{v['cons']}{label}".encode()).hexdigest()
     ok = cls in ("HEALTHY",)
+    ms = kw["ms"] if "ms" in kw else duration_ms(v, rows, ok)
     PROBE_ROWS.append((at, (
         key, "eu1", pub["ph"], pub["cm"], 0, ts(pub["msu"]), 800_000,
         v["cons"], kw.get("host", v["host"]), 1, rows, label, ts(at), ts(at),
-        ts(at + timedelta(milliseconds=kw.get("ms", 400))), rnd.randint(0, 900),
+        ts(at + timedelta(milliseconds=ms)), rnd.randint(0, 900),
         kw.get("dns", 1), rnd.randint(1, 30), kw.get("tcp", 1), rnd.randint(4, 60),
         kw.get("tls", 1), rnd.randint(8, 90), "TLS1.3" if kw.get("tls", 1) else "",
         hashlib.sha256(f"cert{v['i']}".encode()).hexdigest() if kw.get("tls", 1) else "",
         kw.get("idok", 1), kw.get("idreason", ""), 1 if ok else 0,
-        rnd.randint(20, 800) if ok else 0, rows if ok else kw.get("got", 0), rows,
+        int(ms * 0.8) if ok else 0, rows if ok else kw.get("got", 0), rows,
         1 if ok or kw.get("cv") else 0, 1 if ok else 0,
         phase, outcome, cls, kw.get("reason", ""), kw.get("err", ""),
-        kw.get("ms", 400), "{}", kw.get("attested", 1))))
+        ms, "{}", kw.get("attested", 1))))
 
 # What actually happened on the wire for validator v at time `at`, independent
 # of whether the chain proves it was obliged. Attestation decides the class, not
