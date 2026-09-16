@@ -171,6 +171,51 @@ killed mid-window — produced **60 measurements** and the taxonomy held with ze
 misclassifications: 27 `HEALTHY`, 9 `FAULT` (the killed validator, in-window), 12
 `TOLERATED` (grace, post-prune), 9 `EXPECTED_GONE`, 3 `UNREACHABLE_POST_WINDOW`.
 
+## Run of 16 September 2026: 8 MiB blobs at v10.1.0-corto
+
+The earlier numbers in this document come from a devnet that only ever
+published blobs of a few hundred KB. This run was made to exercise the size
+the real network plans for. `celestia-appd` and `fibre` were built from
+`v10.1.0-corto` (`fa5b523b`), the tag the observer pins; four validators,
+retention floored at 10 minutes, two blobs of 8,650,752 bytes each.
+
+Assignment came out at 3186 / 3035 / 3035 / 3035 rows, 12,291 distinct of
+16,384, no wrap overlaps. At a row size of 2112 bytes that is a shard of
+about **7.95 MiB per validator**, which matters because grpc-go's default
+receive limit is 4 MiB: before the receive limit was raised to the reference
+client's (`ProtocolParams.MaxMessageSize()`), every one of these downloads
+would have failed with `ResourceExhausted` and been recorded as an in-window
+FAULT against an honest validator. They returned `SERVED_OK`, with every row
+verified against the commitment and against the recomputed assignment.
+
+One validator's Fibre server was killed 2 minutes into the window. The
+resulting classifications are the whole taxonomy in one run:
+
+| phase | that validator | the other three |
+|---|---|---|
+| w1 (before the kill) | HEALTHY | HEALTHY |
+| w2, w3, w4 | FAULT (`TCP_REFUSED`) | HEALTHY |
+| grace | TOLERATED | HEALTHY, or TOLERATED once pruned |
+| post | UNREACHABLE_POST_WINDOW | EXPECTED_GONE |
+
+Totals over 48 probes: serve rate 29/35 (82.9 %), reachability 3/4, both
+blobs `degraded` at their last complete in-window point (9,256 distinct rows
+served of the 4,096 needed, so still reconstructable without the faulted
+validator), zero observation gaps.
+
+Incidental measurements from the same run:
+
+| quantity | value |
+|---|---|
+| bytes downloaded by the observer | 221 MiB over 13 minutes, 29 downloads |
+| one probe of a 7.95 MiB shard | 130 to 195 ms |
+| four validators probed in parallel | within 35 ms of each other |
+| observer clock offset from chain time | 1.7 to 3.2 s (devnet block lag) |
+| `measurements.jsonl` for 48 probes | 80 KB |
+
+The database was then deleted and rebuilt from the JSONL files alone: same 48
+probes, same 29/35. The raw files are the record; the database is derived.
+
 ## Takeaways
 
 1. The serving guarantee is **4 hours by default** and entirely off-chain. If
@@ -185,3 +230,7 @@ misclassifications: 27 `HEALTHY`, 9 `FAULT` (the killed validator, in-window), 1
 5. Detecting a *down* validator is trivial and instant. Detecting one that
    serves *only when watched*, or prunes early, is why the probe schedule has to
    be dense and spread across the whole window.
+6. A shard is **large**: 7.95 MiB per validator for an 8 MiB blob on four
+   validators, and the planned mainnet blob is 128 MiB. Any client of the
+   Fibre read path, an observer included, has to raise gRPC's default 4 MiB
+   receive limit and size its timeouts by the shard, not by a constant.
