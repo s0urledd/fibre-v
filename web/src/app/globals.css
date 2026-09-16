@@ -1,133 +1,417 @@
-/* Tokens from docs/research/R9 section 6.1. Light palette on :root, dark
-   under prefers-color-scheme and [data-theme=dark]. Status colours are
-   Okabe-Ito and are never the only carrier of meaning. */
+/* =============================================================================
+   Fibre observer — the instrument plate.
+
+   One paper, one ink, three chromatic values. The page is built like the face
+   of a measuring instrument rather than like an explorer: exactly one element
+   carries the largest size, and it is the reading. Everything else is
+   calibration — the sample the reading rests on, the share of the population it
+   speaks for, the vantage it was taken from. An instrument that hides its
+   calibration is a toy.
+
+   The rule the whole system exists to enforce: FAULT is the only class that
+   counts against a validator, so --fault is the only status colour permitted to
+   touch a word or a number. Every other verdict is ink. That is mechanical
+   rather than intentional — you can audit it by grepping for --fault — which is
+   what keeps a later change from quietly promoting UNREACHABLE into the alarm
+   channel.
+
+   Ink is stored as channels and spent through an opacity ladder, so the dark
+   theme is a handful of overrides rather than a parallel palette that goes
+   stale. The previous stylesheet had a dark block nothing could reach.
+   ========================================================================== */
+
 :root {
-  --bg: #fdfcff;
-  --surface: #ffffff;
-  --surface-2: #eaecee;
-  --border: #c4c8ce;
-  --text: #0e1014;
-  --text-2: #4a5058;
-  --text-3: #808890;
-  --link: #5640d1;
-  --status-healthy: #009e73;
-  --status-tolerated: #e69f00;
-  --status-fault: #d55e00;
-  --status-expected-gone: #808890;
-  --status-post-window: #0072b2;
-  --badge-alpha: 0.12;
   color-scheme: light dark;
+
+  /* substrate */
+  --ink:      20 22 26;            /* #14161A, as channels */
+  --paper:    #faf9f6;             /* warm stock, not #fff */
+  --paper-2:  #f1f0ea;             /* recessed: controls, code, gap gutters */
+
+  /* the ink ladder. Ratios are against --paper and were computed, not guessed;
+     web/test/audit.cjs re-checks them against what is actually painted. */
+  --a-text:   .94;                 /* 14.8:1 */
+  --a-text-2: .74;                 /*  7.6:1 */
+  --a-text-3: .62;                 /*  5.0:1 */
+  --a-edge:   .52;                 /*  3.6:1 — component boundaries */
+  --a-rule:   .22;                 /*  hairlines, decorative only */
+  --a-wash:   .05;
+
+  --text:     rgb(var(--ink) / var(--a-text));
+  --text-2:   rgb(var(--ink) / var(--a-text-2));
+  --text-3:   rgb(var(--ink) / var(--a-text-3));
+  --edge:     rgb(var(--ink) / var(--a-edge));
+  --rule:     rgb(var(--ink) / var(--a-rule));
+  --wash:     rgb(var(--ink) / var(--a-wash));
+
+  /* The three chromatic values, and what each is allowed to mean.
+     --accent  the observer's own voice. Links, focus, the window index rule,
+               and every notice about this instrument rather than about a
+               validator. Never a status.
+     --fault   the accusation. The only status colour permitted on text.
+     --hold    held out because this observer could not complete the
+               measurement. Marks, rules and plate edges; never text. */
+  --accent:   #3d3a8f;             /* 9.1:1 on paper */
+  --fault:    #962707;             /* 7.7:1 on paper */
+  --hold:     #a97100;             /* 4.0:1 — above the 3:1 non-text floor */
+
+  --gap-hatch: repeating-linear-gradient(45deg,
+                 var(--paper-2) 0 4px, var(--rule) 4px 5px);
+
+  /* Type. No web fonts: a page whose claim is that it depends on nothing but a
+     full node should not open a connection to a font CDN to render, and
+     self-hosting a family would put binaries in the repo for a design whose
+     power is in its scale and spacing rather than its letterforms. */
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Inter, "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Roboto Mono", Menlo, Consolas, monospace;
+
+  /* Root is 16px and every step is rem, so a reader's own font size is
+     honoured. The scale is capped: one element per page may use --t-reading. */
+  --t-reading: 3.25rem;    /* 52px — the cap */
+  --t-sub:     1.75rem;    /* 28px — second-order readings */
+  --t-h1:      1.25rem;    /* 20px — the only heading size */
+  --t-h2:      0.9375rem;  /* 15px — section marks, set as caps */
+  --t-lead:    0.9375rem;  /* 15px — largest running text */
+  --t-body:    0.875rem;   /* 14px */
+  --t-table:   0.8125rem;  /* 13px */
+  --t-sample:  0.75rem;    /* 12px — every denominator, caption, footer */
+  --t-label:   0.6875rem;  /* 11px — engraved caps */
+  --t-fine:    0.625rem;   /* 10px — SVG tick labels only */
+
+  --w-light: 300;          /* --t-reading only */
+  --w-book:  400;
+  --w-bold:  600;
+
+  --lh-tight: 1;
+  --lh-sub:   1.1;
+  --lh-data:  1.35;
+  --lh-text:  1.6;
+  --track-caps:    .09em;
+  --track-reading: -.025em;
+  --track-sub:     -.015em;
+
+  /* space: 4px base, strict */
+  --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px; --s5: 24px;
+  --s6: 32px; --s7: 48px; --s8: 72px;
+
+  /* geometry: the instrument has no rounded corners and casts no shadows */
+  --radius: 0;
+  --radius-control: 2px;
+  --page: 1120px;
+  --measure: 68ch;
+  --row-h: 34px;
+  --col-validator: 248px;
+  --mark: 10px;
+
+  --dur: 90ms;
 }
+
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0e1014;
-    --surface: #242830;
-    --surface-2: #1a1d22;
-    --border: #4a5058;
-    --text: #fdfcff;
-    --text-2: #c4c8ce;
-    --text-3: #808890;
-    --link: #7c68f2;
-    --status-post-window: #56b4e9;
-    --badge-alpha: 0.28;
+    --ink:      250 250 248;
+    --paper:    #0d0e11;
+    --paper-2:  #171a1f;
+    --a-text-3: .58;
+    --a-edge:   .42;
+    --a-rule:   .26;
+    --a-wash:   .06;
+    --accent:   #a99cf5;
+    --fault:    #ff9a7a;
+    --hold:     #d69a2e;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #0e1014;
-  --surface: #242830;
-  --surface-2: #1a1d22;
-  --border: #4a5058;
-  --text: #fdfcff;
-  --text-2: #c4c8ce;
-  --text-3: #808890;
-  --link: #7c68f2;
-  --status-post-window: #56b4e9;
-  --badge-alpha: 0.28;
+  --ink:      250 250 248;
+  --paper:    #0d0e11;
+  --paper-2:  #171a1f;
+  --a-text-3: .58;
+  --a-edge:   .42;
+  --a-rule:   .26;
+  --a-wash:   .06;
+  --accent:   #a99cf5;
+  --fault:    #ff9a7a;
+  --hold:     #d69a2e;
 }
+@media (prefers-reduced-motion: reduce) { :root { --dur: 0ms; } }
 
+/* ---------------------------------------------------------------- base --- */
 * { box-sizing: border-box; }
-html { font-size: 14px; }
+html { font-size: 16px; }
 body {
   margin: 0;
-  background: var(--bg);
+  background: var(--paper);
   color: var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
-  line-height: 1.6;
+  font-family: var(--sans);
+  font-size: var(--t-body);
+  line-height: var(--lh-text);
+  font-variant-numeric: tabular-nums lining-nums;
+  -webkit-font-smoothing: antialiased;
 }
-a { color: var(--link); text-decoration: none; }
+a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-code, .mono { font-family: ui-monospace, "JetBrains Mono", "Roboto Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
-h1 { font-size: 24px; margin: 0 0 8px; }
-h2 { font-size: 18px; margin: 24px 0 8px; }
-h3 { font-size: 15px; margin: 16px 0 6px; }
-p { margin: 0 0 10px; }
-.wrap { max-width: 1160px; margin: 0 auto; padding: 0 16px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+p { margin: 0 0 var(--s3); }
+
+h1 { font-size: var(--t-h1); font-weight: var(--w-bold); letter-spacing: -.01em; margin: 0 0 var(--s2); }
+h2 {
+  font-size: var(--t-label); font-weight: var(--w-bold); text-transform: uppercase;
+  letter-spacing: var(--track-caps); color: var(--text-3);
+  margin: var(--s7) 0 var(--s3); padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--rule);
+}
+h3 { font-size: var(--t-body); font-weight: var(--w-bold); margin: var(--s5) 0 var(--s2); }
+
+.wrap { max-width: var(--page); margin: 0 auto; padding: 0 var(--s5); }
 .muted { color: var(--text-2); }
 .faint { color: var(--text-3); }
 .right { text-align: right; }
+.lead { font-size: var(--t-lead); color: var(--text-2); max-width: var(--measure); }
+.label {
+  font-size: var(--t-label); font-weight: var(--w-bold); text-transform: uppercase;
+  letter-spacing: var(--track-caps); color: var(--text-3);
+}
+.sample { font-family: var(--mono); font-size: var(--t-sample); color: var(--text-3); }
 
-/* header */
-.top { border-bottom: 1px solid var(--border); background: var(--surface); }
-.top .wrap { display: flex; align-items: center; gap: 20px; height: 48px; flex-wrap: wrap; }
-.top .brand { font-weight: 600; color: var(--text); }
-.top nav a { color: var(--text-2); margin-right: 14px; }
-.top nav a:hover { color: var(--text); text-decoration: none; }
+/* --------------------------------------------------------------- chrome --- */
+.top { border-bottom: 1px solid var(--rule); }
+.top .wrap { display: flex; align-items: baseline; gap: var(--s5); min-height: 56px; flex-wrap: wrap; padding-top: var(--s3); padding-bottom: var(--s3); }
+.top .brand { color: var(--text); font-size: var(--t-lead); font-weight: var(--w-bold); letter-spacing: -.01em; }
+.top .brand:hover { text-decoration: none; }
+.top nav { display: flex; gap: var(--s4); }
+.top nav a { color: var(--text-2); font-size: var(--t-table); }
+.top nav a:hover { color: var(--text); text-decoration: none; border-bottom: 1px solid var(--accent); }
 .top .spacer { flex: 1; }
-.top .chain { font-size: 12px; }
+.top .chain { font-family: var(--mono); font-size: var(--t-sample); color: var(--text-3); }
 
-/* banner */
-.banner { background: var(--surface-2); border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text-2); }
-.banner .wrap { padding: 6px 16px; }
+/* The vantage line is not a dismissable notice. Every reachability verdict on
+   this site is a statement about a network path and half that path is ours, so
+   it is a permanent property of the instrument and is drawn as chrome. --hold,
+   never --fault: it qualifies our own measurement. */
+.vantage { border-bottom: 1px solid var(--rule); }
+.vantage .wrap {
+  padding-top: var(--s2); padding-bottom: var(--s2);
+  font-size: var(--t-sample); color: var(--text-2);
+  border-left: 2px solid var(--hold);
+}
 
-/* footer */
-.foot { border-top: 1px solid var(--border); margin-top: 40px; padding: 12px 0 24px; font-size: 12px; color: var(--text-2); }
-.foot.stale { background: color-mix(in srgb, var(--status-tolerated) 20%, var(--surface)); color: var(--text); }
+.foot { border-top: 1px solid var(--rule); margin-top: var(--s8); padding: var(--s4) 0 var(--s7); }
+.foot .wrap { font-family: var(--mono); font-size: var(--t-sample); color: var(--text-3); }
+.foot.stale .wrap { color: var(--text); }
+.foot.stale { border-top: 2px solid var(--hold); }
 
-/* cards and tiles */
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 12px 0 20px; }
-.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
-.tile .k { font-size: 12px; color: var(--text-2); }
-.tile .v { font-size: 22px; font-weight: 600; }
-.tile .d { font-size: 12px; color: var(--text-2); }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; margin: 12px 0; }
+/* ------------------------------------------------------- the range switch --- */
+.range { display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap; margin: var(--s7) 0 0; }
+.range button {
+  font: var(--w-book) var(--t-sample)/1 var(--mono);
+  background: none; border: 0; padding: var(--s1) var(--s2);
+  border-bottom: 2px solid transparent; color: var(--text-2); cursor: pointer;
+}
+.range button:hover { color: var(--text); }
+/* Three cues, not one: the rule, the weight and aria-pressed. */
+.range button[aria-pressed="true"] { color: var(--text); font-weight: var(--w-bold); border-bottom-color: var(--accent); }
+.range .bounds { margin-left: auto; }
 
-/* tables */
-.tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
-table { border-collapse: collapse; width: 100%; font-size: 13px; line-height: 1.4; }
-caption { text-align: left; padding: 8px 10px; color: var(--text-2); font-size: 12px; caption-side: top; }
-th, td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; white-space: nowrap; }
-th { text-align: left; background: var(--surface-2); font-weight: 600; position: sticky; top: 0; }
+/* -------------------------------------------------------------- the plate --- */
+.plate { margin: var(--s8) 0 var(--s5); }
+.plate-head { display: flex; justify-content: space-between; align-items: baseline; padding-bottom: var(--s2); border-bottom: 1px solid var(--edge); }
+.plate-body { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--s6); padding-top: var(--s5); }
+.plate-main { min-width: 0; }
+.plate-side { text-align: right; flex: none; }
+
+/* The reading is ink. A serve rate is a measurement, not a verdict, and
+   colouring it green would make the page a traffic light for a number whose
+   whole point is that it is qualified. */
+.reading {
+  font-family: var(--mono); font-size: var(--t-reading); font-weight: var(--w-light);
+  line-height: var(--lh-tight); letter-spacing: var(--track-reading);
+  color: var(--text); margin: 0;
+}
+.reading.absent { color: var(--text-3); }
+.reading .state { display: block; margin-top: var(--s2); }
+.plate .sample { display: block; margin-top: var(--s2); }
+.plate .lead { margin: var(--s4) 0 0; }
+
+/* The counter-reading: the only chromatic thing above the fold, and only when
+   there is something to accuse. A zero is not an accusation and is drawn as
+   the word "none" in ink, with no mark and no colour. */
+.counter {
+  font-family: var(--mono); font-size: var(--t-sub); font-weight: var(--w-bold);
+  line-height: var(--lh-sub); letter-spacing: var(--track-sub);
+  color: var(--fault); margin: 0; display: flex; align-items: center; gap: var(--s2); justify-content: flex-end;
+}
+.counter.none { color: var(--text-3); font-weight: var(--w-book); }
+
+.coverage { font-family: var(--mono); font-size: var(--t-sample); color: var(--text-3); margin: 0 0 var(--s7); }
+
+/* A notice about this observer's own measurement, never about a validator, so
+   it carries --hold and never --fault. */
+.plate-warn { border-left: 2px solid var(--hold); padding: var(--s2) 0 var(--s2) var(--s4); margin: 0 0 var(--s7); max-width: var(--measure); }
+.plate-warn p { font-size: var(--t-sample); color: var(--text-2); margin: var(--s1) 0 0; }
+/* The observer talking about itself: unreachable API, stale data, a gap. */
+.plate-note { border-left: 2px solid var(--accent); padding: var(--s2) 0 var(--s2) var(--s4); margin: 0 0 var(--s5); max-width: var(--measure); }
+.plate-note p { font-size: var(--t-sample); color: var(--text-2); margin: var(--s1) 0 0; }
+
+/* ---------------------------------------------------------------- the bar --- */
+.bar-block { margin: 0 0 var(--s7); }
+.bar-block .sample { margin-left: var(--s3); }
+.bar { display: flex; height: 10px; margin: var(--s3) 0 var(--s2); gap: 2px; }
+.bar i { display: block; }
+.seg--served   { background: var(--text-2); }
+.seg--hold     { background: var(--hold); }
+.seg--unproven { background: var(--rule); box-shadow: inset 0 1px 0 var(--edge); }
+.seg--gap      { background: var(--gap-hatch); }
+.seg--fault    { background: var(--fault); }
+.bar-key { display: flex; flex-wrap: wrap; gap: var(--s4); list-style: none; margin: 0; padding: 0; font-size: var(--t-sample); color: var(--text-2); }
+.bar-key li { display: flex; align-items: center; gap: var(--s2); }
+.bar-key b { font-family: var(--mono); font-weight: var(--w-bold); color: var(--text); }
+
+/* ----------------------------------------------------------------- marks --- */
+/* Four shapes, not fifteen. Fifteen distinguishable shapes at 10px is not
+   achievable, and the tier is what the reader needs: kept, counted against,
+   held out because we could not measure, held out because nothing was owed,
+   not observed. The triangle is the only pointed shape in the system, so a
+   fault is pre-attentive and survives total colour loss. */
+.mark { width: var(--mark); height: var(--mark); flex: none; display: inline-block; vertical-align: -1px; }
+.mark--kept  { color: var(--text); }
+.mark--fault { color: var(--fault); }
+.mark--hold  { color: var(--hold); }
+.mark--held  { color: var(--text-2); }
+.mark--gap   { color: var(--text-3); }
+
+.verdict { display: inline-flex; align-items: center; gap: var(--s2); white-space: nowrap; }
+.verdict .w { font-size: var(--t-table); }
+.verdict--fault .w { color: var(--fault); font-weight: var(--w-bold); }
+.verdict--kept .w { color: var(--text); }
+.verdict--hold .w, .verdict--held .w { color: var(--text-2); }
+.verdict--gap .w { color: var(--text-3); }
+
+/* A zero in a count column is a dot, so the column is blank except where there
+   is something to report and a non-zero fault is visible from across the room. */
+.nil { color: var(--text-3); }
+
+/* ---------------------------------------------------------------- tables --- */
+/* overflow-y: clip rather than the default auto, because an overflow-x: auto
+   element computes overflow-y: auto, which makes the wrapper the scroll
+   container and silently kills position: sticky on the header. */
+.tablewrap { overflow-x: auto; overflow-y: clip; border-top: 1px solid var(--edge); border-bottom: 1px solid var(--edge); }
+table { border-collapse: collapse; width: 100%; font-size: var(--t-table); line-height: var(--lh-data); }
+caption { text-align: left; padding: var(--s2) 0; color: var(--text-3); font-size: var(--t-sample); caption-side: top; }
+th {
+  text-align: left; font-size: var(--t-label); font-weight: var(--w-bold);
+  text-transform: uppercase; letter-spacing: var(--track-caps); color: var(--text-3);
+  padding: var(--s2) var(--s3); background: var(--paper);
+  position: sticky; top: 0; z-index: 2; border-bottom: 1px solid var(--edge); white-space: nowrap;
+}
+td { padding: var(--s1) var(--s3); border-bottom: 1px solid var(--rule); vertical-align: middle; white-space: nowrap; height: var(--row-h); }
 th.right, td.right { text-align: right; }
-tr:last-child td { border-bottom: 0; }
-tr.gap td { background: repeating-linear-gradient(45deg, var(--surface-2), var(--surface-2) 6px, var(--border) 6px, var(--border) 7px); color: var(--text-2); }
+tbody tr:hover td { background: var(--wash); }
+tbody tr:last-child td { border-bottom: 0; }
 
-/* badges */
-.badge { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font: 600 12px ui-monospace, "JetBrains Mono", Menlo, monospace; color: var(--text); background: color-mix(in srgb, var(--c) calc(var(--badge-alpha) * 100%), var(--surface)); white-space: nowrap; }
-.badge .g { color: var(--c); }
-.badge.not-probed { border-style: dashed; background: transparent; }
+/* The identity column is pinned, and the two numbers the product is about sit
+   immediately beside it, so neither can end up behind a horizontal scroll. */
+.col-pin { position: sticky; left: 0; z-index: 1; background: var(--paper); width: var(--col-validator); white-space: normal; }
+tbody tr:hover .col-pin { background: color-mix(in srgb, var(--paper) 96%, var(--text)); }
+th.col-pin { z-index: 3; }
+.col-pin .name { display: block; font-size: var(--t-table); color: var(--text); }
+.col-pin .addr { display: block; font-family: var(--mono); font-size: var(--t-label); color: var(--text-3); }
+.chip { font-size: var(--t-label); text-transform: uppercase; letter-spacing: var(--track-caps); color: var(--text-3); margin-left: var(--s2); }
 
-/* controls */
-.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0 12px; font-size: 13px; }
-.controls a, .controls button { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 4px; padding: 3px 8px; font: inherit; cursor: pointer; }
-.controls a.on, .controls button.on { background: var(--surface-2); font-weight: 600; }
-input[type=search] { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 4px; padding: 4px 8px; font: inherit; min-width: 260px; }
+/* The rate and its sample are one object, never two columns: the sample is a
+   smaller, dimmer sibling inside the same cell. */
+.rate { display: inline-flex; align-items: baseline; gap: var(--s2); }
+.rate .v { font-family: var(--mono); color: var(--text); }
+.rate .n { font-family: var(--mono); font-size: var(--t-sample); color: var(--text-3); }
+/* A gauge under the figure, so sixty rows can be scanned without reading sixty
+   numbers. Track and fill are the same 2px rule at different values: a single
+   hairline with a tick at the end read as a stray glyph rather than a scale. */
+.gauge-track { display: block; position: relative; }
+.gauge-rail { display: block; height: 2px; background: var(--rule); margin-top: 3px; }
+.gauge { display: block; height: 2px; background: var(--text-3); margin-left: auto; }
 
-/* timeline */
+tr.gap td { background: var(--gap-hatch); color: var(--text-2); }
+
+/* -------------------------------------------------------------- controls --- */
+.controls { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; margin: var(--s5) 0 var(--s3); font-size: var(--t-table); }
+.controls button, .controls a {
+  border: 1px solid var(--edge); background: var(--paper); color: var(--text-2);
+  border-radius: var(--radius-control); padding: var(--s1) var(--s3); font: inherit; cursor: pointer;
+}
+.controls button:hover, .controls a:hover { color: var(--text); text-decoration: none; }
+.controls button[aria-pressed="true"], .controls a.on { color: var(--text); border-color: var(--text-3); font-weight: var(--w-bold); }
+input[type=search] {
+  border: 1px solid var(--edge); background: var(--paper-2); color: var(--text);
+  border-radius: var(--radius-control); padding: var(--s1) var(--s3); font: inherit; min-width: 260px;
+}
+
+/* ------------------------------------------------------------- key/value --- */
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: var(--s1) var(--s5); margin: var(--s4) 0 var(--s7); font-size: var(--t-table); }
+dl.kv dt { color: var(--text-3); }
+dl.kv dd { margin: 0; word-break: break-all; }
+
+/* ------------------------------------------------------------- the square --- */
+/* Celestia's own shape, holding Celestia's own numbers. A blob is erasure-coded
+   into a square of rows; reconstruction needs a quarter of them. This draws the
+   square at 16x16, one cell per 64 rows, filled by the rows that actually came
+   back, with the quarter that reconstruction needs marked by a rule. It is the
+   one graphic form on the site derived from the data structure rather than
+   from the measurements, which is what makes the page recognisably about
+   Celestia rather than merely coloured like it. */
+.square { display: grid; grid-template-columns: repeat(16, 1fr); gap: 1px; width: 160px; height: 160px; }
+.square i { display: block; background: var(--rule); }
+.square i.on { background: var(--text-2); }
+.square-wrap { position: relative; flex: none; }
+/* everything above this line is enough to rebuild the blob */
+.square-need { position: absolute; left: -4px; right: -4px; height: 0; border-top: 2px solid var(--accent); pointer-events: auto; }
+.square-block { display: flex; gap: var(--s5); align-items: flex-start; flex-wrap: wrap; margin: var(--s4) 0 var(--s4); }
+.square-read { min-width: 260px; flex: 1 1 320px; }
+.square-read .lead { margin: var(--s2) 0 var(--s2); }
+.figure { border-left: 2px solid var(--edge); padding: var(--s2) 0 var(--s2) var(--s4); margin: var(--s4) 0 var(--s7); }
+.figure > .sample { display: block; max-width: var(--measure); line-height: var(--lh-text); }
+
+/* -------------------------------------------------------------- timeline --- */
 .timeline { overflow-x: auto; }
 .timeline svg { display: block; }
-.legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; margin: 8px 0; }
 
-/* reconstruct bar */
-.bar { position: relative; height: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
-.bar .fill { height: 100%; background: var(--c); }
-.bar .tick { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text); }
+/* The legend lives on the methodology page, which is the page that exists to
+   explain it, rather than repeating below every table on the site. */
+.legend { display: grid; gap: var(--s3); margin: var(--s4) 0 var(--s7); }
+.legend > div { display: grid; grid-template-columns: 180px 1fr; gap: var(--s4); align-items: start; }
+.legend .def { font-size: var(--t-sample); color: var(--text-2); max-width: var(--measure); }
 
-.notice { border: 1px solid var(--border); background: var(--surface-2); padding: 10px 12px; border-radius: 6px; margin: 12px 0; }
-.err { color: var(--status-fault); }
-dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 8px 0; font-size: 13px; }
-dl.kv dt { color: var(--text-2); }
-dl.kv dd { margin: 0; word-break: break-all; }
-@media (max-width: 640px) {
-  .top .wrap { height: auto; padding: 8px 16px; }
+.notice { border-left: 2px solid var(--edge); padding: var(--s2) 0 var(--s2) var(--s4); margin: var(--s4) 0; max-width: var(--measure); }
+.err { color: var(--fault); }
+
+/* --------------------------------------------------------------- loading --- */
+/* Skeletons are the exact size of the value that replaces them, so the largest
+   object on the page does not pop into existence on every load. */
+.skel { display: inline-block; background: var(--paper-2); color: transparent; border-radius: var(--radius-control); }
+.skel--reading { width: 4.5ch; height: var(--t-reading); vertical-align: -.1em; }
+.skel--sub { width: 3ch; height: var(--t-sub); }
+
+
+/* ----------------------------------------------------------- graduation --- */
+.grad { margin: 0 0 var(--s7); }
+/* Scrolled at its natural size rather than scaled down: shrinking the viewBox
+   to a phone takes the 13px readings to about six pixels, which is a picture of
+   a chart rather than a chart. */
+.grad-scroll { overflow-x: auto; }
+.grad-svg { display: block; width: 100%; min-width: 560px; max-width: 720px; height: auto; margin: var(--s3) 0 var(--s2); }
+.grad .sample { display: block; max-width: var(--measure); line-height: var(--lh-text); }
+
+/* Screen-reader-only text, for state a sighted reader gets from the skeleton. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+@media (max-width: 760px) {
+  :root { --t-reading: 2.5rem; --page: 100%; }
+  .top .wrap { min-height: 0; gap: var(--s3); }
+  .plate-body { flex-direction: column; gap: var(--s5); }
+  .plate-side { text-align: left; }
+  .counter { justify-content: flex-start; }
   dl.kv { grid-template-columns: 1fr; }
+  .legend > div { grid-template-columns: 1fr; gap: var(--s1); }
+  input[type=search] { min-width: 0; width: 100%; }
 }

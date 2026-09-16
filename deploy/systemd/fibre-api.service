@@ -6,7 +6,9 @@ Wants=network-online.target
 [Service]
 User=fibre-observer
 EnvironmentFile=/etc/fibre-observer/observer.env
-ExecStart=/usr/local/bin/observer-api -data-dir ${DATA_DIR} -listen ${API_LISTEN} -vantage ${VANTAGE}
+ExecStart=/usr/local/bin/observer-api -data-dir ${DATA_DIR} -listen ${API_LISTEN} -vantage ${VANTAGE} \
+  -vantage-location ${VANTAGE_LOCATION} -vantage-provider ${VANTAGE_PROVIDER} \
+  -vantage-asn ${VANTAGE_ASN} -vantage-egress ${VANTAGE_EGRESS}
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

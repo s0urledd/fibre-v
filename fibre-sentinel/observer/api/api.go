@@ -28,12 +28,64 @@ import (
 // Version is reported in /v1/meta.
 const Version = "0.1.0"
 
+// VantageInfo describes where this observer watches from.
+//
+// Every reachability observation on the site is a statement about a network
+// path, and half that path is ours. A reader cannot judge an UNREACHABLE
+// without knowing where it was measured from, and a validator operator cannot
+// check our traffic against their own logs without knowing which addresses to
+// look for.
+//
+// These fields are not equally trustworthy, and the response says so rather
+// than presenting them as one thing:
+//
+//   - EgressAddresses is the anchor. An operator who sees connections from
+//     these addresses on their Fibre port can match them against this record,
+//     and one who sees connections from anywhere else knows they are not this
+//     observer.
+//   - ASN is checkable from those addresses by anyone, through public routing
+//     data (RIPEstat, whois, bgp.tools). It identifies the network our
+//     traffic is routed through, not a place: one provider can hold several
+//     autonomous systems, and one autonomous system can span countries.
+//   - Provider usually follows from the ASN, so it is checkable in the same
+//     way, just less precisely.
+//   - Location is the only genuinely unverifiable field. Geolocating an
+//     address is a guess, so this is the operator's word and nothing more.
+type VantageInfo struct {
+	// Name is the short label every response already carries.
+	Name string `json:"name"`
+	// Location is where the machine physically sits, e.g. "Helsinki,
+	// Finland". Operator's word; an address cannot prove it.
+	Location string `json:"location,omitempty"`
+	// Provider is the hosting company, e.g. "Hetzner".
+	Provider string `json:"provider,omitempty"`
+	// ASN is the autonomous system our traffic is routed through, e.g.
+	// "AS24940". Anyone can check it against EgressAddresses.
+	ASN string `json:"asn,omitempty"`
+	// EgressAddresses are the source addresses probes leave from, and the
+	// thing everything else here is checked against.
+	EgressAddresses []string `json:"egress_addresses,omitempty"`
+	// Verifiability says, per field, what a reader can check and how, so the
+	// page rendering these cannot present a guess as a fact.
+	Verifiability map[string]string `json:"verifiability"`
+	// Complete is false while the operator has not filled this in, which is
+	// what the dashboard checks before claiming the vantage is described.
+	Complete bool `json:"complete"`
+}
+
 // Server serves the API over a store.
 type Server struct {
 	st      *store.Store
 	vantage string
+	info    VantageInfo
 	mux     *http.ServeMux
 	log     *scan.Logger // may be nil (tests)
+	// The two window aggregates the dashboard waits for, held as snapshots per
+	// window. See snapshot.go: both are aggregates over the whole window and
+	// are computed on a schedule rather than per request, so a reader never
+	// waits for one and never sees one without its age.
+	net  *snapshotCache[*networkResponse]
+	vals *snapshotCache[[]validatorRow]
 }
 
 // New builds a Server. vantage is the label rendered on every response.
@@ -42,7 +94,27 @@ func New(st *store.Store, vantage string) *Server { return NewWithLogger(st, van
 // NewWithLogger is New with somewhere to put the detail of an internal error
 // that the response deliberately withholds.
 func NewWithLogger(st *store.Store, vantage string, log *scan.Logger) *Server {
-	s := &Server{st: st, vantage: vantage, mux: http.NewServeMux(), log: log}
+	return NewWithVantage(st, VantageInfo{Name: vantage}, log)
+}
+
+// NewWithVantage is NewWithLogger with the vantage described rather than only
+// named.
+func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger) *Server {
+	info.Verifiability = map[string]string{
+		"egress_addresses": "the anchor: match these against the source addresses hitting your Fibre port",
+		"asn":              "check it against egress_addresses through public routing data (whois, RIPEstat, bgp.tools); it names the network, not a place",
+		"provider":         "usually follows from the asn, so checkable the same way",
+		"location":         "the operator's word: geolocating an address is a guess, so nothing here proves it",
+	}
+	info.Complete = info.Location != "" && info.Provider != "" && info.ASN != "" && len(info.EgressAddresses) > 0
+	s := &Server{st: st, vantage: info.Name, info: info, mux: http.NewServeMux(), log: log}
+	s.net = newSnapshotCache("network", s.computeNetwork)
+	s.vals = newSnapshotCache("validators", func(ctx context.Context, win Window) ([]validatorRow, error) {
+		return s.validatorRows(ctx, win, "")
+	})
+	// Warm every window now, so the first visitor is not the one who waits.
+	s.net.warm(s.logf(), time.Now())
+	s.vals.warm(s.logf(), time.Now())
 	s.mux.HandleFunc("GET /v1/meta", s.handleMeta)
 	s.mux.HandleFunc("GET /v1/network", s.handleNetwork)
 	s.mux.HandleFunc("GET /v1/validators", s.handleValidators)
@@ -184,6 +256,7 @@ func rate(num, den int64) Rate {
 type metaResponse struct {
 	APIVersion             string       `json:"api_version"`
 	Vantage                string       `json:"vantage"`
+	VantageInfo            VantageInfo  `json:"vantage_info"`
 	VantageCount           int          `json:"vantage_count"`
 	ObservedFromOneVantage bool         `json:"observed_from_one_location"`
 	ChainID                string       `json:"chain_id"`
@@ -269,7 +342,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	var pinned string
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT pinned_celestia_app FROM publications ORDER BY settlement_height DESC LIMIT 1`).Scan(&pinned)
 	writeJSON(w, 200, metaResponse{
-		APIVersion: Version, Vantage: s.vantage, VantageCount: vantages, ObservedFromOneVantage: vantages == 1,
+		APIVersion: Version, Vantage: s.vantage, VantageInfo: s.info,
+		VantageCount: vantages, ObservedFromOneVantage: vantages == 1,
 		ChainID: meta["chain_id"], LastScannedHeight: meta["last_scanned_height"], EndpointsHeight: meta["endpoints_height"],
 		ProtocolParamsFinger: meta["protocol_params_fingerprint"], PinnedCelestiaApp: pinned,
 		Counts: counts, Collector: col, Prober: pr, LastProbeAt: lastProbe, Meta: meta, ServerTime: now.UTC(),
@@ -319,8 +393,13 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 type classCounts map[string]int64
 
 type networkResponse struct {
-	Window                 Window `json:"window"`
-	Vantage                string `json:"vantage"`
+	Window  Window `json:"window"`
+	Vantage string `json:"vantage"`
+	// ComputedAt and ComputeMs say when this summary was taken and how long it
+	// took. It is a snapshot refreshed on a schedule, not a live query, so its
+	// age is published rather than left for a reader to assume.
+	ComputedAt             string `json:"computed_at,omitempty"`
+	ComputeMs              int64  `json:"compute_ms,omitempty"`
 	ObservedFromOneVantage bool   `json:"observed_from_one_location"`
 	RegisteredEndpoints    int64  `json:"registered_endpoints"`
 	ValidatorsProbed       int64  `json:"validators_probed"`
@@ -613,13 +692,36 @@ func (s *Server) attestationWhere(ctx context.Context, where string, args ...any
 }
 
 func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	now := time.Now()
-	win, err := parseWindow(r, now)
+	win, err := parseWindow(r, time.Now())
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	resp, at, ms, err := s.net.get(r.Context(), s.logf(), win)
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	// A copy, so a reader cannot mutate the cached snapshot and two concurrent
+	// readers cannot race on it.
+	out := *resp
+	out.ComputedAt, out.ComputeMs = at.UTC().Format(time.RFC3339Nano), ms
+	writeJSON(w, 200, &out)
+}
+
+// logf adapts the server's logger, which may be absent in tests, to what the
+// snapshot cache needs.
+func (s *Server) logf() logf {
+	if s.log == nil {
+		return nil
+	}
+	return func(format string, args ...any) { s.log.Printf(format, args...) }
+}
+
+// computeNetwork does the work handleNetwork used to do inline. It is called
+// from the snapshot cache rather than from the request, so its context outlives
+// the reader who triggered it.
+func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkResponse, error) {
 	db := s.st.DB()
 	var resp networkResponse
 	resp.Window, resp.Vantage = win, s.vantage
@@ -630,8 +732,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 
 	classes, total, err := s.classCountsWhere(ctx, `started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg())
 	if err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	resp.Classes = classes
 	resp.ServeRate = serveRate(classes)
@@ -640,14 +741,12 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	resp.ExcludedClasses = excludedFromRate
 	if resp.ByObligation, err = s.obligationRate(ctx,
 		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	_ = total
 	if resp.Attestation, err = s.attestationWhere(ctx,
 		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ?`, win.startArg()).Scan(&resp.ProbeCount)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`, win.startArg()).Scan(&resp.Gaps)
@@ -666,19 +765,16 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp.VantageHealth, err = s.worstCorrelatedPoint(ctx, win); err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	if resp.ByPoint, err = s.rateByPoint(ctx,
 		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 
 	reach, err := s.reachabilityNow(ctx)
 	if err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	var reachable int64
 	for _, v := range reach {
@@ -692,11 +788,10 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 
 	recon, err := s.reconstructableCount(ctx, win)
 	if err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return nil, err
 	}
 	resp.Reconstructable = recon
-	writeJSON(w, 200, resp)
+	return &resp, nil
 }
 
 // reachState is the latest reachability evidence for one validator: the most
@@ -744,8 +839,27 @@ func (s *Server) reachabilityNow(ctx context.Context) (map[string]reachState, er
 // ---- validators ----
 
 type validatorRow struct {
-	Address        string  `json:"address"`      // 20-byte consensus address, hex
-	ConsAddress    string  `json:"cons_address"` // celestiavalcons1... when known from the registry
+	Address     string `json:"address"`      // 20-byte consensus address, hex
+	ConsAddress string `json:"cons_address"` // celestiavalcons1... when known from the registry
+	// Moniker is the name the operator set in the staking module, read from
+	// the chain itself. Empty when the chain has no validator at this
+	// consensus address, or before identities have been polled once. A reader
+	// recognises a validator by this, not by twenty hex characters.
+	Moniker string `json:"moniker,omitempty"`
+	// Operator is the celestiavaloper... address, for linking out.
+	Operator string `json:"operator_address,omitempty"`
+	// KeybaseIdentity is the operator's Keybase key suffix when it set one,
+	// which is how an avatar could be resolved later. Deliberately NOT called
+	// "identity": on this row that word already means the TLS consensus-key
+	// binding this observer checks, and the two are unrelated.
+	KeybaseIdentity string `json:"keybase_identity,omitempty"`
+	Website         string `json:"website,omitempty"`
+	// Jailed and BondStatus are the chain's own words about the validator,
+	// unlike everything else on this row, which this observer measured. A
+	// jailed validator still owes the shards it signed for, so these are
+	// shown rather than used to drop anyone from the table.
+	Jailed         bool    `json:"jailed"`
+	BondStatus     string  `json:"bond_status,omitempty"`
 	Host           string  `json:"host"`
 	EndpointSince  *string `json:"endpoint_since"`
 	VotingPower    int64   `json:"voting_power"` // from the latest assignment seen
@@ -966,6 +1080,33 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			v.LastSeenAt = &at
 		}
 	}
+	// Names from the staking module, joined last so every row that exists by
+	// now gets one. Only validators this observer already has a reason to
+	// show are named: a name on its own is not evidence of anything, and
+	// listing every validator on the chain would bury the ones that
+	// registered a Fibre endpoint.
+	irows, err := db.QueryContext(ctx, `SELECT cons_address, operator_address, moniker, identity, website, jailed, status
+		FROM validator_identities`)
+	if err != nil {
+		return nil, err
+	}
+	for irows.Next() {
+		var addr, op, moniker, identity, website, status string
+		var jailed int
+		if err := irows.Scan(&addr, &op, &moniker, &identity, &website, &jailed, &status); err != nil {
+			irows.Close()
+			return nil, err
+		}
+		if v, ok := byAddr[strings.ToLower(addr)]; ok {
+			v.Moniker, v.Operator, v.KeybaseIdentity, v.Website = moniker, op, identity, website
+			v.Jailed, v.BondStatus = jailed == 1, status
+		}
+	}
+	irows.Close()
+	if err := irows.Err(); err != nil {
+		return nil, err
+	}
+
 	// one observation per (validator, blob): see obligationRate.
 	byObligation := map[string]Rate{}
 	orows, err := db.QueryContext(ctx, `SELECT validator_address,
@@ -1057,12 +1198,15 @@ func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	rows, err := s.validatorRows(r.Context(), win, "")
+	rows, at, ms, err := s.vals.get(r.Context(), s.logf(), win)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"window": win, "vantage": s.vantage, "validators": rows})
+	writeJSON(w, 200, map[string]any{
+		"window": win, "vantage": s.vantage, "validators": rows,
+		"computed_at": at.UTC().Format(time.RFC3339Nano), "compute_ms": ms,
+	})
 }
 
 func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
@@ -1219,6 +1363,14 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// Per blob, deliberately. Batching both of these was tried and measured on
+	// a store with 2,200 publications: the class tally got about 8% slower,
+	// because fifty seeks on probes_promise beat one CTE-joined GROUP BY, and
+	// batching the row lists was far worse, taking /v1/blobs?limit=200 from
+	// 1.35s to 3.58s by pulling every in-window point's JSON when only the
+	// chosen point is wanted. A page is a few hundred rows at most. The batch
+	// is kept for the network summary, which examines two thousand and
+	// publishes no row count.
 	for i := range out {
 		classes, total, err := s.classCountsWhere(ctx, `promise_hash = ?`, out[i].PromiseHash)
 		if err != nil {
@@ -1414,17 +1566,19 @@ func (s *Server) reconstructableCount(ctx context.Context, win Window) (reconstr
 		`SELECT COUNT(*) FROM publications WHERE settlement_time >= ?`, win.startArg()).Scan(&out.PublicationsInWindow); err != nil {
 		return out, err
 	}
-	blobs, err := s.blobRows(ctx, `settlement_time >= ?`, reconstructSample, win.startArg())
+	// Statuses only: the summary publishes no row count, so the bounds settle
+	// every verdict and not one row list is parsed.
+	verdicts, err := s.reconstructBatch(ctx, `settlement_time >= ?`, reconstructSample, win.startArg())
 	if err != nil {
 		return out, err
 	}
-	out.Examined = int64(len(blobs))
-	for _, b := range blobs {
-		if b.Reconstructable == nil {
+	out.Examined = int64(len(verdicts))
+	for _, rc := range verdicts {
+		if rc == nil {
 			out.Unknown++
 			continue
 		}
-		switch b.Reconstructable.Status {
+		switch rc.Status {
 		case "unknown":
 			out.Unknown++
 		case "pending":
@@ -1491,8 +1645,12 @@ func (s *Server) handleBlobs(w http.ResponseWriter, r *http.Request) {
 
 type assignmentRow struct {
 	ValidatorAddress string `json:"validator_address"`
-	VotingPower      int64  `json:"voting_power"`
-	RowCount         int    `json:"row_count"`
+	// Moniker is the name from the staking module, so this table reads like
+	// a list of validators rather than a list of hashes. Empty when the chain
+	// has no validator at this consensus address.
+	Moniker     string `json:"moniker,omitempty"`
+	VotingPower int64  `json:"voting_power"`
+	RowCount    int    `json:"row_count"`
 	// Attested: the settled promise carries a signature from this validator
 	// that verified against its consensus key, which is proof it stored the
 	// shard. false means unproven, null means the record predates
@@ -1512,7 +1670,11 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no publication with this promise hash")
 		return
 	}
-	rows, err := s.st.DB().QueryContext(ctx, `SELECT validator_address, voting_power, row_count, attested FROM assignments WHERE promise_hash = ? ORDER BY voting_power DESC, validator_address`, hash)
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT a.validator_address, a.voting_power, a.row_count, a.attested,
+			COALESCE(i.moniker, '')
+		FROM assignments a
+		LEFT JOIN validator_identities i ON i.cons_address = a.validator_address
+		WHERE a.promise_hash = ? ORDER BY a.voting_power DESC, a.validator_address`, hash)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
@@ -1521,7 +1683,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a assignmentRow
 		var att sql.NullInt64
-		if err := rows.Scan(&a.ValidatorAddress, &a.VotingPower, &a.RowCount, &att); err != nil {
+		if err := rows.Scan(&a.ValidatorAddress, &a.VotingPower, &a.RowCount, &att, &a.Moniker); err != nil {
 			rows.Close()
 			s.writeInternal(w, r.URL.Path, err)
 			return

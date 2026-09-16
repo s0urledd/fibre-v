@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +25,15 @@ func main() {
 		listen  = flag.String("listen", "127.0.0.1:8080", "HTTP listen address")
 		check   = flag.String("check", "", "health check: GET this URL, exit 0 on HTTP 200 (for container healthchecks; the image has no curl)")
 		vantage = flag.String("vantage", "local", "vantage name rendered on every response")
+		// Where this observer watches from. Every reachability observation is
+		// a statement about a network path and half that path is ours, so a
+		// reader cannot judge an UNREACHABLE without knowing where it was
+		// measured from. The first three are operator-declared; the egress
+		// addresses are what a validator can match against its own logs.
+		vLocation = flag.String("vantage-location", "", `human-readable place, e.g. "Helsinki, Finland"`)
+		vProvider = flag.String("vantage-provider", "", `hosting provider, e.g. "Hetzner"`)
+		vASN      = flag.String("vantage-asn", "", `autonomous system, e.g. "AS24940"`)
+		vEgress   = flag.String("vantage-egress", "", "comma-separated source addresses probes leave from")
 	)
 	flag.Parse()
 	if *check != "" {
@@ -39,9 +49,23 @@ func main() {
 	}
 	defer st.Close()
 
+	info := api.VantageInfo{
+		Name: *vantage, Location: *vLocation, Provider: *vProvider, ASN: *vASN,
+		EgressAddresses: splitList(*vEgress),
+	}
+	if info.Location == "" || info.Provider == "" || info.ASN == "" || len(info.EgressAddresses) == 0 {
+		// Not fatal: a devnet or a local run has nothing meaningful to say
+		// here. But a public vantage that leaves it blank is publishing
+		// reachability verdicts without saying where they were measured from,
+		// and the About page points readers at this endpoint for exactly that.
+		log.Printf("WARNING: vantage not fully described (location=%q provider=%q asn=%q egress=%d); "+
+			"a public vantage should set -vantage-location, -vantage-provider, -vantage-asn and -vantage-egress",
+			info.Location, info.Provider, info.ASN, len(info.EgressAddresses))
+	}
+
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           api.NewWithLogger(st, *vantage, log),
+		Handler:           api.NewWithVantage(st, info, log),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -59,6 +83,17 @@ func main() {
 		log.Fatalf("serve: %v", err)
 	}
 	log.Printf("stopped")
+}
+
+// splitList turns a comma-separated flag into a trimmed, non-empty list.
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // healthCheck GETs url and returns a process exit code: 0 on HTTP 200.

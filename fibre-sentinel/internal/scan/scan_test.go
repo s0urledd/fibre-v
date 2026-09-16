@@ -1,6 +1,8 @@
 package scan
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +12,8 @@ import (
 
 	fibretypes "github.com/celestiaorg/celestia-app/v10/x/fibre/types"
 	abci "github.com/cometbft/cometbft/abci/types"
+	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
+	"github.com/cosmos/cosmos-sdk/crypto/keys/ed25519"
 	gogojsonpb "github.com/cosmos/gogoproto/jsonpb"
 	assign "github.com/plsgiveup/fibre/fibre-assign"
 )
@@ -354,5 +358,45 @@ func TestMustServeUntilForPromise_ChangeThatRevertsInsideTheInterval(t *testing.
 	}
 	if !strings.Contains(basis, "AMBIGUOUS") {
 		t.Fatalf("basis should say AMBIGUOUS: %q", basis)
+	}
+}
+
+// The consensus address the staking module implies must be the same
+// identifier every probe row and assignment already uses. If the derivation
+// drifts, validator names silently stop joining and every row loses its
+// moniker with nothing failing.
+func TestConsAddressFromConsensusKey(t *testing.T) {
+	// A known ed25519 consensus key and the CometBFT address derived from it:
+	// the first 20 bytes of SHA-256 over the raw 32-byte key.
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = byte(i + 1)
+	}
+	sum := sha256.Sum256(raw)
+	want := strings.ToLower(hex.EncodeToString(sum[:20]))
+
+	pk := &ed25519.PubKey{Key: raw}
+	b, err := pk.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := consAddressFromAny(&codectypes.Any{Value: b})
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	if got != want {
+		t.Fatalf("cons address = %s, want %s", got, want)
+	}
+	if len(got) != 40 {
+		t.Fatalf("cons address is %d hex chars, want 40 to match the probe rows", len(got))
+	}
+
+	// A missing or malformed key is an error, never a blank address: a blank
+	// would collide every such validator into one row in the store.
+	if _, err := consAddressFromAny(nil); err == nil {
+		t.Fatal("a nil consensus key should be an error")
+	}
+	if _, err := consAddressFromAny(&codectypes.Any{Value: []byte("not a key")}); err == nil {
+		t.Fatal("a malformed consensus key should be an error")
 	}
 }

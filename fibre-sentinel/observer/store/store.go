@@ -33,7 +33,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 3
+const SchemaVersion = 5
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -79,6 +79,61 @@ var migrations = []migration{
 			// "deregistered". The column says what was actually observed.
 			`ALTER TABLE endpoints ADD COLUMN closed_reason TEXT`,
 			`UPDATE endpoints SET closed_reason = 'left_bonded_provider_list' WHERE closed_at IS NOT NULL AND closed_reason IS NULL`,
+		},
+	},
+	{
+		version: 4,
+		note:    "validator identities from the staking module, so rows carry the name the operator chose",
+		stmts: []string{
+			// Read from the chain's own staking module, not from an explorer
+			// API: an observer whose validator names come from somebody
+			// else's index is that much less independent, and it inherits
+			// that index's rate limits, terms and coverage gaps.
+			//
+			// The key is the 20-byte consensus address in lower-case hex,
+			// the same identifier every probe row and assignment already
+			// uses, so no join needs a bech32 conversion.
+			`CREATE TABLE IF NOT EXISTS validator_identities (
+				cons_address     TEXT PRIMARY KEY,
+				operator_address TEXT NOT NULL DEFAULT '',
+				moniker          TEXT NOT NULL DEFAULT '',
+				identity         TEXT NOT NULL DEFAULT '',
+				website          TEXT NOT NULL DEFAULT '',
+				tokens           TEXT NOT NULL DEFAULT '',
+				jailed           INTEGER NOT NULL DEFAULT 0,
+				status           TEXT NOT NULL DEFAULT '',
+				first_seen_at    TEXT NOT NULL,
+				updated_at       TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS validator_identities_moniker ON validator_identities (moniker)`,
+		},
+	},
+	{
+		version: 5,
+		note:    "covering index for the in-window window aggregates the network summary runs",
+		stmts: []string{
+			// Every rate on /v1/network is an aggregate over the same
+			// population — probes of an assigned shard, in window, since a
+			// timestamp — and there were five separate scans of it per
+			// request with no index to seek by. Measured on a store with
+			// 2,200 publications and 714,000 probes, /v1/network?window=7d
+			// took 27.9s.
+			//
+			// The leading columns are the two equalities and the range, in
+			// that order, so SQLite can seek instead of scanning the table.
+			// The rest are there so it never has to: every column these
+			// aggregates read is in the index, which is what turns a scan of
+			// forty-column rows into a scan of the index alone. Measured on
+			// the same store: attestation 1.63s to 0.20s, the per-point
+			// breakdown 2.37s to 0.89s, the correlated-failure guard 2.41s
+			// to 0.88s, the verdict tally 1.72s to 0.50s.
+			//
+			// It costs about 200 bytes a probe. `outcome` is deliberately not
+			// in it: it is the widest column none of these queries reads, and
+			// the one query that does read it seeks by promise_hash instead.
+			`CREATE INDEX IF NOT EXISTS probes_window ON probes
+				(assigned, phase, started_at, classification, schedule_label,
+				 attested, validator_address, promise_hash, scheduled_at)`,
 		},
 	},
 }
@@ -568,6 +623,45 @@ func (s *Store) ObserveEndpoints(ctx context.Context, providers []scan.FibreProv
 		closed++
 	}
 	return opened, closed, tx.Commit()
+}
+
+// UpsertValidatorIdentities stores what the staking module says about each
+// validator. It is upsert-only: a validator that stops appearing keeps its
+// last known name, because a row in the probe tables with no name is worse
+// than a row with a stale one, and the chain does not forget validators.
+func (s *Store) UpsertValidatorIdentities(ids []scan.ValidatorIdentity, now time.Time) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	n := 0
+	for _, v := range ids {
+		if v.ConsAddressHex == "" {
+			// No consensus key this build could parse, so nothing to join
+			// against. Counted as skipped rather than stored under a blank
+			// key, which would collide every such validator into one row.
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO validator_identities
+			(cons_address, operator_address, moniker, identity, website, tokens, jailed, status, first_seen_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(cons_address) DO UPDATE SET
+				operator_address = excluded.operator_address,
+				moniker          = excluded.moniker,
+				identity         = excluded.identity,
+				website          = excluded.website,
+				tokens           = excluded.tokens,
+				jailed           = excluded.jailed,
+				status           = excluded.status,
+				updated_at       = excluded.updated_at`,
+			strings.ToLower(v.ConsAddressHex), v.OperatorAddress, v.Moniker, v.Identity, v.Website,
+			v.Tokens, b2i(v.Jailed), v.Status, ts(now), ts(now)); err != nil {
+			return 0, fmt.Errorf("validator identity %s: %w", v.ConsAddressHex, err)
+		}
+		n++
+	}
+	return n, tx.Commit()
 }
 
 // Endpoint is one open or closed endpoint-history row.

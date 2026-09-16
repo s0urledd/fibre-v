@@ -19,6 +19,7 @@ export type ClassCounts = Record<string, number>;
 export type Meta = {
   api_version: string;
   vantage: string;
+  vantage_info: VantageInfo;
   vantage_count: number;
   observed_from_one_location: boolean;
   chain_id: string;
@@ -33,10 +34,29 @@ export type Meta = {
   last_probe_at: string | null;
   server_time: string;
 };
+/** where this observer watches from; the first three are operator-declared */
+export type VantageInfo = {
+  name: string;
+  location?: string;
+  provider?: string;
+  asn?: string;
+  egress_addresses?: string[];
+  /** per-field: what a reader can actually check, and how */
+  verifiability: Record<string, string>;
+  complete: boolean;
+};
+
 export type RunStatus = { run_id: number; started_at: string; last_heartbeat_at: string; stopped_at: string | null; alive: boolean };
 
 export type Network = {
-  window: Window;
+  /**
+   * When this summary was computed and how long it took. It is a snapshot
+   * refreshed on a schedule, not a live query — the figures are aggregates over
+   * the whole window and recomputing them per reader is not something a public
+   * site can afford — so the page shows its age rather than implying it is now.
+   */
+  computed_at?: string;
+  compute_ms?: number;  window: Window;
   vantage: string;
   observed_from_one_location: boolean;
   registered_endpoints: number;
@@ -89,6 +109,14 @@ export type Reconstructable = {
 export type Validator = {
   address: string;
   cons_address: string;
+  /** the name the operator set in the staking module, read from the chain */
+  moniker?: string;
+  operator_address?: string;
+  keybase_identity?: string;
+  website?: string;
+  /** the chain's own words about the validator, unlike everything we measure */
+  jailed: boolean;
+  bond_status?: string;
   host: string;
   endpoint_since: string | null;
   voting_power: number;
@@ -107,6 +135,12 @@ export type Validator = {
   expected_load_band: string;
   /** newest publication: true proven to have stored it, false unproven, null not recorded */
   attested_last: boolean | null;
+  /**
+   * The height whose validator set the row counts and voting power above were
+   * computed from. A validator that has left the active set keeps its last
+   * figures, and this says how stale they are.
+   */
+  assignment_height?: number;
 };
 
 export type Probe = {

@@ -1,0 +1,210 @@
+package api
+
+import (
+	"context"
+	"sync"
+	"time"
+)
+
+// The window aggregates are snapshots, not live queries.
+//
+// Both figures the overview waits for are aggregates over the whole window. The
+// network summary is the verdict tally, the obligation-counted rate, the
+// attestation coverage, the per-point breakdown, the correlated-failure guard
+// and the reconstructability of the newest reconstructSample publications; the
+// validator list is much the same tally again, per validator. On a store with
+// 2,200 publications and 714,000 probes those took 27.6s and 4.9s, and the page
+// asked for both every thirty seconds, per viewer, with cache: 'no-store'. A
+// covering index and a batched reconstructability pass cut that a long way, but
+// not to anything worth serving per request: they are aggregates over hundreds
+// of thousands of rows and no index makes that free.
+//
+// So they are computed on a schedule instead. A reader gets the last snapshot
+// immediately, whatever else is happening, and the snapshot carries the moment
+// it was taken and how long it took, so its age is published rather than
+// implied. That is the honest shape for this product anyway: every other number
+// on the site is a stored observation with a timestamp, and now these are too.
+//
+// Refreshing happens in the background, one at a time per window, and a stale
+// snapshot keeps being served while its replacement is computed, so a reader
+// never waits for an aggregate. Every window is warmed at startup, so the first
+// visitor does not wait either. After that a refresh is triggered by a read,
+// which means a window nobody is looking at stops costing anything.
+//
+// What this does not yet do: a refresh still recomputes the reconstructability
+// of every publication in the sample, and a publication whose retention window
+// closed hours ago can never change verdict again. Caching those per promise
+// hash would make a refresh nearly free. It is not done here because "can never
+// change" has to account for probes ingested late — after a collector restart
+// with a backlog, say — and getting that wrong would publish a stale verdict
+// about a named validator. It wants its own change, with the invalidation
+// reasoned through rather than bolted on.
+
+// ttlFor is how old a snapshot may be before a read starts a refresh, scaled by
+// how much a minute of new data can actually move the figure.
+//
+// A day's window turns over in a day, so a minute is well inside its
+// resolution. A thirty-day window does not meaningfully change in a minute, and
+// refreshing it as often would spend the same seconds of work to move a figure
+// in its third decimal place. None of these is tighter than the probe schedule
+// that produces the data, which moves in minutes: refreshing faster than the
+// measurements arrive buys nothing and costs a core.
+func ttlFor(name string) time.Duration {
+	switch name {
+	case "24h":
+		return time.Minute
+	case "7d":
+		return 5 * time.Minute
+	case "30d":
+		return 15 * time.Minute
+	default: // "all", and anything added later
+		return 30 * time.Minute
+	}
+}
+
+// warmWindows is every window the dashboard offers, computed once at startup so
+// that no visitor is the one who pays for a cold aggregate.
+var warmWindows = []string{"24h", "7d", "30d", "all"}
+
+// snapshotTimeout bounds a background refresh. One that cannot finish in this
+// time is abandoned rather than left to pile up behind the next; the previous
+// snapshot keeps being served and the next read tries again.
+const snapshotTimeout = 5 * time.Minute
+
+// logf is the bit of a logger a cache needs, so it does not depend on the whole
+// Server and stays usable with nothing.
+type logf func(format string, args ...any)
+
+type snap[T any] struct {
+	v  T
+	at time.Time
+	ms int64
+}
+
+// snapshotCache holds one computed value per window, refreshed on read.
+type snapshotCache[T any] struct {
+	label      string
+	compute    func(context.Context, Window) (T, error)
+	mu         sync.Mutex
+	entries    map[string]*snap[T]
+	refreshing map[string]bool
+}
+
+func newSnapshotCache[T any](label string, compute func(context.Context, Window) (T, error)) *snapshotCache[T] {
+	return &snapshotCache[T]{
+		label: label, compute: compute,
+		entries: map[string]*snap[T]{}, refreshing: map[string]bool{},
+	}
+}
+
+// get returns the snapshot for win with the moment it was taken and what it
+// cost, computing inline only when there is nothing at all to serve. A stale
+// snapshot is returned as it stands and a refresh is started behind it.
+func (c *snapshotCache[T]) get(ctx context.Context, log logf, win Window) (T, time.Time, int64, error) {
+	var zero T
+	c.mu.Lock()
+	s := c.entries[win.Name]
+	if s != nil && time.Since(s.at) >= ttlFor(win.Name) && !c.refreshing[win.Name] {
+		c.refreshing[win.Name] = true
+		go c.background(log, win)
+	}
+	c.mu.Unlock()
+	if s != nil {
+		return s.v, s.at, s.ms, nil
+	}
+
+	// Nothing to serve: this reader pays. Claiming the window first means a
+	// burst of first-time readers produces one computation, not one each.
+	c.mu.Lock()
+	if c.refreshing[win.Name] {
+		c.mu.Unlock()
+		if got := c.await(ctx, win); got != nil {
+			return got.v, got.at, got.ms, nil
+		}
+		return zero, time.Time{}, 0, ctx.Err()
+	}
+	c.refreshing[win.Name] = true
+	c.mu.Unlock()
+
+	got, err := c.fill(ctx, win)
+	if err != nil {
+		return zero, time.Time{}, 0, err
+	}
+	return got.v, got.at, got.ms, nil
+}
+
+// await blocks until a snapshot for win exists or the caller gives up.
+func (c *snapshotCache[T]) await(ctx context.Context, win Window) *snap[T] {
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+			c.mu.Lock()
+			s := c.entries[win.Name]
+			c.mu.Unlock()
+			if s != nil {
+				return s
+			}
+		}
+	}
+}
+
+// background recomputes away from any request: the reader that triggered it has
+// long since been served, so its context must not be the one that goes away.
+func (c *snapshotCache[T]) background(log logf, win Window) {
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotTimeout)
+	defer cancel()
+	if _, err := c.fill(ctx, win); err != nil && log != nil {
+		// A failed refresh is not a failed request: the previous snapshot is
+		// still being served, so this is logged and left for the next read.
+		log("%s snapshot refresh (%s): %v", c.label, win.Name, err)
+	}
+}
+
+func (c *snapshotCache[T]) fill(ctx context.Context, win Window) (*snap[T], error) {
+	start := time.Now()
+	v, err := c.compute(ctx, win)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.refreshing[win.Name] = false
+	if err != nil {
+		return nil, err
+	}
+	s := &snap[T]{v: v, at: start, ms: time.Since(start).Milliseconds()}
+	c.entries[win.Name] = s
+	return s, nil
+}
+
+// warm computes every window once, in the background, one at a time.
+// Sequential on purpose: these are the heaviest queries the process runs, and
+// starting four at once against a cold page cache makes each of them slower
+// than running them in turn.
+func (c *snapshotCache[T]) warm(log logf, now time.Time) {
+	go func() {
+		for _, name := range warmWindows {
+			c.mu.Lock()
+			busy := c.refreshing[name]
+			if !busy {
+				c.refreshing[name] = true
+			}
+			c.mu.Unlock()
+			if busy {
+				continue // a reader got there first
+			}
+			c.background(log, windowFor(name, now))
+		}
+	}()
+}
+
+// windowFor builds the Window parseWindow would build for a name.
+func windowFor(name string, now time.Time) Window {
+	span := windows[name]
+	w := Window{Name: name, Span: span, End: now}
+	if span > 0 {
+		w.Start = now.Add(-span)
+	}
+	return w
+}

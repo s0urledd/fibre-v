@@ -1,4 +1,4 @@
-import { Legend } from "@/components/Badge";
+import { Legend } from "@/components/Verdict";
 
 export const metadata = { title: "Methodology · Fibre observer" };
 
@@ -24,7 +24,7 @@ export default function Methodology() {
       <p>Assignment is the publisher&rsquo;s arithmetic. A validator becomes obliged only once it holds the shard, and the only on-chain evidence of that is a signature from the validator on the settled <code>MsgPayForFibre</code>: a Fibre server writes the shard to its store <em>before</em> it signs. This site verifies those signatures itself against each validator&rsquo;s consensus key rather than trusting the count in the transaction, because the chain&rsquo;s own check runs in the ante handler and is skipped when the block is finalised or when the node has already seen the message, so a settled transaction carries no guarantee that its signature entries are valid.</p>
       <p>A missing signature is <strong>not</strong> evidence that a validator failed to store the shard. The publisher stops collecting signatures the moment it has enough voting power to be safe and keeps delivering to the rest in the background, so a validator can hold a shard whose signature never reached the chain. Absence means <em>unproven</em>, never <em>absent</em>.</p>
       <p>So a probe of an assigned but unattested validator is recorded as <strong>UNATTESTED</strong> whatever happened on the wire, and sits outside the serve rate in both directions. A failure the validator was never proven to owe cannot count against it, and a success it was never proven to owe cannot count for it. The wire outcome is still published, and every page that shows a serve rate also shows how many probes were held out this way, so you can see how much of the set the rate speaks for.</p>
-      <Legend classes={["HEALTHY", "FAULT", "TOLERATED", "EXPECTED_GONE", "SERVED_PAST_WINDOW", "UNREACHABLE_POST_WINDOW", "EXPECTED_UNASSIGNED", "SERVING_UNASSIGNED", "PROBE_ERROR", "NOT_PROBED"]} />
+      <Legend />
       <p><strong>FAULT is the only class that counts against a validator.</strong> It means: while the promise held, the validator answered not found, was unreachable at any layer, presented a certificate its consensus key did not endorse, or returned wrong, partial or unverifiable rows.</p>
 
       <h2 id="rates">Rates</h2>

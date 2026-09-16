@@ -3,12 +3,20 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useApi, type Validator, type Probe, type Window, type Rate, type ClassCounts, utc, ago, shortHex } from "@/lib/api";
-import Badge, { Legend } from "@/components/Badge";
+import Verdict from "@/components/Verdict";
 import RateCell from "@/components/Rate";
 
 type Detail = {
   validator: Validator;
-  windows: { window: Window; serve_rate: Rate; rated_probe_count: number; classes: ClassCounts }[];
+  windows: {
+    window: Window;
+    serve_rate: Rate;
+    rated_probe_count: number;
+    classes: ClassCounts;
+    serve_rate_coverage: Rate;
+    serve_rate_by_obligation: Rate;
+    serve_rate_held_out: ClassCounts;
+  }[];
   recent_probes: Probe[];
 };
 
@@ -21,8 +29,20 @@ function Page() {
   const v = data.validator;
   return (
     <>
-      <h1 className="mono">{v.cons_address || v.address}</h1>
+      {/* The operator's own name first; the consensus address is the key
+          every number below is joined on, so it stays directly underneath. */}
+      <h1>{v.moniker || <span className="mono">{v.cons_address || v.address}</span>}</h1>
+      {v.moniker && <p className="mono faint">{v.cons_address || v.address}</p>}
+      {v.jailed && (
+        <p className="notice">
+          The chain has jailed this validator. That is the chain&rsquo;s own status, not something this site measured, and it does not
+          release the validator from the shards it already signed for, so its rows below stand.
+        </p>
+      )}
       <dl className="kv">
+        {v.operator_address && <><dt>operator address</dt><dd className="mono">{v.operator_address}</dd></>}
+        {v.bond_status && <><dt>bond status</dt><dd className="mono" title="The chain's own status for this validator, not a measurement of this site.">{v.bond_status.replace("BOND_STATUS_", "").toLowerCase()}</dd></>}
+        {v.website && <><dt>website</dt><dd><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website}</a></dd></>}
         <dt>consensus address (hex)</dt><dd className="mono">{v.address}</dd>
         {v.cons_address && <><dt>consensus address</dt><dd className="mono">{v.cons_address}</dd></>}
         <dt>registered Fibre endpoint</dt><dd className="mono">{v.host || "— not registered"}{v.endpoint_since && <span className="muted"> since {utc(v.endpoint_since)}</span>}</dd>
@@ -46,14 +66,15 @@ function Page() {
       <div className="tablewrap">
         <table>
           <caption>healthy / (healthy + fault) over assigned probes in the in-window and grace phases whose obligation the promise proves. Tolerated, unattested, expected gone and not probed are listed, never folded in.</caption>
-          <thead><tr><th>window</th><th className="right">serve rate</th><th className="right">probes</th><th>verdicts</th></tr></thead>
+          <thead><tr><th>window</th><th className="right">serve rate</th><th className="right">probes</th><th className="right">coverage</th><th>verdicts</th></tr></thead>
           <tbody>
             {data.windows.map((w) => (
               <tr key={w.window.name}>
                 <td className="mono">{w.window.name} <span className="faint">{utc(w.window.start)} →</span></td>
-                <td className="right mono"><RateCell r={w.serve_rate} /></td>
+                <td className="right mono"><RateCell r={w.serve_rate} obligations={w.serve_rate_by_obligation} /></td>
                 <td className="right mono">{w.rated_probe_count}</td>
-                <td>{Object.entries(w.classes).sort().map(([k, n]) => <span key={k} style={{ marginRight: 8 }}><Badge cls={k} /> <span className="mono">{n}</span></span>)}{Object.keys(w.classes).length === 0 && <span className="muted">— (0 probes)</span>}</td>
+                <td className="right mono faint" title={"this span's rate speaks for " + w.serve_rate_coverage.num + " of " + w.serve_rate_coverage.den + " in-window probes of an assigned shard"}>{w.serve_rate_coverage.den > 0 ? Math.round((w.serve_rate_coverage.value ?? 0) * 100) + "%" : "\u00b7"}</td>
+                <td>{Object.entries(w.classes).sort().map(([k, n]) => <span key={k} style={{ marginRight: 8 }}><Verdict cls={k} /> <span className="mono">{n}</span></span>)}{Object.keys(w.classes).length === 0 && <span className="muted">— (0 probes)</span>}</td>
               </tr>
             ))}
           </tbody>
@@ -73,7 +94,7 @@ function Page() {
                 <td className="mono"><Link href={`/blob/?hash=${p.promise_hash}`}>{shortHex(p.promise_hash, 6)}</Link></td>
                 <td className="mono">{p.schedule_label}</td>
                 <td>{p.phase.replace("_", " ")}</td>
-                <td><Badge cls={p.classification} title={p.classification_reason} /></td>
+                <td><Verdict cls={p.classification} title={p.classification_reason} /></td>
                 <td className="mono">
                   {p.outcome}
                   {p.attested === false && <span className="muted" title="No verified signature on this promise, so the obligation is unproven and this probe is outside the serve rate."> (unproven)</span>}
@@ -91,7 +112,7 @@ function Page() {
           </tbody>
         </table>
       </div>
-      <Legend />
+      
     </>
   );
 }
