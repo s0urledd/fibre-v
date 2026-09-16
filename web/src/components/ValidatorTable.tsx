@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { type Validator, shortBech, utc, enoughToRank, fmtCount, fmtRate, MIN_RATED } from "@/lib/api";
 import RateCell from "./Rate";
 import { Count, Mark } from "./Verdict";
+import Info from "./Info";
 
 /**
  * Seven columns here; the rest are on the validator's own page. The previous
@@ -239,11 +240,30 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
           <thead>
             <tr>
               <th className="col-pin">Validator</th>
-              <th className="right">Serve rate</th>
-              <th className="right">Fault</th>
-              <th className="right">Uptime</th>
-              <th className="right">Throughput</th>
-              <th>Obligation</th>
+              <th className="right">Serve rate<Info label="Serve rate">
+                <p>Of the shards the chain proves this validator stored, how many it handed over when asked, over probes taken while the obligation held.</p>
+                <p>The interval under the figure is an upper bound on the fault rate, drawn around one observation per blob rather than per probe.</p>
+                <p>Below {MIN_RATED} rated observations no percentage is printed: the counts are shown instead and the validator is not ranked among the worst.</p>
+              </Info></th>
+              <th className="right">Fault<Info label="Fault">
+                <p><strong>The only class counted against a validator.</strong></p>
+                <p>It means both halves of one sentence: this site reached the validator, <em>and</em> it failed to hand over a shard the chain proves it stored.</p>
+                <p>Everything short of that — unreachable, unproven, unregistered, a certificate whose validity lapsed — is listed under its own name and never folded in.</p>
+              </Info></th>
+              <th className="right">Uptime<Info label="Uptime">
+                <p>How often this site completed a TLS handshake with the registered endpoint, over the window.</p>
+                <p>Sampled every ten minutes for every validator with a host in <code>x/valaddr</code>, assigned or not, so it is the one figure here whose coverage does not depend on the chain proving an obligation.</p>
+                <p>No confidence bound is drawn around it: half of every path it measures is this site&rsquo;s own.</p>
+              </Info></th>
+              <th className="right">Throughput<Info label="Throughput">
+                <p>Rows handed over per second, from dial to rows verified against the blob commitment.</p>
+                <p>Rows per second rather than milliseconds because assignments run from 148 rows to 4,096 — a validator carrying more rows takes longer for the same service, so a duration column would name the busiest rather than the slowest.</p>
+                <p>No threshold is attached. Part of every millisecond is this site&rsquo;s own path.</p>
+              </Info></th>
+              <th>Obligation<Info label="Obligation">
+                <p>Whether the newest publication this validator appears in carries a signature from it, verified against its consensus key. A Fibre server writes the shard before it signs, so that signature is proof of storage.</p>
+                <p><strong>&ldquo;Unproven&rdquo; is not an accusation.</strong> The publisher stops collecting signatures at two thirds of voting power, so roughly a third of the set is left unproven on any given blob, by design.</p>
+              </Info></th>
               <th className="right">Voting power</th>
             </tr>
           </thead>

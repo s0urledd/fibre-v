@@ -467,7 +467,13 @@ for comp in ("collector", "prober", "api", "heartbeat"):
         VALUES (?,?,?,?,?,NULL,NULL)""",
         (comp, "eu1", "0.1.0", ts(NOW - timedelta(days=7)), ts(NOW)))
 
+# The same meta keys a real collector writes. app_version and fibre_active in
+# particular: without them the site cannot tell "Fibre is not live on this
+# chain" from "the collector has not reached a node yet", and a fixture that
+# omits them renders the pre-activation copy over a store full of measurements.
 for k, val in (("chain_id","mocha-5"), ("last_scanned_height","900000"),
+               ("chain_height","900000"), ("app_version","10"),
+               ("fibre_active","yes"), ("fibre_app_version","10"),
                ("pinned_celestia_app","fa5b523b7e3b2b83bd16bc072a45cbd3819fa369"),
                ("protocol_params_fingerprint","fp")):
     db.execute("INSERT INTO meta VALUES (?,?,?)", (k, val, ts(NOW)))
