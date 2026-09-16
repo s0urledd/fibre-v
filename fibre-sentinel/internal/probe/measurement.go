@@ -46,6 +46,13 @@ type Measurement struct {
 	ValidatorAddress string `json:"validator_address"` // 20-byte consensus addr, hex
 	ValidatorHost    string `json:"validator_host"`    // host:port as registered
 	Assigned         bool   `json:"assigned"`
+	// HostSource is "bonded" when the validator was in
+	// AllBondedFibreProviders at the time of the probe, and "last_known" when
+	// it was not but this observer had seen it register that host earlier and
+	// kept probing it anyway. A validator's retention obligation comes from
+	// the promise it signed, not from its bonding status, so leaving the
+	// bonded set must not stop the evidence.
+	HostSource string `json:"host_source,omitempty"`
 	// Attested: the settled promise carries a signature from this validator
 	// that the observer verified against its consensus key. That is the only
 	// on-chain proof the validator ever stored this shard, because a Fibre

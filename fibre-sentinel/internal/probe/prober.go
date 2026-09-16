@@ -121,6 +121,10 @@ type Prober struct {
 	// complete marks (vantage, promise, point) slots every target of which
 	// has a row; plan skips them without resolving targets again.
 	complete map[string]bool
+	// sweep counts runDue calls, and rotates the order work is dispatched in
+	// so a sweep that runs out of time does not drop the same validators each
+	// cycle.
+	sweep uint64
 	// skippedPubs are publications logged once as not probeable (wrong chain,
 	// failed settlement tx).
 	skippedPubs map[string]bool
@@ -511,6 +515,14 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 	if len(items) == 0 {
 		return 0
 	}
+	// Targets come out of the resolver in validator-set order, and a sweep
+	// that runs out of time drops whatever is left. Probing in that order
+	// every cycle took the coverage from the same validators every time — the
+	// tail of the set by voting power — so their published rates rested on
+	// systematically less evidence than everyone else's, and nothing said so.
+	// A per-cycle rotation spreads the loss instead of concentrating it.
+	rotateItems(items, p.sweep)
+	p.sweep++
 
 	var (
 		mu       sync.Mutex
@@ -643,7 +655,7 @@ func (p *Prober) recordNotProbedTarget(pub scan.Publication, pt SchedulePoint, t
 		PromiseHash: pub.PromiseHash, Commitment: pub.Promise.Commitment,
 		BlobVersion: pub.Promise.BlobVersion, MustServeUntil: pub.MustServeUntil,
 		ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
-		ValidatorAddress:   t.AddressHex, ValidatorHost: t.Host,
+		ValidatorAddress:   t.AddressHex, ValidatorHost: t.Host, HostSource: t.HostSource,
 		Assigned: t.Assigned, Attested: t.Attested, AssignedRowCount: t.RowCount,
 		ScheduleLabel: pt.Label, ScheduledAt: pt.At.UTC(),
 		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
@@ -698,6 +710,24 @@ func (p *Prober) forgetPoints(promiseHash string) {
 			delete(p.complete, k)
 		}
 	}
+}
+
+// rotateItems rotates the work list by a per-sweep offset, keeping each
+// publication's points together so the schedule still runs in order within a
+// blob. It is a rotation rather than a shuffle so the order stays
+// reproducible from the sweep number alone.
+func rotateItems(items []work, sweep uint64) {
+	if len(items) < 2 {
+		return
+	}
+	off := int(sweep % uint64(len(items)))
+	if off == 0 {
+		return
+	}
+	rotated := make([]work, 0, len(items))
+	rotated = append(rotated, items[off:]...)
+	rotated = append(rotated, items[:off]...)
+	copy(items, rotated)
 }
 
 func short(s string) string {

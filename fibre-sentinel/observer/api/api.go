@@ -639,10 +639,16 @@ type validatorRow struct {
 	Classes          classCounts      `json:"classes"`
 	AssignedRowsLast int              `json:"assigned_rows_last"`
 	ExpectedLoadBand string           `json:"expected_load_band"` // floor | low | mid | high, by assigned rows
-	// AttestedLast reports whether the newest publication proves this
-	// validator stored it: true, false (assigned but unproven) or null
-	// (recorded before the observer verified signatures).
+	// AttestedLast reports whether the newest publication this validator
+	// appears in proves it stored that blob: true, false (assigned but
+	// unproven) or null (recorded before the observer verified signatures).
 	AttestedLast *bool `json:"attested_last"`
+	// AssignmentHeight is the settlement height the voting power, row count
+	// and attestation above were read at. It is the newest publication this
+	// validator appears in, which is not necessarily the newest publication:
+	// a validator that has left the set keeps the figures from when it was
+	// last assigned, and this says when that was.
+	AssignmentHeight int64 `json:"assignment_height"`
 }
 
 func loadBand(rows int) string {
@@ -704,12 +710,21 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		since := e.FirstSeenAt
 		v.EndpointSince = &since
 	}
-	// validators with assignments (voting power, rows)
-	// The newest publication carries the whole bonded set with its voting
-	// power and row counts; one indexed lookup instead of a correlated
-	// subquery per assignment row.
-	rows, err := db.QueryContext(ctx, `SELECT validator_address, voting_power, row_count, attested FROM assignments
-		WHERE promise_hash = (SELECT promise_hash FROM publications ORDER BY settlement_height DESC, settlement_tx_index DESC LIMIT 1)`)
+	// Voting power and row count come from the newest publication each
+	// validator actually appears in, not from the newest publication overall.
+	// Reading them from the latest publication alone rendered a validator
+	// that had left the set as zero power with zero rows beside its fault
+	// count, and the table sorts faults to the top: the row that looked worst
+	// was the one we had the least current information about. The height the
+	// figures come from is published with them.
+	rows, err := db.QueryContext(ctx, `SELECT a.validator_address, a.voting_power, a.row_count, a.attested, p.settlement_height
+		FROM assignments a
+		JOIN publications p ON p.promise_hash = a.promise_hash
+		JOIN (
+			SELECT a2.validator_address AS va, MAX(p2.settlement_height) AS h
+			FROM assignments a2 JOIN publications p2 ON p2.promise_hash = a2.promise_hash
+			GROUP BY a2.validator_address
+		) m ON m.va = a.validator_address AND m.h = p.settlement_height`)
 	if err != nil {
 		return nil, err
 	}
@@ -718,18 +733,29 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		var vp int64
 		var rc int
 		var att sql.NullInt64
-		if err := rows.Scan(&addr, &vp, &rc, &att); err != nil {
+		var h int64
+		if err := rows.Scan(&addr, &vp, &rc, &att, &h); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		v := get(addr)
+		// A block can carry several publications; keep whichever row we see
+		// with the highest height, and break the tie deterministically.
+		if v.AssignmentHeight > h {
+			continue
+		}
+		v.AssignmentHeight = h
 		v.VotingPower, v.AssignedRowsLast, v.ExpectedLoadBand = vp, rc, loadBand(rc)
+		v.AttestedLast = nil
 		if att.Valid {
 			b := att.Int64 == 1
 			v.AttestedLast = &b
 		}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	// classes per validator in window
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, classification, COUNT(*) FROM probes
 		WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window' GROUP BY validator_address, classification`, win.startArg())

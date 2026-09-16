@@ -6,13 +6,13 @@ export default function About() {
       <h1>About</h1>
       <p>An independent observer for Celestia Fibre (CIP-51). It reads what it needs from the chain, recomputes the rest, and probes validators' registered Fibre endpoints from outside as an ordinary client. Nothing here trusts a validator's self-report.</p>
       <h2>Who runs it</h2>
-      <p>[OPERATOR NAME], from vantage [CITY, PROVIDER, ASN]. Not affiliated with the Celestia Foundation or Celestia Labs. The operator also runs a Celestia validator. It is included in every headline number like any other validator, and every number can be recomputed without it from the public API (filter by consensus address).</p>
+      <p>Huginn Tech, run by Gokay and Utku. Not affiliated with the Celestia Foundation or Celestia Labs. The operator also runs a Celestia validator. It is included in every headline number like any other validator, and every number can be recomputed without it from the public API (filter by consensus address). The vantage's location and network are not asserted here; they are published in <code>/v1/meta</code> under the vantage label, where they can be checked directly. One vantage means every reachability and serve-rate observation in this dataset is from a single network path: a route, firewall or peering problem between here and a validator is not distinguishable from a problem at the validator.</p>
       <h2>Source and reproducibility</h2>
       <p>Everything is open source under Apache-2.0: <a href="https://github.com/plsgiveup/fibre">github.com/plsgiveup/fibre</a>. The README lists one command per claim: the TLS golden vectors, the assignment differential test against celestia-app, the prober's unit tests, and a devnet run with fault injection (60 measurements, zero misclassifications). The celestia-app commit the assignment constants are pinned to is printed in the footer.</p>
       <h2>Data</h2>
       <ul>
         <li>Raw probe rows are kept indefinitely and are available through the API (<code>/v1/probes</code>). Each row keeps the original measurement record.</li>
-        <li>Probe load follows the published policy (see Methodology). Validators who want to be moved to reachability-only probing can write to [CONTACT]; the change is recorded and shown.</li>
+        <li>Probe load follows the published policy (see Methodology). A validator operator who wants to be probed less, or not at all, can ask by opening an issue at <a href="https://github.com/plsgiveup/fibre">github.com/plsgiveup/fibre</a>; the people running this site will honour that request. There is no machine-readable opt-out register yet, so no such request is recorded or shown anywhere in the API today. Until one exists, a validator that blocks this site's traffic will simply show up as UNREACHABLE rather than FAULT — and UNREACHABLE is deliberately kept out of the serve rate (see API conventions).</li>
         <li>No cookies, no analytics, no third-party requests from this page.</li>
       </ul>
       <h2>Limitations</h2>

@@ -296,9 +296,24 @@ func (p *Policy) observe(pub scan.Publication, now time.Time) {
 	p.recentPubs[pub.PromiseHash] = pl
 }
 
+// pointsPerPublication is how many probes one admitted publication costs a
+// single validator: the in-window points plus the grace point. It mirrors the
+// prober's default schedule; an operator who widens that schedule must widen
+// this with it, or the sampler will admit more work than the request cap can
+// carry.
+const pointsPerPublication = 5.0
+
 // projectedP computes the admission probability from the trailing lookback:
-// p = min(1, cap/projected) over the global hourly cap and the most
-// constrained validator's hourly cap.
+// p = min(1, cap/projected) over EVERY cap BeforeProbe enforces, not just the
+// hourly ones.
+//
+// The sampler's promise is "the whole schedule or none of it": a publication
+// is admitted once and every one of its points is probed. That only holds if
+// the probability it is admitted at is one the rest of the day's budget can
+// sustain. When p was computed from the hourly caps alone, the daily caps
+// then denied probes mid schedule — and because the schedule is packed toward
+// the deadline, the points that were dropped were the late in-window and
+// grace ones, which are exactly where a retention breach shows.
 func (p *Policy) projectedP(now time.Time) (float64, string) {
 	lookback := p.cfg.Sampling.ProjectionLookback
 	var global int64
@@ -315,13 +330,23 @@ func (p *Policy) projectedP(now time.Time) (float64, string) {
 			perValRows[a] = pl.perValRs[a]
 		}
 	}
-	// scale the lookback window to one hour.
-	scale := float64(time.Hour) / float64(lookback)
+	// scale the lookback window to one hour and to one day.
+	hourly := float64(time.Hour) / float64(lookback)
+	daily := float64(24*time.Hour) / float64(lookback)
+
 	prob, binding := 1.0, "none"
-	if g := float64(global) * scale; g > float64(p.cfg.Caps.Global.BytesPerHour) {
-		prob = float64(p.cfg.Caps.Global.BytesPerHour) / g
-		binding = "global_bytes_per_hour"
+	tighten := func(capBytes int64, projected float64, name string) {
+		if capBytes <= 0 || projected <= float64(capBytes) {
+			return
+		}
+		if q := float64(capBytes) / projected; q < prob {
+			prob, binding = q, name
+		}
 	}
+
+	tighten(p.cfg.Caps.Global.BytesPerHour, float64(global)*hourly, "global_bytes_per_hour")
+	tighten(p.cfg.Caps.Global.BytesPerDay, float64(global)*daily, "global_bytes_per_day")
+
 	// deterministic iteration for stable logs.
 	addrs := make([]string, 0, len(perVal))
 	for a := range perVal {
@@ -329,12 +354,18 @@ func (p *Policy) projectedP(now time.Time) (float64, string) {
 	}
 	sort.Strings(addrs)
 	for _, a := range addrs {
-		capB := float64(p.cfg.bytesPerHourCap(perValRows[a]))
-		if v := float64(perVal[a]) * scale; v > capB {
-			if q := capB / v; q < prob {
-				prob, binding = q, "validator_bytes_per_hour"
-			}
-		}
+		rows := perValRows[a]
+		tighten(p.cfg.bytesPerHourCap(rows), float64(perVal[a])*hourly, "validator_bytes_per_hour")
+		tighten(p.cfg.bytesPerDayCap(rows), float64(perVal[a])*daily, "validator_bytes_per_day")
+	}
+
+	// The request cap is counted in probes rather than bytes. Each admitted
+	// publication costs one validator pointsPerPublication requests over the
+	// whole retention window, so the rate that matters is how many
+	// publications land per minute, not how many bytes they carry.
+	if rpm := p.cfg.Caps.PerValidator.RequestsPerMinute; rpm > 0 && len(addrs) > 0 {
+		perMinute := float64(len(p.recentPubs)) * pointsPerPublication * (float64(time.Minute) / float64(lookback))
+		tighten(int64(rpm), perMinute, "validator_requests_per_minute")
 	}
 	return prob, binding
 }

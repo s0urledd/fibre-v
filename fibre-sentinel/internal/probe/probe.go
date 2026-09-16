@@ -169,6 +169,7 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		ValidatorSetHeight: in.ValidatorSetHeight,
 		ValidatorAddress:   in.Target.AddressHex,
 		ValidatorHost:      in.Target.Host,
+		HostSource:         in.Target.HostSource,
 		Assigned:           in.Target.Assigned,
 		Attested:           in.Target.Attested,
 		AssignedRowCount:   in.Target.RowCount,

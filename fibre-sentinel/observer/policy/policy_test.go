@@ -129,11 +129,18 @@ func TestAdmitSamplesWhenGlobalCapBinds(t *testing.T) {
 		}
 	}
 	prob, binding := p.State()
-	if binding != "global_bytes_per_hour" {
-		t.Fatalf("binding cap = %s", binding)
+	// The global DAILY cap binds first, not the hourly one. 600 GiB/day over
+	// 50 GiB/h is twelve hours of headroom, so a load sustained for a full
+	// day runs out of daily budget at half the hourly rate. The sampler has
+	// to see that when it picks p, or the day's later probes get denied one
+	// by one after their publications were already admitted — and because
+	// the schedule is packed toward the deadline, the points lost are the
+	// late in-window and grace ones, which is where a breach shows.
+	if binding != "global_bytes_per_day" {
+		t.Fatalf("binding cap = %s, want the daily cap: it is tighter than the hourly one at sustained load", binding)
 	}
-	if prob > 0.6 || prob < 0.3 {
-		t.Fatalf("p = %.3f, want roughly 0.4", prob)
+	if prob > 0.4 || prob <= 0 {
+		t.Fatalf("p = %.3f, want tighter than the hourly cap's ~0.4", prob)
 	}
 	if admitted == 0 || admitted == 60 {
 		t.Fatalf("admitted %d of 60", admitted)
