@@ -118,7 +118,7 @@ function Page() {
         </Info>
       </h2>
       <div className="layers">
-        <Layer label="Reachable" r={v.reachability_window}
+        <Layer label="Uptime" r={v.reachability_window}
           sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} checks` : undefined}
           what={<>
             <p>How often this site completed a TLS handshake with the registered endpoint.</p>
@@ -209,7 +209,7 @@ function Page() {
       )}
       <div className="tablewrap">
         <table>
-          <caption>healthy / (healthy + fault) over assigned probes in the in-window and grace phases whose obligation the promise proves. Tolerated, unattested, expected gone and not probed are listed, never folded in.</caption>
+          <caption>healthy / (healthy + fault) over in-window probes of an assigned shard whose obligation the promise proves; grace probes are recorded but outside the rate. Tolerated, unattested, expected gone and not probed are listed, never folded in.</caption>
           <thead><tr><th>window</th><th className="right">serve rate</th><th className="right">probes</th><th className="right">coverage</th><th>verdicts</th></tr></thead>
           <tbody>
             {data.windows.map((w) => (

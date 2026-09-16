@@ -113,13 +113,17 @@ uses the same threshold. Validators past that point still receive the shard —
 delivery continues in the background — but their signature never reaches the
 chain, so nothing on chain proves they hold it.
 
-It is a race, not a fixed list: membership follows arrival order, so the same
-validator is in some quorums and not others. Simulated against the mocha
-snapshot over 20,000 random arrival orders, the quorum holds a median of 53 of
-79 validators, and the chance of being in it is flat across stake — 68.9% for
-the largest ten, 66.5% for the smallest twenty-four. The floor on quorum size
-is 30, the case where the largest validators all answer first, and that is a
-bound rather than an expectation.
+It is a race, not a fixed list: membership follows upload-completion order, so
+the same validator is in some quorums and not others. How large the quorum is
+can be bounded: simulated against the mocha snapshot over 20,000 uniformly
+random arrival orders it holds a median of 53 of 79 validators, and the floor
+is 30, the case where the largest validators all answer first — a bound, not an
+expectation. Who is in it cannot be bounded that way: completion order depends
+on shard size (which scales with stake), on the network path between publisher
+and validator, and on the validator's own write-and-sign latency, none of which
+a uniform draw models. An earlier version of this section said inclusion was
+flat across stake; that was the simulation's assumption read back as a result,
+and it is withdrawn.
 
 The observer classifies those probes `UNATTESTED` and holds them out of the
 serve rate in both directions. A devnet with equal stake barely produces the

@@ -53,7 +53,7 @@ cd fibre-tlsverify && go test -race ./...
 cd fibre-assign         && go test -race ./...
 cd fibre-assign/reftest && go test ./...
 
-# fibre-sentinel — 14 unit tests
+# fibre-sentinel — 92 unit tests, including the verdict taxonomy table
 cd fibre-sentinel && go test ./...
 
 # fibre-sentinel — full devnet run with fault injection: 60 measurements, 0 misclassifications
@@ -105,6 +105,7 @@ on top of the modules above. The research that precedes it lives in `docs/`:
 | `docs/research/R8-comparable-products-and-durability.md` | how Filecoin Spark, Xatu, Storj, Celenium, ProbeLab and L2BEAT measure and present, and the data-loss prevention patterns the observer adopts |
 | `docs/research/R9-presentation-and-celestia-design.md` | Celestia's visual identity, Celenium conventions, trusted-dashboard patterns, and the dashboard design spec |
 | `docs/research/R7-devnet-reproduction.md` | reproducing the tests and the devnet fault-injection run on a fresh Linux machine |
+| `docs/research/R10-explorer-shaped-dashboard.md` | why the dashboard is shaped like an explorer: what the field does, what Celestia users recognise, and the design direction the site follows |
 | `docs/research/R0-open-decisions.md` | decisions only the owners can make |
 | `docs/adr/0001-observer-architecture.md` | the architecture decision for collector, prober, store, API and web |
 | `docs/verdicts.md` | the verdict taxonomy the dashboard is allowed to use |
