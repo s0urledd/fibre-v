@@ -404,6 +404,13 @@ type networkResponse struct {
 	RegisteredEndpoints    int64  `json:"registered_endpoints"`
 	ValidatorsProbed       int64  `json:"validators_probed"`
 	Reachability           Rate   `json:"reachability"` // endpoints whose latest heartbeat or probe reached TLS
+	// ReachabilityWindow is every reachability heartbeat in the window that
+	// completed TLS, over every heartbeat sent. Reachability above is a census
+	// of the endpoints right now; this is how the whole window went, which is
+	// the difference between "two are down" and "two have been down all week".
+	// Heartbeats are pooled, so a validator that registered mid-window
+	// contributes fewer samples than one that was there throughout.
+	ReachabilityWindow Rate `json:"reachability_window"`
 	// ServeRate is HEALTHY / (HEALTHY + FAULT) over assigned probes in the
 	// in-window and grace phases. Probes of validators whose storage the
 	// settled promise does not prove are classified UNATTESTED and fall out
@@ -495,6 +502,26 @@ type attestationStats struct {
 	// signatures. Their attestation is absent, not negative, so they stay in
 	// the serve rate under the older taxonomy and out of Coverage.
 	Unknown int64 `json:"unknown_probes"`
+
+	// The same three counts per (validator, blob) obligation rather than per
+	// probe, which is the unit an operator reads them in.
+	//
+	// Each obligation is probed at four schedule points, so the probe counts
+	// above run about four times these. A page that told an operator "812
+	// unattested" when the true statement is "203 blobs carried no signature
+	// from you" would have multiplied its own evidence by the size of a
+	// schedule the reader cannot see, and the figure it multiplied is the one
+	// most likely to be misread as an accusation. An obligation is counted
+	// attested if any probe of it carries verified proof, so a mix of NULL and
+	// 1 is proven rather than unknown.
+	AttestedBlobs   int64 `json:"attested_blobs"`
+	UnattestedBlobs int64 `json:"unattested_blobs"`
+	UnknownBlobs    int64 `json:"unknown_blobs"`
+	// BlobCoverage is AttestedBlobs / (AttestedBlobs + UnattestedBlobs). It is
+	// not the same number as Coverage: obligations differ in how many times
+	// they were probed, so the probe-counted ratio silently weights an
+	// obligation by its probe count.
+	BlobCoverage Rate `json:"blob_coverage"`
 }
 
 // excludedFromRate names the classes published beside the serve rate rather
@@ -688,6 +715,22 @@ func (s *Server) attestationWhere(ctx context.Context, where string, args ...any
 		return attestationStats{}, err
 	}
 	st.Coverage = rate(st.Attested, st.Attested+st.Unattested)
+
+	// The same over obligations. MAX ignores NULLs in SQLite and in Postgres,
+	// so an obligation with any verified evidence resolves to that evidence
+	// and only one with no evidence at all stays unknown.
+	err = s.st.DB().QueryRowContext(ctx, `SELECT
+			COALESCE(SUM(CASE WHEN a = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a IS NULL THEN 1 ELSE 0 END), 0)
+		FROM (
+			SELECT MAX(attested) AS a FROM probes WHERE `+where+`
+			GROUP BY validator_address, promise_hash
+		)`, args...).Scan(&st.AttestedBlobs, &st.UnattestedBlobs, &st.UnknownBlobs)
+	if err != nil {
+		return attestationStats{}, err
+	}
+	st.BlobCoverage = rate(st.AttestedBlobs, st.AttestedBlobs+st.UnattestedBlobs)
 	return st, nil
 }
 
@@ -784,6 +827,14 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	}
 	resp.Reachability = rate(reachable, int64(len(reach)))
 
+	var beats, beatsUp int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*),
+			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0)
+		FROM reachability WHERE started_at >= ?`, win.startArg()).Scan(&beats, &beatsUp); err != nil {
+		return nil, err
+	}
+	resp.ReachabilityWindow = rate(beatsUp, beats)
+
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(blob_size),0) FROM publications WHERE settlement_time >= ?`, win.startArg()).Scan(&resp.Publications, &resp.PublicationBytes)
 
 	recon, err := s.reconstructableCount(ctx, win)
@@ -867,6 +918,29 @@ type validatorRow struct {
 	Reachable      *bool   `json:"reachable"`       // latest heartbeat or probe; null if never probed
 	IdentityStatus string  `json:"identity_status"` // verified | mismatch | no_tls | unreachable | unknown
 	IdentityReason string  `json:"identity_reason,omitempty"`
+	// Uptime is how often this observer completed a TLS conversation with the
+	// endpoint over the window, from the reachability heartbeat: every
+	// registered validator, every ten minutes, whether or not it was assigned
+	// anything. It is the closest thing here to "is the Fibre service
+	// running", and unlike the serve rate its coverage does not depend on
+	// attestation — an operator the publisher never collected a signature
+	// from still gets 144 samples a day.
+	//
+	// It is not an accusation. Half of every path measured here is this
+	// observer's own, so a dip is a statement about a route as much as about
+	// a server, which is why it is published beside the serve rate rather
+	// than folded into it.
+	Uptime Rate `json:"reachability_window"`
+	// IdentityValid is how often the certificate presented was endorsed by
+	// this validator's consensus key, over the heartbeats that got far enough
+	// to see a certificate. A validator whose endpoint is up but whose
+	// endorsement has lapsed is serving nothing a client will accept, and
+	// nothing in the serve rate says so.
+	IdentityValid Rate `json:"identity_rate_window"`
+	// LastUnreachableAt is the most recent heartbeat in the window that could
+	// not complete TLS, so a reader can tell a single outage from a service
+	// that is flapping.
+	LastUnreachableAt *string `json:"last_unreachable_at"`
 	// ServeRate is HEALTHY / (HEALTHY + FAULT) over this validator's assigned
 	// probes in the in-window and grace phases. Probes where the settled
 	// promise does not prove this validator stored the blob are UNATTESTED
@@ -888,6 +962,14 @@ type validatorRow struct {
 	Classes          classCounts      `json:"classes"`
 	AssignedRowsLast int              `json:"assigned_rows_last"`
 	ExpectedLoadBand string           `json:"expected_load_band"` // floor | low | mid | high, by assigned rows
+	// ByPoint is this validator's serve rate per schedule point, the same
+	// breakdown /v1/network publishes for the whole set. The points sit at
+	// different fractions of the retention window, so a validator that serves
+	// early and not late has pruned before it was allowed to, and a validator
+	// that is uniformly poor has a different problem. The pooled rate cannot
+	// tell those apart, and pruning early is the specific failure this
+	// observer exists to catch.
+	ByPoint []stratum `json:"serve_rate_by_point"`
 	// AttestedLast reports whether the newest publication this validator
 	// appears in proves it stored that blob: true, false (assigned but
 	// unproven) or null (recorded before the observer verified signatures).
@@ -1022,8 +1104,42 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		v.Classes[c] = n
 	}
 	rows.Close()
-	// proven / unproven / unknown obligations per validator, same scope as
-	// the classes above so the serve rate and its exclusions line up.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// The retention profile per validator: the same population as the classes
+	// above, sliced by schedule point.
+	rows, err = db.QueryContext(ctx, `SELECT validator_address, schedule_label,
+			COALESCE(SUM(CASE WHEN classification = 'HEALTHY' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END), 0)
+		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
+		GROUP BY validator_address, schedule_label
+		ORDER BY validator_address, schedule_label`, win.startArg())
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var addr string
+		var st stratum
+		var ok, bad int64
+		if err := rows.Scan(&addr, &st.Key, &ok, &bad); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		st.Rate = rate(ok, ok+bad)
+		v := get(addr)
+		v.ByPoint = append(v.ByPoint, st)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// proven / unproven / unknown per validator, same scope as the classes
+	// above so the serve rate and its exclusions line up. Counted twice: once
+	// per probe, which is what the rate's population is, and once per
+	// (validator, blob) obligation, which is what an operator reads. The two
+	// differ by the size of the probe schedule, so publishing only the first
+	// would inflate every disclosure about a named validator fourfold.
 	rows, err = db.QueryContext(ctx, `SELECT validator_address,
 			COALESCE(SUM(CASE WHEN attested = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested = 0 THEN 1 ELSE 0 END), 0),
@@ -1044,6 +1160,36 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		v.Attestation = attestationStats{Attested: at, Unattested: un, Unknown: unk, Coverage: rate(at, at+un)}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows, err = db.QueryContext(ctx, `SELECT validator_address,
+			COALESCE(SUM(CASE WHEN a = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a IS NULL THEN 1 ELSE 0 END), 0)
+		FROM (
+			SELECT validator_address AS validator_address, MAX(attested) AS a
+			FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
+			GROUP BY validator_address, promise_hash
+		) GROUP BY validator_address`, win.startArg())
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var addr string
+		var at, un, unk int64
+		if err := rows.Scan(&addr, &at, &un, &unk); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		v := get(addr)
+		v.Attestation.AttestedBlobs, v.Attestation.UnattestedBlobs, v.Attestation.UnknownBlobs = at, un, unk
+		v.Attestation.BlobCoverage = rate(at, at+un)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, COUNT(*), MAX(started_at) FROM probes WHERE started_at >= ? GROUP BY validator_address`, win.startArg())
 	if err != nil {
 		return nil, err
@@ -1061,6 +1207,42 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		v.LastSeenAt = &l
 	}
 	rows.Close()
+	// The heartbeat history, which until now was written every ten minutes for
+	// every registered validator and read only for its newest row. It is the
+	// one stability signal here whose coverage does not depend on being
+	// assigned or attested anything, which is exactly what an operator asking
+	// "is my Fibre server up" needs.
+	hrows, err := db.QueryContext(ctx, `SELECT validator_address, COUNT(*),
+			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 AND identity_ok = 1 THEN 1 ELSE 0 END), 0),
+			MAX(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN NULL ELSE started_at END)
+		FROM reachability WHERE started_at >= ? GROUP BY validator_address`, win.startArg())
+	if err != nil {
+		return nil, err
+	}
+	for hrows.Next() {
+		var addr string
+		var seen, up, ident int64
+		var lastDown sql.NullString
+		if err := hrows.Scan(&addr, &seen, &up, &ident, &lastDown); err != nil {
+			hrows.Close()
+			return nil, err
+		}
+		v := get(addr)
+		v.Uptime = rate(up, seen)
+		// Denominator is the heartbeats that reached TLS, not all of them: an
+		// unreachable endpoint presented no certificate, and counting that as
+		// an identity failure would report the same outage twice.
+		v.IdentityValid = rate(ident, up)
+		if lastDown.Valid {
+			at := lastDown.String
+			v.LastUnreachableAt = &at
+		}
+	}
+	hrows.Close()
+	if err := hrows.Err(); err != nil {
+		return nil, err
+	}
 	reach, err := s.reachabilityNow(ctx)
 	if err != nil {
 		return nil, err

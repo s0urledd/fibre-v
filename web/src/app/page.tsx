@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Network, type Validator, type Meta, fmtCount, bytes, utc, ago } from "@/lib/api";
+import { useApi, type Network, type Validator, type Meta, fmtCount, fmtRate, bytes, utc, ago } from "@/lib/api";
 import ValidatorTable from "@/components/ValidatorTable";
 import { Reading } from "@/components/Rate";
 import Graduation from "@/components/Graduation";
@@ -46,11 +46,16 @@ export default function Overview() {
   // on a network where two endpoints were actually down — which reads as a
   // broken network and is not what the data says. Each validator lands in
   // exactly one segment, worst first, so the segments sum to the population.
+  // An endpoint whose certificate its consensus key does not endorse sits in
+  // the same segment as one that will not answer: a client refuses both, and
+  // in neither case does the serve rate have anything to say — the publisher
+  // could not upload to it either, so it is never proven to owe anything.
+  const unusable = (v: Validator) => v.reachable === false || v.identity_status === "mismatch" || v.identity_status === "no_tls";
   const seg = {
     fault: faulted,
-    hold: list.filter((v) => (v.classes.FAULT ?? 0) === 0 && v.reachable === false).length,
-    gap: list.filter((v) => (v.classes.FAULT ?? 0) === 0 && v.reachable !== false && v.probe_count === 0).length,
-    unproven: list.filter((v) => (v.classes.FAULT ?? 0) === 0 && v.reachable !== false && v.probe_count > 0 && v.serve_rate.den === 0).length,
+    hold: list.filter((v) => (v.classes.FAULT ?? 0) === 0 && unusable(v)).length,
+    gap: list.filter((v) => (v.classes.FAULT ?? 0) === 0 && !unusable(v) && v.probe_count === 0).length,
+    unproven: list.filter((v) => (v.classes.FAULT ?? 0) === 0 && !unusable(v) && v.probe_count > 0 && v.serve_rate.den === 0).length,
   };
   const served = Math.max(0, list.length - seg.fault - seg.hold - seg.gap - seg.unproven);
   const pct = (n: number) => (list.length ? (n / list.length) * 100 : 0);
@@ -166,11 +171,12 @@ export default function Overview() {
       {net && list.length > 0 && (
         <section className="bar-block">
           <span className="label">Validators</span>
-          <span className="sample">
+          <span className="sample" title="The bar is a census of the endpoints as they stand. The heartbeat figure is the whole window: a network with two endpoints down right now and one that was down all week are not the same network, and only the second figure can tell you which one this is.">
             {net.registered_endpoints} with a registered Fibre endpoint · {net.validators_probed} probed in this window
+            {net.reachability_window?.den > 0 && <> · {fmtRate(net.reachability_window)} of {net.reachability_window.den.toLocaleString("en-US")} heartbeats completed</>}
           </span>
           <div className="bar" role="img"
-            aria-label={`${served} serving, ${seg.hold} unreachable now, ${seg.unproven} with nothing proven owed, ${seg.gap} not probed, ${seg.fault} faulted`}>
+            aria-label={`${served} serving, ${seg.hold} unreachable or unendorsed now, ${seg.unproven} with nothing proven owed, ${seg.gap} not probed, ${seg.fault} faulted`}>
             {served > 0 && <i className="seg--served" style={{ width: `${pct(served)}%` }} />}
             {seg.hold > 0 && <i className="seg--hold" style={{ width: `${pct(seg.hold)}%` }} />}
             {seg.unproven > 0 && <i className="seg--unproven" style={{ width: `${pct(seg.unproven)}%` }} />}
@@ -179,7 +185,7 @@ export default function Overview() {
           </div>
           <ul className="bar-key">
             <li><Mark tier="kept" /> <b>{served}</b> serving</li>
-            <li><Mark tier="hold" /> <b>{seg.hold}</b> unreachable now</li>
+            <li title="The endpoint did not answer, or answered with a certificate this validator's consensus key does not endorse. A client refuses both."><Mark tier="hold" /> <b>{seg.hold}</b> unreachable or unendorsed</li>
             <li><Mark tier="held" /> <b>{seg.unproven}</b> nothing proven owed</li>
             <li><Mark tier="gap" /> <b>{seg.gap}</b> not probed</li>
             <li><Mark tier="fault" /> <b>{seg.fault}</b> faulted</li>

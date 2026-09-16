@@ -1,21 +1,38 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { type Validator, shortBech, utc, ago, enoughToRank, fmtCount, MIN_RATED } from "@/lib/api";
+import { type Validator, shortBech, utc, ago, enoughToRank, fmtCount, fmtRate, MIN_RATED } from "@/lib/api";
 import RateCell from "./Rate";
 import { Count, Mark } from "./Verdict";
 
 /**
- * Eight columns here; the rest are on the validator's own page. The previous
+ * Seven columns here; the rest are on the validator's own page. The previous
  * table carried thirteen and measured 1,638px inside a 1,128px column, which
  * put the serve rate and the fault count — the two numbers this product exists
  * to publish — behind a horizontal scroll on a laptop. They are now columns two
  * and three, immediately beside the pinned identity column, so no viewport can
  * hide them.
  *
- * One column is gone rather than moved: "Tolerated" was always zero. TOLERATED
- * is a grace-phase class and every rate query filters phase = 'in_window', so
- * the count could never be anything else.
+ * Three columns are gone rather than moved.
+ *
+ * "Tolerated" was always zero: TOLERATED is a grace-phase class and every rate
+ * query filters phase = 'in_window', so the count could never be anything else.
+ *
+ * "Unattested" was a probe count, and an obligation is probed at four schedule
+ * points, so it read four times larger than the thing it described. An
+ * operator looking at "812" beside their own name reads an accusation; the
+ * true statement was "203 blobs carried no signature from you", which is not
+ * an accusation at all — the publisher stops collecting signatures at two
+ * thirds of voting power, and everyone past that point is left unproven by
+ * design. It belongs in the methodology, and the Obligation column already
+ * carries the fact with the blob counts in its tooltip.
+ *
+ * "Unreachable" was also a probe count, and only over windows the validator
+ * happened to be assigned something in. Uptime replaces it: the heartbeat
+ * samples every registered endpoint every ten minutes whether or not it was
+ * assigned anything, so it answers "is the Fibre service running" with
+ * coverage that does not depend on attestation. That is the question the
+ * table exists for.
  */
 
 // Rank by how bad the evidence is, not by whether any bad evidence exists. A
@@ -26,7 +43,15 @@ function severity(v: Validator): number {
   if (faults > 0 && enoughToRank(v.serve_rate)) return 0;
   if (faults > 0) return 1; // real faults, but too little evidence to rate
   if (v.reachable === false) return 2;
-  if ((v.classes.UNREACHABLE ?? 0) > 0) return 3;
+  // An endpoint that answers with a certificate its consensus key does not
+  // endorse is as unusable to a client as one that does not answer, and
+  // nothing in the serve rate says so: the publisher could not upload to it
+  // either, so it is never proven to owe anything and its rate stays empty.
+  if (v.identity_status === "mismatch" || v.identity_status === "no_tls") return 2;
+  // A service that was down, or unendorsed, for part of the window ranks above
+  // one that was neither, whether or not it was assigned anything then.
+  if (v.reachability_window?.den > 0 && (v.reachability_window.value ?? 1) < 1) return 3;
+  if (v.identity_rate_window?.den > 0 && (v.identity_rate_window.value ?? 1) < 1) return 3;
   if (v.probe_count === 0) return 5;
   return 4;
 }
@@ -46,10 +71,53 @@ function attested(v: Validator): { text: string; cls: string; title: string } {
     return { text: "proven", cls: "", title: "The newest publication carries this validator's signature, verified against its consensus key. A Fibre server writes the shard before it signs, so that signature is proof of storage." };
   }
   if (v.attested_last === false) {
-    const n = v.attestation?.unattested_probes ?? 0;
-    return { text: "unproven", cls: "muted", title: `The newest publication carries no verified signature from this validator, so nothing on chain proves it stored that shard. The publisher stops collecting signatures once it has a safe quorum, so this is silence, not absence.${n ? ` ${n} probes in this window are held out of the serve rate for that reason.` : ""}` };
+    const n = v.attestation?.unattested_blobs ?? 0;
+    return { text: "unproven", cls: "muted", title: `The newest publication carries no verified signature from this validator, so nothing on chain proves it stored that shard. The publisher stops collecting signatures once two thirds of voting power has answered, and everyone past that point is left unproven by design, so this is silence rather than absence.${n ? ` ${n} blob${n === 1 ? "" : "s"} in this window are outside the serve rate for that reason, in both directions.` : ""}` };
   }
   return { text: "—", cls: "faint", title: "No publication with attestation recorded for this validator yet." };
+}
+
+/**
+ * Uptime: how often this site completed a TLS conversation with the endpoint
+ * over the window, from the heartbeat that runs every ten minutes for every
+ * registered validator.
+ *
+ * Deliberately not RateCell. That component draws a 95% upper bound on the
+ * FAULT rate, because a serve rate is published as an accusation and an
+ * accusation is stated in the direction it accuses. Uptime is not an
+ * accusation: half of every path measured here is this site's own, and a
+ * confidence bound drawn around it would dress a statement about a route as a
+ * statement about an operator. So it shows the figure and the sample it rests
+ * on, and nothing more.
+ */
+function Uptime({ v }: { v: Validator }) {
+  const r = v.reachability_window;
+  if (!r || r.den === 0) return <span className="nil" title="no heartbeat for this endpoint in this window">·</span>;
+  return (
+    <span className="rate">
+      <span className="v">{fmtRate(r)}</span>
+      <span className="n">{enoughToRank(r) ? `${r.den.toLocaleString("en-US")} checks` : "under floor"}</span>
+    </span>
+  );
+}
+
+function uptimeTitle(v: Validator): string {
+  const r = v.reachability_window;
+  if (!r || r.den === 0) {
+    return v.host
+      ? "No reachability heartbeat has completed for this endpoint in this window."
+      : "No Fibre host registered in x/valaddr, so there is nothing to reach.";
+  }
+  const id = v.identity_rate_window;
+  const parts = [
+    `${fmtCount(r)} heartbeats completed TLS. Every registered endpoint is checked every ten minutes, whether or not it was assigned anything, so this figure does not depend on the chain proving an obligation.`,
+  ];
+  if (id && id.den > 0 && id.num < id.den) {
+    parts.push(`On ${(id.den - id.num).toLocaleString("en-US")} of those the certificate was not endorsed by this validator's consensus key, so a client would have refused it.`);
+  }
+  if (v.last_unreachable_at) parts.push(`Last failed heartbeat ${utc(v.last_unreachable_at)}.`);
+  parts.push("Half of every path measured here is this site's own, so a dip is not by itself a statement about the operator.");
+  return parts.join(" ");
 }
 
 // The state word on the identity line, so a reader learns the endpoint's
@@ -144,8 +212,7 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
               <th className="col-pin">Validator</th>
               <th className="right">Serve rate</th>
               <th className="right">Fault</th>
-              <th className="right">Unreachable</th>
-              <th className="right">Unattested</th>
+              <th className="right">Uptime</th>
               <th>Obligation</th>
               <th className="right">Voting power</th>
               <th className="right">Last probe</th>
@@ -153,7 +220,7 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr><td colSpan={8} className="muted">
+              <tr><td colSpan={7} className="muted">
                 {rows.length === 0
                   ? "No validators seen yet: no registered Fibre endpoint and no probe."
                   : `No validator matches “${q}”. Try the consensus address or the Fibre host.`}
@@ -183,11 +250,8 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
                   <td className="right" title="Reached, and failed to hand over a shard the chain proves it stored. The only class counted against a validator.">
                     <Count n={v.classes.FAULT} tier="fault" />
                   </td>
-                  <td className="right" title="This site could not complete a conversation with the endpoint while the validator was under obligation. Half of that path is ours, so it is held out of the rate.">
-                    <Count n={v.classes.UNREACHABLE} tier="hold" />
-                  </td>
-                  <td className="right" title="Probes of a settled promise that carries no verified signature from this validator. Nothing proves it was ever sent the shard, so the probe is held out of the rate in both directions.">
-                    <Count n={v.serve_rate_held_out?.UNATTESTED} tier="held" />
+                  <td className="right" title={uptimeTitle(v)}>
+                    <Uptime v={v} />
                   </td>
                   <td className={a.cls} title={a.title}>{a.text}</td>
                   <td className="right mono" title={`${share.toFixed(2)}% of the voting power in this table`}>
