@@ -136,6 +136,19 @@ func main() {
 				_ = st.SetMeta("endpoints_height", itoa(height), now)
 				_ = st.SetMeta("endpoints_registered", itoa(int64(len(provs))), now)
 			}
+			// Validator names, from the chain's own staking module rather
+			// than from an explorer's API. A reader recognises a validator by
+			// the name its operator chose, not by twenty hex characters, and
+			// taking that name from a third-party index would make this
+			// observer depend on somebody else's coverage and terms.
+			if ids, err := chain.ValidatorIdentities(ctx); err != nil {
+				log.Printf("validator identities: %v", err)
+			} else if n, err := st.UpsertValidatorIdentities(ids, now); err != nil {
+				log.Printf("validator identities: store: %v", err)
+			} else if n > 0 {
+				log.Printf("validator identities: %d of %d stored", n, len(ids))
+				_ = st.SetMeta("validator_identities", itoa(int64(n)), now)
+			}
 		}
 		if err := st.Heartbeat(runID, time.Now()); err != nil {
 			log.Printf("heartbeat: %v", err)

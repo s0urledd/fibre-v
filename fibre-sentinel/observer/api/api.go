@@ -805,8 +805,27 @@ func (s *Server) reachabilityNow(ctx context.Context) (map[string]reachState, er
 // ---- validators ----
 
 type validatorRow struct {
-	Address        string  `json:"address"`      // 20-byte consensus address, hex
-	ConsAddress    string  `json:"cons_address"` // celestiavalcons1... when known from the registry
+	Address     string `json:"address"`      // 20-byte consensus address, hex
+	ConsAddress string `json:"cons_address"` // celestiavalcons1... when known from the registry
+	// Moniker is the name the operator set in the staking module, read from
+	// the chain itself. Empty when the chain has no validator at this
+	// consensus address, or before identities have been polled once. A reader
+	// recognises a validator by this, not by twenty hex characters.
+	Moniker string `json:"moniker,omitempty"`
+	// Operator is the celestiavaloper... address, for linking out.
+	Operator string `json:"operator_address,omitempty"`
+	// KeybaseIdentity is the operator's Keybase key suffix when it set one,
+	// which is how an avatar could be resolved later. Deliberately NOT called
+	// "identity": on this row that word already means the TLS consensus-key
+	// binding this observer checks, and the two are unrelated.
+	KeybaseIdentity string `json:"keybase_identity,omitempty"`
+	Website         string `json:"website,omitempty"`
+	// Jailed and BondStatus are the chain's own words about the validator,
+	// unlike everything else on this row, which this observer measured. A
+	// jailed validator still owes the shards it signed for, so these are
+	// shown rather than used to drop anyone from the table.
+	Jailed         bool    `json:"jailed"`
+	BondStatus     string  `json:"bond_status,omitempty"`
 	Host           string  `json:"host"`
 	EndpointSince  *string `json:"endpoint_since"`
 	VotingPower    int64   `json:"voting_power"` // from the latest assignment seen
@@ -1027,6 +1046,33 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			v.LastSeenAt = &at
 		}
 	}
+	// Names from the staking module, joined last so every row that exists by
+	// now gets one. Only validators this observer already has a reason to
+	// show are named: a name on its own is not evidence of anything, and
+	// listing every validator on the chain would bury the ones that
+	// registered a Fibre endpoint.
+	irows, err := db.QueryContext(ctx, `SELECT cons_address, operator_address, moniker, identity, website, jailed, status
+		FROM validator_identities`)
+	if err != nil {
+		return nil, err
+	}
+	for irows.Next() {
+		var addr, op, moniker, identity, website, status string
+		var jailed int
+		if err := irows.Scan(&addr, &op, &moniker, &identity, &website, &jailed, &status); err != nil {
+			irows.Close()
+			return nil, err
+		}
+		if v, ok := byAddr[strings.ToLower(addr)]; ok {
+			v.Moniker, v.Operator, v.KeybaseIdentity, v.Website = moniker, op, identity, website
+			v.Jailed, v.BondStatus = jailed == 1, status
+		}
+	}
+	irows.Close()
+	if err := irows.Err(); err != nil {
+		return nil, err
+	}
+
 	// one observation per (validator, blob): see obligationRate.
 	byObligation := map[string]Rate{}
 	orows, err := db.QueryContext(ctx, `SELECT validator_address,

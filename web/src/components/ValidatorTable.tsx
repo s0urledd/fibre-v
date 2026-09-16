@@ -54,7 +54,12 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<"severity" | "power" | "rate">("severity");
   const needle = q.trim().toLowerCase();
-  let list = rows.filter((v) => !needle || v.address.includes(needle) || v.cons_address.includes(needle) || v.host.toLowerCase().includes(needle));
+  let list = rows.filter((v) => !needle
+    || v.address.includes(needle)
+    || v.cons_address.includes(needle)
+    || (v.moniker ?? "").toLowerCase().includes(needle)
+    || (v.operator_address ?? "").toLowerCase().includes(needle)
+    || v.host.toLowerCase().includes(needle));
   list = [...list].sort((a, b) => {
     if (sort === "power") return b.voting_power - a.voting_power || a.address.localeCompare(b.address);
     if (sort === "rate") return worse(a, b) || b.voting_power - a.voting_power;
@@ -63,7 +68,7 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
   return (
     <>
       <div className="controls">
-        <input type="search" placeholder="consensus address (hex or celestiavalcons…), host" value={q} onChange={(e) => setQ(e.target.value)} aria-label="search validators" />
+        <input type="search" placeholder="moniker, consensus address, operator address, host" value={q} onChange={(e) => setQ(e.target.value)} aria-label="search validators" />
         <span className="muted">sort:</span>
         {(["severity", "power", "rate"] as const).map((s) => (
           <button key={s} className={sort === s ? "on" : ""} onClick={() => setSort(s)}>{s === "severity" ? "worst first" : s === "power" ? "voting power" : "serve rate"}</button>
@@ -95,9 +100,19 @@ export default function ValidatorTable({ rows, caption }: { rows: Validator[]; c
             )}
             {list.map((v) => (
               <tr key={v.address}>
-                <td className="mono">
-                  <Link href={`/validator/?addr=${v.address}`}>{v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 8) + " ••• " + v.address.slice(-8)}</Link>
-                  <div className="faint">{v.address.slice(0, 12)}…</div>
+                <td>
+                  {/* The name the operator chose comes first. A reader knows a
+                      validator as "P-OPS Team", not as twenty hex characters,
+                      and every Celestia explorer they use shows it that way.
+                      The consensus address stays underneath, because it is
+                      the identifier every number on this row is keyed by. */}
+                  <Link href={`/validator/?addr=${v.address}`}>
+                    {v.moniker || (v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 8) + " ••• " + v.address.slice(-8))}
+                  </Link>
+                  {v.jailed && <span className="faint" title="The chain has jailed this validator. It still owes the shards it signed for, so it stays in this table."> jailed</span>}
+                  <div className="faint mono" title={v.cons_address || v.address}>
+                    {v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 12) + "…"}
+                  </div>
                 </td>
                 <td className="mono">{v.host || <span className="muted">— not registered</span>}</td>
                 <td>{v.reachable === null ? <span className="muted">not probed</span> : v.reachable ? "yes" : <span className="err">no</span>}</td>

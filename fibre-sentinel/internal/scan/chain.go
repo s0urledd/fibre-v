@@ -2,6 +2,9 @@ package scan
 
 import (
 	"context"
+	cryptoed25519 "crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +16,10 @@ import (
 	rpcclient "github.com/cometbft/cometbft/rpc/client"
 	rpchttp "github.com/cometbft/cometbft/rpc/client/http"
 	cmttypes "github.com/cometbft/cometbft/types"
+	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
+	"github.com/cosmos/cosmos-sdk/crypto/keys/ed25519"
+	sdkquery "github.com/cosmos/cosmos-sdk/types/query"
+	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
 
 // Chain is a thin, timeout-bounded wrapper over a single CometBFT RPC endpoint.
@@ -201,6 +208,135 @@ func (c *Chain) BondedFibreProviders(parent context.Context) ([]FibreProvider, e
 		out = append(out, FibreProvider{ConsAddressBech32: p.ValidatorConsensusAddress, Host: p.Info.Host})
 	}
 	return out, nil
+}
+
+// ValidatorIdentity is what the staking module says about one validator:
+// the name its operator chose and the facts a reader needs to recognise it.
+//
+// It is read from the chain, not from an explorer's API. An observer whose
+// validator names come from somebody else's index is that much less
+// independent, and it inherits that index's rate limits, attribution terms
+// and coverage. The staking module carries all of this already, on every
+// Cosmos chain, including the networks a third-party indexer has not got
+// round to.
+type ValidatorIdentity struct {
+	// ConsAddressHex is the 20-byte consensus address, lower-case hex. It is
+	// derived here from the validator's consensus public key so that it joins
+	// directly against the address every probe row and assignment already
+	// uses, with no bech32 round trip.
+	ConsAddressHex string
+	// OperatorAddress is the celestiavaloper... form, for linking out.
+	OperatorAddress string
+	Moniker         string
+	// Identity is the operator's Keybase key suffix, when it set one. It is
+	// how an avatar could be looked up later; it is not needed for a name.
+	Identity string
+	Website  string
+	// Tokens is the staked amount as the chain reports it, and Jailed says
+	// whether the validator is currently jailed. Both are the chain's own
+	// words about the validator, unlike anything this observer measures.
+	Tokens string
+	Jailed bool
+	// Status is BOND_STATUS_BONDED, _UNBONDING or _UNBONDED. A validator that
+	// is not bonded still owes the shards it signed for, so this is shown
+	// rather than used to filter anyone out.
+	Status string
+}
+
+// ValidatorIdentities returns every validator the staking module knows,
+// bonded or not, paging until the set is complete.
+//
+// Unbonded and jailed validators are deliberately included. A validator's
+// Fibre obligation comes from the promise it signed, which outlives its
+// bonding, and dropping it here would hide exactly the validator whose row a
+// reader is most likely to be looking for.
+func (c *Chain) ValidatorIdentities(parent context.Context) ([]ValidatorIdentity, error) {
+	var out []ValidatorIdentity
+	var nextKey []byte
+	for page := 0; ; page++ {
+		if page > 64 {
+			return nil, fmt.Errorf("validator identities: more than 64 pages; refusing to keep paging")
+		}
+		batch, key, err := c.validatorIdentityPage(parent, nextKey)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, batch...)
+		if len(key) == 0 {
+			return out, nil
+		}
+		nextKey = key
+	}
+}
+
+func (c *Chain) validatorIdentityPage(parent context.Context, key []byte) ([]ValidatorIdentity, []byte, error) {
+	ctx, cancel := c.ctx(parent)
+	defer cancel()
+
+	req := stakingtypes.QueryValidatorsRequest{
+		Pagination: &sdkquery.PageRequest{Key: key, Limit: 200},
+	}
+	data, err := req.Marshal()
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal validators request: %w", err)
+	}
+	res, err := c.rpc.ABCIQueryWithOptions(ctx, "/cosmos.staking.v1beta1.Query/Validators", cmtbytes.HexBytes(data), rpcclient.ABCIQueryOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("abci query validators: %w", err)
+	}
+	if res.Response.Code != 0 {
+		return nil, nil, fmt.Errorf("abci query validators: code=%d log=%s", res.Response.Code, res.Response.Log)
+	}
+	var resp stakingtypes.QueryValidatorsResponse
+	if err := resp.Unmarshal(res.Response.Value); err != nil {
+		return nil, nil, fmt.Errorf("unmarshal validators response: %w", err)
+	}
+
+	out := make([]ValidatorIdentity, 0, len(resp.Validators))
+	for _, v := range resp.Validators {
+		id := ValidatorIdentity{
+			OperatorAddress: v.OperatorAddress,
+			Moniker:         v.Description.Moniker,
+			Identity:        v.Description.Identity,
+			Website:         v.Description.Website,
+			Tokens:          v.Tokens.String(),
+			Jailed:          v.Jailed,
+			Status:          v.Status.String(),
+		}
+		if addr, err := consAddressFromAny(v.ConsensusPubkey); err == nil {
+			id.ConsAddressHex = addr
+		} else if c.log != nil {
+			// A validator whose key this build cannot parse still belongs in
+			// the list; it simply cannot be joined to a probe row, and a
+			// silent drop would look like the validator not existing.
+			c.log.Printf("validator %s: consensus key: %v", v.OperatorAddress, err)
+		}
+		out = append(out, id)
+	}
+	var next []byte
+	if resp.Pagination != nil {
+		next = resp.Pagination.NextKey
+	}
+	return out, next, nil
+}
+
+// consAddressFromAny derives the 20-byte consensus address from a validator's
+// consensus public key, the same way CometBFT does: the first 20 bytes of the
+// SHA-256 of the raw ed25519 key. Deriving it here means the staking view and
+// the probe rows share one identifier with no bech32 conversion in between.
+func consAddressFromAny(pk *codectypes.Any) (string, error) {
+	if pk == nil {
+		return "", fmt.Errorf("no consensus public key")
+	}
+	var key ed25519.PubKey
+	if err := key.Unmarshal(pk.Value); err != nil {
+		return "", fmt.Errorf("unmarshal consensus key: %w", err)
+	}
+	if len(key.Key) != cryptoed25519.PublicKeySize {
+		return "", fmt.Errorf("consensus key is %d bytes, want %d", len(key.Key), cryptoed25519.PublicKeySize)
+	}
+	sum := sha256.Sum256(key.Key)
+	return strings.ToLower(hex.EncodeToString(sum[:20])), nil
 }
 
 // ChainID returns the network id from /status.

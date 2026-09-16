@@ -102,6 +102,14 @@ export type Reconstructable = {
 export type Validator = {
   address: string;
   cons_address: string;
+  /** the name the operator set in the staking module, read from the chain */
+  moniker?: string;
+  operator_address?: string;
+  keybase_identity?: string;
+  website?: string;
+  /** the chain's own words about the validator, unlike everything we measure */
+  jailed: boolean;
+  bond_status?: string;
   host: string;
   endpoint_since: string | null;
   voting_power: number;
