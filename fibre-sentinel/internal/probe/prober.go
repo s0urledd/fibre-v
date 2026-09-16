@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	celfibre "github.com/celestiaorg/celestia-app/v10/fibre"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 )
 
@@ -120,6 +121,10 @@ type Prober struct {
 	// complete marks (vantage, promise, point) slots every target of which
 	// has a row; plan skips them without resolving targets again.
 	complete map[string]bool
+	// sweep counts runDue calls, and rotates the order work is dispatched in
+	// so a sweep that runs out of time does not drop the same validators each
+	// cycle.
+	sweep uint64
 	// skippedPubs are publications logged once as not probeable (wrong chain,
 	// failed settlement tx).
 	skippedPubs map[string]bool
@@ -233,6 +238,10 @@ func (p *Prober) Run(parent context.Context) error {
 		for _, h := range finished {
 			p.feed.forget(h)
 			p.store.Forget(h)
+			if p.cfg.Policy != nil {
+				p.cfg.Policy.Forget(h)
+			}
+			p.forgetPoints(h)
 		}
 
 		if len(due) > 0 {
@@ -336,6 +345,15 @@ type Policy interface {
 	BeforeProbe(pub scan.Publication, t Target, now time.Time) (allow, skipDownload bool, reason string)
 	// AfterProbe accounts the bytes and requests a probe consumed.
 	AfterProbe(pub scan.Publication, m Measurement)
+	// SamplingFor reports what this publication's admission decision was made
+	// with, so every row can carry it and the sample can be audited after the
+	// day secret is revealed.
+	SamplingFor(pub scan.Publication) (prob float64, binding, commitment string)
+	// Forget releases whatever the policy holds for a publication whose
+	// schedule is finished. Without it the sticky admit/deny map grows for
+	// the life of the process and its bound is reached by history rather
+	// than by how many publications are actually in flight.
+	Forget(promiseHash string)
 }
 
 // skipped is a slot the policy decided not to probe.
@@ -473,7 +491,15 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 			continue
 		}
 		var commitment [32]byte
-		cb, _ := hex.DecodeString(pub.Promise.Commitment)
+		cb, cerr := hex.DecodeString(pub.Promise.Commitment)
+		if cerr != nil || len(cb) != len(commitment) {
+			// The resolver checks this too, so today this cannot fire. A
+			// zero commitment would ask every validator for a blob nobody
+			// has and publish the whole set as failing, which is too bad an
+			// outcome to leave guarded only by a check somewhere else.
+			p.log.Printf("publication %s: commitment %q is not 32 hex bytes; skipping", short(ph), pub.Promise.Commitment)
+			continue
+		}
 		copy(commitment[:], cb)
 
 		for _, j := range jobs {
@@ -493,6 +519,14 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 	if len(items) == 0 {
 		return 0
 	}
+	// Targets come out of the resolver in validator-set order, and a sweep
+	// that runs out of time drops whatever is left. Probing in that order
+	// every cycle took the coverage from the same validators every time — the
+	// tail of the set by voting power — so their published rates rested on
+	// systematically less evidence than everyone else's, and nothing said so.
+	// A per-cycle rotation spreads the loss instead of concentrating it.
+	rotateItems(items, p.sweep)
+	p.sweep++
 
 	var (
 		mu       sync.Mutex
@@ -568,6 +602,7 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 		PruneTolerance:     p.schedCfg().PruneTolerance,
 		SkipDownload:       skipDL,
 		ExpectedShardBytes: ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, t.RowCount),
+		MaxMessageSize:     maxMessageSizeFor(pub.Assignment.ProtocolParams),
 		ClockOffsetMS:      p.clockOffsetMS(),
 	}
 
@@ -582,6 +617,7 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 	}
 	lock.Unlock()
 
+	p.stampSampling(&m, pub)
 	if err := p.store.Append(m); err != nil {
 		p.log.Fatalf("append measurement: %v", err)
 	}
@@ -600,11 +636,22 @@ func (p *Prober) recordNotProbed(ctx context.Context, j job, reason string) {
 	key := pointKey(p.cfg.Vantage, pub.PromiseHash, j.point.At)
 	targets, err := p.resolver.TargetsFor(ctx, pub, p.cfg.IncludeUnassigned)
 	if err != nil {
-		// No targets, so no per-validator row can be written. The point is
-		// marked handled in memory and ages past the backfill horizon on a
-		// restart; a row with no validator address would only be a record
-		// nothing downstream can attribute.
-		p.log.Printf("not-probed %s %s: targets unresolved: %v (%s)", short(pub.PromiseHash), j.point.Label, err, reason)
+		// The chain call failed, but the publication record already names
+		// every assigned validator and its row count, so a row per validator
+		// can still be written without touching the chain. Writing nothing
+		// made the publication disappear: no probe row, and no gap counter
+		// moved either, so a reader saw a clean window with no sign that a
+		// whole publication had gone unobserved.
+		p.log.Printf("not-probed %s %s: targets unresolved: %v (%s); recording from the publication record instead",
+			short(pub.PromiseHash), j.point.Label, err, reason)
+		for _, v := range pub.Assignment.Validators {
+			p.recordNotProbedTarget(pub, j.point, Target{
+				AddressHex: v.Address,
+				Assigned:   v.RowCount > 0,
+				Attested:   v.Attested,
+				RowCount:   v.RowCount,
+			}, reason+"; targets could not be resolved: "+err.Error())
+		}
 		p.complete[key] = true
 		return
 	}
@@ -624,17 +671,29 @@ func (p *Prober) recordNotProbedTarget(pub scan.Publication, pt SchedulePoint, t
 		PromiseHash: pub.PromiseHash, Commitment: pub.Promise.Commitment,
 		BlobVersion: pub.Promise.BlobVersion, MustServeUntil: pub.MustServeUntil,
 		ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
-		ValidatorAddress:   t.AddressHex, ValidatorHost: t.Host,
-		Assigned: t.Assigned, AssignedRowCount: t.RowCount,
+		ValidatorAddress:   t.AddressHex, ValidatorHost: t.Host, HostSource: t.HostSource,
+		Assigned: t.Assigned, Attested: t.Attested, AssignedRowCount: t.RowCount,
 		ScheduleLabel: pt.Label, ScheduledAt: pt.At.UTC(),
 		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
 		Phase: PhaseAt(pt.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,
 		Classification: ClassNotProbed, ClassificationReason: reason,
 	}
+	p.stampSampling(&m, pub)
 	if err := p.store.AppendDeferred(m); err != nil {
 		p.log.Fatalf("append not-probed measurement: %v", err)
 	}
 	p.logMeasurement(m)
+}
+
+// stampSampling records the admission decision on a row. Without it the
+// commit-and-reveal audit could only be carried out against the publications
+// that were denied, which is the half that needs it least.
+func (p *Prober) stampSampling(m *Measurement, pub scan.Publication) {
+	if p.cfg.Policy == nil {
+		return
+	}
+	prob, binding, commitment := p.cfg.Policy.SamplingFor(pub)
+	m.Sampling = &SamplingDecision{P: prob, Binding: binding, DayCommitment: commitment}
 }
 
 func (p *Prober) logMeasurement(m Measurement) {
@@ -648,6 +707,55 @@ func (p *Prober) logMeasurement(m Measurement) {
 	if m.Classification == ClassFault {
 		p.log.Printf("  FAULT reason: %s | raw: %s", m.ClassificationReason, truncate(m.RawError, 160))
 	}
+}
+
+// maxMessageSizeFor returns the gRPC receive bound implied by a publication's
+// own recorded protocol params, so a blob encoded under params this binary was
+// not built against is still judged rather than refused by our own limit.
+// It mirrors celestia-app's ProtocolParams.MaxMessageSize.
+func maxMessageSizeFor(pp scan.ProtocolParamsSnapshot) int {
+	if pp.TotalRows <= 0 || pp.OriginalRows <= 0 {
+		return 0 // fall back to the pinned defaults
+	}
+	celPP := celfibre.DefaultProtocolParams
+	celPP.Rows = pp.OriginalRows
+	celPP.EncodingRatio = float64(pp.OriginalRows) / float64(pp.TotalRows)
+	if got := celPP.MaxMessageSize(); got > 0 {
+		return got
+	}
+	return 0
+}
+
+// forgetPoints drops the per-point "every target recorded" markers for a
+// publication whose schedule is over. The map was only ever added to, at six
+// call sites, so a long-running vantage grew one entry per publication per
+// schedule point for as long as the process lived — while the two maps beside
+// it were already being released here.
+func (p *Prober) forgetPoints(promiseHash string) {
+	prefix := p.cfg.Vantage + "|" + promiseHash + "|"
+	for k := range p.complete {
+		if strings.HasPrefix(k, prefix) {
+			delete(p.complete, k)
+		}
+	}
+}
+
+// rotateItems rotates the work list by a per-sweep offset, keeping each
+// publication's points together so the schedule still runs in order within a
+// blob. It is a rotation rather than a shuffle so the order stays
+// reproducible from the sweep number alone.
+func rotateItems(items []work, sweep uint64) {
+	if len(items) < 2 {
+		return
+	}
+	off := int(sweep % uint64(len(items)))
+	if off == 0 {
+		return
+	}
+	rotated := make([]work, 0, len(items))
+	rotated = append(rotated, items[off:]...)
+	rotated = append(rotated, items[:off]...)
+	copy(items, rotated)
 }
 
 func short(s string) string {
@@ -714,7 +822,11 @@ func retryOnce(ctx context.Context, in Input, coder *Coder, to StepTimeouts, fir
 		FirstDurationMS: first.TotalDurationMS,
 	}
 	if m.Outcome == first.Outcome {
-		m.ClassificationReason += "; persisted across a retry after " + delay.String()
+		// Deliberately not "persisted": the retry goes back to the same
+		// address from the same vantage, so a repeat is one observation
+		// twice, not two agreeing observations. Only a second vantage could
+		// corroborate, and there is not one.
+		m.ClassificationReason += "; same vantage and address, retried after " + delay.String()
 	} else {
 		m.ClassificationReason += "; first attempt " + string(first.Outcome) + ", retried after " + delay.String()
 	}

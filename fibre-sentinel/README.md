@@ -184,20 +184,41 @@ download that started and then ran out of time is not retried.
 ### Error-class taxonomy
 
 Classification is a fact about one probe (given whether the validator is
-assigned this shard and which phase the probe's *actual start time* falls in),
-never an aggregate:
+assigned this shard, whether the settled promise *proves* it stored the shard,
+and which phase the probe's *actual start time* falls in), never an aggregate:
 
-| assigned | phase | outcome | classification |
-|---|---|---|---|
-| yes | in-window (`t < must_serve_until`) | `NOT_FOUND` / unreachable / bad identity / wrong or invalid rows | **FAULT** |
-| yes | in-window | `SERVED_OK` | **HEALTHY** |
-| yes | grace (`msu` … `msu + prune-tolerance`) | `NOT_FOUND` / unreachable | **TOLERATED** |
-| yes | post (`> msu + prune-tolerance`) | `NOT_FOUND` | **EXPECTED_GONE** |
-| yes | post | unreachable | **UNREACHABLE_POST_WINDOW** (not a fault; obligation over) |
-| yes | post | `SERVED_OK` | **SERVED_PAST_WINDOW** (fine; affects disk accounting) |
-| no | any | `NOT_FOUND` | **EXPECTED_UNASSIGNED** |
-| no | any | `SERVED_OK` | **SERVING_UNASSIGNED** (flagged for review) |
-| any | any | probe could not run / slot elapsed | **PROBE_ERROR** / **NOT_PROBED** |
+| assigned | attested | phase | outcome | classification |
+|---|---|---|---|---|
+| yes | no | any | any | **UNATTESTED** (no proof this validator ever stored the shard; outside every rate, in both directions) |
+| yes | yes | in-window (`t < must_serve_until`) | `NOT_FOUND` / `INVALID_ROWS` / `SERVER_ERROR` / wrong key | **FAULT** (reached, and it did not serve what it holds) |
+| yes | yes | in-window | `DNS_FAIL` / `TCP_*` / `TLS_HANDSHAKE_FAIL` / `RPC_UNAVAILABLE` / `RPC_ERROR` | **UNREACHABLE** (not a fault: from one vantage this is our path too) |
+| yes | yes | any | `NO_REGISTERED_HOST` | **NOT_REGISTERED** (jailing and unbonding drop the bonded entry) |
+| yes | yes | any | `WRONG_ROWS` / `PARTIAL` whose rows verify against the commitment | **SHADOWED_SHARD** (another promise over the same blob answered) |
+| yes | yes | any | lapsed but correctly signed certificate | **IDENTITY_EXPIRED** (a late renewal, not impersonation) |
+| yes | yes | in-window | `SERVED_OK` | **HEALTHY** |
+| yes | yes | grace (`msu` … `msu + prune-tolerance`) | `NOT_FOUND` / unreachable | **TOLERATED** |
+| yes | yes | post (`> msu + prune-tolerance`) | `NOT_FOUND` | **EXPECTED_GONE** |
+| yes | yes | post | unreachable | **UNREACHABLE_POST_WINDOW** (not a fault; obligation over) |
+| yes | yes | post | `WRONG_ROWS` | **SERVED_PAST_WINDOW** (`DownloadShard` enforces no assignment) |
+| yes | yes | post | `SERVED_OK` | **SERVED_PAST_WINDOW** (fine; affects disk accounting) |
+| no | — | any | `NOT_FOUND` | **EXPECTED_UNASSIGNED** |
+| no | — | any | `SERVED_OK` | **SERVING_UNASSIGNED** (flagged for review) |
+| any | — | any | probe could not run / slot elapsed | **PROBE_ERROR** / **NOT_PROBED** |
+
+A **fault** is the only thing said against a validator, and it means both
+halves of one sentence: the observer *reached* it, and it failed to hand over
+a shard the chain *proves* it stored. Anything short of that has its own class
+and stays out of the serve rate in both directions. The rate's population is
+in-window probes only; a grace probe can only ever add HEALTHY, so counting
+grace rewarded over-retention instead of measuring retention.
+
+"Attested" means the observer verified a signature from that validator over the
+settled promise against its consensus key. A Fibre server writes the shard to
+its store before it signs, so a verified signature proves storage. The absence
+of one does not prove the opposite: the publisher stops collecting signatures at
+the safety threshold and keeps delivering in the background, so absence means
+*unproven*. `internal/scan/attest.go` explains why the observer verifies rather
+than counting the entries the transaction carries.
 
 ### Load shape
 

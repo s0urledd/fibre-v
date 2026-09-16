@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,14 +17,32 @@ import (
 
 // Target is one validator to probe for a given publication.
 type Target struct {
-	Address      assign.Address // 20-byte consensus address
-	AddressHex   string
-	PubKey       ed25519.PublicKey // consensus key, for the TLS identity check
-	Host         string            // host:port registered in x/valaddr (may be "")
-	VotingPower  int64
-	Assigned     bool
+	Address     assign.Address // 20-byte consensus address
+	AddressHex  string
+	PubKey      ed25519.PublicKey // consensus key, for the TLS identity check
+	Host        string            // host:port registered in x/valaddr (may be "")
+	VotingPower int64
+	Assigned    bool
+	// Attested mirrors the publication's per-validator attestation: the
+	// settled promise carries a signature from this validator that verified
+	// against its consensus key. Only an attested validator is provably under
+	// the retention obligation for this blob.
+	Attested     bool
 	AssignedRows []int // recomputed by fibre-assign; empty if unassigned
 	RowCount     int
+
+	// HostSource says where Host came from. "bonded" means the validator is
+	// in AllBondedFibreProviders right now. "last_known" means it is not, but
+	// this observer saw it register that host earlier and is still probing
+	// it: jailing and unbonding drop a provider from the bonded list while
+	// the chain keeps its x/valaddr entry for the jailed grace period, and a
+	// validator's retention obligation comes from the promise it signed, not
+	// from its bonding status. Dropping it would stop collecting evidence
+	// about a server that may well still be serving. "" means no host was
+	// ever seen for this validator.
+	HostSource string
+	// HostSeenAt is when the registry entry behind Host was last confirmed.
+	HostSeenAt time.Time
 }
 
 // Resolver turns a publication into probe targets: it fetches the validator set
@@ -36,10 +55,25 @@ type Resolver struct {
 	mu            sync.Mutex
 	hostCacheAt   time.Time
 	hostCacheTTL  time.Duration
-	hostByConsHex map[string]string // 20-byte hex -> host:port
+	hostByConsHex map[string]string // 20-byte hex -> host:port, bonded only
+	// lastKnown keeps the newest host this observer ever saw for a validator,
+	// with the time it was last confirmed. It is the fallback when a
+	// validator leaves the bonded set, which happens on every jailing and
+	// every unbonding without the validator doing anything to its Fibre
+	// service.
+	lastKnown map[string]knownHost
 
 	valSetCache map[int64][]scan.ValSetMember
 }
+
+type knownHost struct {
+	host string
+	at   time.Time
+}
+
+// maxLastKnownHosts bounds the fallback map. It is one entry per validator
+// that has ever registered, which is small, but it must still be bounded.
+const maxLastKnownHosts = 4096
 
 // maxValSetCache bounds the per-height validator-set cache; publications
 // arrive at many distinct heights and the map would otherwise grow for the
@@ -55,6 +89,7 @@ func NewResolver(chain *scan.Chain, hostCacheTTL time.Duration) *Resolver {
 		chain:        chain,
 		hostCacheTTL: hostCacheTTL,
 		valSetCache:  map[int64][]scan.ValSetMember{},
+		lastKnown:    map[string]knownHost{},
 	}
 }
 
@@ -68,21 +103,74 @@ func (r *Resolver) hostMap(ctx context.Context) (map[string]string, error) {
 	providers, err := r.chain.BondedFibreProviders(ctx)
 	if err != nil {
 		if r.hostByConsHex != nil {
-			return r.hostByConsHex, nil // serve stale rather than fail a probe
+			// Serve stale rather than fail a probe. The staleness is bounded
+			// and every target carries the time behind its host, so a probe
+			// taken against an old registry says so rather than looking like
+			// a fresh observation.
+			return r.hostByConsHex, nil
 		}
 		return nil, err
 	}
+	now := time.Now()
 	m := make(map[string]string, len(providers))
 	for _, p := range providers {
 		_, raw, err := bech32.DecodeAndConvert(p.ConsAddressBech32)
 		if err != nil {
 			continue
 		}
-		m[strings.ToLower(hex.EncodeToString(raw))] = p.Host
+		key := strings.ToLower(hex.EncodeToString(raw))
+		m[key] = p.Host
+		r.lastKnown[key] = knownHost{host: p.Host, at: now}
 	}
+	r.evictLastKnown()
 	r.hostByConsHex = m
-	r.hostCacheAt = time.Now()
+	r.hostCacheAt = now
 	return m, nil
+}
+
+// evictLastKnown keeps the fallback map bounded, dropping the entries
+// confirmed longest ago first. Emptying it wholesale would throw away exactly
+// the validators that have been gone longest, which are the ones the fallback
+// exists for.
+func (r *Resolver) evictLastKnown() {
+	if len(r.lastKnown) <= maxLastKnownHosts {
+		return
+	}
+	type ent struct {
+		key string
+		at  time.Time
+	}
+	all := make([]ent, 0, len(r.lastKnown))
+	for k, v := range r.lastKnown {
+		all = append(all, ent{k, v.at})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].at.Equal(all[j].at) {
+			return all[i].key < all[j].key
+		}
+		return all[i].at.Before(all[j].at)
+	})
+	for i := 0; i < len(all)-maxLastKnownHosts; i++ {
+		delete(r.lastKnown, all[i].key)
+	}
+}
+
+// hostFor resolves one validator's host, preferring the bonded registry and
+// falling back to the last host this observer saw it register.
+func (r *Resolver) hostFor(bonded map[string]string, addrHex string) (host, source string, at time.Time) {
+	if h, ok := bonded[addrHex]; ok && h != "" {
+		r.mu.Lock()
+		seen := r.lastKnown[addrHex].at
+		r.mu.Unlock()
+		return h, "bonded", seen
+	}
+	r.mu.Lock()
+	k, ok := r.lastKnown[addrHex]
+	r.mu.Unlock()
+	if ok && k.host != "" {
+		return k.host, "last_known", k.at
+	}
+	return "", "", time.Time{}
 }
 
 func (r *Resolver) validatorSet(ctx context.Context, height int64) ([]scan.ValSetMember, error) {
@@ -98,10 +186,20 @@ func (r *Resolver) validatorSet(ctx context.Context, height int64) ([]scan.ValSe
 		return nil, err
 	}
 	r.mu.Lock()
-	if len(r.valSetCache) >= maxValSetCache {
-		r.valSetCache = map[int64][]scan.ValSetMember{} // bounded: one entry per promise height otherwise
-	}
 	r.valSetCache[height] = v
+	if len(r.valSetCache) > maxValSetCache {
+		// Evict the lowest heights, which belong to the oldest publications.
+		// Emptying the map instead cost a full round trip for every height
+		// still in flight, at the moment the process was busiest.
+		heights := make([]int64, 0, len(r.valSetCache))
+		for h := range r.valSetCache {
+			heights = append(heights, h)
+		}
+		sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+		for i := 0; i < len(heights)-maxValSetCache; i++ {
+			delete(r.valSetCache, heights[i])
+		}
+	}
 	r.mu.Unlock()
 	return v, nil
 }
@@ -156,15 +254,22 @@ func (r *Resolver) TargetsFor(ctx context.Context, p scan.Publication, includeUn
 		return nil, fmt.Errorf("recompute assignment: %w", err)
 	}
 
-	// cross-check recomputed counts against the record.
+	// cross-check recomputed counts against the record, and carry the
+	// scanner's per-validator attestation across: the observer verified those
+	// signatures once, at scan time, against the consensus keys at the promise
+	// height, and the result is part of the record.
 	recByAddr := map[string]int{}
 	for a, rows := range sm {
 		recByAddr[a.String()] = len(rows)
 	}
+	attestedByAddr := map[string]bool{}
 	for _, v := range p.Assignment.Validators {
 		if recByAddr[v.Address] != v.RowCount {
 			return nil, fmt.Errorf("assignment mismatch for %s: record says %d rows, recompute says %d — record and chain disagree",
 				v.Address, v.RowCount, recByAddr[v.Address])
+		}
+		if v.Attested {
+			attestedByAddr[strings.ToLower(v.Address)] = true
 		}
 	}
 
@@ -176,13 +281,17 @@ func (r *Resolver) TargetsFor(ctx context.Context, p scan.Publication, includeUn
 			continue
 		}
 		addrHex := v.Address.String()
+		host, source, seenAt := r.hostFor(hosts, addrHex)
 		out = append(out, Target{
 			Address:      v.Address,
 			AddressHex:   addrHex,
 			PubKey:       pubByAddr[v.Address],
-			Host:         hosts[addrHex],
+			Host:         host,
+			HostSource:   source,
+			HostSeenAt:   seenAt,
 			VotingPower:  powerByAddr[v.Address],
 			Assigned:     assigned,
+			Attested:     attestedByAddr[strings.ToLower(addrHex)],
 			AssignedRows: append([]int(nil), rows...),
 			RowCount:     len(rows),
 		})

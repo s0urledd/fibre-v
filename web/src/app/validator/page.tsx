@@ -33,9 +33,19 @@ function Page() {
       </dl>
 
       <h2>Serve rate</h2>
+      {v.attestation && (v.attestation.unattested_probes > 0 || v.attestation.unknown_probes > 0) && (
+        <div className="notice">
+          <strong>{v.attestation.unattested_probes.toLocaleString("en-US")} of this validator&rsquo;s probes are outside the rates below.</strong>{" "}
+          A validator only owes a shard it stored, and the only on-chain proof it stored one is a signature on the settled promise
+          that this observer verified against its consensus key. Where that proof is missing the probe is recorded as
+          <em> unattested</em> and excluded in both directions, so a failure it was never proven to owe cannot count against it and a
+          success it was never proven to owe cannot count for it.
+          {v.attestation.unknown_probes > 0 && <> {v.attestation.unknown_probes.toLocaleString("en-US")} further probes predate signature verification and are counted under the older rules.</>}
+        </div>
+      )}
       <div className="tablewrap">
         <table>
-          <caption>healthy / (healthy + fault) over assigned probes in the in-window and grace phases. Tolerated, expected gone and not probed are listed, never folded in.</caption>
+          <caption>healthy / (healthy + fault) over assigned probes in the in-window and grace phases whose obligation the promise proves. Tolerated, unattested, expected gone and not probed are listed, never folded in.</caption>
           <thead><tr><th>window</th><th className="right">serve rate</th><th className="right">probes</th><th>verdicts</th></tr></thead>
           <tbody>
             {data.windows.map((w) => (
@@ -64,7 +74,15 @@ function Page() {
                 <td className="mono">{p.schedule_label}</td>
                 <td>{p.phase.replace("_", " ")}</td>
                 <td><Badge cls={p.classification} title={p.classification_reason} /></td>
-                <td className="mono">{p.outcome}</td>
+                <td className="mono">
+                  {p.outcome}
+                  {p.attested === false && <span className="muted" title="No verified signature on this promise, so the obligation is unproven and this probe is outside the serve rate."> (unproven)</span>}
+                  {p.retry_first_outcome && (
+                    <span className="faint" title={`The first attempt was ${p.retry_first_outcome}. The retry went to the same address from the same vantage, so a repeat is one observation twice, not two that agree.`}>
+                      {" "}(retried after {p.retry_first_outcome})
+                    </span>
+                  )}
+                </td>
                 <td className="right mono">{p.rows_expected ? `${p.rows_returned}/${p.rows_expected}` : "—"}</td>
                 <td className="right mono">{p.total_duration_ms}</td>
                 <td className="muted" style={{ whiteSpace: "normal", maxWidth: 360 }}>{p.raw_error || p.classification_reason}</td>

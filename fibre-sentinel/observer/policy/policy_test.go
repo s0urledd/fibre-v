@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -128,11 +129,18 @@ func TestAdmitSamplesWhenGlobalCapBinds(t *testing.T) {
 		}
 	}
 	prob, binding := p.State()
-	if binding != "global_bytes_per_hour" {
-		t.Fatalf("binding cap = %s", binding)
+	// The global DAILY cap binds first, not the hourly one. 600 GiB/day over
+	// 50 GiB/h is twelve hours of headroom, so a load sustained for a full
+	// day runs out of daily budget at half the hourly rate. The sampler has
+	// to see that when it picks p, or the day's later probes get denied one
+	// by one after their publications were already admitted — and because
+	// the schedule is packed toward the deadline, the points lost are the
+	// late in-window and grace ones, which is where a breach shows.
+	if binding != "global_bytes_per_day" {
+		t.Fatalf("binding cap = %s, want the daily cap: it is tighter than the hourly one at sustained load", binding)
 	}
-	if prob > 0.6 || prob < 0.3 {
-		t.Fatalf("p = %.3f, want roughly 0.4", prob)
+	if prob > 0.4 || prob <= 0 {
+		t.Fatalf("p = %.3f, want tighter than the hourly cap's ~0.4", prob)
 	}
 	if admitted == 0 || admitted == 60 {
 		t.Fatalf("admitted %d of 60", admitted)
@@ -250,13 +258,50 @@ func TestValidateRejectsBadConfig(t *testing.T) {
 	}
 }
 
-func TestDecisionsAreBounded(t *testing.T) {
+// The sticky admit/deny map must stay bounded, and eviction must drop the
+// publications whose windows closed longest ago. It used to empty the whole
+// map, which re-decided every publication still in flight at whatever
+// admission probability the load happened to give — admitting some points of
+// a schedule whose earlier points were denied.
+func TestDecisionsAreBoundedAndEvictOldestFirst(t *testing.T) {
 	p := newTest(t, Default())
-	for i := 0; i < maxDecisions+10; i++ {
-		p.decisions[string(rune(i))+"x"] = true
-		p.forgetOldDecisions()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	hash := func(i int) string { return fmt.Sprintf("%08x", i) }
+	for i := 0; i < maxDecisions+1000; i++ {
+		p.remember(scan.Publication{PromiseHash: hash(i), SettlementTime: base.Add(time.Duration(i) * time.Second)}, i%2 == 0)
 	}
 	if len(p.decisions) >= maxDecisions {
 		t.Fatalf("decisions grew to %d, bound is %d", len(p.decisions), maxDecisions)
+	}
+	// the newest publication is always still known
+	newest := hash(maxDecisions + 999)
+	if _, ok := p.decisions[newest]; !ok {
+		t.Fatalf("the newest publication was evicted")
+	}
+	// and the ones that survived are newer than the ones that did not
+	oldestKept := base.Add(time.Duration(maxDecisions+1000) * time.Second)
+	for h, d := range p.decisions {
+		if d.at.Before(oldestKept) {
+			oldestKept = d.at
+		}
+		if d.at.IsZero() {
+			t.Fatalf("%s kept with no settlement time", h)
+		}
+	}
+	if _, ok := p.decisions[hash(0)]; ok {
+		t.Fatalf("the oldest publication survived eviction while newer ones were dropped")
+	}
+	// a decision, once made, never changes while it is remembered
+	pub := scan.Publication{PromiseHash: newest, SettlementTime: base}
+	first, _ := p.Admit(pub, false)
+	for i := 0; i < 5; i++ {
+		if again, _ := p.Admit(pub, false); again != first {
+			t.Fatalf("Admit flipped from %v to %v for a publication still in the map", first, again)
+		}
+	}
+	// Forget releases it
+	p.Forget(newest)
+	if _, ok := p.decisions[newest]; ok {
+		t.Fatalf("Forget did not drop the decision")
 	}
 }

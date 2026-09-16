@@ -13,7 +13,20 @@ import (
 )
 
 // MeasurementSchemaVersion is bumped when the Measurement JSON shape changes.
-const MeasurementSchemaVersion = 1
+//
+// 1: initial shape.
+// 2: Attested, and the UNATTESTED classification it can produce.
+const MeasurementSchemaVersion = 2
+
+// AttestationSchemaVersion is the first measurement version whose Attested
+// field carries evidence. A record below it was written by a prober that did
+// not know about attestation: its Attested is false because the field did not
+// exist, and its classification can never be UNATTESTED. Consumers must treat
+// that as unknown rather than as "did not attest".
+const AttestationSchemaVersion = 2
+
+// HasAttestation reports whether Attested carries evidence.
+func (m Measurement) HasAttestation() bool { return m.SchemaVersion >= AttestationSchemaVersion }
 
 // Measurement is one probe's raw result: which vantage, when, each network
 // layer timed and judged separately, plus the raw error text. No scores — a
@@ -33,7 +46,21 @@ type Measurement struct {
 	ValidatorAddress string `json:"validator_address"` // 20-byte consensus addr, hex
 	ValidatorHost    string `json:"validator_host"`    // host:port as registered
 	Assigned         bool   `json:"assigned"`
-	AssignedRowCount int    `json:"assigned_row_count"`
+	// HostSource is "bonded" when the validator was in
+	// AllBondedFibreProviders at the time of the probe, and "last_known" when
+	// it was not but this observer had seen it register that host earlier and
+	// kept probing it anyway. A validator's retention obligation comes from
+	// the promise it signed, not from its bonding status, so leaving the
+	// bonded set must not stop the evidence.
+	HostSource string `json:"host_source,omitempty"`
+	// Attested: the settled promise carries a signature from this validator
+	// that the observer verified against its consensus key. That is the only
+	// on-chain proof the validator ever stored this shard, because a Fibre
+	// server writes the shard before it signs. False means unproven, not
+	// absent: the publisher stops collecting signatures at the safety
+	// threshold and keeps delivering in the background.
+	Attested         bool `json:"attested"`
+	AssignedRowCount int  `json:"assigned_row_count"`
 
 	// scheduling
 	ScheduleLabel string    `json:"schedule_label"` // w1..wN, grace, post
@@ -56,6 +83,15 @@ type Measurement struct {
 	ClassificationReason string         `json:"classification_reason"`
 	RawError             string         `json:"raw_error,omitempty"`
 	TotalDurationMS      int64          `json:"total_duration_ms"`
+
+	// Sampling records the admission decision this publication was probed (or
+	// not probed) under: the probability, the cap that bound it, and the
+	// commitment to that day's secret. Every row carries it, admitted or
+	// denied, so that once the secret for a day is published anyone can
+	// recompute which publications should have been in the sample and check
+	// this observer against it. Empty when no policy was configured, which
+	// means everything was probed.
+	Sampling *SamplingDecision `json:"sampling,omitempty"`
 
 	// ClockOffsetMS is the observer's clock minus the chain's latest block
 	// time when the probe ran. Phases are decided by the local clock, so a
@@ -101,6 +137,19 @@ type TLSResult struct {
 	Error            string `json:"error,omitempty"`
 }
 
+// SamplingDecision is the load-policy decision a row was produced under.
+type SamplingDecision struct {
+	// P is the admission probability at the moment the publication was first
+	// seen. 1 means no cap was binding and nothing was sampled out.
+	P float64 `json:"p"`
+	// Binding names the cap that produced P ("none" when P is 1).
+	Binding string `json:"binding,omitempty"`
+	// DayCommitment is SHA256 of the day secret the draw used. It can be
+	// published in advance; revealing the secret afterwards lets anyone
+	// recompute the draw for every promise hash of that day.
+	DayCommitment string `json:"day_commitment,omitempty"`
+}
+
 // IdentityResult is the fibre-tlsverify consensus-key binding check on the peer
 // certificate, run as its own step against the handshake's peer cert.
 type IdentityResult struct {
@@ -108,6 +157,10 @@ type IdentityResult struct {
 	OK         bool   `json:"ok"`
 	DurationMS int64  `json:"duration_ms"`
 	Reason     string `json:"reason,omitempty"` // tlsverify.Reason on failure
+	// Stale: the certificate is endorsed by the right consensus key but its
+	// signed validity window has lapsed or has not started. That is endpoint
+	// hygiene, not impersonation, and the taxonomy keeps the two apart.
+	Stale bool `json:"stale,omitempty"`
 	// ClaimedNotBefore/After come from Inspect — what the peer's extension
 	// says regardless of verdict.
 	ClaimedNotBefore string `json:"claimed_not_before,omitempty"`

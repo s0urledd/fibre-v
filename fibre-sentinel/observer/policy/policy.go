@@ -174,9 +174,14 @@ type Policy struct {
 	// publications seen in the projection lookback, keyed by promise hash,
 	// with the bytes a full schedule over all assigned validators would cost.
 	recentPubs map[string]pubLoad
-	decisions  map[string]bool // promise hash -> admitted (sticky per process)
-	lastP      float64
-	lastCap    string
+	// decisions is the sticky admit/deny per promise hash. It must survive
+	// for as long as the publication can still be asked about, because the
+	// admission probability moves with load: re-deciding a publication mid
+	// schedule would probe some of its points and not others, and the whole
+	// point of the sticky map is "the whole schedule or none of it".
+	decisions map[string]decision
+	lastP     float64
+	lastCap   string
 }
 
 type pubLoad struct {
@@ -202,7 +207,7 @@ func New(cfg Config) (*Policy, error) {
 		master:     master,
 		validators: map[string]*validatorState{},
 		recentPubs: map[string]pubLoad{},
-		decisions:  map[string]bool{},
+		decisions:  map[string]decision{},
 		lastP:      1,
 	}, nil
 }
@@ -291,9 +296,24 @@ func (p *Policy) observe(pub scan.Publication, now time.Time) {
 	p.recentPubs[pub.PromiseHash] = pl
 }
 
+// pointsPerPublication is how many probes one admitted publication costs a
+// single validator: the in-window points plus the grace point. It mirrors the
+// prober's default schedule; an operator who widens that schedule must widen
+// this with it, or the sampler will admit more work than the request cap can
+// carry.
+const pointsPerPublication = 5.0
+
 // projectedP computes the admission probability from the trailing lookback:
-// p = min(1, cap/projected) over the global hourly cap and the most
-// constrained validator's hourly cap.
+// p = min(1, cap/projected) over EVERY cap BeforeProbe enforces, not just the
+// hourly ones.
+//
+// The sampler's promise is "the whole schedule or none of it": a publication
+// is admitted once and every one of its points is probed. That only holds if
+// the probability it is admitted at is one the rest of the day's budget can
+// sustain. When p was computed from the hourly caps alone, the daily caps
+// then denied probes mid schedule — and because the schedule is packed toward
+// the deadline, the points that were dropped were the late in-window and
+// grace ones, which are exactly where a retention breach shows.
 func (p *Policy) projectedP(now time.Time) (float64, string) {
 	lookback := p.cfg.Sampling.ProjectionLookback
 	var global int64
@@ -310,13 +330,23 @@ func (p *Policy) projectedP(now time.Time) (float64, string) {
 			perValRows[a] = pl.perValRs[a]
 		}
 	}
-	// scale the lookback window to one hour.
-	scale := float64(time.Hour) / float64(lookback)
+	// scale the lookback window to one hour and to one day.
+	hourly := float64(time.Hour) / float64(lookback)
+	daily := float64(24*time.Hour) / float64(lookback)
+
 	prob, binding := 1.0, "none"
-	if g := float64(global) * scale; g > float64(p.cfg.Caps.Global.BytesPerHour) {
-		prob = float64(p.cfg.Caps.Global.BytesPerHour) / g
-		binding = "global_bytes_per_hour"
+	tighten := func(capBytes int64, projected float64, name string) {
+		if capBytes <= 0 || projected <= float64(capBytes) {
+			return
+		}
+		if q := float64(capBytes) / projected; q < prob {
+			prob, binding = q, name
+		}
 	}
+
+	tighten(p.cfg.Caps.Global.BytesPerHour, float64(global)*hourly, "global_bytes_per_hour")
+	tighten(p.cfg.Caps.Global.BytesPerDay, float64(global)*daily, "global_bytes_per_day")
+
 	// deterministic iteration for stable logs.
 	addrs := make([]string, 0, len(perVal))
 	for a := range perVal {
@@ -324,12 +354,18 @@ func (p *Policy) projectedP(now time.Time) (float64, string) {
 	}
 	sort.Strings(addrs)
 	for _, a := range addrs {
-		capB := float64(p.cfg.bytesPerHourCap(perValRows[a]))
-		if v := float64(perVal[a]) * scale; v > capB {
-			if q := capB / v; q < prob {
-				prob, binding = q, "validator_bytes_per_hour"
-			}
-		}
+		rows := perValRows[a]
+		tighten(p.cfg.bytesPerHourCap(rows), float64(perVal[a])*hourly, "validator_bytes_per_hour")
+		tighten(p.cfg.bytesPerDayCap(rows), float64(perVal[a])*daily, "validator_bytes_per_day")
+	}
+
+	// The request cap is counted in probes rather than bytes. Each admitted
+	// publication costs one validator pointsPerPublication requests over the
+	// whole retention window, so the rate that matters is how many
+	// publications land per minute, not how many bytes they carry.
+	if rpm := p.cfg.Caps.PerValidator.RequestsPerMinute; rpm > 0 && len(addrs) > 0 {
+		perMinute := float64(len(p.recentPubs)) * pointsPerPublication * (float64(time.Minute) / float64(lookback))
+		tighten(int64(rpm), perMinute, "validator_requests_per_minute")
 	}
 	return prob, binding
 }
@@ -339,18 +375,18 @@ func (p *Policy) Admit(pub scan.Publication, alreadyStarted bool) (bool, string)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if alreadyStarted {
-		p.decisions[pub.PromiseHash] = true
+		p.remember(pub, true)
 		return true, ""
 	}
 	if d, ok := p.decisions[pub.PromiseHash]; ok {
-		if d {
+		if d.in {
 			return true, ""
 		}
 		return false, p.lastReason(pub)
 	}
 	for _, h := range p.cfg.Sampling.AlwaysProbe {
 		if h == pub.PromiseHash {
-			p.decisions[pub.PromiseHash] = true
+			p.remember(pub, true)
 			return true, ""
 		}
 	}
@@ -359,12 +395,18 @@ func (p *Policy) Admit(pub scan.Publication, alreadyStarted bool) (bool, string)
 	prob, binding := p.projectedP(now)
 	p.lastP, p.lastCap = prob, binding
 	in := p.Sampled(pub.PromiseHash, pub.SettlementTime, prob)
-	p.forgetOldDecisions()
-	p.decisions[pub.PromiseHash] = in
+	p.remember(pub, in)
 	if in {
 		return true, ""
 	}
 	return false, p.lastReason(pub)
+}
+
+// decision is one sticky admit/deny plus the settlement time it belongs to,
+// which is what orders eviction.
+type decision struct {
+	in bool
+	at time.Time
 }
 
 // maxDecisions bounds the sticky admit/deny map. A decision only matters
@@ -372,18 +414,74 @@ func (p *Policy) Admit(pub scan.Publication, alreadyStarted bool) (bool, string)
 // life of the process is a slow leak on a long-running vantage.
 const maxDecisions = 20000
 
-// forgetOldDecisions drops the whole map once it grows past the bound. The
-// map is a cache of "did we admit this publication", and a publication whose
-// points are all recorded is never asked about again, so a reset costs at
-// most one re-decision for the few still in flight.
-func (p *Policy) forgetOldDecisions() {
+// keepDecisions is how many survive an eviction. Evicting down to a margin
+// rather than to the bound keeps eviction from running on every insert.
+const keepDecisions = maxDecisions * 3 / 4
+
+// remember stores a decision, evicting the oldest publications first when the
+// map is full.
+//
+// The map is not a cache that may be dropped. A publication's admission
+// probability is computed from the load at the moment it is first seen, and
+// that probability moves with load, so re-deciding a publication that is
+// still in flight can admit points 3 and 4 of a schedule whose points 1 and 2
+// were denied. The earlier code emptied the whole map when it filled, which
+// did exactly that to every publication still running. Evicting by settlement
+// time instead drops the ones whose windows closed longest ago, which are the
+// ones that can no longer be asked about.
+func (p *Policy) remember(pub scan.Publication, in bool) {
 	if len(p.decisions) >= maxDecisions {
-		p.decisions = make(map[string]bool, 1024)
+		p.evictOldestDecisions()
 	}
+	p.decisions[pub.PromiseHash] = decision{in: in, at: pub.SettlementTime}
+}
+
+func (p *Policy) evictOldestDecisions() {
+	type ent struct {
+		hash string
+		at   time.Time
+	}
+	all := make([]ent, 0, len(p.decisions))
+	for h, d := range p.decisions {
+		all = append(all, ent{h, d.at})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].at.Equal(all[j].at) {
+			return all[i].hash < all[j].hash
+		}
+		return all[i].at.Before(all[j].at)
+	})
+	for i := 0; i < len(all)-keepDecisions; i++ {
+		delete(p.decisions, all[i].hash)
+	}
+}
+
+// Forget drops the decision for a publication whose schedule is finished, so
+// the bound above is reached only when a vantage really is tracking that many
+// live publications.
+func (p *Policy) Forget(promiseHash string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.decisions, promiseHash)
 }
 
 func (p *Policy) lastReason(pub scan.Publication) string {
 	return fmt.Sprintf("budget:p=%.3f:%s:day_commitment=%s", p.lastP, p.lastCap, p.DayCommitment(pub.SettlementTime))
+}
+
+// SamplingFor returns what this publication's admission decision was made
+// with: the probability it was sampled at, the cap that bound that
+// probability, and the commitment to the day secret the draw used.
+//
+// The prober stamps these on every row it writes, admitted or denied, which
+// is what makes the sample auditable at all. Recording them only on denials
+// left the admitted side with no record: the commit-and-reveal audit the
+// methodology page describes could not be carried out against half the
+// decisions it was supposed to cover.
+func (p *Policy) SamplingFor(pub scan.Publication) (prob float64, binding, commitment string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastP, p.lastCap, p.DayCommitment(pub.SettlementTime)
 }
 
 // State returns the last computed admission probability and binding cap,
@@ -423,6 +521,16 @@ func trim(events []event, since time.Time) []event {
 
 // BeforeProbe implements probe.Policy.
 func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time) (allow, skipDownload bool, reason string) {
+	// The spacing wait happens before the lock is taken. It used to run
+	// inside the critical section, which meant one validator's two-second
+	// wait blocked admission for every other validator in the pool: with
+	// eight workers and a flat lateness bound that turned into probes
+	// recorded as gaps for whoever happened to be scheduled behind it.
+	if wait := p.spacingWait(t.AddressHex, now); wait > 0 {
+		time.Sleep(wait)
+		now = time.Now()
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	vs := p.state(t.AddressHex)
@@ -430,12 +538,6 @@ func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time
 	p.global = trim(p.global, now.Add(-24*time.Hour))
 	pv := p.cfg.Caps.PerValidator
 
-	if !vs.lastRequest.IsZero() && now.Sub(vs.lastRequest) < pv.MinRequestSpacing {
-		// Not a budget denial: the caller's schedule is coarse (seconds),
-		// so we simply wait out the spacing rather than drop the probe.
-		time.Sleep(pv.MinRequestSpacing - now.Sub(vs.lastRequest))
-		now = time.Now()
-	}
 	if reqs, _ := sumSince(vs.events, now.Add(-time.Minute)); pv.RequestsPerMinute > 0 && reqs >= pv.RequestsPerMinute {
 		return false, false, fmt.Sprintf("budget:validator_requests_per_minute=%d", pv.RequestsPerMinute)
 	}
@@ -463,6 +565,23 @@ func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time
 	return true, false, ""
 }
 
+// spacingWait reports how long to hold off before touching this validator
+// again, reading the state under the lock and returning so the caller can wait
+// without holding it.
+func (p *Policy) spacingWait(addr string, now time.Time) time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	vs := p.state(addr)
+	spacing := p.cfg.Caps.PerValidator.MinRequestSpacing
+	if vs.lastRequest.IsZero() || spacing <= 0 {
+		return 0
+	}
+	if d := spacing - now.Sub(vs.lastRequest); d > 0 {
+		return d
+	}
+	return 0
+}
+
 // AfterProbe implements probe.Policy.
 func (p *Policy) AfterProbe(pub scan.Publication, m probe.Measurement) {
 	p.mu.Lock()
@@ -472,9 +591,21 @@ func (p *Policy) AfterProbe(pub scan.Publication, m probe.Measurement) {
 	if m.AssignedRowCount > 0 {
 		vs.rowsLastSeen = m.AssignedRowCount
 	}
+	// Charge the budget for what the probe asked for, not for what came
+	// back. Charging only successful downloads made the stopping rule depend
+	// on the thing being measured: a validator that served ran out of budget
+	// part way through the day while one that answered NOT_FOUND was probed
+	// for the full day, so the two validators' "24h" rates covered different
+	// spans and were published side by side as if they did not.
 	var bytes int64
-	if m.Download.Attempted && m.Download.RowsReturned > 0 {
-		bytes = ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, m.Download.RowsReturned)
+	if m.Download.Attempted {
+		rows := m.Download.RowsExpected
+		if rows <= 0 {
+			rows = m.AssignedRowCount
+		}
+		if rows > 0 {
+			bytes = ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, rows)
+		}
 	}
 	ev := event{at: m.StartedAt, bytes: bytes}
 	vs.events = append(vs.events, ev)
@@ -482,11 +613,17 @@ func (p *Policy) AfterProbe(pub scan.Publication, m probe.Measurement) {
 
 	switch m.Outcome {
 	case probe.OutcomeDNSFail, probe.OutcomeTCPRefused, probe.OutcomeTCPTimeout, probe.OutcomeTCPUnreachable,
-		probe.OutcomeTLSFail, probe.OutcomeRPCUnavailable:
+		probe.OutcomeTLSFail, probe.OutcomeRPCUnavailable, probe.OutcomeRPCDeadline, probe.OutcomeRPCError:
 		vs.consecFail++
 		vs.lastFailAt = m.StartedAt
-	case probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomeReachable, probe.OutcomePartial,
-		probe.OutcomeWrongRows, probe.OutcomeInvalidRows:
+	case probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomePartial,
+		probe.OutcomeWrongRows, probe.OutcomeInvalidRows, probe.OutcomeServerError:
+		// Only an answer about the shard clears the counter. REACHABLE is
+		// deliberately absent: it is what the backoff itself produces when it
+		// skips the download, so counting it as recovery made the counter
+		// reset every fourth probe. A validator that was up but failing had
+		// a quarter of its evidence turned into a gap, for ever, and the
+		// backoff never actually engaged for its full window.
 		vs.consecFail = 0
 	}
 }

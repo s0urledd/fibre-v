@@ -150,12 +150,20 @@ func (h *ParamHistory) MustServeUntil(creation time.Time, settlementHeight int64
 // params it reads when the shard is UPLOADED (fibre/server_upload.go: the
 // ValidatePaymentPromise query at latest state), which happens somewhere
 // between the promise height and the settlement tx. The observer only sees
-// the chain, so it evaluates the params at both ends of that interval. When
-// they agree (the normal case) the answer is exact. When a params change
-// landed in between, the EARLIER must_serve_until is used, so the observer
-// never calls a FAULT past a window the server may legitimately have used,
-// and the record is marked ambiguous. If no history entry covers the promise
-// height (the scan started after it), only the settlement params are used.
+// the chain, so it takes the EARLIEST must_serve_until any params value in
+// force anywhere in that interval could produce. Then it never calls a fault
+// past a window the server may legitimately have used, whichever instant
+// inside the interval the upload actually landed on.
+//
+// Every history entry in the interval is considered, not only its two ends.
+// Comparing the endpoints alone missed a change that reverted before
+// settlement: the two ends agreed, the record was marked unambiguous, and the
+// deadline recorded was later than the one the server would have used if the
+// upload fell in the middle. Every probe between the two deadlines would then
+// have been published as a retention failure.
+//
+// If no history entry covers the promise height (the scan started after it),
+// only the settlement params are used.
 func (h *ParamHistory) MustServeUntilForPromise(creation time.Time, promiseHeight, settlementHeight int64, settlementTxIndex int) (msu time.Time, snap ParamsSnapshot, basis string, ambiguous bool, ok bool) {
 	at := h.at(settlementHeight, settlementTxIndex)
 	if at == nil {
@@ -164,18 +172,42 @@ func (h *ParamHistory) MustServeUntilForPromise(creation time.Time, promiseHeigh
 	msu, basis = windowFrom(at.Params, creation)
 	snap = at.ParamsJSON
 
-	// params at the end of the promise-height block (any tx index)
-	before := h.at(promiseHeight, int(^uint(0)>>1))
-	if before == nil || before == at || paramsEqual(before.Params, at.Params) {
-		return msu, snap, basis, false, true
+	// Params in force at the end of the promise-height block, plus every
+	// change that landed between there and the settlement tx.
+	candidates := []*ParamEntry{}
+	if before := h.at(promiseHeight, int(^uint(0)>>1)); before != nil {
+		candidates = append(candidates, before)
 	}
-	early, earlyBasis := windowFrom(before.Params, creation)
-	if early.Before(msu) {
-		msu, basis, snap = early, earlyBasis, before.ParamsJSON
+	for i := range h.entries {
+		e := &h.entries[i]
+		if lessKey(e.FromHeight, e.FromTxIndex, promiseHeight, int(^uint(0)>>1)) {
+			continue // before the interval
+		}
+		if lessKey(settlementHeight, settlementTxIndex, e.FromHeight, e.FromTxIndex) {
+			break // after the interval; entries are ordered
+		}
+		candidates = append(candidates, e)
+	}
+
+	differs := false
+	for _, c := range candidates {
+		if c == at {
+			continue
+		}
+		if !paramsEqual(c.Params, at.Params) {
+			differs = true
+		}
+		early, earlyBasis := windowFrom(c.Params, creation)
+		if early.Before(msu) {
+			msu, basis, snap = early, earlyBasis, c.ParamsJSON
+		}
+	}
+	if !differs {
+		return msu, snap, basis, false, true
 	}
 	basis += "; AMBIGUOUS: fibre params changed between promise height " + itoa64(promiseHeight) +
 		" and settlement height " + itoa64(settlementHeight) +
-		"; the server uses the params at upload time, which lies in that interval; the earlier bound is recorded"
+		"; the server uses the params at upload time, which lies in that interval; the earliest bound over every params value in force there is recorded"
 	return msu, snap, basis, true, true
 }
 

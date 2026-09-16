@@ -17,7 +17,7 @@ Anything I could not verify is marked **UNVERIFIED**.*
 | Does the fibre server rate-limit downloads? | **No.** No per-peer limit, no bandwidth cap, no download concurrency limit. What exists: a 16-connection listener cap, 13 streams per connection, keepalive enforcement (min 10 s between client pings), a 15 s connection-setup timeout, max message size ≈ 132 MiB. | §1 |
 | Can a probe ask for a subset of rows? | **No.** `DownloadShardRequest` carries only `blob_id`; the server returns the whole stored shard. Minimum bytes per successful probe = the validator's entire assigned shard (+ a fixed 64 KiB RLC vector). | §1.2 |
 | Has core said anything about acceptable probe load? | Only that download rate limiting "is planned for the next iterations" and that community dashboards checking reachability and serving are expected. **No number for acceptable probe frequency exists anywhere public.** | §2 |
-| Proposed default | 6 requests per (validator, blob) over the window (5 carry bytes); every blob probed while under budget, otherwise unbiased deterministic sampling; per-validator concurrency 1; hourly cap = 1 % of the floor validator's sized ingress (2.9 GB/h at 148 rows, scaled by rows); observer-side global cap 50 GB/h. | §3–§6 |
+| Proposed default | 6 requests per (validator, blob) over the window (5 carry bytes); every blob probed while under budget, otherwise unbiased deterministic sampling; per-validator concurrency 1; hourly cap = 1 % of the floor validator's sized ingress (2.9 GB/h at 148 rows, scaled by rows); observer-side global cap 53.7 GB/h (the code ships 50 GiB/h). | §3–§6 |
 | Headline arithmetic | At 1 × 128 MiB blob/min, the observer costs a validator **0.5 %** of its sized capacity (any stake). At the ingest rate the hardware was actually sized for, full-shard probing would need **5× the validator's capacity** — so sampling is not optional, it is structural. | §3.4 |
 
 ---
@@ -307,22 +307,49 @@ Assumed capacity: floor validator 0.65 Gbps = 81.25 MB/s = 292.5 GB/h
 therefore **stake-invariant**, because shard bytes and assumed capacity both
 scale with rows).
 
+**V and Σ rows.** The observer-total columns below sum shard bytes across
+every bonded validator, so they depend on how many validators there are (V)
+and how many rows each one is assigned. `fibre-assign/assign.go:138` clamps
+every validator's row count to `clamp(rows, MinRowsPerValidator, OriginalRows)`
+with `MinRowsPerValidator = 148` (`fibre-assign/params.go:65-69`), regardless
+of stake. A validator whose proportional share (`3 × 4096 × stakeFraction`)
+would otherwise put it below 148 rows is bumped up to 148; the break-even
+stake fraction is `148 / 12,288 = 1.2044 %` (12,288 = 3 × 4096 is only the
+*unclamped* sum, reached when no validator is small enough to hit the floor).
+R2 §2a's 14 Sep 2026 snapshot puts mainnet at **V = 100 bonded validators**;
+at that count an equal-weight validator holds about 1 % of stake, below the
+1.2044 % break-even (the same reason Huginn's 0.68 % share is clamped up to
+148 rows on mocha-5, R2 line 110), so all 100 sit at the floor. The sum used
+below is therefore `Σ rows = max(12,288, 148 × V) = max(12,288, 14,800) =
+**14,800**` for V = 100, not the 12,288 (`3 × 4096`) this section previously
+assumed with no validator count stated at all.
+
 **Scenario A — 1 blob/min of 128 MiB (60/h):**
 
-| | Floor validator | 30 % validator | Observer total (100 validators, Σ rows ≈ 12,288) |
+| | Floor validator | 30 % validator | Observer total (V = 100 validators, Σ rows = 14,800) |
 |---|---:|---:|---:|
 | Requests | 60 × 6 = 360/h = **6/min** | 6/min | 36,000/h |
-| Bytes | 60 × 5 × 4.99 MB = **1.50 GB/h** = 3.3 Mbps | 60 × 5 × 122.7 MB = 36.8 GB/h = 82 Mbps | 60 × 5 × 415 MB = **125 GB/h** = 277 Mbps; 3.0 TB/day |
+| Bytes | 60 × 5 × 4.99 MB = **1.50 GB/h** = 3.3 Mbps | 60 × 5 × 122.7 MB = 36.8 GB/h = 82 Mbps | 60 × 5 × 499 MB = **150 GB/h** = 332 Mbps; 3.6 TB/day |
 | Share of assumed capacity | 3.3 / 650 = **0.51 %** | 82 / 16,190 = **0.51 %** | — |
-| Reader-equivalents | 5 readers of every blob, per vantage | same | ≈ 15 full reads of every blob |
+| Reader-equivalents | 5 readers of every blob, per vantage | same | ≈ 19 full reads of every blob |
+
+(Per-round observer total: `Σ rows × 33,252 B/row + V × 65,540 B RLC` =
+`14,800 × 33,252 + 100 × 65,540` = 498,683,600 B ≈ 499 MB, where 33,252 B/row
+and the 65,540 B per-validator RLC constant are fit from the two 128 MiB
+shard sizes in the Appendix: `(122,665,664 − 4,986,836) / (3687 − 148)` and
+`4,986,836 − 148 × 33,252`.)
 
 **Scenario B — 10 blobs/min of 1 MiB (600/h):**
 
 | | Floor validator | 30 % validator | Observer total |
 |---|---:|---:|---:|
 | Requests | 600 × 6 = 3,600/h = **60/min** | 60/min | 360,000/h |
-| Bytes | 600 × 5 × 0.175 MB = **0.53 GB/h** = 1.2 Mbps | 600 × 5 × 2.79 MB = 8.4 GB/h = 19 Mbps | 600 × 5 × 15.6 MB = **47 GB/h** = 104 Mbps |
+| Bytes | 600 × 5 × 0.175 MB = **0.53 GB/h** = 1.2 Mbps | 600 × 5 × 2.79 MB = 8.4 GB/h = 19 Mbps | 600 × 5 × 17.5 MB = **52.5 GB/h** = 117 Mbps |
 | Share of assumed capacity | **0.18 %** | 0.12 % | — |
+
+(Per-round observer total for a 1 MiB blob: `14,800 × 740 + 100 × 65,540` =
+17,506,000 B ≈ 17.5 MB, same fitting method against the 1 MiB Appendix
+figures.)
 
 (Floor share is higher than the 30 % validator's for small blobs because the
 fixed 64 KiB RLC vector is a large part of a 148-row shard.)
@@ -338,6 +365,21 @@ the design, not a fallback: at any publication rate above ≈ 0.2 % of the
 network's sized ingest (≈ 4.4 MB/s ≈ 2 × 128 MiB/min), a 5-download schedule
 on every blob would exceed a 1 % budget.
 
+**But the global cap binds harder than that 0.2 % figure.** 0.2 % is only
+the *per-validator* byte cap. The **global** cap (`policy.go:72-73`, shipped
+as `50 << 30` = 50 GiB/h = 53.7 GB/h per vantage, see §3.5 on the GiB/GB
+gap) applies to the sum of shard bytes pulled from all V = 100 bonded
+validators (§3.4 above), not one. At the same ≈ 16 × 128 MiB blobs/second
+worst-case publication rate, a full-schedule observer would pull, per hour,
+`blobs/h × 5 × (Σ rows × 33,252 B/row + V × 65,540 B RLC)` =
+`57,600 × 5 × 498,683,600 B` ≈ **143,620 GB/h, i.e. ≈ 143.6 TB/h** across all
+validators combined. Against the 53.7 GB/h global cap, that requires
+*p* = 53.7 / 143,620 ≈ **0.037 %**, about **5.3×** tighter than the 0.2 %
+the per-validator cap alone would allow. At the mainnet-November publication
+rate, the sampling rate the shipped code actually enforces is the smaller of
+the two caps' requirements, i.e. **≈ 0.037 %**, not the 0.2 % a per-validator-only
+reading of this section gives.
+
 **Expected case (near-term mainnet ramp-up, Scenario A-ish):** 0.5 % of a
 validator's assumed capacity, 6 requests/min, one connection at a time. This
 is well inside "a small single-digit percentage or less".
@@ -351,14 +393,14 @@ is well inside "a small single-digit percentage or less".
 | Max requests per validator per minute | **30** | Scenario A uses 6; Scenario B (60) triggers *p* = 0.5. Chosen because each probe currently costs **two** TCP+TLS handshakes (raw TLS at `probe.go:178-216`, then a fresh gRPC dial at `probe.go:268`); raise to 60 once the probe reuses one connection for L3+L4. |
 | Max bytes per validator per hour | **1 % of assumed capacity × rows/148** → floor **2.93 GB/h**; 30 % validator 72.9 GB/h; 4096-row validator 81 GB/h | 0.01 × 292.5 GB/h. Scenario A floor uses 1.50 GB/h (51 % of cap). |
 | Max bytes per validator per day | **0.75 % average** → floor **52.7 GB/day**, scaled by rows | 0.0075 × 81.25 MB/s × 86,400 s. Scenario A floor uses 35.9 GB/day (68 %). |
-| Max global egress (observer ingress) per hour, per vantage | **50 GB/h** (≈ 111 Mbps) | Observer-side cost knob. Scenario A needs 125 GB/h → *p* = 0.40; Scenario B needs 47 GB/h → fits. |
-| Max global per day, per vantage | **600 GB/day** | 12 × hourly, forces a lower sustained average. |
+| Max global egress (observer ingress) per hour, per vantage | **53.7 GB/h** (50 GiB/h; ≈ 119 Mbps) | Observer-side cost knob. `policy.go:72` ships `50 << 30` bytes, i.e. 50 GiB (53,687,091,200 B), not 50 GB, which is 7.37 % larger. Scenario A needs 150 GB/h → *p* ≈ 0.36; Scenario B needs 52.5 GB/h → fits (98 % of cap). |
+| Max global per day, per vantage | **644 GB/day** (600 GiB/day) | 12 × hourly. `policy.go:73` ships `600 << 30` bytes = 644,245,094,400 B, the same GiB/GB gap as the hourly cap, forcing a lower sustained average. |
 | Global concurrency | **8** in-flight probes across all validators | Keeps the observer's own NIC and CPU (proof verification) bounded. |
-| Vantages | ≤ **3**, each with its own budget; the per-validator caps above are **per vantage**, so 3 vantages = 1.5 % hourly per validator worst case | More vantages multiply load; add them by lowering per-vantage caps, not by adding budget. |
+| Vantages | ≤ **3**, each with its own budget; the per-validator caps above are **per vantage**, so 3 vantages is **3 %** hourly per validator worst case (3 times the 1 % per-vantage cap, not 1.5 %, which was the 0.5 % *expected*-case figure tripled instead of the 1 % worst case) | More vantages multiply load; add them by lowering per-vantage caps, not by adding budget. |
 
 The per-validator caps are the ones that protect operators; the global caps
 protect the observer's bill. In Scenario A the **global** cap binds first
-(*p* = 0.40) while every validator is at half its hourly cap; in Scenario B
+(*p* ≈ 0.36) while every validator is at half its hourly cap; in Scenario B
 the **request** cap binds (*p* = 0.5). Both are shown as NOT_PROBED gaps on
 the dashboard (§4).
 
@@ -504,8 +546,8 @@ caps:
     keepalive_pings: false                    # server enforces >= 10 s between pings; we send none
   global:
     concurrency: 8
-    bytes_per_hour: 50GB                      # observer-side cost knob; binds first in the 128 MiB/min scenario (p ~ 0.40)
-    bytes_per_day: 600GB
+    bytes_per_hour: 53687091200                # 50 GiB, not 50 GB; observer-side cost knob; binds first in the 128 MiB/min scenario (p ~ 0.36)
+    bytes_per_day: 644245094400                 # 600 GiB
     requests_per_second: 20
 
 sampling:
@@ -580,9 +622,14 @@ matters for the same reason: the observer must never hold a slot.
 1. **0.65 Gbps / 1.18 TB provenance** — UNVERIFIED (§2.5). If core's number
    is egress rather than ingress, or differs, only `capacity_model` changes;
    the fractions in §3.4 scale linearly.
-2. **Real validator count and stake distribution** at Fibre launch — the global
-   totals assume 100 validators and Σ rows ≈ 12,288 (`3 × 4096`, matching the
-   devnet's zero-overlap assignment in `docs/fibre-operational-notes.md`).
+2. **Real stake distribution** at Fibre launch: §3.4 now uses R2 §2a's
+   sourced mainnet count, V = 100 bonded validators, and derives
+   Σ rows = max(12,288, 148 × V) = 14,800 from the `MinRowsPerValidator`
+   floor in `fibre-assign/assign.go:138`, on the simplifying assumption of
+   roughly equal stake. The real distribution is uneven (R2 §2a's P-OPS
+   example holds 7.53 % and 926 rows, well above the floor), so the true
+   Σ rows sits somewhere between 12,288 and 14,800; 14,800 is the
+   upper-bound estimate the arithmetic in §3.4 uses.
 3. **Whether the planned download limiter will be per-IP** — if so, the
    observer's fixed vantage IPs are trivially throttled and the policy URL /
    user agent is the only way to ask for an allowance. Thread 2295 argues for

@@ -21,7 +21,7 @@ func protocolParamsForBlobVersion(v uint32) (assign.ProtocolParams, error) {
 
 // buildAssignmentTable computes the fibre-assign shard assignment for commitment
 // over vals (the validator set at the promise height) and summarises it.
-func buildAssignmentTable(commitment [32]byte, blobVersion uint32, valSetHeight int64, vals []assign.Validator, storeRows bool) AssignmentTable {
+func buildAssignmentTable(commitment [32]byte, blobVersion uint32, valSetHeight int64, vals []assign.Validator, storeRows bool, att Attestation) AssignmentTable {
 	pp, err := protocolParamsForBlobVersion(blobVersion)
 	if err != nil {
 		return AssignmentTable{Error: err.Error(), ValidatorSetHeight: valSetHeight}
@@ -53,11 +53,16 @@ func buildAssignmentTable(commitment [32]byte, blobVersion uint32, valSetHeight 
 	seen := map[int]int{}
 	sigma := 0
 	withRows := 0
+	attestedWithRows := 0
 	out := make([]ValidatorAssignment, 0, len(ordered))
 	for _, v := range ordered {
 		rows := sm[v.Address]
+		attested := att.Has(v.Address.String())
 		if len(rows) > 0 {
 			withRows++
+			if attested {
+				attestedWithRows++
+			}
 		}
 		sigma += len(rows)
 		for _, r := range rows {
@@ -67,6 +72,7 @@ func buildAssignmentTable(commitment [32]byte, blobVersion uint32, valSetHeight 
 			Address:     v.Address.String(),
 			VotingPower: v.VotingPower,
 			RowCount:    len(rows),
+			Attested:    attested,
 		}
 		if storeRows {
 			va.Rows = append([]int(nil), rows...)
@@ -89,5 +95,12 @@ func buildAssignmentTable(commitment [32]byte, blobVersion uint32, valSetHeight 
 		Distinct:           len(seen),
 		WrapOverlaps:       overlaps,
 		ValidatorsWithRows: withRows,
+
+		AttestedWithRows:        attestedWithRows,
+		SignatureEntries:        att.Entries,
+		SignaturesVerified:      att.Verified,
+		SignaturesUnmatched:     att.Unmatched,
+		SignaturesOutOfPosition: att.OutOfPosition,
+		AttestedVotingPower:     att.AttestedPower,
 	}
 }

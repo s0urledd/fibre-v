@@ -154,7 +154,14 @@ func TestBuildAssignmentTable(t *testing.T) {
 	var commit [32]byte
 	commit[0] = 0xAB
 
-	tbl := buildAssignmentTable(commit, 0, 51, vals, true)
+	// mark the first two validators attested, so the table's attested counts
+	// are exercised alongside the assignment itself
+	att := Attestation{Attested: map[string]bool{
+		vals[0].Address.String(): true,
+		vals[1].Address.String(): true,
+	}, Entries: 2, Verified: 2, AttestedPower: 2_000_000, TotalPower: 4_000_000}
+
+	tbl := buildAssignmentTable(commit, 0, 51, vals, true, att)
 	if tbl.Error != "" {
 		t.Fatalf("unexpected error: %s", tbl.Error)
 	}
@@ -171,12 +178,24 @@ func TestBuildAssignmentTable(t *testing.T) {
 	if sum != tbl.Sigma {
 		t.Errorf("sigma %d != sum %d", tbl.Sigma, sum)
 	}
+	attested := 0
+	for _, v := range tbl.Validators {
+		if v.Attested {
+			attested++
+		}
+	}
+	if attested != 2 || tbl.AttestedWithRows != 2 {
+		t.Errorf("attested = %d, AttestedWithRows = %d, want 2 and 2", attested, tbl.AttestedWithRows)
+	}
+	if tbl.AttestedVotingPower != 2_000_000 || tbl.SignaturesVerified != 2 {
+		t.Errorf("attested power %d, verified %d", tbl.AttestedVotingPower, tbl.SignaturesVerified)
+	}
 	if tbl.ProtocolParams.Fingerprint != assign.ParamsV10BlobV0.Fingerprint() {
 		t.Errorf("fingerprint mismatch")
 	}
 
 	// unknown blob version -> explicit error, no assignment.
-	bad := buildAssignmentTable(commit, 7, 51, vals, true)
+	bad := buildAssignmentTable(commit, 7, 51, vals, true, Attestation{})
 	if bad.Error == "" {
 		t.Fatal("expected error for blob version 7")
 	}
@@ -290,9 +309,50 @@ func TestMustServeUntilForPromise_UploadTimeAmbiguity(t *testing.T) {
 		t.Fatalf("pre-change earlier: msu=%s amb=%v", msu, amb)
 	}
 
-	// promise height before the scan start: settlement params only, not ambiguous
+	// Promise height before the scan start, over an interval that still
+	// contains a known change: ambiguous, and the earliest bound wins. The
+	// upload happened somewhere in [50, 320] and the params changed at 300,
+	// so which window the server used is genuinely unknown.
 	msu, _, _, amb, ok = h.MustServeUntilForPromise(creation, 50, 320, 0)
-	if !ok || amb || !msu.Equal(creation.Add(30*time.Minute)) {
-		t.Fatalf("pre-history promise: msu=%s amb=%v ok=%v", msu, amb, ok)
+	if !ok || !amb || !msu.Equal(creation.Add(30*time.Minute)) {
+		t.Fatalf("pre-history promise spanning a change: msu=%s amb=%v ok=%v", msu, amb, ok)
+	}
+
+	// Promise height before the scan start with no known change in the
+	// interval: the seed params are the only thing we have and there is
+	// nothing to be ambiguous about.
+	h3 := NewParamHistory(100, params(10*time.Minute, time.Hour, 13*time.Hour))
+	msu, _, _, amb, ok = h3.MustServeUntilForPromise(creation, 50, 320, 0)
+	if !ok || amb || !msu.Equal(creation.Add(time.Hour)) {
+		t.Fatalf("pre-history promise, no change: msu=%s amb=%v ok=%v", msu, amb, ok)
+	}
+}
+
+// A params change that reverts before settlement leaves the two ends of the
+// interval agreeing. Comparing only the ends called the window unambiguous
+// and recorded the later deadline, so every probe between the two deadlines
+// would have been published as a retention failure against a validator whose
+// server had pruned exactly when its params said it could.
+func TestMustServeUntilForPromise_ChangeThatRevertsInsideTheInterval(t *testing.T) {
+	creation := time.Unix(1700000000, 0).UTC()
+	h := NewParamHistory(100, params(10*time.Minute, time.Hour, 13*time.Hour))
+	h.AddFinalizeEvent(295, params(10*time.Minute, 30*time.Minute, 13*time.Hour)) // shorter
+	h.AddFinalizeEvent(299, params(10*time.Minute, time.Hour, 13*time.Hour))      // and back again
+
+	msu, snap, basis, amb, ok := h.MustServeUntilForPromise(creation, 290, 320, 0)
+	if !ok {
+		t.Fatal("no params for the settlement height")
+	}
+	if !amb {
+		t.Fatal("a change that reverted inside the interval is still a change the server could have uploaded under")
+	}
+	if !msu.Equal(creation.Add(30 * time.Minute)) {
+		t.Fatalf("msu=%s, want creation+30m: the shortest window any params in the interval could produce", msu)
+	}
+	if snap.ShardRetentionSeconds != 1800 {
+		t.Fatalf("snapshot should be the params that produced the bound, got retention %ds", snap.ShardRetentionSeconds)
+	}
+	if !strings.Contains(basis, "AMBIGUOUS") {
+		t.Fatalf("basis should say AMBIGUOUS: %q", basis)
 	}
 }

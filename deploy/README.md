@@ -49,12 +49,20 @@ sudo cp deploy/observer.env.example /etc/fibre-observer/observer.env
 sudo cp fibre-sentinel/observer/policy/policy.mocha.yaml /etc/fibre-observer/policy.yaml   # mocha-5; policy.example.yaml for mainnet
 ```
 
-Edit `observer.env`: set `RPC`, `VANTAGE`, `DATA_DIR`. In `policy.yaml`
-set `sampling.master_secret_file: /var/lib/fibre-observer/master.secret`
-so the sampling secret survives restarts; the prober creates it with mode
-0600 on first run. The file must live under the data directory: the units
-mount `/etc/fibre-observer` read-only, and the service user cannot write
-there.
+Edit `observer.env`: set `RPC`, `VANTAGE`, `DATA_DIR`. The shipped
+`policy.yaml` already points `sampling.master_secret_file` at
+`/var/lib/fibre-observer/sampling-master.key`; the prober creates it with
+mode 0600 on first run. Keep it there. The file must live under the data
+directory, because the units mount `/etc/fibre-observer` read-only and the
+service user cannot write there.
+
+That file is what makes the sample auditable. The commitments published at
+`/v1/sampling` are SHA-256 of a per-day secret derived from it, so if the
+master is regenerated on every restart the commitments change with it and
+nobody can ever check a day's draw against them. It is also the reason the
+sample is unpredictable: a publisher who learned the master in advance could
+work out which of its blobs would be probed, so do not put it anywhere the
+publishers can read, and do not include it in a backup that leaves the host.
 
 Leave `-probe-unassigned` off on a public vantage. The read-path rate
 limiting Celestia is designing (forum topic 2295) treats requests for

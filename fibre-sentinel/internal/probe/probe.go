@@ -12,6 +12,7 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	celfibre "github.com/celestiaorg/celestia-app/v10/fibre"
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -129,6 +131,14 @@ type Input struct {
 	// (ShardBytes); it scales the download deadline. 0 = base deadline only.
 	ExpectedShardBytes int64
 
+	// MaxMessageSize is the receive bound for this publication's protocol
+	// params, not the observer's compile-time defaults. A blob whose params
+	// allow a larger message than this binary was built against would
+	// otherwise be refused by our own limit and recorded as a gap, so the
+	// largest shards — the ones most worth checking — would never be judged.
+	// 0 falls back to the pinned defaults.
+	MaxMessageSize int
+
 	// ClockOffsetMS is the observer's wall clock minus the chain's latest
 	// block time, in milliseconds, as measured by the caller. Every phase
 	// decision is made against the local clock, so the offset is recorded
@@ -159,7 +169,9 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		ValidatorSetHeight: in.ValidatorSetHeight,
 		ValidatorAddress:   in.Target.AddressHex,
 		ValidatorHost:      in.Target.Host,
+		HostSource:         in.Target.HostSource,
 		Assigned:           in.Target.Assigned,
+		Attested:           in.Target.Attested,
 		AssignedRowCount:   in.Target.RowCount,
 		ScheduleLabel:      in.SchedulePoint.Label,
 		ScheduledAt:        in.SchedulePoint.At.UTC(),
@@ -171,7 +183,26 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 	defer func() {
 		m.FinishedAt = time.Now().UTC()
 		m.TotalDurationMS = m.FinishedAt.Sub(m.StartedAt).Milliseconds()
-		m.Classification, m.ClassificationReason = Classify(m.Assigned, m.Phase, m.Outcome)
+		// A probe the observer abandoned says nothing about the validator.
+		// Shutdown (SIGTERM, a -deadline expiry) cancels mid-flight probes,
+		// and without this an ordinary restart would publish DNS_FAIL or
+		// TCP_TIMEOUT as a retention failure for whatever was in flight.
+		if ctx.Err() != nil && m.Outcome != OutcomeServedOK {
+			m.Outcome = OutcomeProbeError
+			if m.RawError == "" {
+				m.RawError = "probe abandoned: " + ctx.Err().Error()
+			} else {
+				m.RawError = "probe abandoned (" + ctx.Err().Error() + "): " + m.RawError
+			}
+		}
+		m.Classification, m.ClassificationReason = Classify(Evidence{
+			Assigned:           m.Assigned,
+			Attested:           m.Attested,
+			Phase:              m.Phase,
+			Outcome:            m.Outcome,
+			CommitmentVerified: m.Download.CommitmentVerified,
+			IdentityStale:      m.Identity.Stale,
+		})
 	}()
 
 	if !in.SkipDownload && coder == nil {
@@ -232,16 +263,26 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 	var terr error
 	var ip string
 	var attempts []string
+	allLocal := len(addrs) > 0
 	for _, cand := range addrs {
 		d := net.Dialer{Timeout: to.TCP}
 		c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(cand, port))
 		if err == nil {
 			rawConn, ip = c, cand
+			allLocal = false
 			break
 		}
 		attempts = append(attempts, cand+": "+err.Error())
-		if terr == nil || !isNoRoute(err) {
-			terr = err // keep the most informative failure
+		local := isNoRoute(err) || localDialFault(err)
+		if !local {
+			allLocal = false
+		}
+		// A remote answer always outranks a local one. "Network is
+		// unreachable" from this vantage says nothing about the validator,
+		// while "connection refused" from another of its addresses does, and
+		// the old rule could let the first overwrite the second.
+		if terr == nil || (!local && isNoRoute(terr)) {
+			terr = err
 		}
 		if ctx.Err() != nil {
 			break
@@ -253,8 +294,24 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 			terr = errors.New("no address to dial")
 		}
 		m.TCP.Error = strings.Join(attempts, "; ")
-		m.Outcome = classifyDialError(terr)
-		m.RawError = terr.Error()
+		if allLocal {
+			// Every candidate address failed on this machine's own network:
+			// no stack for the family, no route, no local source address. The
+			// packets never left. That is the observer's problem, and calling
+			// it a retention failure would fault an IPv6-only validator for
+			// the vantage's lack of IPv6, permanently.
+			m.Outcome = OutcomeProbeError
+		} else {
+			m.Outcome = classifyDialError(terr)
+		}
+		// The selected error alone loses the evidence a reader needs to tell
+		// a routing problem from a validator that is down, so publish the
+		// whole attempt list when more than one address was tried.
+		if len(attempts) > 1 {
+			m.RawError = strings.Join(attempts, "; ")
+		} else {
+			m.RawError = terr.Error()
+		}
 		return m
 	}
 	if len(attempts) > 0 {
@@ -311,8 +368,17 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 	m.Identity.DurationMS = sinceMS(t0)
 	m.Identity.OK = verr == nil
 	if verr != nil {
+		if errors.Is(verr, errVerifyTimeout) {
+			// The observer ran out of CPU, not the validator out of honesty.
+			m.Identity.Reason = "observer_timeout"
+			m.Identity.Error = verr.Error()
+			m.Outcome = OutcomeProbeError
+			m.RawError = verr.Error()
+			return m
+		}
 		if reason, ok := tlsverify.ReasonOf(verr); ok {
 			m.Identity.Reason = string(reason)
+			m.Identity.Stale = identityStale(reason)
 		}
 		m.Identity.Error = verr.Error()
 		m.Outcome = OutcomeIdentityFail
@@ -343,22 +409,64 @@ type dlResult struct {
 	rawErr  string
 }
 
-// maxRecvMsgSize matches the reference client's receive bound
+// defaultMaxRecvMsgSize matches the reference client's receive bound
 // (fibre/internal/grpc/fibre_client.go: MaxCallRecvMsgSize(maxMsgSize) with
 // maxMsgSize = ProtocolParams.MaxMessageSize()). grpc-go's default is 4 MiB,
-// which would turn every shard larger than that into a spurious failure.
-var maxRecvMsgSize = celfibre.DefaultProtocolParams.MaxMessageSize()
+// which would turn every shard larger than that into a spurious failure. It is
+// only the fallback: Input.MaxMessageSize carries the publication's own bound.
+var defaultMaxRecvMsgSize = celfibre.DefaultProtocolParams.MaxMessageSize()
+
+// userAgent identifies this observer on every connection, as R4 section 5
+// requires, so an operator seeing the traffic can tell who it is and stop it.
+const userAgent = "fibre-sentinel-observer"
 
 // downloadAndVerify runs the L4 step against endpoint, the ip:port literal
 // that L2/L3 already verified, so all layers judge the same address.
+//
+// This is a deliberate difference from the reference client, which dials the
+// registered host string and lets grpc-go's resolver and pick_first try every
+// address (celestia-app fibre/internal/grpc/fibre_client.go). Pinning the
+// address buys a property the reference client does not need and this
+// observer does: every layer of a measurement describes one endpoint, so a
+// recorded TLS identity, a recorded round trip and a recorded download all
+// belong to the same peer. Letting grpc re-resolve would let the download
+// land on a different address from the one whose certificate was checked, and
+// the record could not say which.
+//
+// The cost is real and is the reason this comment exists. L2 tries every
+// resolved address and takes the first that connects, so a host with several
+// addresses is not judged on one of them alone; but if that address accepts
+// TCP and then fails at the RPC layer, the probe does not fall back to the
+// next. The result is UNREACHABLE, which is already outside the serve rate
+// and already says the observer could not complete a conversation rather than
+// that the validator refused to serve, so the trade costs coverage of a
+// multi-address host rather than fairness to it.
+//
+// This is also the second connection of the probe: L3 opens one to read the
+// certificate and this opens another. A Fibre server admits a bounded number
+// of connections (DefaultMaxConnections, netutil.LimitListener), so the
+// observer occupies two slots where the reference client occupies one.
+// Folding the identity check into this connection's VerifyConnection callback
+// would halve that, at the cost of restructuring the per-layer timings that
+// the whole record is built from.
 func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint string, timeout time.Duration) dlResult {
 	r := dlResult{DownloadResult: DownloadResult{Attempted: true, RowsExpected: in.Target.RowCount}}
 	t0 := time.Now()
 
+	recvLimit := in.MaxMessageSize
+	if recvLimit <= 0 {
+		recvLimit = defaultMaxRecvMsgSize
+	}
 	tlsCfg := tlsverify.ClientTLSConfig(in.Target.PubKey, in.ChainID)
 	conn, err := grpc.NewClient("passthrough:///"+endpoint,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvMsgSize)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(recvLimit)),
+		grpc.WithUserAgent(userAgent),
+		// grpc-go consults HTTPS_PROXY even for a passthrough target, so
+		// without this the download could take a proxy while L1-L3 dialled
+		// the address directly, and the layers would not be judging the same
+		// endpoint.
+		grpc.WithNoProxy(),
 	)
 	if err != nil {
 		r.DurationMS = sinceMS(t0)
@@ -371,6 +479,16 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint str
 	dctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	if in.BlobVersion > 255 {
+		// BlobID carries a uint8. Truncating here would silently probe the
+		// wrong version rather than say the observer cannot judge this blob.
+		r.DurationMS = sinceMS(t0)
+		r.Error = "blob version out of range for BlobID"
+		r.outcome = OutcomeProbeError
+		r.rawErr = fmt.Sprintf("blob version %d does not fit the 8-bit BlobID field; this observer cannot judge it", in.BlobVersion)
+		return r
+	}
+	dctx = metadata.AppendToOutgoingContext(dctx, "x-fibre-observer", in.Vantage)
 	blobID := celfibre.NewBlobID(uint8(in.BlobVersion), celfibre.Commitment(in.Commitment))
 	resp, err := fibretypes.NewFibreClient(conn).DownloadShard(dctx, &fibretypes.DownloadShardRequest{BlobId: blobID})
 	r.DurationMS = sinceMS(t0)
@@ -448,17 +566,50 @@ func parseShard(shard *fibretypes.BlobShard, originalRows int) ([]*rsema1d.RowPr
 	return proofs, v, nil
 }
 
+// localDialFault reports the dial failures that are the observer's own: the
+// socket never left this machine. They must not become a statement about the
+// validator, and the default arm of a string switch is the wrong place to put
+// an error nobody recognised.
+func localDialFault(err error) bool {
+	for _, e := range []syscall.Errno{
+		syscall.EAFNOSUPPORT, // this host has no stack for that address family
+		syscall.EMFILE,       // out of file descriptors
+		syscall.ENFILE,
+		syscall.ENOMEM,
+		syscall.ENOBUFS,
+		syscall.EADDRINUSE,    // local port exhaustion
+		syscall.EADDRNOTAVAIL, // no local source address
+		syscall.EACCES,        // local policy refused the socket
+		syscall.EPERM,
+		syscall.EINVAL,
+	} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
+}
+
 func classifyDialError(err error) Outcome {
+	// Ours before theirs: a local socket failure is not a validator's fault.
+	if localDialFault(err) {
+		return OutcomeProbeError
+	}
 	s := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(s, "refused"):
 		return OutcomeTCPRefused
 	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline exceeded") || strings.Contains(s, "i/o timeout"):
 		return OutcomeTCPTimeout
-	case strings.Contains(s, "no route to host") || strings.Contains(s, "unreachable") || strings.Contains(s, "no such host"):
+	case strings.Contains(s, "no route to host") || strings.Contains(s, "unreachable"):
 		return OutcomeTCPUnreachable
+	case strings.Contains(s, "no such host"):
+		return OutcomeDNSFail
 	default:
-		return OutcomeTCPUnreachable
+		// An error nobody recognised is not evidence of anything. Recording
+		// it as TCP_UNREACHABLE turned every unrecognised local errno into a
+		// published fault.
+		return OutcomeProbeError
 	}
 }
 
@@ -493,6 +644,11 @@ func classifyDownloadError(err error) Outcome {
 			return OutcomeProbeError
 		case codes.Canceled:
 			return OutcomeProbeError
+		case codes.Internal, codes.Unknown, codes.DataLoss, codes.Aborted:
+			// The endpoint was reached, completed TLS, proved its identity
+			// and answered. Calling that "unreachable" is false about a
+			// server the observer just talked to.
+			return OutcomeServerError
 		default:
 			return OutcomeRPCError
 		}
@@ -524,9 +680,30 @@ func verifyWithin(cert *x509.Certificate, expected ed25519.PublicKey, chainID st
 	case r := <-ch:
 		return r.err
 	case <-t.C:
-		return fmt.Errorf("identity verification did not finish within %s", timeout)
+		return fmt.Errorf("%w: did not finish within %s", errVerifyTimeout, timeout)
 	}
 }
+
+// identityStale separates a certificate whose signed validity window has
+// lapsed or not yet started from one signed by the wrong key. The first is a
+// rotation the operator ran late; the second means someone else is answering
+// on this endpoint. Publishing them as the same verdict would put a missed
+// renewal and an impersonation in the same column.
+func identityStale(r tlsverify.Reason) bool {
+	switch r {
+	case tlsverify.ReasonCertExpired, tlsverify.ReasonCertNotYetValid,
+		tlsverify.ReasonWindowEmpty, tlsverify.ReasonWindowTooLong:
+		return true
+	}
+	return false
+}
+
+// errVerifyTimeout marks an identity verification that the observer gave up
+// on. Verification is a few microseconds of CPU, so a timeout is starvation on
+// this machine, never a statement about the certificate. Without this the
+// timeout produced IDENTITY_FAIL, the harshest class in the taxonomy, with an
+// empty reason field.
+var errVerifyTimeout = errors.New("identity verification timed out in the observer")
 
 // orderAddrs puts IPv4 literals before IPv6 ones, keeping the resolver's
 // order within each family.
@@ -542,11 +719,18 @@ func orderAddrs(addrs []string) []string {
 	return append(v4, v6...)
 }
 
-// isNoRoute reports the local "this family is not routed here" failures that
-// should not outrank a real answer from another address.
+// isNoRoute reports the local "this family is not routed from here" failures.
+// They are the observer's own network, so they must never outrank a real
+// answer from another address, and if every candidate fails this way the probe
+// is an observer error rather than a verdict.
 func isNoRoute(err error) bool {
+	if errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EAFNOSUPPORT) ||
+		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return true
+	}
 	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "network is unreachable") || strings.Contains(s, "no route to host")
+	return strings.Contains(s, "network is unreachable") || strings.Contains(s, "no route to host") ||
+		strings.Contains(s, "address family not supported") || strings.Contains(s, "cannot assign requested address")
 }
 
 // ShardBytes estimates the wire size of one validator's shard for a blob:

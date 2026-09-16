@@ -3,6 +3,7 @@ package probe
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,56 +133,86 @@ func TestClassify_Taxonomy(t *testing.T) {
 		phase    Phase
 		outcome  Outcome
 		want     Classification
+		// commitmentVerified matters only for WRONG_ROWS and PARTIAL, where
+		// it is the whole question: rows that verify against the commitment
+		// but carry the wrong indices mean another promise answered in this
+		// one's place, which no validator can prevent.
+		commitmentVerified bool
 	}
+	// Every existing row describes an ATTESTED validator: one the settled
+	// promise proves stored the shard. The unattested rows are a separate
+	// table below, because the obligation itself differs.
 	rows := []row{
 		// assigned, in obligation
-		{true, PhaseInWindow, OutcomeServedOK, ClassHealthy},
-		{true, PhaseInWindow, OutcomeNotFound, ClassFault},
-		{true, PhaseInWindow, OutcomeRPCUnavailable, ClassFault},
-		{true, PhaseInWindow, OutcomeTCPRefused, ClassFault},
-		{true, PhaseInWindow, OutcomeIdentityFail, ClassFault},
-		{true, PhaseInWindow, OutcomeWrongRows, ClassFault},
-		{true, PhaseInWindow, OutcomeInvalidRows, ClassFault},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeServedOK, want: ClassHealthy},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeNotFound, want: ClassFault},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeInvalidRows, want: ClassFault},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeServerError, want: ClassFault},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeIdentityFail, want: ClassFault},
+		// unreachable is not a retention verdict: from one vantage it is not
+		// distinguishable from a problem on the observer's own path.
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeRPCUnavailable, want: ClassUnreachable},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeTCPRefused, want: ClassUnreachable},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeTCPTimeout, want: ClassUnreachable},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeDNSFail, want: ClassUnreachable},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeTLSFail, want: ClassUnreachable},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeRPCError, want: ClassUnreachable},
+		// rows that do not verify against the commitment are corrupt data
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassFault},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassFault},
+		// rows that DO verify are another promise's shard for the same blob
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassShadowedShard, commitmentVerified: true},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true},
+		{assigned: true, phase: PhasePost, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true},
+		// no registered host is a registry state, not a refusal to serve
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeNoHost, want: ClassNotRegistered},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeNoHost, want: ClassNotRegistered},
+		{assigned: true, phase: PhasePost, outcome: OutcomeNoHost, want: ClassNotRegistered},
 		// assigned, grace
-		{true, PhaseGrace, OutcomeNotFound, ClassTolerated},
-		{true, PhaseGrace, OutcomeRPCUnavailable, ClassTolerated},
-		{true, PhaseGrace, OutcomeServedOK, ClassHealthy},
-		{true, PhaseGrace, OutcomeIdentityFail, ClassFault},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeNotFound, want: ClassTolerated},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeRPCUnavailable, want: ClassTolerated},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeServedOK, want: ClassHealthy},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeIdentityFail, want: ClassFault},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomePartial, want: ClassFault},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeWrongRows, want: ClassFault},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeServerError, want: ClassTolerated},
 		// assigned, post
-		{true, PhasePost, OutcomeNotFound, ClassExpectedGone},
-		{true, PhasePost, OutcomeServedOK, ClassServedPastWindow},
-		{true, PhasePost, OutcomeTCPTimeout, ClassUnreachablePostWindow},
+		{assigned: true, phase: PhasePost, outcome: OutcomeNotFound, want: ClassExpectedGone},
+		{assigned: true, phase: PhasePost, outcome: OutcomeServedOK, want: ClassServedPastWindow},
+		{assigned: true, phase: PhasePost, outcome: OutcomeTCPTimeout, want: ClassUnreachablePostWindow},
+		{assigned: true, phase: PhasePost, outcome: OutcomeInvalidRows, want: ClassFault},
+		// DownloadShard enforces no assignment, so serving rows outside it
+		// after the obligation ended is not a rule the validator broke.
+		{assigned: true, phase: PhasePost, outcome: OutcomeWrongRows, want: ClassServedPastWindow},
+		{assigned: true, phase: PhasePost, outcome: OutcomePartial, want: ClassServedPastWindow},
+		{assigned: true, phase: PhasePost, outcome: OutcomeServerError, want: ClassUnreachablePostWindow},
 		// unassigned
-		{false, PhaseInWindow, OutcomeNotFound, ClassExpectedUnassigned},
-		{false, PhaseInWindow, OutcomeServedOK, ClassServingUnassigned},
-		{false, PhasePost, OutcomeNotFound, ClassExpectedUnassigned},
-		{false, PhaseGrace, OutcomeRPCUnavailable, ClassExpectedUnassigned},
-		// rows added by the pre-mocha audit (docs/verdicts.md alignment)
-		{true, PhaseInWindow, OutcomePartial, ClassFault},
-		{true, PhaseInWindow, OutcomeNoHost, ClassFault},
-		{true, PhaseGrace, OutcomePartial, ClassFault},
-		{true, PhaseGrace, OutcomeWrongRows, ClassFault},
-		{true, PhaseGrace, OutcomeNoHost, ClassTolerated},
-		{true, PhasePost, OutcomeWrongRows, ClassFault},
-		{true, PhasePost, OutcomeInvalidRows, ClassFault},
-		{true, PhasePost, OutcomePartial, ClassServedPastWindow},
-		{true, PhasePost, OutcomeNoHost, ClassUnreachablePostWindow},
-		{false, PhaseInWindow, OutcomeWrongRows, ClassServingUnassigned},
-		{false, PhaseInWindow, OutcomeInvalidRows, ClassServingUnassigned},
-		{false, PhaseInWindow, OutcomePartial, ClassServingUnassigned},
-		{false, PhaseInWindow, OutcomeIdentityFail, ClassFault},
-		{false, PhaseGrace, OutcomeNoHost, ClassExpectedUnassigned},
-		{true, PhaseInWindow, OutcomeReachable, ClassNotProbed},
-		{true, PhaseInWindow, OutcomeRPCDeadline, ClassProbeError},
-		{false, PhasePost, OutcomeRPCDeadline, ClassProbeError},
+		{assigned: false, phase: PhaseInWindow, outcome: OutcomeNotFound, want: ClassExpectedUnassigned},
+		{assigned: false, phase: PhaseInWindow, outcome: OutcomeServedOK, want: ClassServingUnassigned},
+		{assigned: false, phase: PhasePost, outcome: OutcomeNotFound, want: ClassExpectedUnassigned},
+		{assigned: false, phase: PhaseGrace, outcome: OutcomeRPCUnavailable, want: ClassExpectedUnassigned},
+		{assigned: false, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassServingUnassigned},
+		{assigned: false, phase: PhaseInWindow, outcome: OutcomeInvalidRows, want: ClassServingUnassigned},
+		{assigned: false, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassServingUnassigned},
+		{assigned: false, phase: PhaseInWindow, outcome: OutcomeIdentityFail, want: ClassFault},
+		{assigned: false, phase: PhaseGrace, outcome: OutcomeNoHost, want: ClassExpectedUnassigned},
+		{assigned: false, phase: PhaseInWindow, outcome: OutcomeServerError, want: ClassExpectedUnassigned},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeReachable, want: ClassNotProbed},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeRPCDeadline, want: ClassProbeError},
+		{assigned: false, phase: PhasePost, outcome: OutcomeRPCDeadline, want: ClassProbeError},
 		// probe-side
-		{true, PhaseInWindow, OutcomeProbeError, ClassProbeError},
-		{true, PhaseInWindow, OutcomeMissed, ClassNotProbed},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeProbeError, want: ClassProbeError},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeMissed, want: ClassNotProbed},
 	}
 	for _, r := range rows {
-		got, reason := Classify(r.assigned, r.phase, r.outcome)
+		got, reason := Classify(Evidence{
+			Assigned: r.assigned, Attested: true, Phase: r.phase,
+			Outcome: r.outcome, CommitmentVerified: r.commitmentVerified,
+		})
 		if got != r.want {
-			t.Errorf("Classify(assigned=%v, %s, %s) = %s (%q), want %s", r.assigned, r.phase, r.outcome, got, reason, r.want)
+			t.Errorf("Classify(assigned=%v, attested, %s, %s, commitmentVerified=%v) = %s (%q), want %s",
+				r.assigned, r.phase, r.outcome, r.commitmentVerified, got, reason, r.want)
 		}
 		if reason == "" {
 			t.Errorf("Classify(%v,%s,%s): empty reason", r.assigned, r.phase, r.outcome)
@@ -189,11 +220,167 @@ func TestClassify_Taxonomy(t *testing.T) {
 	}
 }
 
+// Every outcome must be named by the taxonomy. A new outcome that fell
+// through to a default arm used to become a FAULT under obligation, which
+// made "we have not taught the observer about this yet" indistinguishable
+// from "the validator broke its promise".
+func TestClassify_NoOutcomeReachesAnUnnamedFault(t *testing.T) {
+	for _, o := range AllOutcomes {
+		for _, phase := range []Phase{PhaseInWindow, PhaseGrace, PhasePost} {
+			got, reason := Classify(Evidence{Assigned: true, Attested: true, Phase: phase, Outcome: o})
+			if reason == "" {
+				t.Errorf("Classify(%s, %s): empty reason", phase, o)
+			}
+			if got == ClassFault && strings.Contains(reason, "unrecognised") {
+				t.Errorf("Classify(%s, %s) faulted on an outcome it does not recognise", phase, o)
+			}
+		}
+	}
+	// and an outcome the taxonomy has never seen must not accuse anyone
+	got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: Outcome("INVENTED")})
+	if got.CountsAgainst() {
+		t.Errorf("an unknown outcome under obligation = %s, want something that does not count against the validator", got)
+	}
+}
+
+// A validator that cannot be reached has not been shown to break anything.
+// Publishing that as a fault is the accusation this product must not make
+// from a single vantage.
+func TestClassify_UnreachableIsNotAFault(t *testing.T) {
+	for _, o := range []Outcome{
+		OutcomeDNSFail, OutcomeTCPRefused, OutcomeTCPTimeout, OutcomeTCPUnreachable,
+		OutcomeTLSFail, OutcomeRPCUnavailable, OutcomeRPCError,
+	} {
+		got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: o})
+		if got != ClassUnreachable {
+			t.Errorf("in-window %s = %s, want %s", o, got, ClassUnreachable)
+		}
+		if got.CountsAgainst() || got.Rated() {
+			t.Errorf("%s reached the serve rate as %s", o, got)
+		}
+	}
+	// but a server that answered and failed to produce the shard is a fault
+	for _, o := range []Outcome{OutcomeNotFound, OutcomeInvalidRows, OutcomeServerError} {
+		got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: o})
+		if !got.CountsAgainst() {
+			t.Errorf("in-window %s = %s, want a fault: the validator answered and did not serve", o, got)
+		}
+	}
+}
+
+// A second, never-settled promise over the same blob makes an honest
+// validator answer with the other promise's rows, because DownloadShard is
+// addressed by commitment alone. That must never be published as a fault.
+func TestClassify_ShadowedShardIsNeverAFault(t *testing.T) {
+	for _, phase := range []Phase{PhaseInWindow, PhaseGrace, PhasePost} {
+		for _, o := range []Outcome{OutcomeWrongRows, OutcomePartial} {
+			got, reason := Classify(Evidence{
+				Assigned: true, Attested: true, Phase: phase, Outcome: o, CommitmentVerified: true,
+			})
+			if got != ClassShadowedShard {
+				t.Errorf("%s %s with verified rows = %s (%q), want %s", phase, o, got, reason, ClassShadowedShard)
+			}
+			if got.CountsAgainst() {
+				t.Errorf("%s %s with verified rows counts against the validator", phase, o)
+			}
+		}
+	}
+	// rows that do not verify against the commitment are still corrupt data
+	if got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeWrongRows}); !got.CountsAgainst() {
+		t.Errorf("unverifiable rows in window = %s, want a fault", got)
+	}
+}
+
+// A certificate that is signed by the right key but has lapsed is a missed
+// renewal. Publishing it in the same column as "someone else is answering on
+// this endpoint" would put those two in the same sentence.
+func TestClassify_StaleIdentityIsNotImpersonation(t *testing.T) {
+	stale, reason := Classify(Evidence{
+		Assigned: true, Attested: true, Phase: PhaseInWindow,
+		Outcome: OutcomeIdentityFail, IdentityStale: true,
+	})
+	if stale != ClassIdentityExpired {
+		t.Fatalf("lapsed identity = %s (%q), want %s", stale, reason, ClassIdentityExpired)
+	}
+	if stale.CountsAgainst() || stale.Rated() {
+		t.Errorf("lapsed identity reached the serve rate as %s", stale)
+	}
+	wrong, _ := Classify(Evidence{
+		Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeIdentityFail,
+	})
+	if !wrong.CountsAgainst() {
+		t.Errorf("a wrong consensus key = %s, want a fault", wrong)
+	}
+}
+
+// A validator with no Fibre host in x/valaddr cannot be reached by anyone,
+// but jailing and unbonding remove it from the bonded provider list while the
+// chain keeps its registration. That is a registry state, not a refusal.
+func TestClassify_NoRegisteredHostIsNotAFault(t *testing.T) {
+	for _, phase := range []Phase{PhaseInWindow, PhaseGrace, PhasePost} {
+		got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: phase, Outcome: OutcomeNoHost})
+		if got != ClassNotRegistered {
+			t.Errorf("%s NO_REGISTERED_HOST = %s, want %s", phase, got, ClassNotRegistered)
+		}
+		if got.CountsAgainst() || got.Rated() {
+			t.Errorf("%s NO_REGISTERED_HOST reached the serve rate as %s", phase, got)
+		}
+	}
+}
+
+// An assigned validator whose signature is not in the settled promise is never
+// accused: nothing proves it was ever sent the shard. It is never credited
+// either, so the serve rate cannot be gamed by publishing blobs nobody signed.
+func TestClassify_UnattestedIsNeverAFault(t *testing.T) {
+	outcomes := []Outcome{
+		OutcomeNotFound, OutcomeTCPRefused, OutcomeTCPTimeout, OutcomeTLSFail,
+		OutcomeRPCUnavailable, OutcomeRPCError, OutcomeWrongRows,
+		OutcomeInvalidRows, OutcomePartial, OutcomeServedOK,
+	}
+	for _, phase := range []Phase{PhaseInWindow, PhaseGrace, PhasePost} {
+		for _, o := range outcomes {
+			got, reason := Classify(Evidence{Assigned: true, Phase: phase, Outcome: o})
+			if got != ClassUnattested {
+				t.Errorf("Classify(assigned, UNattested, %s, %s) = %s, want %s", phase, o, got, ClassUnattested)
+			}
+			if reason == "" {
+				t.Errorf("Classify(assigned, UNattested, %s, %s): empty reason", phase, o)
+			}
+		}
+	}
+	// serving anyway is reported as such: it proves the validator does hold it
+	_, reason := Classify(Evidence{Assigned: true, Phase: PhaseInWindow, Outcome: OutcomeServedOK})
+	if !strings.Contains(reason, "served") {
+		t.Errorf("a served shard from an unattested validator should say so: %q", reason)
+	}
+
+	// identity is a property of the endpoint, not of one shard, so it is a
+	// fault even with no attestation for this blob
+	if got, _ := Classify(Evidence{Assigned: true, Phase: PhaseInWindow, Outcome: OutcomeIdentityFail}); got != ClassFault {
+		t.Errorf("unattested IDENTITY_FAIL = %s, want %s", got, ClassFault)
+	}
+	// observer-side classes are unchanged by attestation
+	for _, o := range []Outcome{OutcomeProbeError, OutcomeMissed, OutcomeRPCDeadline, OutcomeReachable} {
+		a, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: o})
+		b, _ := Classify(Evidence{Assigned: true, Phase: PhaseInWindow, Outcome: o})
+		if a != b {
+			t.Errorf("attestation changed an observer-side class for %s: %s vs %s", o, a, b)
+		}
+	}
+	// an UNassigned validator is judged as before, attested or not
+	for _, att := range []bool{true, false} {
+		if got, _ := Classify(Evidence{Attested: att, Phase: PhaseInWindow, Outcome: OutcomeNotFound}); got != ClassExpectedUnassigned {
+			t.Errorf("unassigned attested=%v NOT_FOUND = %s", att, got)
+		}
+	}
+}
+
 func TestClassifyDialError(t *testing.T) {
 	cases := map[string]Outcome{
 		"dial tcp 127.0.0.1:7980: connectex: No connection could be made because the target machine actively refused it.": OutcomeTCPRefused,
-		"dial tcp 10.0.0.1:7980: i/o timeout":                OutcomeTCPTimeout,
-		"dial tcp: lookup nonexistent.invalid: no such host": OutcomeTCPUnreachable,
+		"dial tcp 10.0.0.1:7980: i/o timeout": OutcomeTCPTimeout,
+		// a name that does not resolve is a DNS failure, not an unreachable network
+		"dial tcp: lookup nonexistent.invalid: no such host": OutcomeDNSFail,
 	}
 	for in, want := range cases {
 		if got := classifyDialError(errStr(in)); got != want {
@@ -256,8 +443,10 @@ func TestClassifyDownloadError_StatusCodes(t *testing.T) {
 		{status.Error(codes.DeadlineExceeded, "context deadline exceeded"), OutcomeRPCDeadline},
 		{status.Error(codes.ResourceExhausted, "grpc: received message larger than max (5000000 vs. 4194304)"), OutcomeProbeError},
 		{status.Error(codes.InvalidArgument, "bad blob id"), OutcomeProbeError},
-		{status.Error(codes.Internal, "store: i/o error"), OutcomeRPCError},
-		{status.Error(codes.Unknown, "boom"), OutcomeRPCError},
+		// the endpoint was reached, proved its identity and answered; calling
+		// that "unreachable" would be false about a server we just talked to
+		{status.Error(codes.Internal, "store: i/o error"), OutcomeServerError},
+		{status.Error(codes.Unknown, "boom"), OutcomeServerError},
 		{status.Error(codes.Unavailable, "connection error: desc = \"transport: authentication handshake failed: fibre tls identity [signature_invalid]: bad\""), OutcomeIdentityFail},
 		{context.DeadlineExceeded, OutcomeRPCDeadline},
 		{errors.New("dial tcp: connection refused"), OutcomeRPCUnavailable},
@@ -285,8 +474,8 @@ func TestOrderAddrsAndDownloadDeadline(t *testing.T) {
 	if d := to.downloadDeadline(122_000_000); d < 25*time.Second+110*time.Second || d > 25*time.Second+120*time.Second {
 		t.Errorf("scaled deadline = %s", d)
 	}
-	if maxRecvMsgSize <= 4<<20 {
-		t.Errorf("maxRecvMsgSize = %d, must exceed grpc's 4 MiB default", maxRecvMsgSize)
+	if defaultMaxRecvMsgSize <= 4<<20 {
+		t.Errorf("defaultMaxRecvMsgSize = %d, must exceed grpc's 4 MiB default", defaultMaxRecvMsgSize)
 	}
 }
 

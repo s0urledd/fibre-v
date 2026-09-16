@@ -9,7 +9,24 @@ import (
 )
 
 // SchemaVersion is bumped whenever the Publication JSON shape changes.
-const SchemaVersion = 1
+//
+// 1: initial shape.
+// 2: verified attestation. AssignmentTable gained the signature-verification
+//
+//	counters and ValidatorAssignment gained Attested.
+const SchemaVersion = 2
+
+// AttestationSchemaVersion is the first record version whose attestation
+// fields mean anything. Below it the record was written by a scanner that did
+// not verify signatures, so Attested is false for every validator because the
+// field did not exist — not because the validator failed to attest. Consumers
+// must treat that as unknown.
+const AttestationSchemaVersion = 2
+
+// HasAttestation reports whether this record's attestation fields carry
+// evidence. When false, Attested and the signature counters are absent, not
+// negative.
+func (p Publication) HasAttestation() bool { return p.SchemaVersion >= AttestationSchemaVersion }
 
 // Publication is the persisted record for one on-chain MsgPayForFibre. One JSON
 // object per line in publications.jsonl.
@@ -122,6 +139,24 @@ type AssignmentTable struct {
 	Distinct           int `json:"distinct"`      // distinct row indices
 	WrapOverlaps       int `json:"wrap_overlaps"` // indices held by >1 validator
 	ValidatorsWithRows int `json:"validators_with_rows"`
+
+	// AttestedWithRows is how many of ValidatorsWithRows carry a verified
+	// signature over this promise, i.e. how many are PROVEN to have stored
+	// their shard. Only these can be held to the retention obligation; see
+	// Attestation in attest.go for why the rest are unproven rather than
+	// absent.
+	AttestedWithRows int `json:"attested_with_rows"`
+	// SignatureEntries, SignaturesVerified, SignaturesUnmatched and
+	// SignaturesOutOfPosition describe the verification itself, so a reader
+	// can tell a promise whose signatures all checked out from one whose
+	// trailing entries were never verified by the chain.
+	SignatureEntries        int `json:"signature_entries"`
+	SignaturesVerified      int `json:"signatures_verified"`
+	SignaturesUnmatched     int `json:"signatures_unmatched,omitempty"`
+	SignaturesOutOfPosition int `json:"signatures_out_of_position,omitempty"`
+	// AttestedVotingPower is the voting power that attested, out of
+	// TotalVotingPower.
+	AttestedVotingPower int64 `json:"attested_voting_power"`
 }
 
 // ProtocolParamsSnapshot records the (off-chain, pinned) assignment constants
@@ -142,6 +177,11 @@ type ValidatorAssignment struct {
 	VotingPower int64  `json:"voting_power"`
 	RowCount    int    `json:"row_count"`
 	Rows        []int  `json:"rows,omitempty"` // omitted when -rows=false
+	// Attested is true when this validator's signature over the promise
+	// verified against its consensus key, which proves it stored the shard
+	// (the server writes before it signs). False means unproven, not absent:
+	// the publisher stops collecting signatures at the safety threshold.
+	Attested bool `json:"attested"`
 }
 
 func protoParamsSnapshot(p assign.ProtocolParams) ProtocolParamsSnapshot {

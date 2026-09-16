@@ -9,7 +9,7 @@ import Timeline from "@/components/Timeline";
 type Detail = {
   blob: Blob;
   params: { shard_retention_s: number; payment_promise_timeout_s: number };
-  assignments: { validator_address: string; voting_power: number; row_count: number }[];
+  assignments: { validator_address: string; voting_power: number; row_count: number; attested: boolean | null }[];
   probes: Probe[];
 };
 
@@ -27,7 +27,8 @@ function Recon({ b }: { b: Blob }) {
   return (
     <div className="card">
       <strong>Reconstructable: {r.status}</strong>
-      {" — "}<span className="mono">{r.served_distinct_rows.toLocaleString("en-US")}</span> distinct rows observed served of <span className="mono">{total.toLocaleString("en-US")}</span>; <span className="mono">{r.needed_rows.toLocaleString("en-US")}</span> needed; {r.served_by_validators} of {r.assigned_validators} assigned validators served at point <span className="mono">{r.point}</span>.
+      {" — "}<span className="mono">{r.served_distinct_rows.toLocaleString("en-US")}</span> distinct rows observed served of <span className="mono">{total.toLocaleString("en-US")}</span>; <span className="mono">{r.needed_rows.toLocaleString("en-US")}</span> needed; {r.served_by_validators} of {r.assigned_validators} assigned validators served at point <span className="mono">{r.point}</span>
+      {r.attestation_known && <>, {r.served_by_attested} of the {r.attested_validators} the promise proves stored it</>}.
       <div className="bar" style={{ ["--c" as string]: colour, marginTop: 6 }}>
         <div className="fill" style={{ width: `${Math.min(100, (r.served_distinct_rows / total) * 100)}%` }} />
         <div className="tick" style={{ left: `${(r.needed_rows / total) * 100}%` }} title={`${r.needed_rows} needed`} />
@@ -35,7 +36,11 @@ function Recon({ b }: { b: Blob }) {
       <p className="faint" style={{ marginTop: 6 }}>
         Based on rows observed from one location at the last in-window probe ({utc(r.point_at)}). Rows not probed are not counted.
         {r.window_over && " The retention window has since ended; shards may be pruned as specified."}
-        {" "}Degraded means enough rows were served but not every assigned validator answered.
+        {" "}Degraded means enough rows were served but not every validator that was proven to owe this blob answered.
+        {r.attestation_known && r.attested_validators < r.assigned_validators && (
+          <> {r.assigned_validators - r.attested_validators} of the {r.assigned_validators} assigned validators carry no verified signature on this
+          promise, so nothing proves they ever stored it. They cannot demote this verdict by staying quiet.</>
+        )}
       </p>
     </div>
   );
@@ -79,7 +84,7 @@ function Page() {
       <div className="tablewrap">
         <table>
           <caption>Rows recomputed with fibre-assign from the validator set at the promise height; last verdict per validator.</caption>
-          <thead><tr><th>validator</th><th className="right">voting power</th><th className="right">rows</th><th>last verdict</th><th>last probe (UTC)</th><th className="right">rows served</th></tr></thead>
+          <thead><tr><th>validator</th><th className="right">voting power</th><th className="right">rows</th><th>obligation</th><th>last verdict</th><th>last probe (UTC)</th><th className="right">rows served</th></tr></thead>
           <tbody>
             {byPower.map((a) => {
               const p = lastByVal.get(a.validator_address);
@@ -88,6 +93,13 @@ function Page() {
                   <td className="mono"><Link href={`/validator/?addr=${a.validator_address}`}>{a.validator_address.slice(0, 12)}…</Link></td>
                   <td className="right mono">{a.voting_power.toLocaleString("en-US")}</td>
                   <td className="right mono">{a.row_count}</td>
+                  <td className={a.attested === false ? "muted" : ""} title={a.attested === true
+                    ? "This validator's signature on the settled promise verified against its consensus key. The Fibre server writes the shard before it signs, so the signature is proof of storage."
+                    : a.attested === false
+                      ? "The settled promise carries no verified signature from this validator. The publisher stops collecting signatures once it has a safe quorum, so this means unproven, not absent: the validator may well hold the shard."
+                      : "Recorded before the observer verified signatures."}>
+                    {a.attested === true ? "proven" : a.attested === false ? "unproven" : "—"}
+                  </td>
                   <td>{p ? <Badge cls={p.classification} title={p.classification_reason} /> : <Badge cls="NOT_PROBED" />}</td>
                   <td className="mono">{p ? `${utc(p.started_at)} (${p.schedule_label})` : "—"}</td>
                   <td className="right mono">{p && p.rows_expected ? `${p.rows_returned}/${p.rows_expected}` : "—"}</td>
