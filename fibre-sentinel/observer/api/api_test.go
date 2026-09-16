@@ -84,20 +84,46 @@ func TestMetaAndNetwork(t *testing.T) {
 		ServeRate       struct{ Num, Den int64 } `json:"serve_rate"`
 		Classes         map[string]int64         `json:"classes"`
 		ProbeCount      int64                    `json:"probe_count"`
-		Reconstructable struct{ Num, Den int64 } `json:"reconstructable"`
+		Coverage        struct{ Num, Den int64 } `json:"serve_rate_coverage"`
+		HeldOut         map[string]int64         `json:"serve_rate_held_out"`
+		Reconstructable struct {
+			Rate                 struct{ Num, Den int64 } `json:"rate"`
+			Recoverable          struct{ Num, Den int64 } `json:"recoverable"`
+			Yes, Degraded, No    int64
+			PublicationsInWindow int64 `json:"publications_in_window"`
+			Examined             int64 `json:"publications_examined"`
+			SampleLimit          int   `json:"sample_limit"`
+		} `json:"reconstructable"`
 	}
 	if code := get(t, ts, "/v1/network?window=all", &net); code != 200 {
 		t.Fatalf("network: %d", code)
 	}
-	// fixture run: in-window + grace assigned probes: 27 HEALTHY, 9 FAULT, 12 TOLERATED.
+	// fixture run: in-window assigned probes are 27 HEALTHY and 9 FAULT. The
+	// 12 TOLERATED are grace probes, which are outside the rate's population:
+	// a grace probe can only ever add HEALTHY, so counting it would reward
+	// over-retention rather than measure retention.
 	if net.ServeRate.Num != 27 || net.ServeRate.Den != 36 {
 		t.Fatalf("serve rate = %+v (classes %v)", net.ServeRate, net.Classes)
+	}
+	if net.Coverage.Num != 36 || net.Coverage.Den != 36 {
+		t.Fatalf("coverage = %+v, want every in-window probe to have produced a verdict", net.Coverage)
 	}
 	if net.ProbeCount != 60 {
 		t.Fatalf("probe count = %d", net.ProbeCount)
 	}
-	if net.Reconstructable.Den == 0 {
+	// the sample bound is published, and with a small fixture nothing is cut
+	if net.Reconstructable.SampleLimit == 0 || net.Reconstructable.Examined != net.Reconstructable.PublicationsInWindow {
+		t.Fatalf("reconstructable coverage not disclosed: %+v", net.Reconstructable)
+	}
+	if net.Reconstructable.Rate.Den == 0 {
 		t.Fatalf("reconstructable has no denominator: %+v", net.Reconstructable)
+	}
+	// degraded is reported on its own, never folded into the numerator
+	if net.Reconstructable.Rate.Num+net.Reconstructable.Degraded+net.Reconstructable.No != net.Reconstructable.Rate.Den {
+		t.Fatalf("reconstructable counts do not add up: %+v", net.Reconstructable)
+	}
+	if net.Reconstructable.Recoverable.Num < net.Reconstructable.Rate.Num {
+		t.Fatalf("recoverable must include the fully-served ones: %+v", net.Reconstructable)
 	}
 	if code := get(t, ts, "/v1/network?window=bogus", nil); code != 400 {
 		t.Fatalf("bad window: %d", code)
@@ -310,10 +336,13 @@ func TestReconstructableIgnoresIncompletePoint(t *testing.T) {
 
 	// a blob whose only in-window point is half done is "pending", not "no"
 	var netAll struct {
-		Reconstructable struct{ Num, Den int64 } `json:"reconstructable"`
+		Reconstructable struct {
+			Rate    struct{ Num, Den int64 } `json:"rate"`
+			Pending int64                    `json:"pending"`
+		} `json:"reconstructable"`
 	}
 	get(t, ts, "/v1/network?window=all", &netAll)
-	if netAll.Reconstructable.Den == 0 {
+	if netAll.Reconstructable.Rate.Den == 0 {
 		t.Fatal("network reconstructable lost its denominator")
 	}
 }

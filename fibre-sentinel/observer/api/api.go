@@ -328,14 +328,30 @@ type networkResponse struct {
 	// in-window and grace phases. Probes of validators whose storage the
 	// settled promise does not prove are classified UNATTESTED and fall out
 	// of both sides of this fraction: see Attestation for how many.
-	ServeRate        Rate             `json:"serve_rate"`
-	Attestation      attestationStats `json:"attestation"`
-	ProbeCount       int64            `json:"probe_count"` // all probe rows in window
-	Classes          classCounts      `json:"classes"`
-	Publications     int64            `json:"publications"`
-	PublicationBytes int64            `json:"publication_bytes"`
-	Reconstructable  Rate             `json:"reconstructable"` // publications whose latest probed point held >= OriginalRows distinct served rows
-	Gaps             int64            `json:"probe_gaps"`      // NOT_PROBED + PROBE_ERROR rows in window
+	// ServeRate is HEALTHY / (HEALTHY + FAULT) over probes of an assigned
+	// shard while the validator was under obligation. FAULT means the
+	// observer reached the validator and it failed to hand over a shard the
+	// chain proves it stored. Everything the rate does not speak for is in
+	// HeldOut, and ExcludedClasses says why each class is out.
+	ServeRate Rate `json:"serve_rate"`
+	// Coverage is how much of the rate's own population produced a verdict:
+	// (HEALTHY + FAULT) over every probe in that population. A high rate over
+	// low coverage is a statement about a handful of probes.
+	Coverage Rate `json:"serve_rate_coverage"`
+	// ByObligation counts one observation per (validator, blob) instead of
+	// one per probe. The four in-window probes of one obligation are near
+	// copies of each other, so this is the number a confidence interval may
+	// honestly be drawn around.
+	ByObligation     Rate               `json:"serve_rate_by_obligation"`
+	HeldOut          map[string]int64   `json:"serve_rate_held_out"`
+	ExcludedClasses  []excludedClass    `json:"serve_rate_excluded_classes"`
+	Attestation      attestationStats   `json:"attestation"`
+	ProbeCount       int64              `json:"probe_count"` // all probe rows in window
+	Classes          classCounts        `json:"classes"`
+	Publications     int64              `json:"publications"`
+	PublicationBytes int64              `json:"publication_bytes"`
+	Reconstructable  reconstructSummary `json:"reconstructable"`
+	Gaps             int64              `json:"probe_gaps"` // NOT_PROBED + PROBE_ERROR rows in window
 }
 
 func (s *Server) classCountsWhere(ctx context.Context, where string, args ...any) (classCounts, int64, error) {
@@ -380,10 +396,92 @@ type attestationStats struct {
 	Unknown int64 `json:"unknown_probes"`
 }
 
-// serveRate is HEALTHY over HEALTHY + FAULT. UNATTESTED is a class of its
-// own, so an unproven obligation never reaches either side of this fraction.
+// excludedFromRate names the classes published beside the serve rate rather
+// than inside it, with the reason each one is out. It lives in one place so a
+// page cannot describe the exclusions differently from the API.
+//
+// The grace phase is outside the rate's population for the same kind of
+// reason: a grace probe can only ever add HEALTHY, since NOT_FOUND and
+// unreachability there are TOLERATED by design. Including it gave a validator
+// that prunes promptly a lower rate than one that over-retains, with
+// identical in-window behaviour, and the "worst first" table sorts on exactly
+// that axis. Grace probes are still recorded and still shown; they just do
+// not move a retention rate.
+var excludedFromRate = []excludedClass{
+	{"UNATTESTED", "the settled promise carries no verified signature from this validator, so nothing proves it ever stored the shard"},
+	{"UNREACHABLE", "the observer could not complete a conversation with the endpoint; from one vantage that is not distinguishable from a problem on the observer's own path"},
+	{"NOT_REGISTERED", "the validator had no Fibre host in x/valaddr at the time of the probe; jailing and unbonding remove a provider from the bonded list while the chain keeps the entry"},
+	{"SHADOWED_SHARD", "the rows returned verify against the blob commitment but are not this promise's assignment; DownloadShard is addressed by commitment alone, so another promise over the same blob answers in its place"},
+	{"IDENTITY_EXPIRED", "the certificate is endorsed by the right consensus key but its signed validity window has lapsed; endpoint hygiene, not a retention failure"},
+	{"NOT_PROBED", "the slot elapsed unprobed or the policy sampled it out; a gap in observation, never a zero"},
+	{"PROBE_ERROR", "the observer's own probe failed"},
+}
+
+type excludedClass struct {
+	Class  string `json:"class"`
+	Reason string `json:"reason"`
+}
+
+// serveRate is HEALTHY over HEALTHY + FAULT, where FAULT means the observer
+// reached the validator and it failed to hand over a shard it was proven to
+// hold. Every other class is published under its own name beside the rate.
 func serveRate(c classCounts) Rate {
 	return rate(c["HEALTHY"], c["HEALTHY"]+c["FAULT"])
+}
+
+// obligationRate counts one observation per (validator, blob) rather than one
+// per probe.
+//
+// The schedule visits the same validator and blob four times in window, and
+// every bonded validator is assigned every blob because of the minimum-rows
+// floor, so the probes inside one obligation are near-perfectly correlated: a
+// certificate that lapsed, or a disk that lost a shard, produces four FAULT
+// rows for one event. Counting those as four independent trials makes any
+// confidence interval far narrower than the evidence supports, which is the
+// wrong error to make under a public accusation. An obligation is kept when
+// no probe of it faulted.
+func (s *Server) obligationRate(ctx context.Context, where string, args ...any) (Rate, error) {
+	var kept, broken int64
+	err := s.st.DB().QueryRowContext(ctx, `SELECT
+			COALESCE(SUM(CASE WHEN f = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN f > 0 THEN 1 ELSE 0 END), 0)
+		FROM (
+			SELECT SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END) AS f,
+			       SUM(CASE WHEN classification IN ('HEALTHY','FAULT') THEN 1 ELSE 0 END) AS rated
+			FROM probes WHERE `+where+`
+			GROUP BY validator_address, promise_hash
+		) WHERE rated > 0`, args...).Scan(&kept, &broken)
+	if err != nil {
+		return Rate{}, err
+	}
+	return rate(kept, kept+broken), nil
+}
+
+// coverage is how much of the rate's own population produced a verdict.
+// Without it a reader cannot tell a rate resting on twelve probes from one
+// resting on four hundred scheduled slots, and the probe and gap counts
+// published next to it are over a different population entirely.
+func coverage(c classCounts) Rate {
+	var rated, all int64
+	for cls, n := range c {
+		all += n
+		if cls == "HEALTHY" || cls == "FAULT" {
+			rated += n
+		}
+	}
+	return rate(rated, all)
+}
+
+// heldOut counts, per excluded class, how many probes of this population the
+// rate does not speak for.
+func heldOut(c classCounts) map[string]int64 {
+	out := map[string]int64{}
+	for _, e := range excludedFromRate {
+		if n := c[e.Class]; n > 0 {
+			out[e.Class] = n
+		}
+	}
+	return out
 }
 
 // attestationWhere counts proven, unproven and unknown obligations over the
@@ -418,16 +516,24 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM endpoints WHERE closed_at IS NULL`).Scan(&resp.RegisteredEndpoints)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT validator_address) FROM probes WHERE started_at >= ?`, win.startArg()).Scan(&resp.ValidatorsProbed)
 
-	classes, total, err := s.classCountsWhere(ctx, `started_at >= ? AND assigned = 1 AND phase IN ('in_window','grace')`, win.startArg())
+	classes, total, err := s.classCountsWhere(ctx, `started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg())
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	resp.Classes = classes
 	resp.ServeRate = serveRate(classes)
+	resp.Coverage = coverage(classes)
+	resp.HeldOut = heldOut(classes)
+	resp.ExcludedClasses = excludedFromRate
+	if resp.ByObligation, err = s.obligationRate(ctx,
+		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
 	_ = total
 	if resp.Attestation, err = s.attestationWhere(ctx,
-		`started_at >= ? AND assigned = 1 AND phase IN ('in_window','grace')`, win.startArg()); err != nil {
+		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
@@ -517,7 +623,17 @@ type validatorRow struct {
 	// promise does not prove this validator stored the blob are UNATTESTED
 	// and sit outside the fraction, so an unproven obligation can neither
 	// reward nor punish it. Attestation says how many those were.
-	ServeRate        Rate             `json:"serve_rate"`
+	ServeRate Rate `json:"serve_rate"`
+	// Coverage and HeldOut carry the same meaning as on /v1/network: how much
+	// of this validator's own obligation population produced a verdict, and
+	// what the rate does not speak for.
+	Coverage Rate `json:"serve_rate_coverage"`
+	// ByObligation counts one observation per (validator, blob) instead of
+	// one per probe. The four in-window probes of one obligation are near
+	// copies of each other, so this is the number a confidence interval may
+	// honestly be drawn around.
+	ByObligation     Rate             `json:"serve_rate_by_obligation"`
+	HeldOut          map[string]int64 `json:"serve_rate_held_out"`
 	Attestation      attestationStats `json:"attestation"`
 	ProbeCount       int64            `json:"probe_count"`
 	Classes          classCounts      `json:"classes"`
@@ -616,7 +732,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	rows.Close()
 	// classes per validator in window
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, classification, COUNT(*) FROM probes
-		WHERE started_at >= ? AND assigned = 1 AND phase IN ('in_window','grace') GROUP BY validator_address, classification`, win.startArg())
+		WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window' GROUP BY validator_address, classification`, win.startArg())
 	if err != nil {
 		return nil, err
 	}
@@ -637,7 +753,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN attested = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested IS NULL THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase IN ('in_window','grace')
+		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
 		GROUP BY validator_address`, win.startArg())
 	if err != nil {
 		return nil, err
@@ -689,12 +805,44 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			v.LastSeenAt = &at
 		}
 	}
+	// one observation per (validator, blob): see obligationRate.
+	byObligation := map[string]Rate{}
+	orows, err := db.QueryContext(ctx, `SELECT validator_address,
+			COALESCE(SUM(CASE WHEN f = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN f > 0 THEN 1 ELSE 0 END), 0)
+		FROM (
+			SELECT validator_address, promise_hash,
+			       SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END) AS f,
+			       SUM(CASE WHEN classification IN ('HEALTHY','FAULT') THEN 1 ELSE 0 END) AS rated
+			FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
+			GROUP BY validator_address, promise_hash
+		) WHERE rated > 0 GROUP BY validator_address`, win.startArg())
+	if err != nil {
+		return nil, err
+	}
+	for orows.Next() {
+		var addr string
+		var kept, broken int64
+		if err := orows.Scan(&addr, &kept, &broken); err != nil {
+			orows.Close()
+			return nil, err
+		}
+		byObligation[addr] = rate(kept, kept+broken)
+	}
+	orows.Close()
+	if err := orows.Err(); err != nil {
+		return nil, err
+	}
+
 	out := make([]validatorRow, 0, len(byAddr))
 	for addr, v := range byAddr {
 		if only != "" && addr != only {
 			continue
 		}
 		v.ServeRate = serveRate(v.Classes)
+		v.Coverage = coverage(v.Classes)
+		v.HeldOut = heldOut(v.Classes)
+		v.ByObligation = byObligation[addr]
 		out = append(out, *v)
 	}
 	// voting power desc, then address
@@ -775,7 +923,7 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	var spans []span
 	for _, name := range []string{"24h", "7d", "30d"} {
 		win := Window{Name: name, Span: windows[name], Start: now.Add(-windows[name]), End: now}
-		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND assigned = 1 AND phase IN ('in_window','grace')`, addr, win.startArg())
+		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND assigned = 1 AND phase = 'in_window'`, addr, win.startArg())
 		if err != nil {
 			s.writeInternal(w, r.URL.Path, err)
 			return
@@ -1036,25 +1184,72 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 }
 
 // reconstructSample bounds how many of the newest publications the network
-// reconstructability rate is computed over per request.
+// reconstructability rate is computed over per request. The bound is real and
+// is published: reconstructSummary carries how many publications the window
+// holds and how many were examined, so a rate over the newest 2000 of 50000
+// cannot be read as a rate over the window.
 const reconstructSample = 2000
 
-func (s *Server) reconstructableCount(ctx context.Context, win Window) (Rate, error) {
+// reconstructSummary is the network reconstructability figure with everything
+// a reader needs to know what it covers. "Degraded" is reported on its own
+// rather than folded into the numerator: it means the rows were all there but
+// a validator proven to owe the blob did not answer, which is not the same
+// statement as "the blob could be rebuilt with everyone serving".
+type reconstructSummary struct {
+	// Rate is fully-served publications over those with a verdict.
+	Rate Rate `json:"rate"`
+	// Recoverable counts publications where enough distinct rows came back to
+	// rebuild the blob, whether or not every obliged validator answered. This
+	// is the availability question; Rate is the compliance one.
+	Recoverable Rate  `json:"recoverable"`
+	Yes         int64 `json:"yes"`
+	Degraded    int64 `json:"degraded"`
+	No          int64 `json:"no"`
+	// Pending and Unknown are publications with no verdict yet: a sweep still
+	// running, or row lists that were not recorded.
+	Pending int64 `json:"pending"`
+	Unknown int64 `json:"unknown"`
+	// PublicationsInWindow is every publication the window holds; Examined is
+	// how many this request actually looked at. They differ when the window
+	// holds more than the sample bound, and the dashboard says so when they do.
+	PublicationsInWindow int64 `json:"publications_in_window"`
+	Examined             int64 `json:"publications_examined"`
+	SampleLimit          int   `json:"sample_limit"`
+}
+
+func (s *Server) reconstructableCount(ctx context.Context, win Window) (reconstructSummary, error) {
+	out := reconstructSummary{SampleLimit: reconstructSample}
+	if err := s.st.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM publications WHERE settlement_time >= ?`, win.startArg()).Scan(&out.PublicationsInWindow); err != nil {
+		return out, err
+	}
 	blobs, err := s.blobRows(ctx, `settlement_time >= ?`, reconstructSample, win.startArg())
 	if err != nil {
-		return Rate{}, err
+		return out, err
 	}
-	var yes, den int64
+	out.Examined = int64(len(blobs))
 	for _, b := range blobs {
-		if b.Reconstructable == nil || b.Reconstructable.Status == "unknown" || b.Reconstructable.Status == "pending" {
+		if b.Reconstructable == nil {
+			out.Unknown++
 			continue
 		}
-		den++
-		if b.Reconstructable.Status != "no" {
-			yes++
+		switch b.Reconstructable.Status {
+		case "unknown":
+			out.Unknown++
+		case "pending":
+			out.Pending++
+		case "yes":
+			out.Yes++
+		case "degraded":
+			out.Degraded++
+		default:
+			out.No++
 		}
 	}
-	return rate(yes, den), nil
+	den := out.Yes + out.Degraded + out.No
+	out.Rate = rate(out.Yes, den)
+	out.Recoverable = rate(out.Yes+out.Degraded, den)
+	return out, nil
 }
 
 func (s *Server) handleBlobs(w http.ResponseWriter, r *http.Request) {

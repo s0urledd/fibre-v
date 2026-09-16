@@ -72,6 +72,7 @@ by `TestClassify_UnattestedIsNeverAFault`.
 | outcome | meaning |
 |---|---|
 | `SERVED_OK` | shard returned, every row verifies against the commitment and the returned indices equal the assigned set |
+| `SERVER_ERROR` | the endpoint was reached, completed TLS, proved its identity and answered the RPC with an application error (gRPC `Internal`, `Unknown`, `DataLoss`, `Aborted`). Deliberately not a reachability failure: calling it "unreachable" would be false about a server the observer just talked to |
 | `PARTIAL` | fewer rows than assigned, the ones returned are valid |
 | `WRONG_ROWS` | rows returned but not the assigned set (`ShardMap.Verify` failed) |
 | `INVALID_ROWS` | rows returned but they fail commitment verification |
@@ -98,10 +99,14 @@ One sentence each, and what a reader should conclude.
 | classification | when | conclude |
 |---|---|---|
 | `HEALTHY` | assigned validator returned `SERVED_OK` in window or in grace | the validator kept its promise at this point in time |
-| `FAULT` | assigned validator, in window: `NOT_FOUND`, unreachable at any layer (including no registered host), bad identity, wrong, partial or invalid rows. In grace: bad identity, wrong, partial or invalid rows. In post: bad identity, wrong or invalid rows. Any validator, any phase: bad identity (identity is a property of the endpoint, not of one shard) | the validator broke its retention promise or is not who the chain says it is; this is the only class that counts against a validator |
+| `FAULT` | the observer **reached** the validator and it failed to hand over a shard the chain proves it stored. In window: `NOT_FOUND`, `INVALID_ROWS`, `SERVER_ERROR`, or rows that verify against neither the commitment nor the assignment. In grace and post: `INVALID_ROWS`, and in grace also wrong or partial rows. Any validator, any phase: a TLS certificate signed by the wrong consensus key (identity is a property of the endpoint, not of one shard) | the validator broke its retention promise or is not who the chain says it is; this is the only class that counts against a validator |
+| `UNREACHABLE` | assigned and attested, in window, and the observer could not complete a conversation at all: `DNS_FAIL`, `TCP_REFUSED`, `TCP_TIMEOUT`, `TCP_UNREACHABLE`, `TLS_HANDSHAKE_FAIL`, `RPC_UNAVAILABLE`, `RPC_ERROR` | we could not get to it. From one vantage that is not distinguishable from a route, firewall or peering problem on the observer's own path, so it is published in full beside the serve rate and kept out of it |
+| `NOT_REGISTERED` | assigned validator with no Fibre host in `x/valaddr` at the time of the probe (`NO_REGISTERED_HOST`) | a registry state, not a refusal. Jailing and unbonding remove a provider from `AllBondedFibreProviders` while the chain keeps the entry for the jailed grace period |
+| `SHADOWED_SHARD` | assigned validator returned rows that **verify against the blob commitment** but whose indices are not this promise's assignment (`WRONG_ROWS` or `PARTIAL` with `commitment_verified`) | another promise over the same blob answered in this one's place. `DownloadShard` is addressed by the commitment alone and a store keeps one shard per commitment, so the validator has no way to tell the two apart. Never a fault |
+| `IDENTITY_EXPIRED` | certificate endorsed by the right consensus key, but its signed validity window has lapsed or has not started | a renewal running late. Endpoint hygiene, not impersonation and not a retention failure |
 | `TOLERATED` | assigned validator, grace phase: `NOT_FOUND` or unreachable | honest pruning lag; do not read anything into it |
 | `EXPECTED_GONE` | assigned validator, post phase: `NOT_FOUND` | correct behaviour after the window |
-| `SERVED_PAST_WINDOW` | assigned validator, post phase: still serving (`SERVED_OK`, or `PARTIAL` with valid rows) | not a fault; the validator keeps data longer than it must |
+| `SERVED_PAST_WINDOW` | assigned validator, post phase: still serving (`SERVED_OK`, `PARTIAL`, or `WRONG_ROWS`) | not a fault; the validator keeps data longer than it must. `WRONG_ROWS` is here rather than under FAULT because `DownloadShard` performs no assignment check at all — assignment is enforced only at upload — so rows outside an assignment, after the obligation ended, are not a rule the validator broke |
 | `UNREACHABLE_POST_WINDOW` | assigned validator, post phase: unreachable | not a retention fault; the obligation was over. It still feeds the reachability view |
 | `EXPECTED_UNASSIGNED` | validator not assigned this shard answered `NOT_FOUND` or was unreachable | normal; only probed when `-probe-unassigned` is on |
 | `SERVING_UNASSIGNED` | validator not assigned this shard returned data for it (`SERVED_OK`, `PARTIAL`, `WRONG_ROWS` or `INVALID_ROWS`) | unexpected; either the observer's assignment is wrong or the validator over-serves. Shown for review, never as a fault |
@@ -111,13 +116,37 @@ One sentence each, and what a reader should conclude.
 
 ## How the dashboard derives its numbers
 
-- **Serve rate** for a validator over a window = `HEALTHY / (HEALTHY + FAULT)`,
-  counting only in-window and grace probes of assigned shards whose
-  obligation the promise proves. The probe count is shown next to every rate,
-  and the number of probes held out as `UNATTESTED` is published alongside it
-  (`attestation.unattested_probes`) so a reader can see how much of the
-  population the rate speaks for. A rate with high `UNATTESTED` coverage is a
-  statement about a minority of the set.
+- **The rate's population** is probes of an assigned shard while the validator
+  was *under obligation*: `assigned = 1 AND phase = 'in_window'`. The grace
+  phase is deliberately outside it. A grace probe can only ever add `HEALTHY`,
+  because `NOT_FOUND` and unreachability there are `TOLERATED` by design, so
+  counting grace gave a validator that prunes promptly a **lower** rate than
+  one that over-retains with identical in-window behaviour — the opposite of
+  what the number claims to measure, on exactly the axis the "worst first"
+  table sorts by.
+- **Serve rate** over that population = `HEALTHY / (HEALTHY + FAULT)`. Every
+  other class is published beside it under its own name, never folded in, and
+  the API carries both the counts (`serve_rate_held_out`) and the reason each
+  class is out (`serve_rate_excluded_classes`) so the dashboard cannot
+  describe the exclusions differently from the API.
+- **Verdict coverage** (`serve_rate_coverage`) = `(HEALTHY + FAULT)` over every
+  probe in that population. A high rate over low coverage is a statement about
+  a handful of probes, and without this figure a reader cannot tell the two
+  apart. The `probe_count` and `probe_gaps` fields are over *all* probes, a
+  different population; they are not this.
+- **Serve rate by obligation** (`serve_rate_by_obligation`) counts one
+  observation per (validator, blob): kept when no probe of it faulted. The
+  schedule visits the same validator and blob four times in window, and the
+  minimum-rows floor assigns every bonded validator every blob, so the probes
+  inside one obligation are near-perfectly correlated — one lapsed certificate
+  produces four `FAULT` rows for one event. Any confidence interval is drawn
+  around this number, never around the probe count, and the dashboard states
+  it as an **upper bound on the fault rate**, because that is the direction an
+  accusation is made in.
+- Below **20** rated observations no percentage is printed at all; the counts
+  are shown instead, and the validator is not ranked among the worst. A single
+  unlucky probe used to render as "0.0%" beside a named validator and sort it
+  above one with a hundred real faults.
 - **Reachability** on the overview and validator pages is the latest
   evidence per endpoint: the newest heartbeat or probe (any phase, assigned
   or not, gaps excluded) with TCP and TLS both successful. It is "reachable
@@ -144,6 +173,14 @@ One sentence each, and what a reader should conclude.
   threshold is the row count from `fibre-assign`'s pinned protocol params,
   not a hard-coded fraction of validators. Rows from several vantages count a
   validator once.
+- **Reconstructable** is published as four numbers, not one: `yes` (every
+  validator proven to owe the blob served), `degraded` (the rows were all
+  there but someone stayed quiet), `no`, and separately `pending`/`unknown`.
+  "Degraded" is never folded into the numerator, because "the blob can be
+  rebuilt" and "everyone kept their promise" are different statements. The
+  response also carries `publications_in_window`, `publications_examined` and
+  `sample_limit`, so a rate over the newest 2000 of 50000 cannot be read as a
+  rate over the window.
 - `PROBE_ERROR`, `NOT_PROBED` and `MISSED` are excluded from every rate and
   rendered as gaps. `UNATTESTED` is also excluded, but it is not a gap: the
   probe ran and its outcome is recorded. It is excluded because no obligation
@@ -158,6 +195,26 @@ One sentence each, and what a reader should conclude.
   local clock and the grace span is only a few minutes wide, so a vantage
   whose offset is large can be discounted after the fact. The prober logs a
   warning past 30 seconds.
+
+## What a fault is, and what it is not
+
+The only thing this site says against a validator is that it was **reached**
+and failed to hand over a shard the chain **proves** it stored. Everything
+that falls short of both halves of that sentence has its own class and its own
+column:
+
+| the observer saw | class | why it is not a fault |
+|---|---|---|
+| no signature from this validator on the settled promise | `UNATTESTED` | nothing proves it was ever sent the shard |
+| no answer from the endpoint at all | `UNREACHABLE` | from one vantage, indistinguishable from the observer's own path failing |
+| no Fibre host in the registry | `NOT_REGISTERED` | jailing and unbonding remove the provider from the bonded list; the chain keeps the entry |
+| another promise's rows for the same blob | `SHADOWED_SHARD` | `DownloadShard` takes a commitment, not a promise hash; the validator cannot tell them apart |
+| a lapsed but correctly signed certificate | `IDENTITY_EXPIRED` | a late renewal, not someone else answering |
+| an outcome the taxonomy does not recognise | `PROBE_ERROR` | "we have not taught the observer about this" is not evidence |
+| a local socket error, a cancelled probe, a verification that timed out | `PROBE_ERROR` | the packets never left this machine |
+
+This is why the serve rate moved after the audit. It did not get more
+forgiving; it stopped making claims the evidence did not support.
 
 ## Adding a class
 

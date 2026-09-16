@@ -43,13 +43,35 @@ export type Network = {
   validators_probed: number;
   reachability: Rate;
   serve_rate: Rate;
+  /** how much of the rate's own population produced a verdict */
+  serve_rate_coverage: Rate;
+  /** one observation per (validator, blob); the basis for any interval */
+  serve_rate_by_obligation: Rate;
+  /** class -> probes the rate does not speak for */
+  serve_rate_held_out: ClassCounts;
+  serve_rate_excluded_classes: { class: string; reason: string }[];
   attestation: Attestation;
   probe_count: number;
   classes: ClassCounts;
   publications: number;
   publication_bytes: number;
-  reconstructable: Rate;
+  reconstructable: Reconstructable;
   probe_gaps: number;
+};
+
+export type Reconstructable = {
+  /** fully served, over publications with a verdict */
+  rate: Rate;
+  /** enough rows came back to rebuild the blob, whether or not everyone answered */
+  recoverable: Rate;
+  yes: number;
+  degraded: number;
+  no: number;
+  pending: number;
+  unknown: number;
+  publications_in_window: number;
+  publications_examined: number;
+  sample_limit: number;
 };
 
 export type Validator = {
@@ -63,6 +85,9 @@ export type Validator = {
   identity_status: string;
   identity_reason?: string;
   serve_rate: Rate;
+  serve_rate_coverage: Rate;
+  serve_rate_by_obligation: Rate;
+  serve_rate_held_out: ClassCounts;
   attestation: Attestation;
   probe_count: number;
   classes: ClassCounts;
@@ -94,7 +119,15 @@ export type Probe = {
   tls_ok: boolean;
   identity_ok: boolean;
   raw_error?: string;
+  retry_first_outcome?: string;
+  clock_offset_ms?: number;
 };
+
+// Below this many rated probes a percentage is noise dressed as a
+// measurement, so the tables print the counts instead and the ranking leaves
+// the validator out. One unlucky probe used to render "0.0%" next to a named
+// validator and sort it above one with a hundred real faults.
+export const MIN_RATED = 20;
 
 export type Reconstruct = {
   status: "yes" | "degraded" | "no" | "pending" | "unknown";
@@ -199,7 +232,14 @@ export function useApi<T>(path: string | null, refreshMs = 30000): Fetch<T> {
 
 export function fmtRate(r: Rate | undefined | null): string {
   if (!r || r.den === 0 || r.value === null) return "—";
+  // Too few observations to state as a percentage: show the counts instead.
+  if (r.den < MIN_RATED) return fmtCount(r);
   return (r.value * 100).toFixed(1) + "%";
+}
+
+/** whether a rate has enough observations behind it to rank or compare. */
+export function enoughToRank(r: Rate | undefined | null): boolean {
+  return !!r && r.den >= MIN_RATED;
 }
 export function fmtCount(r: Rate | undefined | null): string {
   if (!r) return "";
@@ -242,12 +282,36 @@ export function nsDisplay(ns: string): string {
   const stripped = ns.replace(/^(00)+/, "");
   return shortHex(stripped || ns, 6);
 }
-// Wilson 95% lower bound of a proportion, printed next to small-n rates.
-export function wilsonLower(num: number, den: number): number | null {
+// Wilson 95% interval for a proportion. Both ends matter and they answer
+// different questions: the lower bound on the serve rate is the charitable
+// reading, the upper bound on the fault rate is the accusatory one. A table
+// that publishes faults should show the bound on the claim it is making.
+function wilson(num: number, den: number): [number, number] | null {
   if (den === 0) return null;
   const z = 1.96, p = num / den, n = den;
   const denom = 1 + (z * z) / n;
   const centre = p + (z * z) / (2 * n);
   const margin = z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
-  return Math.max(0, (centre - margin) / denom);
+  return [Math.max(0, (centre - margin) / denom), Math.min(1, (centre + margin) / denom)];
+}
+
+export function wilsonLower(num: number, den: number): number | null {
+  const w = wilson(num, den);
+  return w && w[0];
+}
+
+/**
+ * Upper bound on the fault rate: "at most this share of the obligations we
+ * could judge went unserved, with 95% confidence". This is the direction an
+ * accusation has to be stated in.
+ *
+ * Pass an obligation-level rate where one is available. The four in-window
+ * probes of one (validator, blob) are near copies of each other, so a bound
+ * drawn around the probe count claims far more precision than the evidence
+ * carries.
+ */
+export function faultRateUpper(r: Rate | undefined | null): number | null {
+  if (!r || r.den === 0) return null;
+  const w = wilson(r.den - r.num, r.den);
+  return w && w[1];
 }

@@ -70,7 +70,9 @@ func attestedFixture(t *testing.T) *httptest.Server {
 
 	point := now.Add(-10 * time.Minute)
 	mk := func(addr string, attested bool, outcome probe.Outcome) probe.Measurement {
-		class, reason := probe.Classify(true, attested, probe.PhaseInWindow, outcome)
+		class, reason := probe.Classify(probe.Evidence{
+			Assigned: true, Attested: attested, Phase: probe.PhaseInWindow, Outcome: outcome,
+		})
 		m := probe.Measurement{
 			SchemaVersion: probe.AttestationSchemaVersion, Vantage: "test",
 			PromiseHash: hash, Commitment: "cc", MustServeUntil: msu, ValidatorSetHeight: 99,

@@ -128,6 +128,10 @@ type IdentityResult struct {
 	OK         bool   `json:"ok"`
 	DurationMS int64  `json:"duration_ms"`
 	Reason     string `json:"reason,omitempty"` // tlsverify.Reason on failure
+	// Stale: the certificate is endorsed by the right consensus key but its
+	// signed validity window has lapsed or has not started. That is endpoint
+	// hygiene, not impersonation, and the taxonomy keeps the two apart.
+	Stale bool `json:"stale,omitempty"`
 	// ClaimedNotBefore/After come from Inspect — what the peer's extension
 	// says regardless of verdict.
 	ClaimedNotBefore string `json:"claimed_not_before,omitempty"`
