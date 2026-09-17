@@ -33,7 +33,7 @@ const VERDICTS: Record<string, Def> = {
   },
   FAULT: {
     label: "fault", tier: "fault",
-    def: "This site reached the validator and it failed to hand over a shard the chain proves it stored: no such shard, unverifiable bytes, a server error, or a TLS identity that is not the endorsed consensus key. The only class that counts against a validator.",
+    def: "An identity-verified endpoint, for a shard it signed for, said it has no such shard, returned bytes that do not verify against the commitment, or returned rows outside its assignment. The only class that counts against a validator.",
   },
   UNREACHABLE: {
     label: "unreachable", tier: "hold",
@@ -42,6 +42,14 @@ const VERDICTS: Record<string, Def> = {
   IDENTITY_EXPIRED: {
     label: "identity expired", tier: "hold",
     def: "The certificate is endorsed by the right consensus key, but its signed validity window has lapsed or has not started. A renewal running late, not someone else answering on this endpoint.",
+  },
+  IDENTITY_MISMATCH: {
+    label: "bad certificate", tier: "hold",
+    def: "The certificate is not endorsed by this validator's consensus key, so no client can download from the endpoint. A statement about the endpoint, shown as its status; not about any shard, so outside the serve rate.",
+  },
+  SERVER_ERROR: {
+    label: "server error", tier: "hold",
+    def: "The endpoint was reached and answered with an application error instead of the shard. It did not say it lacks the shard; from one probe that is not distinguishable from a transient fault, so it is shown beside the rate, not inside it.",
   },
   UNATTESTED: {
     label: "unattested", tier: "held",

@@ -52,12 +52,15 @@ const (
 	// ClassHealthy: assigned validator served its exact rows while under
 	// obligation (or still serving in grace/post — over-serving is fine).
 	ClassHealthy Classification = "HEALTHY"
-	// ClassFault: the observer reached this validator and it failed to hand
-	// over a shard it was proven to hold, or it answered as someone else.
-	// This is the only class that counts against a validator, and it requires
-	// an answer: a validator the observer could not reach is not in here,
-	// because "we could not get to it" and "it did not serve" are different
-	// statements and only the second is about the validator.
+	// ClassFault: an identity-verified endpoint, while the promise held,
+	// said it has no such shard, returned bytes that do not verify against
+	// the commitment, or returned rows outside this promise's assignment,
+	// for a shard the chain proves it stored. This is the only class that
+	// counts against a validator, and every part of the sentence is load-
+	// bearing: a validator the observer could not reach is not in here, a
+	// server that answered with an error is not in here, and an endpoint
+	// whose certificate is wrong is not in here — each of those is a
+	// different statement with its own class.
 	ClassFault Classification = "FAULT"
 	// ClassUnreachable: assigned and attested, under obligation, and the
 	// observer could not complete a conversation with the endpoint at all.
@@ -85,6 +88,25 @@ const (
 	// retention failure, so it is reported on its own rather than folded into
 	// the serve rate.
 	ClassIdentityExpired Classification = "IDENTITY_EXPIRED"
+	// ClassIdentityMismatch: the TLS certificate is not endorsed by this
+	// validator's consensus key at all. No client will download from the
+	// endpoint, so it is as unusable as one that does not answer — and like
+	// UNREACHABLE it is a statement about the endpoint, not about a shard.
+	// It is judged before attestation (a certificate is a property of the
+	// endpoint) and held out of the serve rate: the rate speaks about shards
+	// the chain proves were stored, and a wrong certificate proves nothing
+	// about any shard. It is surfaced as the endpoint's status and in the
+	// endorsement rate instead.
+	ClassIdentityMismatch Classification = "IDENTITY_MISMATCH"
+	// ClassServerError: the endpoint was reached, proved its identity and
+	// answered the RPC with an application error (gRPC Internal, Unknown,
+	// DataLoss, Aborted) instead of the shard, while the promise held. The
+	// server did not say it lacks the shard; it said it could not answer.
+	// From one probe that is not distinguishable from a transient fault —
+	// an overloaded process, a disk hiccup — so it is recorded and shown
+	// beside the rate, never inside it. A server that errors at every probe
+	// point is visible as such on its own page.
+	ClassServerError Classification = "SERVER_ERROR"
 	// ClassTolerated: NOT_FOUND / unreachable in the grace window right after
 	// must_serve_until. Within measured prune lag; not held against the
 	// validator.
@@ -199,7 +221,7 @@ func Classify(in Evidence) (Classification, string) {
 		if in.IdentityStale {
 			return ClassIdentityExpired, "certificate is endorsed by the right consensus key but its signed validity window has lapsed"
 		}
-		return ClassFault, "TLS identity is not the endorsed consensus key"
+		return ClassIdentityMismatch, "TLS certificate is not endorsed by this validator's consensus key; no client can download from this endpoint"
 	}
 
 	// No registered host is a registry state, not a refusal. Judged before
@@ -256,7 +278,7 @@ func Classify(in Evidence) (Classification, string) {
 		case o == OutcomeWrongRows || o == OutcomePartial:
 			return ClassFault, "returned rows that verify against neither the commitment nor this promise's assignment"
 		case o == OutcomeServerError:
-			return ClassFault, "endpoint reached and identity verified; the server returned an internal error instead of the shard"
+			return ClassServerError, "endpoint reached and identity verified; the server answered with an application error instead of the shard, which from one probe is not distinguishable from a transient fault"
 		case o.reachFailure():
 			return ClassUnreachable, "could not complete a conversation with the endpoint while it was under obligation; from one vantage this is not distinguishable from a problem on the observer's own path"
 		default:

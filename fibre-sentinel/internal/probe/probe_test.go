@@ -147,8 +147,8 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeServedOK, want: ClassHealthy},
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeNotFound, want: ClassFault},
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeInvalidRows, want: ClassFault},
-		{assigned: true, phase: PhaseInWindow, outcome: OutcomeServerError, want: ClassFault},
-		{assigned: true, phase: PhaseInWindow, outcome: OutcomeIdentityFail, want: ClassFault},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeServerError, want: ClassServerError},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeIdentityFail, want: ClassIdentityMismatch},
 		// unreachable is not a retention verdict: from one vantage it is not
 		// distinguishable from a problem on the observer's own path.
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeRPCUnavailable, want: ClassUnreachable},
@@ -173,7 +173,7 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeNotFound, want: ClassTolerated},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeRPCUnavailable, want: ClassTolerated},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeServedOK, want: ClassHealthy},
-		{assigned: true, phase: PhaseGrace, outcome: OutcomeIdentityFail, want: ClassFault},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeIdentityFail, want: ClassIdentityMismatch},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomePartial, want: ClassFault},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeWrongRows, want: ClassFault},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeServerError, want: ClassTolerated},
@@ -195,7 +195,7 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{assigned: false, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassServingUnassigned},
 		{assigned: false, phase: PhaseInWindow, outcome: OutcomeInvalidRows, want: ClassServingUnassigned},
 		{assigned: false, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassServingUnassigned},
-		{assigned: false, phase: PhaseInWindow, outcome: OutcomeIdentityFail, want: ClassFault},
+		{assigned: false, phase: PhaseInWindow, outcome: OutcomeIdentityFail, want: ClassIdentityMismatch},
 		{assigned: false, phase: PhaseGrace, outcome: OutcomeNoHost, want: ClassExpectedUnassigned},
 		{assigned: false, phase: PhaseInWindow, outcome: OutcomeServerError, want: ClassExpectedUnassigned},
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeReachable, want: ClassNotProbed},
@@ -259,12 +259,19 @@ func TestClassify_UnreachableIsNotAFault(t *testing.T) {
 			t.Errorf("%s reached the serve rate as %s", o, got)
 		}
 	}
-	// but a server that answered and failed to produce the shard is a fault
-	for _, o := range []Outcome{OutcomeNotFound, OutcomeInvalidRows, OutcomeServerError} {
+	// but a server that answered and said it has no shard, or handed over
+	// bytes that do not verify, is a fault
+	for _, o := range []Outcome{OutcomeNotFound, OutcomeInvalidRows} {
 		got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: o})
 		if !got.CountsAgainst() {
 			t.Errorf("in-window %s = %s, want a fault: the validator answered and did not serve", o, got)
 		}
+	}
+	// an application error is neither: the server was reached and did not
+	// say it lacks the shard. It has its own class, outside the rate.
+	got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeServerError})
+	if got != ClassServerError || got.Rated() {
+		t.Errorf("in-window SERVER_ERROR = %s, want %s outside the rate", got, ClassServerError)
 	}
 }
 
@@ -305,11 +312,13 @@ func TestClassify_StaleIdentityIsNotImpersonation(t *testing.T) {
 	if stale.CountsAgainst() || stale.Rated() {
 		t.Errorf("lapsed identity reached the serve rate as %s", stale)
 	}
+	// A certificate signed by the wrong key is an unusable endpoint, not a
+	// shard the validator failed to serve: its own class, outside the rate.
 	wrong, _ := Classify(Evidence{
 		Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeIdentityFail,
 	})
-	if !wrong.CountsAgainst() {
-		t.Errorf("a wrong consensus key = %s, want a fault", wrong)
+	if wrong != ClassIdentityMismatch || wrong.Rated() {
+		t.Errorf("a wrong consensus key = %s, want %s outside the rate", wrong, ClassIdentityMismatch)
 	}
 }
 
@@ -354,10 +363,10 @@ func TestClassify_UnattestedIsNeverAFault(t *testing.T) {
 		t.Errorf("a served shard from an unattested validator should say so: %q", reason)
 	}
 
-	// identity is a property of the endpoint, not of one shard, so it is a
-	// fault even with no attestation for this blob
-	if got, _ := Classify(Evidence{Assigned: true, Phase: PhaseInWindow, Outcome: OutcomeIdentityFail}); got != ClassFault {
-		t.Errorf("unattested IDENTITY_FAIL = %s, want %s", got, ClassFault)
+	// identity is a property of the endpoint, not of one shard, so it is
+	// judged the same with or without attestation for this blob
+	if got, _ := Classify(Evidence{Assigned: true, Phase: PhaseInWindow, Outcome: OutcomeIdentityFail}); got != ClassIdentityMismatch {
+		t.Errorf("unattested IDENTITY_FAIL = %s, want %s", got, ClassIdentityMismatch)
 	}
 	// observer-side classes are unchanged by attestation
 	for _, o := range []Outcome{OutcomeProbeError, OutcomeMissed, OutcomeRPCDeadline, OutcomeReachable} {

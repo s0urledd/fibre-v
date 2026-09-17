@@ -72,7 +72,7 @@ by `TestClassify_UnattestedIsNeverAFault`.
 | outcome | meaning |
 |---|---|
 | `SERVED_OK` | shard returned, every row verifies against the commitment and the returned indices equal the assigned set |
-| `SERVER_ERROR` | the endpoint was reached, completed TLS, proved its identity and answered the RPC with an application error (gRPC `Internal`, `Unknown`, `DataLoss`, `Aborted`). Deliberately not a reachability failure: calling it "unreachable" would be false about a server the observer just talked to |
+| `SERVER_ERROR` | the endpoint was reached, completed TLS, proved its identity and answered the RPC with an application error (gRPC `Internal`, `Unknown`, `DataLoss`, `Aborted`). Deliberately not a reachability failure: calling it "unreachable" would be false about a server the observer just talked to. Deliberately not a fault either: the server did not say it lacks the shard |
 | `PARTIAL` | fewer rows than assigned, the ones returned are valid |
 | `WRONG_ROWS` | rows returned but not the assigned set (`ShardMap.Verify` failed) |
 | `INVALID_ROWS` | rows returned but they fail commitment verification |
@@ -99,11 +99,13 @@ One sentence each, and what a reader should conclude.
 | classification | when | conclude |
 |---|---|---|
 | `HEALTHY` | assigned validator returned `SERVED_OK` in window or in grace | the validator kept its promise at this point in time |
-| `FAULT` | the observer **reached** the validator and it failed to hand over a shard the chain proves it stored. In window: `NOT_FOUND`, `INVALID_ROWS`, `SERVER_ERROR`, or rows that verify against neither the commitment nor the assignment. In grace and post: `INVALID_ROWS`, and in grace also wrong or partial rows. Any validator, any phase: a TLS certificate signed by the wrong consensus key (identity is a property of the endpoint, not of one shard) | the validator broke its retention promise or is not who the chain says it is; this is the only class that counts against a validator |
+| `FAULT` | an identity-verified endpoint, for a shard the chain proves it stored, **said it has no such shard** (`NOT_FOUND` in window), **returned bytes that do not verify against the commitment** (`INVALID_ROWS`, any phase), or **returned rows outside this promise's assignment** that verify against nothing (`WRONG_ROWS`/`PARTIAL` in window or grace) | the validator broke its retention promise; this is the only class that counts against a validator. Three conditions, each reproducible by anyone who repeats the probe |
 | `UNREACHABLE` | assigned and attested, in window, and the observer could not complete a conversation at all: `DNS_FAIL`, `TCP_REFUSED`, `TCP_TIMEOUT`, `TCP_UNREACHABLE`, `TLS_HANDSHAKE_FAIL`, `RPC_UNAVAILABLE`, `RPC_ERROR` | we could not get to it. From one vantage that is not distinguishable from a route, firewall or peering problem on the observer's own path, so it is published in full beside the serve rate and kept out of it |
 | `NOT_REGISTERED` | assigned validator with no Fibre host in `x/valaddr` at the time of the probe (`NO_REGISTERED_HOST`) | a registry state, not a refusal. Jailing and unbonding remove a provider from `AllBondedFibreProviders` while the chain keeps the entry for the jailed grace period |
 | `SHADOWED_SHARD` | assigned validator returned rows that **verify against the blob commitment** but whose indices are not this promise's assignment (`WRONG_ROWS` or `PARTIAL` with `commitment_verified`) | another promise over the same blob answered in this one's place. `DownloadShard` is addressed by the commitment alone and a store keeps one shard per commitment, so the validator has no way to tell the two apart. Never a fault |
 | `IDENTITY_EXPIRED` | certificate endorsed by the right consensus key, but its signed validity window has lapsed or has not started | a renewal running late. Endpoint hygiene, not impersonation and not a retention failure |
+| `IDENTITY_MISMATCH` | certificate not endorsed by this validator's consensus key, any validator, any phase (judged before attestation: a certificate is a property of the endpoint) | no client will download from this endpoint, so it is as unusable as one that does not answer. Shown as the endpoint's status and in the endorsement rate, held out of the serve rate: a wrong certificate proves nothing about any shard |
+| `SERVER_ERROR` | assigned and attested, in window, and the endpoint answered with an application error instead of the shard (`SERVER_ERROR` outcome) | the server was reached and did not say it lacks the shard. From one probe this is not distinguishable from a transient fault (an overloaded process, a disk hiccup), so it is shown beside the rate and never inside it; a server that errors at every point is visible as such on its own page. In grace it is `TOLERATED`, after the window `UNREACHABLE_POST_WINDOW` |
 | `TOLERATED` | assigned validator, grace phase: `NOT_FOUND` or unreachable | honest pruning lag; do not read anything into it |
 | `EXPECTED_GONE` | assigned validator, post phase: `NOT_FOUND` | correct behaviour after the window |
 | `SERVED_PAST_WINDOW` | assigned validator, post phase: still serving (`SERVED_OK`, `PARTIAL`, or `WRONG_ROWS`) | not a fault; the validator keeps data longer than it must. `WRONG_ROWS` is here rather than under FAULT because `DownloadShard` performs no assignment check at all — assignment is enforced only at upload — so rows outside an assignment, after the obligation ended, are not a rule the validator broke |
@@ -210,6 +212,8 @@ column:
 | no Fibre host in the registry | `NOT_REGISTERED` | jailing and unbonding remove the provider from the bonded list; the chain keeps the entry |
 | another promise's rows for the same blob | `SHADOWED_SHARD` | `DownloadShard` takes a commitment, not a promise hash; the validator cannot tell them apart |
 | a lapsed but correctly signed certificate | `IDENTITY_EXPIRED` | a late renewal, not someone else answering |
+| a certificate signed by the wrong consensus key | `IDENTITY_MISMATCH` | an unusable endpoint, which is a statement about the endpoint (its status says so), not about a shard |
+| an application error instead of the shard | `SERVER_ERROR` | the server did not say it lacks the shard; from one probe a hiccup and a loss look the same |
 | an outcome the taxonomy does not recognise | `PROBE_ERROR` | "we have not taught the observer about this" is not evidence |
 | a local socket error, a cancelled probe, a verification that timed out | `PROBE_ERROR` | the packets never left this machine |
 

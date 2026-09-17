@@ -52,12 +52,14 @@ export default function Methodology() {
         <li><strong>NOT_REGISTERED</strong> — no Fibre host in x/valaddr at the time of the probe.</li>
         <li><strong>SHADOWED_SHARD</strong> — the rows verify against the blob commitment but belong to another promise over the same blob; <code>DownloadShard</code> is addressed by commitment alone.</li>
         <li><strong>IDENTITY_EXPIRED</strong> — the certificate carries the right consensus key&rsquo;s endorsement but its signed validity window has lapsed. Endpoint hygiene, not a retention failure.</li>
+        <li><strong>IDENTITY_MISMATCH</strong> — the certificate is not endorsed by this validator&rsquo;s consensus key. An unusable endpoint, shown as its status (bad certificate); it proves nothing about any shard.</li>
+        <li><strong>SERVER_ERROR</strong> — the endpoint answered with an application error instead of the shard. It did not say it lacks the shard, and from one probe a hiccup and a loss look the same.</li>
         <li><strong>NOT_PROBED</strong> and <strong>PROBE_ERROR</strong> — this site&rsquo;s own gaps, never a zero.</li>
       </ul>
       <p><strong>Verdict coverage</strong>, shown next to every rate, is how much of that population produced a verdict at all.</p>
       <p>One thing this site cannot see and an operator should know about: a Fibre server derives its storage budget from its validator&rsquo;s stake, and a validator outside the active set gets none. When the budget is full the server <em>rejects the upload</em> (<code>ResourceExhausted</code>) rather than dropping shards it already holds, so a budget problem shows up here as <code>UNATTESTED</code> &mdash; no signature, no obligation, nothing counted against the validator &mdash; and never as a fault. The server does not evict a shard before its prune time.</p>
       <Legend />
-      <p><strong>FAULT is the only class that counts against a validator.</strong> It means: while the promise held, the validator answered not found, was unreachable at any layer, presented a certificate its consensus key did not endorse, or returned wrong, partial or unverifiable rows.</p>
+      <p><strong>FAULT is the only class that counts against a validator.</strong> It means one of three things, for a shard the validator signed for, from an endpoint whose certificate its consensus key endorsed: it said it has no such shard while the promise held; it returned bytes that do not verify against the commitment; or it returned rows outside its assignment that verify against nothing. Anyone who repeats the probe gets the same answer. Being unreachable, answering with a server error, or presenting a wrong certificate are each their own class and never a fault.</p>
 
       <h2 id="rates">Rates</h2>
       <ul>
