@@ -192,19 +192,19 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                   <td title={st.title}>
                     <span className="verdict"><i className={"dot " + st.tone} /><span className={"w " + (st.tone === "fault" ? "err" : "muted")}>{st.word}</span></span>
                   </td>
+                  <td className="right mono">{v.voting_power.toLocaleString("en-US")}</td>
                   <td className="right">
                     <RateCell r={v.reachability_window} sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined} />
                   </td>
                   <td className="right"><RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation} unreachable={v.serve_rate_held_out?.UNREACHABLE ?? 0}
                     sample={(v.serve_rate_held_out?.UNREACHABLE ?? 0) > 0 ? `${v.serve_rate.num} / ${v.serve_rate.den} · ${v.serve_rate_held_out.UNREACHABLE} unreachable` : undefined} /></td>
-                  <td className="right" title="Answered, but did not hand over a shard it had signed for."><Count n={v.faults ?? v.classes.FAULT} tier="fault" /></td>
                   <td className="right" title={v.serve_rows_per_second == null ? "No healthy probe of an assigned shard in this window." :
                     `${v.serve_latency_p50_ms?.toLocaleString("en-US") ?? "—"} ms typical, ${v.serve_latency_p95_ms?.toLocaleString("en-US") ?? "—"} ms at p95, over ${v.serve_latency_sample.toLocaleString("en-US")} healthy probes.`}>
                     {v.serve_rows_per_second == null
                       ? <span className="nil">·</span>
                       : <span className="rate"><span className="v">{v.serve_rows_per_second.toLocaleString("en-US")}</span><span className="n">rows/s</span></span>}
                   </td>
-                  <td className="right mono">{v.voting_power.toLocaleString("en-US")}</td>
+                  <td className="right" title="Answered, but did not hand over a shard it had signed for."><Count n={v.faults ?? v.classes.FAULT} tier="fault" /></td>
                 </tr>
               );
             })}
