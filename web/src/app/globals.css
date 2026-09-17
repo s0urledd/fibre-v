@@ -150,6 +150,11 @@ main { min-height: 60vh; padding-top: var(--s5); }
 .top nav a.on { color: var(--text); border-bottom-color: var(--accent); }
 .top .spacer { flex: 1; }
 .chips { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
+.networks { display: inline-flex; border: 1px solid var(--line-2); border-radius: var(--r-sm); overflow: hidden; }
+.networks .net { font-family: var(--mono); font-size: var(--t-small); padding: 1px 8px; color: var(--text-3); border-right: 1px solid var(--line-2); text-decoration: none; }
+.networks .net:last-child { border-right: 0; }
+.networks a.net:hover { color: var(--text); }
+.networks .net.on { color: var(--text); background: var(--card-2); }
 .chip {
   display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-small); font-family: var(--mono);
   color: var(--text-2); border: 1px solid var(--line-2); border-radius: var(--r-sm); padding: 1px 8px; white-space: nowrap;

@@ -164,11 +164,18 @@ func State(st *store.Store, path string, now time.Time) error {
 	if err := st.UpsertParams(ps.ParamHistory); err != nil {
 		return err
 	}
+	gaps := "[]"
+	if len(ps.Gaps) > 0 {
+		if b, err := json.Marshal(ps.Gaps); err == nil {
+			gaps = string(b)
+		}
+	}
 	for k, v := range map[string]string{
 		"chain_id":                    ps.ChainID,
 		"scan_start_height":           fmt.Sprint(ps.StartHeight),
 		"last_scanned_height":         fmt.Sprint(ps.LastScannedHeight),
 		"protocol_params_fingerprint": ps.ParamFingerprint,
+		"scan_gaps":                   gaps,
 	} {
 		if err := st.SetMeta(k, v, now); err != nil {
 			return err
@@ -202,5 +209,21 @@ func Payments(st *store.Store, path string, now time.Time) (Result, error) {
 			return false, fmt.Errorf("%w: payment without dedupe_key or publisher", ErrBadRecord)
 		}
 		return st.UpsertPayment(p, raw)
+	}, now)
+}
+
+// Registry replays registry.jsonl, the collector's own log of endpoint
+// openings and closings, so a database rebuilt from the JSONL files keeps
+// the endpoint history the live polls produced.
+func Registry(st *store.Store, path string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var e store.EndpointEvent
+		if err := json.Unmarshal(raw, &e); err != nil {
+			return false, fmt.Errorf("%w: decode endpoint event: %v", ErrBadRecord, err)
+		}
+		if e.ConsAddress == "" || e.Host == "" || e.At.IsZero() {
+			return false, fmt.Errorf("%w: endpoint event without address, host or time", ErrBadRecord)
+		}
+		return st.ReplayEndpointEvent(e)
 	}, now)
 }

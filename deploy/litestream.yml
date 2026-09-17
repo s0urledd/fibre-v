@@ -1,6 +1,7 @@
-# Copy to /etc/fibre-observer/litestream.yml and enable fibre-litestream.service
-# (deploy/systemd/fibre-litestream.service), which runs
-# `litestream replicate -config /etc/fibre-observer/litestream.yml`.
+# Copy to /etc/fibre-observer/litestream-<network>.yml (one per instance,
+# with the path below pointing at that instance's data directory) and enable
+# fibre-litestream@<network>, which runs
+# `litestream replicate -config /etc/fibre-observer/litestream-<network>.yml`.
 #
 # This replicates the DERIVED database only. The JSONL files in the same
 # directory are the record the database is rebuilt from, and litestream does
@@ -8,11 +9,11 @@
 # disk costs the raw evidence. Restoring: stop fibre-collector AND fibre-api
 # (both hold the WAL) before `litestream restore`.
 dbs:
-  - path: /var/lib/fibre-observer/data/observer.db
+  - path: /var/lib/fibre-observer/mocha/observer.db
     replicas:
       - type: s3
         bucket: fibre-observer-backup
-        path: observer.db
+        path: mocha/observer.db
         endpoint: https://<account>.r2.cloudflarestorage.com
         region: auto
         # access keys via LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY

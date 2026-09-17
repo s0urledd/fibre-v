@@ -1,12 +1,12 @@
 [Unit]
-Description=Fibre observer: endpoint reachability heartbeat
+Description=Fibre observer (%i): chain scanner (sentinel-scan)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 User=fibre-observer
-EnvironmentFile=/etc/fibre-observer/observer.env
-ExecStart=/usr/local/bin/observer-heartbeat -rpc ${RPC} -data-dir ${DATA_DIR} -vantage ${VANTAGE} -interval 5m
+EnvironmentFile=/etc/fibre-observer/%i.env
+ExecStart=/usr/local/bin/sentinel-scan -rpc ${RPC} -data-dir ${DATA_DIR} -start-height ${START_HEIGHT} -follow
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -25,8 +25,9 @@ MemoryDenyWriteExecute=true
 CapabilityBoundingSet=
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-# only the data directory, not the service user's whole home
-ReadWritePaths=/var/lib/fibre-observer/data
+# only this instance's data directory, not the service user's whole home
+ReadWritePaths=/var/lib/fibre-observer/%i
 
 [Install]
 WantedBy=multi-user.target
+# one instance per network: systemctl enable --now fibre-scan@mocha

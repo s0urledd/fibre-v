@@ -4,6 +4,34 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useApi, type Meta } from "@/lib/api";
 
+/**
+ * Sibling deployments of this observer on other networks, from
+ * NEXT_PUBLIC_NETWORKS ("mainnet=https://observer.example.org,mocha=https://mocha.observer.example.org"),
+ * baked in at build time. The one whose origin we are on is marked; the
+ * others are links. One build serves every network, since each site talks
+ * to its own same-origin /api.
+ */
+const NETWORKS: [string, string][] = (process.env.NEXT_PUBLIC_NETWORKS ?? "")
+  .split(",").map((s) => s.trim()).filter(Boolean)
+  .map((s) => { const i = s.indexOf("="); return i > 0 ? [s.slice(0, i).trim(), s.slice(i + 1).trim()] as [string, string] : null; })
+  .filter((x): x is [string, string] => !!x);
+
+function NetworkLinks() {
+  const [origin, setOrigin] = useState("");
+  useEffect(() => { setOrigin(window.location.origin); }, []);
+  if (NETWORKS.length < 2) return null;
+  return (
+    <span className="networks" role="group" aria-label="network">
+      {NETWORKS.map(([name, url]) => {
+        const here = origin !== "" && url.replace(/\/$/, "") === origin;
+        return here
+          ? <span key={name} className="net on" aria-current="true">{name}</span>
+          : <a key={name} className="net" href={url}>{name}</a>;
+      })}
+    </span>
+  );
+}
+
 const NAV: [string, string][] = [
   ["/", "Overview"],
   ["/blobs/", "Blobs"],
@@ -58,8 +86,17 @@ function ThemeToggle() {
 export function Header() {
   const { data: meta } = useApi<Meta>("/v1/meta", 30000);
   const path = usePathname();
-  const alive = meta?.collector?.alive ?? false;
+  const health = meta?.health ?? (meta?.collector?.alive ? "ok" : "down");
+  const comps = meta?.components ?? [];
+  const dead = comps.filter((c) => !c.alive).map((c) => c.component);
+  const failing = comps.filter((c) => c.alive && !c.ok).map((c) => c.component);
   const height = meta?.chain_height || meta?.last_scanned_height;
+  const chipTitle = [
+    health === "ok" ? "Every observer process is running." : health === "degraded"
+      ? `Observer degraded: ${dead.length ? `not running: ${dead.join(", ")}` : ""}${dead.length && failing.length ? "; " : ""}${failing.length ? `failing: ${failing.join(", ")}` : ""}.`
+      : "No observer process is running; figures are from the last run.",
+    meta?.app_version ? (meta.fibre_active ? `App version ${meta.app_version}: Fibre is live.` : `App version ${meta.app_version}; Fibre needs ${meta.fibre_app_version || "10"}.`) : "",
+  ].filter(Boolean).join(" ");
   return (
     <header className="top blur">
       <div className="wrap">
@@ -71,10 +108,10 @@ export function Header() {
         </nav>
         <span className="spacer" />
         <span className="chips">
+          <NetworkLinks />
           {meta ? (
-            <span className="chip" title={(alive ? "Collector is following the chain." : "Collector stopped; figures are from its last run.")
-              + (meta.app_version ? (meta.fibre_active ? ` App version ${meta.app_version}: Fibre is live.` : ` App version ${meta.app_version}; Fibre needs ${meta.fibre_app_version || "10"}.`) : "")}>
-              <i className={"dot " + (alive ? "ok" : "hold")} />
+            <span className="chip" title={chipTitle}>
+              <i className={"dot " + (health === "ok" ? "ok" : health === "degraded" ? "hold" : "fault")} />
               {meta.chain_id || "chain ?"}{height ? ` · #${Number(height).toLocaleString("en-US")}` : ""}
             </span>
           ) : <span className="chip"><i className="dot" />connecting…</span>}

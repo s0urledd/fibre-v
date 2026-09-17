@@ -56,6 +56,13 @@ export type Meta = {
   /** newest measurement's start time; the prober's only live signal (it writes JSONL, never this database) */
   last_probe_at: string | null;
   server_time: string;
+  /** every observer process with its liveness; health is the /v1/health verdict */
+  components: Component[];
+  health: "ok" | "degraded" | "down";
+  scan_gaps?: ScanGap[];
+  /** matches | chain_ahead | chain_behind | unknown */
+  pin_status: string;
+  unassignable_publications: number;
 };
 /** where this observer watches from; the first three are operator-declared */
 export type VantageInfo = {
@@ -70,6 +77,37 @@ export type VantageInfo = {
 };
 
 export type RunStatus = { run_id: number; started_at: string; last_heartbeat_at: string; stopped_at: string | null; alive: boolean };
+
+/** one observer process, from the status file it keeps in the data directory */
+export type Component = {
+  component: string;
+  present: boolean;
+  alive: boolean;
+  ok: boolean;
+  age_s: number;
+  started_at?: string;
+  updated_at?: string;
+  stopped_at?: string;
+  stop_reason?: string;
+  last_ok_at?: string;
+  last_error?: string;
+  last_error_at?: string;
+  height?: number;
+  detail?: Record<string, unknown>;
+  disk?: { free_bytes: number; total_bytes: number; free_share: number };
+};
+
+/** a height range the scanner could not read from its node */
+export type ScanGap = { from: number; to: number; reason: string; last_error?: string; at: string };
+
+export type Health = {
+  status: "ok" | "degraded" | "down";
+  checks: { name: string; ok: boolean; detail: string }[];
+  components: Component[];
+  scan_gaps?: ScanGap[];
+  pin_status: string;
+  server_time: string;
+};
 
 export type Network = {
   /**

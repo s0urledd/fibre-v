@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Store is the scanner's durable state on disk:
@@ -40,6 +41,19 @@ type PersistState struct {
 	LastScannedHeight int64        `json:"last_scanned_height"`
 	ParamFingerprint  string       `json:"protocol_params_fingerprint"`
 	ParamHistory      []ParamEntry `json:"param_history"`
+	// Gaps are height ranges the scanner had to skip because the node could
+	// not serve them. Published, never hidden: a publication in one of these
+	// blocks is unknown to this observer.
+	Gaps []ScanGap `json:"gaps,omitempty"`
+}
+
+// ScanGap is a run of heights the scanner could not read.
+type ScanGap struct {
+	From      int64     `json:"from"`
+	To        int64     `json:"to"`
+	Reason    string    `json:"reason"`
+	LastError string    `json:"last_error,omitempty"`
+	At        time.Time `json:"at"`
 }
 
 // OpenStore opens or creates the store in dir.

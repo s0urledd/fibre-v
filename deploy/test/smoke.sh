@@ -12,28 +12,32 @@
 # flag that no longer exists, a variable the env file never sets, a directory
 # the service user cannot write.
 #
-# Usage: deploy/test/smoke.sh <rpc-url>
-# Expects the binaries in /usr/local/bin and the layout from deploy/README.md.
+# Usage: deploy/test/smoke.sh <rpc-url> [instance]
+# Expects the binaries in /usr/local/bin and the layout from deploy/README.md;
+# instance is the network name the units are enabled for (default mocha).
 set -o errexit -o nounset -o pipefail
 
 RPC="${1:-http://127.0.0.1:26657}"
+INSTANCE="${2:-mocha}"
 UNITS=/etc/systemd/system
-ENVFILE=/etc/fibre-observer/observer.env
+ENVFILE=/etc/fibre-observer/$INSTANCE.env
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN="$HERE/run-unit.py"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 echo "== units parse and their sandboxing is well-formed"
-for u in "$UNITS"/fibre-*.service; do
-  out=$(systemd-analyze verify "$u" 2>&1) || fail "systemd-analyze verify $u: $out"
+for u in "$UNITS"/fibre-*@.service "$UNITS"/fibre-*@.timer; do
+  [ -e "$u" ] || continue
+  # a template is verified as one instance
+  out=$(systemd-analyze verify "${u/@./@$INSTANCE.}" 2>&1) || fail "systemd-analyze verify $u: $out"
   [ -z "$out" ] || fail "systemd-analyze verify $u: $out"
   echo "  ok $(basename "$u")"
 done
 
 echo "== environment file is complete"
 [ -r "$ENVFILE" ] || fail "no $ENVFILE"
-for key in RPC VANTAGE DATA_DIR POLICY API_LISTEN; do
+for key in NETWORK RPC VANTAGE DATA_DIR POLICY API_LISTEN; do
   grep -q "^${key}=" "$ENVFILE" || fail "$ENVFILE has no $key"
 done
 for key in VANTAGE_LOCATION VANTAGE_PROVIDER VANTAGE_ASN VANTAGE_EGRESS; do
@@ -45,7 +49,7 @@ echo "  ok"
 echo "== each unit starts, reaches the chain, and writes as its service user"
 for unit in fibre-scan fibre-heartbeat fibre-collector; do
   log=$(mktemp)
-  timeout 25 python3 "$RUN" "$UNITS/$unit.service" >"$log" 2>&1 || true
+  timeout 25 python3 "$RUN" "$UNITS/$unit@.service" "$INSTANCE" >"$log" 2>&1 || true
   grep -qiE "connected|up:|round done|done \(" "$log" || fail "$unit produced no sign of life: $(tail -3 "$log")"
   grep -qiE "permission denied|no such file" "$log" && fail "$unit: $(grep -iE 'permission denied|no such file' "$log" | head -1)"
   echo "  ok $unit"

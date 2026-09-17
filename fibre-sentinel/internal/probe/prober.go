@@ -12,6 +12,7 @@ import (
 
 	celfibre "github.com/celestiaorg/celestia-app/v10/fibre"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 )
 
 // Config controls a prober run.
@@ -105,6 +106,8 @@ func (c Config) withDefaults() Config {
 // resumes exactly (per target, so a point interrupted half-way is finished
 // for the remaining validators).
 type Prober struct {
+	status *status.Writer
+
 	cfg      Config
 	log      *scan.Logger
 	chain    *scan.Chain
@@ -194,9 +197,36 @@ func (p *Prober) Run(parent context.Context) error {
 	}
 	defer p.store.Close()
 
-	id, tip, err := p.chain.Status(ctx)
-	if err != nil {
-		p.log.Fatalf("initial status: %v", err)
+	st := status.New(p.cfg.DataDir, "prober", p.cfg.Vantage, "")
+	st.Start()
+	defer st.Stop("exit")
+	p.status = st
+
+	// The chain is asked once at startup for its id; an RPC that is down at
+	// boot used to be fatal, and under a supervisor that is a restart every
+	// five seconds until it comes back. Wait for it instead.
+	var id string
+	var tip int64
+	for attempt := 0; ; attempt++ {
+		var err error
+		id, tip, err = p.chain.Status(ctx)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			p.log.Printf("stopped (signal) before the chain answered")
+			return nil
+		}
+		wait := time.Duration(1<<uint(min(attempt, 5))) * time.Second
+		if attempt < 3 || attempt%10 == 0 {
+			p.log.Printf("WARNING: initial status: %v (attempt %d, retry in %s)", err, attempt+1, wait)
+		}
+		st.Error(fmt.Sprintf("initial status: %v", err))
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(wait):
+		}
 	}
 	p.chainID = id
 	p.measureClock(ctx)
@@ -247,6 +277,12 @@ func (p *Prober) Run(parent context.Context) error {
 		if len(due) > 0 {
 			probed += p.runDue(ctx, due)
 		}
+		// A cycle that got this far read the feed and planned; the chain
+		// side is reported by measureClock and the resolver as they fail.
+		st.OK()
+		st.Set("probes_this_run", probed)
+		st.Set("publications_live", len(p.feed.pubs))
+		st.Set("clock_offset_ms", p.clockOffsetMS())
 
 		if p.cfg.Once {
 			p.log.Printf("done (--once): %d probes, %d missed slots", probed, len(missed))
@@ -293,6 +329,9 @@ func (p *Prober) measureClock(ctx context.Context) {
 	blockTime, err := p.chain.LatestBlockTime(ctx)
 	if err != nil {
 		p.log.Printf("clock check: %v (keeping previous offset)", err)
+		if p.status != nil {
+			p.status.Error(fmt.Sprintf("chain unreachable: %v", err))
+		}
 		return
 	}
 	offset := time.Since(blockTime)
@@ -483,6 +522,9 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 		targets, err := p.resolver.TargetsFor(ctx, pub, p.cfg.IncludeUnassigned)
 		if err != nil {
 			p.log.Printf("resolve targets for %s: %v (retry next cycle)", short(ph), err)
+			if p.status != nil {
+				p.status.Error(fmt.Sprintf("resolve targets: %v", err))
+			}
 			continue
 		}
 		coder, cerr := p.coderFor(pub.Assignment.ProtocolParams.OriginalRows, pub.Assignment.ProtocolParams.TotalRows)

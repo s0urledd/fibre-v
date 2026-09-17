@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,6 +92,9 @@ type Server struct {
 	market *snapshotCache[*marketResponse]
 	// labels is the operator-maintained publisher name registry.
 	labels map[string]PublisherLabel
+	// dataDir holds the status files the processes write (internal/status);
+	// empty means liveness is not reported.
+	dataDir string
 
 	// How many vantages the store holds, and the table watermarks it was
 	// counted at: see vantageCount.
@@ -114,6 +118,9 @@ func WithPublisherLabels(m map[string]PublisherLabel) Option {
 		}
 	}
 }
+
+// WithDataDir tells the server where the processes' status files live.
+func WithDataDir(dir string) Option { return func(s *Server) { s.dataDir = dir } }
 
 // New builds a Server. vantage is the label rendered on every response.
 func New(st *store.Store, vantage string) *Server { return NewWithLogger(st, vantage, nil) }
@@ -143,7 +150,14 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.vals = newSnapshotCache("validators", func(ctx context.Context, win Window) ([]validatorRow, error) {
 		return s.validatorRows(ctx, win, "")
 	})
-	// Warm every window now, so the first visitor is not the one who waits.
+	// Serve the previous process's snapshots at once, then warm every window
+	// so the first visitor is not the one who waits.
+	if s.dataDir != "" {
+		dir := filepath.Join(s.dataDir, "snapshots")
+		s.net.persistTo(dir, s.logf())
+		s.vals.persistTo(dir, s.logf())
+		s.market.persistTo(dir, s.logf())
+	}
 	s.net.warm(s.logf(), time.Now())
 	s.vals.warm(s.logf(), time.Now())
 	s.market.warm(s.logf(), time.Now())
@@ -167,6 +181,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/probes", s.handleProbes)
 	s.mux.HandleFunc("GET /v1/runs", s.handleRuns)
 	s.mux.HandleFunc("GET /v1/sampling", s.handleSampling)
+	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/market", s.handleMarket)
 	s.mux.HandleFunc("GET /v1/publishers", s.handlePublishers)
 	s.mux.HandleFunc("GET /v1/publishers/{addr}", s.handlePublisher)
@@ -335,6 +350,22 @@ type metaResponse struct {
 	LastProbeAt *string           `json:"last_probe_at"`
 	Meta        map[string]string `json:"meta"`
 	ServerTime  time.Time         `json:"server_time"`
+	// Components is every observer process with its liveness, from the
+	// status files in the data directory (see /v1/health). Health is the
+	// same verdict /v1/health returns: ok, degraded or down.
+	Components []componentStatus `json:"components"`
+	Health     string            `json:"health"`
+	// ScanGaps are height ranges the scanner could not read from its node.
+	// A publication in one of them is unknown to this observer.
+	ScanGaps []scan.ScanGap `json:"scan_gaps,omitempty"`
+	// PinStatus says whether the chain's app version matches the celestia-app
+	// major this build's assignment constants are pinned to: matches,
+	// chain_ahead, chain_behind or unknown.
+	PinStatus string `json:"pin_status"`
+	// UnassignablePublications is how many publications have no row
+	// assignment (a blob version this build does not know), and so are never
+	// probed.
+	UnassignablePublications int64 `json:"unassignable_publications"`
 }
 
 type runStatus struct {
@@ -439,8 +470,11 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	var pinned string
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT pinned_celestia_app FROM publications ORDER BY settlement_height DESC LIMIT 1`).Scan(&pinned)
+	h := s.health(ctx, now)
 	writeJSON(w, 200, metaResponse{
-		APIVersion: Version, Vantage: s.vantage, VantageInfo: s.info,
+		Components: h.Components, Health: h.Status, ScanGaps: h.ScanGaps, PinStatus: h.PinStatus,
+		UnassignablePublications: s.unassignablePublications(ctx),
+		APIVersion:               Version, Vantage: s.vantage, VantageInfo: s.info,
 		VantageCount: vantages, ObservedFromOneVantage: vantages == 1,
 		ChainID: meta["chain_id"], LastScannedHeight: meta["last_scanned_height"], EndpointsHeight: meta["endpoints_height"],
 		AppVersion: meta["app_version"], FibreAppVersion: meta["fibre_app_version"], FibreActive: meta["fibre_active"] == "yes",

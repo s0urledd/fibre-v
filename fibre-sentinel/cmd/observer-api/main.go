@@ -88,7 +88,7 @@ func main() {
 	if len(reg) > 0 {
 		log.Printf("publisher labels: %d from %s", len(reg), *labels)
 	}
-	handler := api.NewWithVantage(st, info, log, api.WithPublisherLabels(reg))
+	handler := api.NewWithVantage(st, info, log, api.WithPublisherLabels(reg), api.WithDataDir(*dataDir))
 
 	srv := &http.Server{
 		Addr:              *listen,

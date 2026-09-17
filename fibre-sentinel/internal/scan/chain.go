@@ -466,3 +466,19 @@ func IsResultsNotPersisted(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "not persisted") || strings.Contains(s, "discard_abci_responses")
 }
+
+// IsHeightUnavailable reports an error that means the node does not have
+// this height: pruned ("lowest height is N"), discarded ABCI responses, or a
+// height it has not reached. The last one clears itself; the others do not.
+func IsHeightUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if IsResultsNotPersisted(err) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "lowest height is") ||
+		strings.Contains(s, "is not available") ||
+		strings.Contains(s, "must be less than or equal to the current blockchain height")
+}

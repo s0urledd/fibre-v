@@ -48,6 +48,29 @@ export default function Overview() {
       </div>
 
       {netErr && <div className="note hold"><span className="label">Observer</span><p>Cannot reach the observer API: {netErr}. Nothing below is current.</p></div>}
+      {meta && meta.health !== "ok" && (
+        <div className="note hold">
+          <span className="label">{meta.health === "down" ? "Observer is not running" : "Observer degraded"}</span>
+          <p>
+            {meta.components.filter((c) => !c.alive).map((c) => `${c.component}: ${c.present ? (c.stopped_at ? `stopped (${c.stop_reason || "?"})` : `no update for ${Math.round(c.age_s / 60)} min`) : "never started"}`).join(" · ")}
+            {meta.components.some((c) => !c.alive) && meta.components.some((c) => c.alive && !c.ok) ? " · " : ""}
+            {meta.components.filter((c) => c.alive && !c.ok).map((c) => `${c.component}: ${c.last_error || "failing"}`).join(" · ")}
+{". "}Figures from a stopped process stay on the page as they were; the sample counts say how old they are.
+          </p>
+        </div>
+      )}
+      {meta && (meta.scan_gaps?.length ?? 0) > 0 && (
+        <div className="note hold">
+          <span className="label">Blocks this observer could not read</span>
+          <p>{meta.scan_gaps!.map((g) => g.from === g.to ? `#${g.from.toLocaleString("en-US")}` : `#${g.from.toLocaleString("en-US")}–${g.to.toLocaleString("en-US")}`).join(", ")}: the RPC node could not serve them (pruned, or ABCI responses discarded). A publication settled in one of them is unknown here and was never probed.</p>
+        </div>
+      )}
+      {meta && meta.pin_status === "chain_ahead" && (
+        <div className="note hold">
+          <span className="label">Chain upgraded past this build</span>
+          <p>The chain runs app version {meta.app_version}; this observer&rsquo;s row-assignment constants are pinned to an earlier major. Until the pin is bumped, which validator holds which rows may be computed wrongly. {meta.unassignable_publications > 0 ? `${meta.unassignable_publications.toLocaleString("en-US")} publication(s) already have no assignment and are not probed.` : ""}</p>
+        </div>
+      )}
 
       <div className="tiles">
         <Tile hero label="Serve rate" loading={busy}

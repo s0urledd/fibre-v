@@ -159,3 +159,40 @@ func TestSnapshotTTLScalesWithCacheAge(t *testing.T) {
 		t.Fatalf("24h never below its own floor: %s", got)
 	}
 }
+
+func TestSnapshotPersistsAcrossProcesses(t *testing.T) {
+	s := newSnapshotServer(t)
+	dir := t.TempDir()
+	s.net.persistTo(dir, nil)
+	win := testWindow("24h")
+	if _, at, _, err := s.net.get(context.Background(), nil, win); err != nil || at.IsZero() {
+		t.Fatal(err)
+	}
+	// A second cache, as a restarted process would build, serves the file
+	// without computing anything.
+	calls := 0
+	c2 := newSnapshotCache("network", func(ctx context.Context, w Window) (*networkResponse, error) {
+		calls++
+		return s.computeNetwork(ctx, w)
+	})
+	c2.persistTo(dir, nil)
+	v, at, _, err := c2.get(context.Background(), nil, win)
+	if err != nil || v == nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("a persisted snapshot must be served without recomputing; compute ran %d time(s)", calls)
+	}
+	if at.IsZero() || time.Since(at) > time.Minute {
+		t.Fatalf("persisted snapshot lost its computation time: %v", at)
+	}
+	// A different label does not pick up the file.
+	c3 := newSnapshotCache("validators-not-network", func(ctx context.Context, w Window) (*networkResponse, error) { return nil, nil })
+	c3.persistTo(dir, nil)
+	c3.mu.Lock()
+	n := len(c3.entries)
+	c3.mu.Unlock()
+	if n != 0 {
+		t.Fatal("a snapshot file of another label was loaded")
+	}
+}

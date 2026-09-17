@@ -1,0 +1,10 @@
+[Unit]
+Description=Fibre observer (%i): run the health check every five minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Unit=fibre-healthwatch@%i.service
+
+[Install]
+WantedBy=timers.target

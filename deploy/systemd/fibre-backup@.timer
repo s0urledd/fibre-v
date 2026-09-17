@@ -1,0 +1,11 @@
+[Unit]
+Description=Fibre observer (%i): nightly copy of the raw record
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 UTC
+RandomizedDelaySec=20min
+Persistent=true
+Unit=fibre-backup@%i.service
+
+[Install]
+WantedBy=timers.target
