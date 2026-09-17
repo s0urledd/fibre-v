@@ -286,6 +286,8 @@ tbody tr:hover .col-pin { background: color-mix(in srgb, var(--card) 96%, var(--
 .gauge-rail { display: block; width: 96px; height: 3px; border-radius: 2px; background: var(--card-2); margin-top: 4px; overflow: hidden; }
 .gauge { display: block; height: 3px; border-radius: 2px; background: var(--ok); }
 .gauge.hold { background: var(--hold); }
+.gauge.fault { background: var(--fault); }
+.gauge-rail.split { display: flex; gap: 1px; }
 .power .share { display: block; font-family: var(--mono); font-size: var(--t-label); color: var(--text-3); }
 tr.gap td { background: var(--gap-hatch); color: var(--text-2); }
 

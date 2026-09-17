@@ -15,23 +15,31 @@ export function boundTitle(r: Rate, obligations?: Rate | null): string | undefin
   return `At most ${(ub * 100).toFixed(1)}% of ${basis.den.toLocaleString("en-US")} ${unit} went unserved (95% confidence).`;
 }
 
-export default function RateCell({ r, obligations, gauge = "ok", sample }: {
+export default function RateCell({ r, obligations, gauge = "ok", sample, unreachable = 0 }: {
   r: Rate | null | undefined;
   obligations?: Rate | null;
   gauge?: "ok" | "hold";
   sample?: string;
+  /** probes held out because the validator could not be reached; drawn as an
+   *  amber share of the gauge so a rate over few reached probes does not look
+   *  like a clean record */
+  unreachable?: number;
 }) {
   if (!r || r.den === 0) return <span className="nil" title="no observation in this window">·</span>;
   const rankable = enoughToRank(r);
+  const total = r.den + unreachable;
+  const pct = (n: number) => `${Math.max(n > 0 ? 1 : 0, (n / total) * 100)}%`;
   return (
     <span className="gauge-track" title={(boundTitle(r, obligations) ?? "") + (rankable ? "" : ` Fewer than ${MIN_RATED} observations.`)}>
       <span className="rate">
         <span className={rankable ? "v" : "v dim"}>{fmtPct(r)}</span>
         <span className="n">{sample ?? fmtCount(r)}</span>
       </span>
-      {rankable && r.value !== null && (
-        <span className="gauge-rail" aria-hidden="true">
-          <span className={"gauge " + gauge} style={{ width: `${Math.max(1, r.value * 100)}%` }} />
+      {(rankable || unreachable > 0) && r.value !== null && (
+        <span className="gauge-rail split" aria-hidden="true">
+          <span className={"gauge " + gauge} style={{ width: pct(r.num) }} />
+          {r.den - r.num > 0 && <span className="gauge fault" style={{ width: pct(r.den - r.num) }} />}
+          {unreachable > 0 && <span className="gauge hold" style={{ width: pct(unreachable) }} />}
         </span>
       )}
     </span>

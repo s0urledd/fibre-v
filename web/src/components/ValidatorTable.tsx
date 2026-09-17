@@ -186,7 +186,7 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                   <td className="right">
                     <RateCell r={v.reachability_window} sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined} />
                   </td>
-                  <td className="right"><RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation}
+                  <td className="right"><RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation} unreachable={v.serve_rate_held_out?.UNREACHABLE ?? 0}
                     sample={(v.serve_rate_held_out?.UNREACHABLE ?? 0) > 0 ? `${v.serve_rate.num} / ${v.serve_rate.den} · ${v.serve_rate_held_out.UNREACHABLE} unreachable` : undefined} /></td>
                   <td className="right" title="Answered, but did not hand over a shard it had signed for."><Count n={v.classes.FAULT} tier="fault" /></td>
                   <td className="right" title={v.serve_rows_per_second == null ? "No healthy probe of an assigned shard in this window." :
