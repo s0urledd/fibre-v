@@ -308,14 +308,26 @@ dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px var(--s5
 dl.kv dt { color: var(--text-3); }
 dl.kv dd { margin: 0; word-break: break-all; }
 
+/* numeric columns of the validator table are centred, header and cell alike */
+.vtable th.right, .vtable td.right { text-align: center; }
+.vtable .rate, .vtable .gauge-track { align-items: center; }
+.vtable th.right button.sort { justify-content: center; }
+
+/* ------------------------------------------------------------ reconstruct --- */
+.recon-body { display: flex; gap: var(--s5); align-items: flex-start; flex-wrap: wrap; margin-top: var(--s2); }
+.recon-figs { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); flex: 1 1 300px; min-width: 0; }
+.recon-figs .tile { background: var(--card-2); }
+
+/* --------------------------------------------------------------- timeline --- */
+.tl-key { display: flex; flex-wrap: wrap; gap: var(--s4); list-style: none; margin: var(--s2) 0 0; padding: 0; font-size: var(--t-small); color: var(--text-2); }
+.tl-key li { display: flex; align-items: center; gap: 6px; }
+
 /* ----------------------------------------------------------------- square --- */
-.square { display: grid; grid-template-columns: repeat(16, 1fr); gap: 1px; width: 160px; height: 160px; }
+.square { display: grid; grid-template-columns: repeat(16, 1fr); gap: 1px; width: 144px; height: 144px; }
 .square i { display: block; background: var(--card-2); }
 .square i.on { background: var(--ok); }
 .square-wrap { position: relative; flex: none; }
 .square-need { position: absolute; left: -4px; right: -4px; height: 0; border-top: 2px solid var(--accent); pointer-events: auto; }
-.square-block { display: flex; gap: var(--s5); align-items: flex-start; flex-wrap: wrap; margin: var(--s3) 0; }
-.square-read { min-width: 260px; flex: 1 1 320px; }
 .figure { margin: var(--s3) 0 0; }
 .figure > .sample { display: block; max-width: var(--measure); line-height: 1.55; }
 

@@ -137,7 +137,7 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
         <input type="search" placeholder="Search name, address, host" value={q} onChange={(e) => setQ(e.target.value)} aria-label="search validators" />
       </div>
       <div className="tablewrap">
-        <table>
+        <table className="vtable">
           <thead>
             <tr>
               <th className="rank">#</th>
