@@ -90,12 +90,17 @@ FIBRE_WITHDRAWAL_DELAY="43800s"
 #   API         1317 + i*10
 #   privval    26669 + i*100     (celestia-appd PrivValidatorAPI; fibre signs here)
 #   fibre       7980 + i
-rpc_port()     { echo $((26657 + $1 * 100)); }
-p2p_port()     { echo $((26656 + $1 * 100)); }
-grpc_port()    { echo $((9090  + $1 * 10)); }
-api_port()     { echo $((1317  + $1 * 10)); }
-privval_port() { echo $((26669 + $1 * 100)); }
-fibre_port()   { echo $((7980  + $1)); }
+# FIBRE_DEVNET_PORT_OFFSET shifts every base port by the same amount, for a
+# host that already has a chain on 26657/26656/9090 (a gaiad, a gnoland, a
+# celestia full node). With 10000: RPC 36657, P2P 36656, gRPC 19090, API 11317,
+# privval 36669, fibre 17980.
+PORT_OFFSET="${FIBRE_DEVNET_PORT_OFFSET:-0}"
+rpc_port()     { echo $((26657 + PORT_OFFSET + $1 * 100)); }
+p2p_port()     { echo $((26656 + PORT_OFFSET + $1 * 100)); }
+grpc_port()    { echo $((9090  + PORT_OFFSET + $1 * 10)); }
+api_port()     { echo $((1317  + PORT_OFFSET + $1 * 10)); }
+privval_port() { echo $((26669 + PORT_OFFSET + $1 * 100)); }
+fibre_port()   { echo $((7980  + PORT_OFFSET + $1)); }
 
 APP_HOME()   { echo "${WORKDIR}/app${1}"; }
 FIBRE_HOME() { echo "${WORKDIR}/fibre${1}"; }
@@ -338,8 +343,8 @@ build_genesis() {
     toml_set_section "$cfg" "rpc" "laddr" "\"tcp://0.0.0.0:$(rpc_port "$i")\""
     # celestia-core BlockAPI gRPC (default :9098) and pprof (:6060) also bind per
     # process -- remap so nodes on one host do not collide.
-    toml_set_section "$cfg" "rpc" "grpc_laddr" "\"tcp://127.0.0.1:$((19098 + i * 100))\""
-    toml_set_section "$cfg" "rpc" "pprof_laddr" "\"localhost:$((6060 + i))\""
+    toml_set_section "$cfg" "rpc" "grpc_laddr" "\"tcp://127.0.0.1:$((19098 + PORT_OFFSET + i * 100))\""
+    toml_set_section "$cfg" "rpc" "pprof_laddr" "\"localhost:$((6060 + PORT_OFFSET + i))\""
     toml_set_section "$cfg" "p2p" "laddr" "\"tcp://0.0.0.0:$(p2p_port "$i")\""
     toml_set_section "$cfg" "p2p" "persistent_peers" "\"${peers}\""
     toml_set_section "$cfg" "p2p" "addr_book_strict" "false"

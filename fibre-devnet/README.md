@@ -153,7 +153,8 @@ fibre server's prune loop ticks every 60s. **10 minutes is the hard protocol
 minimum** — `Params.Validate()` rejects anything lower, on chain and via
 `MsgUpdateFibreParams`. That is why the end-to-end tests take ~15 minutes.
 
-Ports (node `i`): RPC `26657+i·100`, P2P `26656+i·100`, SDK gRPC `9090+i·10`,
+Ports (node `i`, plus `FIBRE_DEVNET_PORT_OFFSET` if set — use it on a host that
+already runs a chain on 26657/9090): RPC `26657+i·100`, P2P `26656+i·100`, SDK gRPC `9090+i·10`,
 API `1317+i·10`, privval gRPC `26669+i·100`, core BlockAPI gRPC `19098+i·100`
 (remapped from `:9098`), pprof `6060+i`, fibre listen `7980+i`.
 
