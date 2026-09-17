@@ -77,6 +77,14 @@ export default function Overview() {
         <Tile label="Publications" loading={busy}
           value={net ? net.publications.toLocaleString("en-US") : "—"}
           sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined} />
+        <Tile label="Signed" loading={busy}
+          value={net?.attestation?.blob_coverage?.den ? fmtPct(net.attestation.blob_coverage) : "—"}
+          tone={net?.attestation?.blob_coverage?.den ? undefined : "absent"}
+          sub={net?.attestation?.blob_coverage?.den ? `${net.attestation.attested_blobs.toLocaleString("en-US")} of ${net.attestation.blob_coverage.den.toLocaleString("en-US")} assigned shards` : "no assignment yet"}
+          info={<>
+            <p>Assigned shards whose validator&rsquo;s signature reached the chain. Only these are proven stored and count in the serve rate.</p>
+            <p>Publishers stop collecting signatures at two thirds of stake, so this is the size of the quorum in practice, not a duty anyone missed.</p>
+          </>} />
         <Tile label="Recoverable" loading={busy}
           value={recon && recon.recoverable.den > 0 ? fmtPct(recon.recoverable) : "—"}
           tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}
