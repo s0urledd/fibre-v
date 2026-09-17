@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Network, type Validator, type Meta, fmtCount, fmtRate, bytes, utc, ago, enoughToRank } from "@/lib/api";
+import { useApi, type Network, type Validator, type Meta, fmtCount, fmtPct, bytes, utc, ago } from "@/lib/api";
 import ValidatorTable from "@/components/ValidatorTable";
 import Tile from "@/components/Tile";
 import { Mark } from "@/components/Verdict";
@@ -49,10 +49,10 @@ export default function Overview() {
 
       <div className="tiles">
         <Tile hero label="Serve rate" loading={busy}
-          value={!sr ? "—" : !rated ? "—" : enoughToRank(sr) ? fmtRate(sr) : fmtCount(sr)}
+          value={!sr || !rated ? "—" : fmtPct(sr)}
           tone={!rated ? "absent" : undefined}
           sub={!net ? undefined : !rated ? "nothing rated in this window"
-            : <span title={boundTitle(sr!, net.serve_rate_by_obligation)}>{fmtCount(sr!)} probes · {net.serve_rate_by_obligation.den.toLocaleString("en-US")} obligations{!enoughToRank(sr) && " · under floor"}</span>}
+            : <span title={boundTitle(sr!, net.serve_rate_by_obligation)}>{fmtCount(sr!)} probes · {net.serve_rate_by_obligation.den.toLocaleString("en-US")} obligations</span>}
           info={<>
             <p>Shards handed over, out of the shards validators had signed for on chain. Only probes taken inside the retention window count.</p>
             <p>Unreachable, unproven and unregistered cases are listed separately and are not in this number.</p>
@@ -67,24 +67,22 @@ export default function Overview() {
             <p>This is the only number counted against a validator.</p>
           </>} />
         <Tile label="Uptime" loading={busy}
-          value={net?.reachability_window?.den ? fmtRate(net.reachability_window) : "—"}
+          value={net?.reachability_window?.den ? fmtPct(net.reachability_window) : "—"}
           tone={net?.reachability_window?.den ? undefined : "absent"}
-          sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} heartbeats` : "no heartbeat yet"}
-          info={<p>Share of 10-minute checks where a registered endpoint completed a TLS handshake. Every registered endpoint is checked, assigned or not.</p>} />
+          sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} handshakes` : "no handshake yet"}
+          info={<p>TLS handshakes completed, over handshakes attempted. We open a connection to every registered Fibre endpoint every 10 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>} />
         <Tile label="Endpoints" loading={busy}
           value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
-          sub={net ? `${net.reachability.num} reachable now · ${net.validators_probed} probed` : undefined}
-          info={<p>Validators with a Fibre host registered in <code>x/valaddr</code>. Reachable now: the last check completed TLS.</p>} />
+          sub={net ? `${net.reachability.num} answering now · ${net.validators_probed} probed` : undefined} />
         <Tile label="Publications" loading={busy}
           value={net ? net.publications.toLocaleString("en-US") : "—"}
-          sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined}
-          info={<p><code>MsgPayForFibre</code> transactions settled in this window, and their total padded upload size.</p>} />
+          sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined} />
         <Tile label="Recoverable" loading={busy}
-          value={recon && recon.recoverable.den > 0 ? fmtRate(recon.recoverable) : "—"}
+          value={recon && recon.recoverable.den > 0 ? fmtPct(recon.recoverable) : "—"}
           tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}
           sub={recon && recon.recoverable.den > 0 ? `${recon.recoverable.num} of ${recon.recoverable.den} blobs · ${recon.rate.num} fully served` : "no blob judged yet"}
           info={<>
-            <p>Blobs that could be rebuilt from the rows we fetched at the last check inside the window.</p>
+            <p>Blobs that could be rebuilt from the rows we fetched at the last probe inside the window.</p>
             <p>Fully served: every validator that signed for the blob answered. Recoverable: enough rows came back, whoever answered.</p>
           </>} />
       </div>
@@ -104,7 +102,7 @@ export default function Overview() {
                 No Fibre publication recorded yet. Collector at height {meta!.last_scanned_height || "?"} on {meta!.chain_id || "?"}.{" "}
                 {meta!.counts.OpenEndpoints === 0
                   ? "Fibre is live; no validator has registered an endpoint yet."
-                  : `${meta!.counts.OpenEndpoints} validators have registered an endpoint. Reachability is checked every 10 minutes.`}
+                  : `${meta!.counts.OpenEndpoints} validators have registered an endpoint. A TLS handshake is attempted with each every 10 minutes.`}
               </>
             )}
           </p>
@@ -128,10 +126,7 @@ export default function Overview() {
         {net && recon && <Link href="/blobs/" className="sample">all publications</Link>}
       </div>
       {vals
-        ? <ValidatorTable rows={vals.validators} notLive={notLive}
-            caption={notLive
-              ? `Bonded validators on ${meta?.chain_id || "this chain"}, from the staking module.`
-              : `Worst first. Validators with fewer than 20 rated probes show counts instead of a rate and are not ranked.`} />
+        ? <ValidatorTable rows={vals.validators} notLive={notLive} />
         : <p className="muted">Loading validators…</p>}
     </>
   );

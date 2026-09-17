@@ -340,6 +340,12 @@ export function fmtRate(r: Rate | undefined | null): string {
   return (r.value * 100).toFixed(1) + "%";
 }
 
+/** the percentage whenever there is anything to divide; the floor only decides emphasis */
+export function fmtPct(r: Rate | undefined | null): string {
+  if (!r || r.den === 0 || r.value === null) return "—";
+  return (r.value * 100).toFixed(1) + "%";
+}
+
 /** whether a rate has enough observations behind it to rank or compare. */
 export function enoughToRank(r: Rate | undefined | null): boolean {
   return !!r && r.den >= MIN_RATED;

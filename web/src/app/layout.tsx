@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { Header, Banner, Footer } from "@/components/Chrome";
+import { Header } from "@/components/Chrome";
 
 export const metadata: Metadata = {
   title: "Fibrescope · Celestia Fibre observer",
@@ -12,9 +12,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body>
         <Header />
-        <Banner />
         <main className="wrap">{children}</main>
-        <Footer />
       </body>
     </html>
   );
