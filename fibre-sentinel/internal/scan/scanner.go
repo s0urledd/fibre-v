@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"math"
 	"strings"
 	"time"
 
@@ -57,10 +57,13 @@ type Scanner struct {
 	// a MsgPayForFibre shows up.
 	fibreInactive bool
 
-	valSetCache map[int64][]assign.Validator
-	// memberCache keeps the raw set (with consensus public keys) for the same
-	// heights, so promise signatures can be verified without a second fetch.
-	memberCache map[int64][]ValSetMember
+	// valSets caches the validator set per promise height: the fibre-assign
+	// view used for row assignment and the raw members (with consensus keys)
+	// used to verify signatures, kept in one entry so the two can never
+	// disagree about which heights are cached. valSetOrder is insertion
+	// order, which is what eviction walks.
+	valSets     map[int64]valSetEntry
+	valSetOrder []int64
 }
 
 // New builds a Scanner. It opens the store and dials the RPC lazily in Run.
@@ -83,12 +86,11 @@ func New(cfg Config, log *Logger) (*Scanner, error) {
 		return nil, err
 	}
 	return &Scanner{
-		cfg:         cfg,
-		log:         log,
-		chain:       ch,
-		store:       st,
-		valSetCache: map[int64][]assign.Validator{},
-		memberCache: map[int64][]ValSetMember{},
+		cfg:     cfg,
+		log:     log,
+		chain:   ch,
+		store:   st,
+		valSets: map[int64]valSetEntry{},
 	}, nil
 }
 
@@ -139,6 +141,9 @@ func (s *Scanner) Run(parent context.Context) error {
 			}
 			n := s.processBlock(ctx, h)
 			totalPubs += n
+			if !s.fibreInactive && h%paramReconcileEvery == 0 {
+				s.reconcileParams(ctx, h)
+			}
 			next = h + 1
 			sinceCheckpoint++
 			if sinceCheckpoint >= s.cfg.CheckpointEvery || h == target {
@@ -200,7 +205,7 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 	if start < 1 {
 		start = 1
 	}
-	seed, err := s.chain.FibreParamsAt(ctx, start)
+	seed, err := s.seedParamsFor(ctx, start)
 	switch {
 	case err == nil:
 		s.params = NewParamHistory(start, seed)
@@ -353,9 +358,69 @@ func IsModuleInactive(err error) bool {
 	return strings.Contains(msg, "unknown query path") || strings.Contains(msg, "unknown request")
 }
 
+// paramReconcileEvery is how often, in blocks, the scanner re-reads x/fibre
+// params from state and compares them with the history it built from events.
+// A governance proposal announces its change with an event; an upgrade
+// handler or a store migration that calls SetParams emits nothing, and
+// without this check such a change would stay invisible for the life of the
+// data dir, with every later window computed from the old retention. At six
+// second blocks this is a check every half hour.
+const paramReconcileEvery = 300
+
+// reconcileParams compares the params in state after block h with the
+// history's view of block h and, on a difference, records the live params as
+// in force from the next block, which is the earliest point the scanner can
+// vouch for. The height at which the silent change really landed is lost;
+// the log line says so.
+func (s *Scanner) reconcileParams(ctx context.Context, h int64) {
+	var live fibretypes.Params
+	if err := s.retryRPC(ctx, fmt.Sprintf("params reconcile at height %d", h), func() error {
+		var err error
+		live, err = s.chain.FibreParamsAt(ctx, h)
+		return err
+	}); err != nil {
+		s.log.Printf("h=%d: params reconcile skipped: %v", h, err)
+		return
+	}
+	cur := s.params.at(h, math.MaxInt)
+	if cur != nil && paramsEqual(cur.Params, live) {
+		return
+	}
+	if s.params.add(h+1, -1, "reconcile", live) {
+		s.log.Printf("WARNING: h=%d: x/fibre params in state differ from the event history (promise_timeout=%s shard_retention=%s withdrawal_delay=%s in state); a change landed without an event, recorded as in force from height %d",
+			h, live.PaymentPromiseTimeout, live.ShardRetention, live.WithdrawalDelay, h+1)
+	}
+}
+
+// seedParamsFor returns the params in force at the first tx of block h, which
+// is the state after block h-1. The history keys a seed as (h, -1), "from the
+// first tx of block h"; querying at h itself answers with the state after
+// block h, which is wrong for a publication that shares block h with a param
+// change landing later in the same block. At h = 1, and when x/fibre only
+// became active in block h, h-1 answers "inactive" and the state after block
+// h is the best there is. Transient RPC errors are retried; "inactive" is
+// returned at once.
+func (s *Scanner) seedParamsFor(ctx context.Context, h int64) (fibretypes.Params, error) {
+	var seed fibretypes.Params
+	fetch := func(at int64) error {
+		return s.retryRPC(ctx, fmt.Sprintf("params at height %d", at), func() error {
+			var err error
+			seed, err = s.chain.FibreParamsAt(ctx, at)
+			return err
+		})
+	}
+	if h > 1 {
+		err := fetch(h - 1)
+		if err == nil || !IsModuleInactive(err) {
+			return seed, err
+		}
+	}
+	return seed, fetch(h)
+}
+
 // trySeed asks for params at h and, on success, starts the history there.
 func (s *Scanner) trySeed(ctx context.Context, h int64) bool {
-	seed, err := s.chain.FibreParamsAt(ctx, h)
+	seed, err := s.seedParamsFor(ctx, h)
 	if err != nil {
 		if !IsModuleInactive(err) {
 			s.log.Printf("params at h=%d: %v (still treating x/fibre as inactive)", h, err)
@@ -518,14 +583,15 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 	// never frozen into the record: a record with an assignment error is
 	// skipped by the prober for good, and there is no re-scan path.
 	var table AssignmentTable
-	var vals []assign.Validator
+	var set valSetEntry
 	if verr := s.retryRPC(ctx, fmt.Sprintf("validator set at height %d", pp.Height), func() error {
 		var err error
-		vals, err = s.validatorSet(ctx, pp.Height)
+		set, err = s.validatorSet(ctx, pp.Height)
 		return err
 	}); verr != nil {
 		return Publication{}, fmt.Errorf("validator set at height %d: %w", pp.Height, verr)
 	}
+	vals := set.vals
 
 	// Which validators does this promise PROVE stored their shard? The chain
 	// does not answer that: its signature check runs in the ante handler and
@@ -535,7 +601,14 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 	if sberr != nil {
 		return Publication{}, fmt.Errorf("promise sign bytes: %w", sberr)
 	}
-	att := verifyAttestations(signBytes, msg.ValidatorSignatures, s.memberCache[pp.Height])
+	// The members come back with the set, never from a second lookup: a
+	// cache miss here once produced an empty member list, and an empty list
+	// verifies nothing, which recorded every validator on the blob as
+	// unattested while claiming to be evidence.
+	if len(set.members) == 0 {
+		return Publication{}, fmt.Errorf("validator set at height %d has no members", pp.Height)
+	}
+	att := verifyAttestations(signBytes, msg.ValidatorSignatures, set.members)
 	if att.Unmatched > 0 || att.OutOfPosition > 0 {
 		s.log.Printf("h=%d tx=%d promise %s: %d signature entries, %d verified, %d matched no validator, %d out of position",
 			blk.Height, txIndex, hexstr(hash)[:12], att.Entries, att.Verified, att.Unmatched, att.OutOfPosition)
@@ -567,25 +640,42 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 	}, nil
 }
 
-// validatorSet fetches (and caches) the consensus validator set at height as
-// fibre-assign validators, verifying each address derives from its ed25519 key.
-func (s *Scanner) validatorSet(ctx context.Context, height int64) ([]assign.Validator, error) {
-	if v, ok := s.valSetCache[height]; ok {
-		return v, nil
+// valSetEntry is one cached validator set at one height.
+type valSetEntry struct {
+	vals    []assign.Validator
+	members []ValSetMember
+}
+
+// maxValSetHeights bounds the validator-set cache. Publications arrive at
+// many distinct promise heights, so an unbounded map would grow for the life
+// of the process.
+const maxValSetHeights = 256
+
+// validatorSet fetches (and caches) the consensus validator set at height, as
+// fibre-assign validators plus the raw members, verifying each address
+// derives from its ed25519 key.
+//
+// Eviction is by insertion order, not by height. A promise height is not the
+// scan height: the chain accepts a promise up to PaymentPromiseHeightWindow
+// blocks old, so a late-settling publication can ask for a height below
+// everything already cached. Dropping the lowest heights evicted exactly that
+// entry in the same call that inserted it.
+func (s *Scanner) validatorSet(ctx context.Context, height int64) (valSetEntry, error) {
+	if e, ok := s.valSets[height]; ok {
+		return e, nil
 	}
 	members, err := s.chain.ValidatorSet(ctx, height)
 	if err != nil {
-		return nil, err
+		return valSetEntry{}, err
 	}
-	s.rememberMembers(height, members)
 	if len(members) == 0 {
-		return nil, fmt.Errorf("empty validator set")
+		return valSetEntry{}, fmt.Errorf("empty validator set")
 	}
 	out := make([]assign.Validator, 0, len(members))
 	for _, m := range members {
 		var a assign.Address
 		if len(m.Address) != len(a) {
-			return nil, fmt.Errorf("consensus address is %d bytes, want %d", len(m.Address), len(a))
+			return valSetEntry{}, fmt.Errorf("consensus address is %d bytes, want %d", len(m.Address), len(a))
 		}
 		copy(a[:], m.Address)
 		if len(m.PubKey) == 32 {
@@ -595,47 +685,12 @@ func (s *Scanner) validatorSet(ctx context.Context, height int64) ([]assign.Vali
 		}
 		out = append(out, assign.Validator{Address: a, VotingPower: m.VotingPower})
 	}
-	s.valSetCache[height] = out
-	s.evictValSetCaches(height)
-	return out, nil
-}
-
-// maxValSetHeights bounds the per-height validator-set caches. Publications
-// arrive at many distinct promise heights, so an unbounded map would grow for
-// the life of the process.
-const maxValSetHeights = 256
-
-func (s *Scanner) rememberMembers(height int64, members []ValSetMember) {
-	s.memberCache[height] = members
-	s.evictValSetCaches(height)
-}
-
-// evictValSetCaches drops the oldest heights once either cache is over the
-// bound, keeping the most recent ones: a publication's promise height is
-// always at or below the block being scanned, and the scan moves forward, so
-// the lowest heights are the ones that will not be asked for again.
-func (s *Scanner) evictValSetCaches(current int64) {
-	evict := func(heights []int64, drop func(int64)) {
-		if len(heights) <= maxValSetHeights {
-			return
-		}
-		sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
-		for _, h := range heights[:len(heights)-maxValSetHeights] {
-			drop(h)
-		}
+	e := valSetEntry{vals: out, members: members}
+	s.valSets[height] = e
+	s.valSetOrder = append(s.valSetOrder, height)
+	for len(s.valSetOrder) > maxValSetHeights {
+		delete(s.valSets, s.valSetOrder[0])
+		s.valSetOrder = s.valSetOrder[1:]
 	}
-	if len(s.valSetCache) > maxValSetHeights {
-		hs := make([]int64, 0, len(s.valSetCache))
-		for h := range s.valSetCache {
-			hs = append(hs, h)
-		}
-		evict(hs, func(h int64) { delete(s.valSetCache, h) })
-	}
-	if len(s.memberCache) > maxValSetHeights {
-		hs := make([]int64, 0, len(s.memberCache))
-		for h := range s.memberCache {
-			hs = append(hs, h)
-		}
-		evict(hs, func(h int64) { delete(s.memberCache, h) })
-	}
+	return e, nil
 }
