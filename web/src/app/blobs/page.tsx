@@ -21,7 +21,7 @@ function recon(b: Blob): { word: string; tier: Tier; title: string } {
     return { word: "yes", tier: "kept", title: `${r.served_distinct_rows.toLocaleString("en-US")} distinct rows served; every validator the promise proves owed this blob answered at point ${r.point}.` };
   }
   if (r.status === "degraded") {
-    return { word: "degraded", tier: "held", title: `Enough rows came back to rebuild the blob, but not every validator the promise proves owed it answered at point ${r.point}.` };
+    return { word: "degraded", tier: "hold", title: `Enough rows came back to rebuild the blob, but not every validator the promise proves owed it answered at point ${r.point}.` };
   }
   return { word: "no", tier: "fault", title: `Fewer than the ${r.needed_rows.toLocaleString("en-US")} rows needed came back at point ${r.point}.` };
 }

@@ -170,7 +170,7 @@ func TestValidatorsAndBlobs(t *testing.T) {
 		Validator struct{ Address string } `json:"validator"`
 		Windows   []struct {
 			Window struct{ Name string }    `json:"window"`
-			Count  int64                    `json:"rated_probe_count"`
+			Count  int64                    `json:"probe_count"`
 			Oblig  struct{ Num, Den int64 } `json:"serve_rate_by_obligation"`
 		} `json:"windows"`
 		Recent   []any            `json:"recent_probes"`

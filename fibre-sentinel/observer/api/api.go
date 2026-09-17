@@ -2,9 +2,9 @@
 //
 // Every aggregate carries the probe count it was computed from, the time
 // window it covers, and the vantage. Rates follow docs/verdicts.md: serve
-// rate is HEALTHY / (HEALTHY + FAULT) over assigned probes in the in-window
-// and grace phases; NOT_PROBED and PROBE_ERROR are reported as gaps, never
-// folded into a rate.
+// rate is HEALTHY / (HEALTHY + FAULT) over assigned, attested probes in the
+// in-window phase only; grace is recorded and shown but never rated;
+// NOT_PROBED and PROBE_ERROR are reported as gaps, never folded into a rate.
 package api
 
 import (
@@ -505,12 +505,17 @@ type networkResponse struct {
 	// one per probe. The four in-window probes of one obligation are near
 	// copies of each other, so this is the number a confidence interval may
 	// honestly be drawn around.
-	ByObligation     Rate               `json:"serve_rate_by_obligation"`
-	HeldOut          map[string]int64   `json:"serve_rate_held_out"`
-	ExcludedClasses  []excludedClass    `json:"serve_rate_excluded_classes"`
-	Attestation      attestationStats   `json:"attestation"`
-	ProbeCount       int64              `json:"probe_count"` // all probe rows in window
-	Classes          classCounts        `json:"classes"`
+	ByObligation    Rate             `json:"serve_rate_by_obligation"`
+	HeldOut         map[string]int64 `json:"serve_rate_held_out"`
+	ExcludedClasses []excludedClass  `json:"serve_rate_excluded_classes"`
+	Attestation     attestationStats `json:"attestation"`
+	ProbeCount      int64            `json:"probe_count"` // all probe rows in window
+	Classes         classCounts      `json:"classes"`
+	// Faults is every FAULT of an assigned shard in the window, in any
+	// phase. The serve rate's population is in-window only; corrupt bytes
+	// returned in grace are still corrupt bytes, and docs/verdicts.md counts
+	// INVALID_ROWS in any phase, so the count is wider than the rate.
+	Faults           int64              `json:"faults"`
 	Publications     int64              `json:"publications"`
 	PublicationBytes int64              `json:"publication_bytes"`
 	Reconstructable  reconstructSummary `json:"reconstructable"`
@@ -655,6 +660,7 @@ var excludedFromRate = []excludedClass{
 	{"IDENTITY_EXPIRED", "the certificate is endorsed by the right consensus key but its signed validity window has lapsed; endpoint hygiene, not a retention failure"},
 	{"IDENTITY_MISMATCH", "the certificate is not endorsed by this validator's consensus key, so no client can download from the endpoint; a statement about the endpoint, shown as its status, not about any shard"},
 	{"SERVER_ERROR", "the endpoint was reached and answered with an application error instead of the shard; from one probe that is not distinguishable from a transient fault, so it is shown beside the rate"},
+	{"THROTTLED", "the endpoint was reached and refused the download with a rate limit; that says nothing about the shard, and the prober backs off from a validator that says so"},
 	{"NOT_PROBED", "the slot elapsed unprobed or the policy sampled it out; a gap in observation, never a zero"},
 	{"PROBE_ERROR", "the observer's own probe failed"},
 }
@@ -892,6 +898,7 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		return nil, err
 	}
 	resp.Classes = classes
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND assigned = 1 AND classification = 'FAULT'`, win.startArg()).Scan(&resp.Faults)
 	resp.ServeRate = serveRate(classes)
 	resp.Coverage = coverage(classes)
 	resp.HeldOut = heldOut(classes)
@@ -948,7 +955,7 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	var beats, beatsUp int64
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*),
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0)
-		FROM reachability WHERE started_at >= ?`, win.startArg()).Scan(&beats, &beatsUp); err != nil {
+		FROM reachability WHERE started_at >= ? AND outcome <> 'PROBE_ERROR'`, win.startArg()).Scan(&beats, &beatsUp); err != nil {
 		return nil, err
 	}
 	resp.ReachabilityWindow = rate(beatsUp, beats)
@@ -969,6 +976,8 @@ type reachState struct {
 	at             string
 	host           string
 	reachable      bool // TCP and TLS ok
+	tcpOK          bool
+	tlsOK          bool
 	identityOK     bool
 	identityReason string
 	source         string // heartbeat | probe
@@ -984,11 +993,11 @@ func (s *Server) reachabilityNow(ctx context.Context, only string) (map[string]r
 	// instead of a correlated MAX(started_at) per row over the whole table.
 	rf, pf, args := "", "", []any{}
 	if only != "" {
-		rf, pf = " WHERE validator_address = ?", " AND validator_address = ?"
+		rf, pf = " AND validator_address = ?", " AND validator_address = ?"
 		args = []any{only, only}
 	}
 	q := `SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'heartbeat' FROM reachability
-	      WHERE rowid IN (SELECT MAX(rowid) FROM reachability` + rf + ` GROUP BY validator_address)
+	      WHERE rowid IN (SELECT MAX(rowid) FROM reachability WHERE outcome <> 'PROBE_ERROR'` + rf + ` GROUP BY validator_address)
 	      UNION ALL
 	      SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'probe' FROM probes
 	      WHERE rowid IN (SELECT MAX(rowid) FROM probes WHERE outcome NOT IN ('MISSED','PROBE_ERROR')` + pf + ` GROUP BY validator_address)`
@@ -1004,7 +1013,8 @@ func (s *Server) reachabilityNow(ctx context.Context, only string) (map[string]r
 		if err := rows.Scan(&addr, &st.host, &st.at, &tcp, &tls, &id, &st.identityReason, &st.source); err != nil {
 			return nil, err
 		}
-		st.reachable = tcp == 1 && tls == 1
+		st.tcpOK, st.tlsOK = tcp == 1, tls == 1
+		st.reachable = st.tcpOK && st.tlsOK
 		st.identityOK = id == 1
 		if cur, ok := out[addr]; !ok || st.at > cur.at {
 			out[addr] = st
@@ -1042,15 +1052,15 @@ type validatorRow struct {
 	VotingPower    int64   `json:"voting_power"` // from the latest assignment seen
 	LastSeenAt     *string `json:"last_seen_at"`
 	Reachable      *bool   `json:"reachable"`       // latest heartbeat or probe; null if never probed
-	IdentityStatus string  `json:"identity_status"` // verified | mismatch | no_tls | unreachable | unknown
+	IdentityStatus string  `json:"identity_status"` // verified | expired | mismatch | unverified | no_tls | unreachable | unknown
 	IdentityReason string  `json:"identity_reason,omitempty"`
 	// Uptime is how often this observer completed a TLS conversation with the
 	// endpoint over the window, from the reachability heartbeat: every
-	// registered validator, every ten minutes, whether or not it was assigned
+	// registered validator, every five minutes, whether or not it was assigned
 	// anything. It is the closest thing here to "is the Fibre service
 	// running", and unlike the serve rate its coverage does not depend on
 	// attestation — an operator the publisher never collected a signature
-	// from still gets 144 samples a day.
+	// from still gets 288 samples a day.
 	//
 	// It is not an accusation. Half of every path measured here is this
 	// observer's own, so a dip is a statement about a route as much as about
@@ -1081,13 +1091,16 @@ type validatorRow struct {
 	// one per probe. The four in-window probes of one obligation are near
 	// copies of each other, so this is the number a confidence interval may
 	// honestly be drawn around.
-	ByObligation     Rate             `json:"serve_rate_by_obligation"`
-	HeldOut          map[string]int64 `json:"serve_rate_held_out"`
-	Attestation      attestationStats `json:"attestation"`
-	ProbeCount       int64            `json:"probe_count"`
-	Classes          classCounts      `json:"classes"`
-	AssignedRowsLast int              `json:"assigned_rows_last"`
-	ExpectedLoadBand string           `json:"expected_load_band"` // floor | low | mid | high, by assigned rows
+	ByObligation Rate             `json:"serve_rate_by_obligation"`
+	HeldOut      map[string]int64 `json:"serve_rate_held_out"`
+	Attestation  attestationStats `json:"attestation"`
+	ProbeCount   int64            `json:"probe_count"`
+	Classes      classCounts      `json:"classes"`
+	// Faults is every FAULT of an assigned shard in the window, in any
+	// phase; see networkResponse.Faults.
+	Faults           int64  `json:"faults"`
+	AssignedRowsLast int    `json:"assigned_rows_last"`
+	ExpectedLoadBand string `json:"expected_load_band"` // floor | low | mid | high, by assigned rows
 	// Latency is how long this observer waited for a shard it did get: the
 	// median and 95th percentile of the whole probe, dial to verified rows,
 	// over the probes that came back HEALTHY in this window.
@@ -1149,17 +1162,26 @@ func identityStatus(st *reachState) string {
 		return "unknown"
 	}
 	if !st.reachable {
+		if st.tcpOK && !st.tlsOK {
+			return "no_tls"
+		}
 		return "unreachable"
 	}
 	if st.identityOK {
 		return "verified"
 	}
-	if st.identityReason != "" {
-		return "mismatch"
+	switch st.identityReason {
+	case "":
+		// TCP and TLS both succeeded, but no identity verdict was recorded
+		// (an older row, or a probe that stopped before the identity step).
+		return "unverified"
+	case "cert_expired", "cert_not_yet_valid", "window_empty", "window_too_long":
+		// The right key endorsed it and the signed window has lapsed: a
+		// renewal running late, which the prober files as IDENTITY_EXPIRED.
+		// Calling it a mismatch accused the operator of the wrong thing.
+		return "expired"
 	}
-	// TCP and TLS both succeeded, but no identity verdict was recorded (an
-	// older row, or a probe that stopped before the identity step).
-	return "unverified"
+	return "mismatch"
 }
 
 func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]validatorRow, error) {
@@ -1222,7 +1244,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		innerWhere, outerWhere = " WHERE a2.validator_address = ?", " WHERE a.validator_address = ?"
 		assignArgs = []any{only, only}
 	}
-	rows, err := db.QueryContext(ctx, `SELECT a.validator_address, a.voting_power, a.row_count, a.attested, p.settlement_height
+	tieHash := map[string]string{}
+	rows, err := db.QueryContext(ctx, `SELECT a.validator_address, a.voting_power, a.row_count, a.attested, p.settlement_height, a.promise_hash
 		FROM assignments a
 		JOIN publications p ON p.promise_hash = a.promise_hash
 		JOIN (
@@ -1239,17 +1262,20 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		var rc int
 		var att sql.NullInt64
 		var h int64
-		if err := rows.Scan(&addr, &vp, &rc, &att, &h); err != nil {
+		var ph string
+		if err := rows.Scan(&addr, &vp, &rc, &att, &h, &ph); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		v := get(addr)
-		// A block can carry several publications; keep whichever row we see
-		// with the highest height, and break the tie deterministically.
-		if v.AssignmentHeight > h {
+		// A block can carry several publications; keep the row with the
+		// highest height and, within one block, the greatest promise hash,
+		// so two snapshots of the same data agree whatever order SQLite
+		// hands the rows back in.
+		if v.AssignmentHeight > h || (v.AssignmentHeight == h && tieHash[addr] >= ph) {
 			continue
 		}
-		v.AssignmentHeight = h
+		v.AssignmentHeight, tieHash[addr] = h, ph
 		v.VotingPower, v.AssignedRowsLast, v.ExpectedLoadBand = vp, rc, loadBand(rc)
 		v.AttestedLast = nil
 		if att.Valid {
@@ -1259,6 +1285,25 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	frows, err := db.QueryContext(ctx, `SELECT validator_address, COUNT(*) FROM probes
+		WHERE started_at >= ? AND assigned = 1 AND classification = 'FAULT'`+vfilter("validator_address")+`
+		GROUP BY validator_address`, vargs(win.startArg())...)
+	if err != nil {
+		return nil, err
+	}
+	for frows.Next() {
+		var addr string
+		var n int64
+		if err := frows.Scan(&addr, &n); err != nil {
+			frows.Close()
+			return nil, err
+		}
+		get(addr).Faults = n
+	}
+	frows.Close()
+	if err := frows.Err(); err != nil {
 		return nil, err
 	}
 	// classes per validator in window
@@ -1318,16 +1363,22 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	// how long a failure took, which is not a service figure. total_duration_ms
 	// is the whole probe — dial, TLS, DownloadShard, row verification against
 	// the commitment — because that is what a client actually waits for.
+	//
+	// Throughput is ranked on its own (rr), not read off the median-duration
+	// probe (rn): rows per blob vary with stake share and bytes per row with
+	// blob size, so the probe with the median duration can carry the highest
+	// rows/s of the set.
 	rows, err = db.QueryContext(ctx, `SELECT validator_address,
 			MAX(CASE WHEN rn = (c + 1) / 2         THEN ms END),
 			MAX(CASE WHEN rn = (c * 95 + 99) / 100 THEN ms END),
 			MAX(c),
-			MAX(CASE WHEN rn = (c + 1) / 2         THEN rows_per_s END)
+			MAX(CASE WHEN rr = (c + 1) / 2         THEN rows_per_s END)
 		FROM (
 			SELECT validator_address AS validator_address,
 			       total_duration_ms AS ms,
 			       rows_returned * 1000 / total_duration_ms AS rows_per_s,
 			       ROW_NUMBER() OVER (PARTITION BY validator_address ORDER BY total_duration_ms) AS rn,
+			       ROW_NUMBER() OVER (PARTITION BY validator_address ORDER BY rows_returned * 1000.0 / total_duration_ms) AS rr,
 			       COUNT(*)     OVER (PARTITION BY validator_address)                            AS c
 			FROM probes
 			WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
@@ -1437,16 +1488,19 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		v.LastSeenAt = &l
 	}
 	rows.Close()
-	// The heartbeat history, which until now was written every ten minutes for
+	// The heartbeat history, which until now was written every five minutes for
 	// every registered validator and read only for its newest row. It is the
 	// one stability signal here whose coverage does not depend on being
 	// assigned or attested anything, which is exactly what an operator asking
 	// "is my Fibre server up" needs.
+	// A PROBE_ERROR heartbeat is the observer's own failure (a host it could
+	// not parse, an identity check it starved of CPU) and is left out of
+	// every count, as its probe-side twin is.
 	hrows, err := db.QueryContext(ctx, `SELECT validator_address, COUNT(*),
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 AND identity_ok = 1 THEN 1 ELSE 0 END), 0),
 			MAX(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN NULL ELSE started_at END)
-		FROM reachability WHERE started_at >= ?`+vfilter("validator_address")+`
+		FROM reachability WHERE started_at >= ? AND outcome <> 'PROBE_ERROR'`+vfilter("validator_address")+`
 		GROUP BY validator_address`, vargs(win.startArg())...)
 	if err != nil {
 		return nil, err
@@ -1671,9 +1725,9 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	type span struct {
 		Window Window `json:"window"`
 		Rate   Rate   `json:"serve_rate"`
-		// Count is the assigned in-window probes this window's rate is built
-		// from, not every row for the validator (validator.probe_count).
-		Count        int64            `json:"rated_probe_count"`
+		// Count is every assigned in-window probe in this window, rated or
+		// held out, not every row for the validator (validator.probe_count).
+		Count        int64            `json:"probe_count"`
 		Coverage     Rate             `json:"serve_rate_coverage"`
 		ByObligation Rate             `json:"serve_rate_by_obligation"`
 		HeldOut      map[string]int64 `json:"serve_rate_held_out"`
@@ -1929,7 +1983,7 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 	// counts once) and the union of their assigned rows.
 	srows, err := db.QueryContext(ctx, `SELECT DISTINCT p.validator_address, a.rows_json, a.attested FROM probes p
 		JOIN assignments a ON a.promise_hash = p.promise_hash AND a.validator_address = p.validator_address
-		WHERE p.promise_hash = ? AND p.scheduled_at = ? AND p.assigned = 1 AND p.outcome = 'SERVED_OK'`, hash, pointAt)
+		WHERE p.promise_hash = ? AND p.scheduled_at = ? AND p.assigned = 1 AND p.phase = 'in_window' AND p.outcome = 'SERVED_OK'`, hash, pointAt)
 	if err != nil {
 		return nil, err
 	}

@@ -65,7 +65,7 @@ export default function Timeline({ probes, validators, settled, mustServeUntil, 
                 const cx = x(new Date(p.started_at).getTime());
                 const t = `${d.label} · ${p.schedule_label} · ${utc(p.started_at)} · ${p.outcome} · ${p.rows_returned}/${p.rows_expected} rows · ${p.total_duration_ms} ms${p.raw_error ? " · " + p.raw_error : ""}`;
                 return (
-                  <g key={p.scheduled_at} transform={`translate(${cx} ${y})`}>
+                  <g key={`${p.vantage}|${p.scheduled_at}`} transform={`translate(${cx} ${y})`}>
                     <title>{t}</title>
                     <circle r={7} fill="var(--card)" />
                     {d.tier === "kept" && <circle r={4} fill="var(--ok)" />}
@@ -84,8 +84,8 @@ export default function Timeline({ probes, validators, settled, mustServeUntil, 
       </svg>
       <ul className="tl-key">
         <li><Mark tier="kept" /> served</li>
-        <li><Mark tier="held" /> unproven</li>
-        <li><Mark tier="hold" /> unreachable</li>
+        <li><Mark tier="held" /> not counted</li>
+        <li><Mark tier="hold" /> held out</li>
         <li><Mark tier="fault" /> fault</li>
         <li><Mark tier="gap" /> not probed</li>
         <li className="faint">rows assigned after each name · <Link href="/methodology/#verdicts">definitions</Link></li>

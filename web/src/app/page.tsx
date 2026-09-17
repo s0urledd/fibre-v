@@ -22,9 +22,9 @@ export default function Overview() {
 
   const notLive = !!(meta?.app_version && !meta.fibre_active);
   const noPubs = !!meta && meta.counts.Publications === 0;
-  const faults = net?.classes?.FAULT ?? 0;
+  const faults = net?.faults ?? net?.classes?.FAULT ?? 0;
   const list = vals?.validators ?? [];
-  const faulted = list.filter((v) => (v.classes.FAULT ?? 0) > 0).length;
+  const faulted = list.filter((v) => (v.faults ?? v.classes.FAULT ?? 0) > 0).length;
   const busy = loading && !net;
 
   const sr = net?.serve_rate;
@@ -88,7 +88,9 @@ export default function Overview() {
         <Tile label="Recoverable" loading={busy}
           value={recon && recon.recoverable.den > 0 ? fmtPct(recon.recoverable) : "—"}
           tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}
-          sub={recon && recon.recoverable.den > 0 ? `${recon.recoverable.num} of ${recon.recoverable.den} blobs · ${recon.rate.num} fully served` : "no blob judged yet"}
+          sub={recon && recon.recoverable.den > 0
+            ? `${recon.recoverable.num} of ${recon.recoverable.den} blobs · ${recon.rate.num} fully served${recon.publications_in_window > recon.publications_examined ? ` · newest ${recon.publications_examined.toLocaleString("en-US")} of ${recon.publications_in_window.toLocaleString("en-US")}` : ""}`
+            : "no blob judged yet"}
           info={<>
             <p>Blobs that could be rebuilt from the rows we fetched at the last probe inside the window.</p>
             <p>Fully served: every validator that signed for the blob answered. Recoverable: enough rows came back, whoever answered.</p>

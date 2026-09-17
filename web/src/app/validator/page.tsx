@@ -3,6 +3,7 @@ import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useApi, type Validator, type Probe, type Window, type Rate, fmtPct, fmtCount, utc, ago, shortHex } from "@/lib/api";
+import { initialsOf } from "@/components/ValidatorTable";
 import Verdict from "@/components/Verdict";
 import Info from "@/components/Info";
 import Graduation from "@/components/Graduation";
@@ -13,6 +14,17 @@ type Detail = {
   validator: Validator;
   recent_probes: Probe[];
 };
+
+// the same words the overview table uses for the same states
+function identityWord(status: string): string {
+  switch (status) {
+    case "mismatch": return "bad cert";
+    case "expired": return "cert expired";
+    case "no_tls": return "no tls";
+    case "unverified": return "unverified";
+    default: return status.replace(/_/g, " ");
+  }
+}
 
 function Layer({ label, r, what, sample }: { label: string; r: Rate | null | undefined; what: React.ReactNode; sample?: string }) {
   const absent = !r || r.den === 0;
@@ -44,7 +56,7 @@ function Page() {
       <section className="card">
         <div className="card-head">
           <span className="who">
-            <span className="avatar" aria-hidden="true">{(v.moniker || v.address).slice(0, 2)}</span>
+            <span className="avatar" aria-hidden="true">{initialsOf(v.moniker, v.address)}</span>
             <span>
               <h1 style={{ margin: 0 }}>{v.moniker || <span className="mono">{v.cons_address || v.address}</span>}</h1>
               {v.moniker && <span className="addr mono faint">{v.cons_address || v.address}</span>}
@@ -54,7 +66,7 @@ function Page() {
           <span className="chips">
             {v.reachable === true && v.identity_status === "verified" && <span className="chip ok"><i className="dot ok" />up</span>}
             {v.reachable === false && <span className="chip hold" title={`Could not reach ${v.host} at the last attempt.`}><i className="dot hold" />down</span>}
-            {v.reachable === true && v.identity_status !== "verified" && <span className="chip hold" title={v.identity_reason}><i className="dot hold" />{v.identity_status.replace("_", " ")}</span>}
+            {v.reachable === true && v.identity_status !== "verified" && <span className="chip hold" title={v.identity_reason}><i className="dot hold" />{identityWord(v.identity_status)}</span>}
             {!v.host && <span className="chip">no Fibre endpoint</span>}
             {v.jailed && <span className="chip hold" title="Jailed by the chain. Shards it signed for are still owed.">jailed</span>}
             {v.bond_status && <span className="chip">{v.bond_status.replace("BOND_STATUS_", "").toLowerCase()}</span>}
@@ -145,7 +157,7 @@ function Page() {
           </>} />
       </div>
 
-      {points.length > 0 && <section className="card" style={{ marginTop: "var(--s4)" }}><Graduation points={points} /></section>}
+      {points.some((p) => p.serve_rate.den > 0) && <section className="card" style={{ marginTop: "var(--s4)" }}><Graduation points={points} /></section>}
 
       {(unattested > 0 || unknown > 0) && (
         <p className="coverage">
@@ -168,7 +180,7 @@ function Page() {
           <tbody>
             {data.recent_probes.length === 0 && <tr><td colSpan={8} className="muted">No probes for this validator yet.</td></tr>}
             {data.recent_probes.map((p) => (
-              <tr key={p.promise_hash + p.scheduled_at}>
+              <tr key={`${p.vantage}|${p.promise_hash}|${p.scheduled_at}`}>
                 <td className="mono">{utc(p.started_at)}</td>
                 <td className="mono"><Link href={`/blob/?hash=${p.promise_hash}`}>{shortHex(p.promise_hash, 6)}</Link></td>
                 <td className="mono">{p.schedule_label}</td>

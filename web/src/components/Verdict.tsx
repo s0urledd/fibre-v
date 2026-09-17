@@ -51,6 +51,10 @@ const VERDICTS: Record<string, Def> = {
     label: "server error", tier: "hold",
     def: "The endpoint was reached and answered with an application error instead of the shard. It did not say it lacks the shard; from one probe that is not distinguishable from a transient fault, so it is shown beside the rate, not inside it.",
   },
+  THROTTLED: {
+    label: "rate limited", tier: "hold",
+    def: "The endpoint was reached and refused the download with a rate limit. That says nothing about the shard, so it is shown beside the rate, not inside it, and the prober backs off from a validator that says so.",
+  },
   UNATTESTED: {
     label: "unattested", tier: "held",
     def: "The settled promise carries no verified signature from this validator, so nothing on chain proves it ever stored the shard. Whatever the probe found is recorded but kept out of the serve rate, in both directions.",
