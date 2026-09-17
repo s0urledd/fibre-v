@@ -11,7 +11,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
@@ -42,6 +45,7 @@ func main() {
 		measPath  = flag.String("measurements", "", "path to measurements.jsonl (default <data-dir>/measurements.jsonl)")
 		reachPath = flag.String("reachability", "", "path to reachability.jsonl (default <data-dir>/reachability.jsonl)")
 		payPath   = flag.String("payments", "", "path to payments.jsonl (default <data-dir>/payments.jsonl)")
+		regPath   = flag.String("registry", "", "path to registry.jsonl, this collector's own endpoint-history log (default <data-dir>/registry.jsonl)")
 	)
 	flag.Parse()
 
@@ -62,6 +66,9 @@ func main() {
 	}
 	if *payPath == "" {
 		*payPath = filepath.Join(*dataDir, "payments.jsonl")
+	}
+	if *regPath == "" {
+		*regPath = filepath.Join(*dataDir, "registry.jsonl")
 	}
 
 	log := scan.NewLogger(*logLines)
@@ -86,6 +93,34 @@ func main() {
 	runID, err := st.StartRun("collector", *vantage, version, time.Now())
 	if err != nil {
 		log.Fatalf("start run: %v", err)
+	}
+	live := status.New(*dataDir, "collector", *vantage, version)
+	live.Start()
+	defer live.Stop("exit")
+
+	// The endpoint history has no source but the live polls, so every
+	// opening and closing is appended here as well as written to the
+	// database; on a rebuild the file is replayed before the first poll.
+	regFile, err := os.OpenFile(*regPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Fatalf("open %s: %v", *regPath, err)
+	}
+	defer regFile.Close()
+	appendRegistry := func(evs []store.EndpointEvent) {
+		for _, e := range evs {
+			b, err := json.Marshal(e)
+			if err != nil {
+				continue
+			}
+			if _, err := regFile.Write(append(b, '\n')); err != nil {
+				log.Printf("registry: write: %v", err)
+				live.Error(fmt.Sprintf("registry write: %v", err))
+				return
+			}
+		}
+		if len(evs) > 0 {
+			_ = regFile.Sync()
+		}
 	}
 	log.Printf("collector up: run=%d vantage=%s db=%s data=%s", runID, *vantage, *dbPath, *dataDir)
 
@@ -124,6 +159,11 @@ func main() {
 			if r.Skipped > 0 {
 				log.Printf("reachability: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
 			}
+		}
+		if r, err := ingest.Registry(st, *regPath, now); err != nil {
+			log.Printf("registry: %v", err)
+		} else if r.Inserted > 0 {
+			log.Printf("registry: +%d endpoint event(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
 		if r, err := ingest.Payments(st, *payPath, now); err != nil {
 			log.Printf("payments: %v", err)
@@ -190,7 +230,10 @@ func main() {
 			chainID, height, err := chain.Status(ctx)
 			if err != nil {
 				log.Printf("endpoints: status: %v", err)
+				live.Error(fmt.Sprintf("chain status: %v", err))
 			} else {
+				live.OK()
+				live.Progress(height)
 				// The chain's own identity and tip, recorded here rather than
 				// only by the scanner: before Fibre activates there are no
 				// publications to carry them, and "which chain is this, and how
@@ -206,11 +249,20 @@ func main() {
 					// state, logged but not fatal. fibre_active above says
 					// which of the two this is.
 					log.Printf("endpoints: %v", err)
-				} else if opened, closed, err := st.ObserveEndpoints(ctx, provs, height, now); err != nil {
+				} else if evs, err := st.ObserveEndpointEvents(ctx, provs, height, now); err != nil {
 					log.Printf("endpoints: store: %v", err)
 				} else {
-					if opened > 0 || closed > 0 {
+					if len(evs) > 0 {
+						opened, closed := 0, 0
+						for _, e := range evs {
+							if e.Kind == store.EndpointOpened {
+								opened++
+							} else {
+								closed++
+							}
+						}
 						log.Printf("endpoints: h=%d registered=%d opened=%d closed=%d", height, len(provs), opened, closed)
+						appendRegistry(evs)
 					}
 					_ = st.SetMeta("endpoints_height", itoa(height), now)
 					_ = st.SetMeta("endpoints_registered", itoa(int64(len(provs))), now)
@@ -232,6 +284,11 @@ func main() {
 		}
 		if err := st.Heartbeat(runID, time.Now()); err != nil {
 			log.Printf("heartbeat: %v", err)
+			live.Error(fmt.Sprintf("store heartbeat: %v", err))
+		}
+		if c, err := st.Count(ctx); err == nil {
+			live.Set("publications", c.Publications)
+			live.Set("probes", c.Probes)
 		}
 	}
 
@@ -251,6 +308,7 @@ func main() {
 		case <-ctx.Done():
 			log.Printf("stopped (signal)")
 			_ = st.StopRun(runID, time.Now(), "signal")
+			live.Stop("signal")
 			return
 		case <-tick.C:
 			poll := *epEvery > 0 && time.Since(lastEP) >= *epEvery

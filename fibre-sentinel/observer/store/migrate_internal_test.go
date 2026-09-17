@@ -211,3 +211,20 @@ func TestAttestationColumnsFollowRecordVersion(t *testing.T) {
 		t.Fatalf("v2 measurement stored attested=%v, want 1", att)
 	}
 }
+
+// A database migrated by a newer collector must be refused by an older
+// read-only opener, not served with columns it does not know about.
+func TestReadOnlyRefusesNewerSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "new.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`, SchemaVersion+1, "2030-01-01T00:00:00.000000000Z"); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	if _, err := OpenReadOnly(path); err == nil {
+		t.Fatal("read-only open accepted a database newer than the binary")
+	}
+}

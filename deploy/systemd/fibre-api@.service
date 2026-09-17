@@ -1,15 +1,15 @@
 [Unit]
-Description=Fibre observer: read-only JSON API
+Description=Fibre observer (%i): read-only JSON API
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 User=fibre-observer
-EnvironmentFile=/etc/fibre-observer/observer.env
+EnvironmentFile=/etc/fibre-observer/%i.env
 ExecStart=/usr/local/bin/observer-api -data-dir ${DATA_DIR} -listen ${API_LISTEN} -vantage ${VANTAGE} \
   -vantage-location ${VANTAGE_LOCATION} -vantage-provider ${VANTAGE_PROVIDER} \
   -vantage-asn ${VANTAGE_ASN} -vantage-egress ${VANTAGE_EGRESS} \
-  -publishers /etc/fibre-observer/publishers.yaml
+  -publishers /etc/fibre-observer/publishers-%i.yaml
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -28,8 +28,9 @@ MemoryDenyWriteExecute=true
 CapabilityBoundingSet=
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-# only the data directory, not the service user's whole home
-ReadWritePaths=/var/lib/fibre-observer/data
+# only this instance's data directory, not the service user's whole home
+ReadWritePaths=/var/lib/fibre-observer/%i
 
 [Install]
 WantedBy=multi-user.target
+# one instance per network: systemctl enable --now fibre-api@mocha

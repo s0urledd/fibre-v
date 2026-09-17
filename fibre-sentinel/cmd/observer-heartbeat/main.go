@@ -28,6 +28,7 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 )
 
 func main() {
@@ -65,20 +66,30 @@ func main() {
 
 	timeouts := probe.StepTimeouts{DNS: *dnsTO, TCP: *tcpTO, TLS: *tlsTO}
 
+	st := status.New(*dataDir, "heartbeat", *vantage, "")
+	st.Start()
+	defer st.Stop("exit")
+
+	// A round the chain side refuses writes nothing to reachability.jsonl:
+	// there is no validator to attribute a row to. The status file is where
+	// the failure goes, dated, so the gap in the file has an explanation.
 	round := func() {
 		chainID, tip, err := chain.Status(ctx)
 		if err != nil {
 			log.Printf("status: %v", err)
+			st.Error(fmt.Sprintf("status: %v", err))
 			return
 		}
 		provs, err := chain.BondedFibreProviders(ctx)
 		if err != nil {
 			log.Printf("providers: %v (x/valaddr not available before v10?)", err)
+			st.Error(fmt.Sprintf("providers: %v", err))
 			return
 		}
 		members, err := chain.ValidatorSet(ctx, tip)
 		if err != nil {
 			log.Printf("validator set h=%d: %v", tip, err)
+			st.Error(fmt.Sprintf("validator set: %v", err))
 			return
 		}
 		keyByHex := map[string]ed25519.PublicKey{}
@@ -149,6 +160,10 @@ func main() {
 		wg.Wait()
 
 		log.Printf("round done: h=%d registered=%d probed=%d reachable=%d", tip, len(provs), n, ok)
+		st.OK()
+		st.Progress(tip)
+		st.Set("registered", len(provs))
+		st.Set("reachable", ok)
 	}
 
 	round()
@@ -161,6 +176,7 @@ func main() {
 		select {
 		case <-ctx.Done():
 			log.Printf("stopped (signal)")
+			st.Stop("signal")
 			return
 		case <-tick.C:
 			round()

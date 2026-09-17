@@ -201,3 +201,70 @@ func TestOpenReadOnly(t *testing.T) {
 		t.Fatal("write through a read-only handle succeeded")
 	}
 }
+
+// registry.jsonl replay: the events one store produced rebuild the same
+// endpoint history in an empty store, and replaying them again changes
+// nothing.
+func TestEndpointEventsReplay(t *testing.T) {
+	a := open(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	var log []store.EndpointEvent
+	step := func(snap []scan.FibreProvider, h int64, at time.Time) {
+		evs, err := a.ObserveEndpointEvents(ctx, snap, h, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		log = append(log, evs...)
+	}
+	step([]scan.FibreProvider{{ConsAddressBech32: "celestiavalcons1aaa", Host: "1.2.3.4:7980"}, {ConsAddressBech32: "celestiavalcons1bbb", Host: "5.6.7.8:7980"}}, 100, t0)
+	step([]scan.FibreProvider{{ConsAddressBech32: "celestiavalcons1bbb", Host: "9.9.9.9:7980"}}, 120, t0.Add(2*time.Minute))
+	if len(log) != 5 {
+		t.Fatalf("want 5 events (2 opens, 2 closes, 1 open), got %d: %+v", len(log), log)
+	}
+
+	b := open(t)
+	changed := 0
+	for _, e := range log {
+		ok, err := b.ReplayEndpointEvent(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			changed++
+		}
+	}
+	if changed != 5 {
+		t.Fatalf("replay changed %d rows, want 5", changed)
+	}
+	for _, e := range log {
+		if ok, err := b.ReplayEndpointEvent(e); err != nil || ok {
+			t.Fatalf("second replay must be a no-op: ok=%v err=%v", ok, err)
+		}
+	}
+	rowsOf := func(s *store.Store) string {
+		rows, err := s.DB().Query(`SELECT validator_cons_address, host, first_seen_at, first_seen_height, COALESCE(closed_at,''), COALESCE(closed_height,0)
+			FROM endpoints ORDER BY validator_cons_address, first_seen_at`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		out := ""
+		for rows.Next() {
+			var addr, host, first, closed string
+			var fh, ch int64
+			if err := rows.Scan(&addr, &host, &first, &fh, &closed, &ch); err != nil {
+				t.Fatal(err)
+			}
+			out += addr + "|" + host + "|" + first + "|" + closed + "\n"
+		}
+		return out
+	}
+	if rowsOf(a) != rowsOf(b) {
+		t.Fatalf("replayed history differs:\n%s\n--\n%s", rowsOf(a), rowsOf(b))
+	}
+	cur, err := b.CurrentEndpoints(ctx)
+	if err != nil || len(cur) != 1 || cur[0].Host != "9.9.9.9:7980" {
+		t.Fatalf("current after replay: %+v %v", cur, err)
+	}
+}

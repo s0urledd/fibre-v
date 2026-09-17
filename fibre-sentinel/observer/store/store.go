@@ -303,10 +303,17 @@ func OpenReadOnly(path string) (*Store, error) {
 	// highest: a database with a gap is missing that migration's columns, and
 	// MAX alone would wave it through.
 	var highest, distinct int
-	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0), COUNT(DISTINCT version) FROM schema_migrations WHERE version <= ?`,
-		SchemaVersion).Scan(&highest, &distinct); err != nil {
+	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0), COUNT(DISTINCT version) FROM schema_migrations`).
+		Scan(&highest, &distinct); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("read schema version: %w (is this an observer database?)", err)
+	}
+	if highest > SchemaVersion {
+		// A newer collector has added columns this binary does not know. The
+		// queries here might still run, and the first one that does not would
+		// fail at request time on a public site; refuse now instead.
+		db.Close()
+		return nil, fmt.Errorf("database schema version %d is newer than this binary's %d: upgrade this binary", highest, SchemaVersion)
 	}
 	if highest != SchemaVersion || distinct != SchemaVersion {
 		db.Close()
@@ -688,9 +695,43 @@ func probeAttested(m probe.Measurement) any {
 // treating a closure as the operator withdrawing its endpoint would be
 // reading an event that cannot happen.
 func (s *Store) ObserveEndpoints(ctx context.Context, providers []scan.FibreProvider, height int64, now time.Time) (opened, closed int, err error) {
+	evs, err := s.ObserveEndpointEvents(ctx, providers, height, now)
+	for _, e := range evs {
+		if e.Kind == EndpointOpened {
+			opened++
+		} else {
+			closed++
+		}
+	}
+	return opened, closed, err
+}
+
+// Endpoint event kinds, as written to registry.jsonl.
+const (
+	EndpointOpened = "endpoint_opened"
+	EndpointClosed = "endpoint_closed"
+)
+
+// EndpointEvent is one change to the Fibre endpoint registry as this
+// observer saw it: a (validator, host) pair appearing in or leaving
+// AllBondedFibreProviders. The collector appends these to registry.jsonl so
+// the endpoint history, which has no other source than the live polls,
+// survives a rebuild of the database from the JSONL files.
+type EndpointEvent struct {
+	Kind        string    `json:"kind"`
+	ConsAddress string    `json:"validator_cons_address"`
+	Host        string    `json:"host"`
+	Height      int64     `json:"height"`
+	At          time.Time `json:"at"`
+	Reason      string    `json:"reason,omitempty"`
+}
+
+// ObserveEndpointEvents is ObserveEndpoints returning what changed.
+func (s *Store) ObserveEndpointEvents(ctx context.Context, providers []scan.FibreProvider, height int64, now time.Time) ([]EndpointEvent, error) {
+	var events []EndpointEvent
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	defer tx.Rollback()
 
@@ -698,14 +739,14 @@ func (s *Store) ObserveEndpoints(ctx context.Context, providers []scan.FibreProv
 	open := map[key]int64{}
 	rows, err := tx.Query(`SELECT id, validator_cons_address, host FROM endpoints WHERE closed_at IS NULL`)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	for rows.Next() {
 		var id int64
 		var k key
 		if err := rows.Scan(&id, &k.addr, &k.host); err != nil {
 			rows.Close()
-			return 0, 0, err
+			return nil, err
 		}
 		open[k] = id
 	}
@@ -717,15 +758,15 @@ func (s *Store) ObserveEndpoints(ctx context.Context, providers []scan.FibreProv
 		seen[k] = true
 		if id, ok := open[k]; ok {
 			if _, err := tx.Exec(`UPDATE endpoints SET last_seen_at = ?, last_seen_height = ? WHERE id = ?`, ts(now), height, id); err != nil {
-				return 0, 0, err
+				return nil, err
 			}
 			continue
 		}
 		if _, err := tx.Exec(`INSERT INTO endpoints (validator_cons_address, host, first_seen_at, first_seen_height, last_seen_at, last_seen_height)
 			VALUES (?, ?, ?, ?, ?, ?)`, k.addr, k.host, ts(now), height, ts(now), height); err != nil {
-			return 0, 0, err
+			return nil, err
 		}
-		opened++
+		events = append(events, EndpointEvent{Kind: EndpointOpened, ConsAddress: k.addr, Host: k.host, Height: height, At: now.UTC()})
 	}
 	for k, id := range open {
 		if seen[k] {
@@ -733,11 +774,47 @@ func (s *Store) ObserveEndpoints(ctx context.Context, providers []scan.FibreProv
 		}
 		if _, err := tx.Exec(`UPDATE endpoints SET closed_at = ?, closed_height = ?, closed_reason = ? WHERE id = ?`,
 			ts(now), height, "left_bonded_provider_list", id); err != nil {
-			return 0, 0, err
+			return nil, err
 		}
-		closed++
+		events = append(events, EndpointEvent{Kind: EndpointClosed, ConsAddress: k.addr, Host: k.host, Height: height, At: now.UTC(), Reason: "left_bonded_provider_list"})
 	}
-	return opened, closed, tx.Commit()
+	return events, tx.Commit()
+}
+
+// ReplayEndpointEvent applies one registry.jsonl record. It is idempotent:
+// an open already present (by the same first_seen time, or by a later live
+// poll) and a close already applied are no-ops, so the file can be tailed
+// from zero as often as needed. Returns whether a row changed.
+func (s *Store) ReplayEndpointEvent(e EndpointEvent) (bool, error) {
+	switch e.Kind {
+	case EndpointOpened:
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM endpoints WHERE validator_cons_address = ? AND host = ?
+			AND (first_seen_at = ? OR closed_at IS NULL)`, e.ConsAddress, e.Host, ts(e.At)).Scan(&n); err != nil {
+			return false, err
+		}
+		if n > 0 {
+			return false, nil
+		}
+		_, err := s.db.Exec(`INSERT INTO endpoints (validator_cons_address, host, first_seen_at, first_seen_height, last_seen_at, last_seen_height)
+			VALUES (?, ?, ?, ?, ?, ?)`, e.ConsAddress, e.Host, ts(e.At), e.Height, ts(e.At), e.Height)
+		return err == nil, err
+	case EndpointClosed:
+		reason := e.Reason
+		if reason == "" {
+			reason = "left_bonded_provider_list"
+		}
+		res, err := s.db.Exec(`UPDATE endpoints SET closed_at = ?, closed_height = ?, closed_reason = ?
+			WHERE validator_cons_address = ? AND host = ? AND closed_at IS NULL AND first_seen_at <= ?`,
+			ts(e.At), e.Height, reason, e.ConsAddress, e.Host, ts(e.At))
+		if err != nil {
+			return false, err
+		}
+		n, _ := res.RowsAffected()
+		return n > 0, nil
+	default:
+		return false, fmt.Errorf("unknown endpoint event kind %q", e.Kind)
+	}
 }
 
 // UpsertValidatorIdentities stores what the staking module says about each

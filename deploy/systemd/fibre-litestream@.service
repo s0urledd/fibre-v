@@ -1,13 +1,13 @@
 [Unit]
-Description=Fibre observer: continuous SQLite replication (litestream)
-After=network-online.target fibre-collector.service
+Description=Fibre observer (%i): continuous SQLite replication (litestream)
+After=network-online.target fibre-collector@%i.service
 Wants=network-online.target
 
 [Service]
 User=fibre-observer
 # LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY live here, mode 0600
-EnvironmentFile=/etc/fibre-observer/litestream.env
-ExecStart=/usr/local/bin/litestream replicate -config /etc/fibre-observer/litestream.yml
+EnvironmentFile=/etc/fibre-observer/litestream-%i.env
+ExecStart=/usr/local/bin/litestream replicate -config /etc/fibre-observer/litestream-%i.yml
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -20,7 +20,8 @@ RestrictNamespaces=true
 RestrictSUIDSGID=true
 LockPersonality=true
 CapabilityBoundingSet=
-ReadWritePaths=/var/lib/fibre-observer/data
+ReadWritePaths=/var/lib/fibre-observer/%i
 
 [Install]
 WantedBy=multi-user.target
+# one instance per network: systemctl enable --now fibre-litestream@mocha

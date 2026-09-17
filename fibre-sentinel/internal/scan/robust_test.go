@@ -89,14 +89,32 @@ func TestRetryRPC(t *testing.T) {
 	if err != nil || calls != 2 {
 		t.Fatalf("err=%v calls=%d", err, calls)
 	}
-	// a not-persisted answer is not retried
+	// a height the node does not have is retried for the grace period and
+	// then reported as unavailable, typed, so the scanner can record a gap
+	// and move on instead of exiting.
+	prev := unavailableGrace
+	unavailableGrace = 0
+	defer func() { unavailableGrace = prev }()
 	calls = 0
-	err = s.retryRPC(context.Background(), "test", func() error {
+	err = s.retryRPCAt(context.Background(), "test", 9, func() error {
 		calls++
 		return errors.New("finalize block responses not persisted")
 	})
-	if err == nil || calls != 1 {
+	var ue *ErrHeightUnavailable
+	if !errors.As(err, &ue) || ue.Height != 9 || calls != 1 {
 		t.Fatalf("not persisted: err=%v calls=%d", err, calls)
+	}
+	if !s.recordGap(9, err) || !s.recordGap(10, err) || len(s.gaps) != 1 || s.gaps[0].From != 9 || s.gaps[0].To != 10 {
+		t.Fatalf("gaps not merged: %+v", s.gaps)
+	}
+	if s.recordGap(11, errors.New("boom")) {
+		t.Fatal("a transient error must never become a gap")
+	}
+	err = s.retryRPCAt(context.Background(), "test", 12, func() error {
+		return errors.New("height 12 is not available, lowest height is 500")
+	})
+	if !errors.As(err, &ue) {
+		t.Fatalf("pruned: %v", err)
 	}
 	// a cancelled context stops at once
 	ctx, cancel := context.WithCancel(context.Background())

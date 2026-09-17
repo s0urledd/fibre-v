@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -82,13 +85,78 @@ type snap[T any] struct {
 }
 
 // snapshotCache holds one computed value per window, refreshed on read.
+//
+// With dir set, every snapshot is also written to <dir>/<label>-<window>.json
+// and read back at construction, so a restarted API serves the last figures
+// at once, with their real age, instead of making the first visitors wait
+// minutes for the cold aggregates while the warm-up runs behind them.
 type snapshotCache[T any] struct {
 	label      string
 	compute    func(context.Context, Window) (T, error)
 	born       time.Time
+	dir        string
 	mu         sync.Mutex
 	entries    map[string]*snap[T]
 	refreshing map[string]bool
+}
+
+// persisted is the on-disk form of one snapshot.
+type persisted[T any] struct {
+	Label  string    `json:"label"`
+	Window string    `json:"window"`
+	At     time.Time `json:"at"`
+	Ms     int64     `json:"ms"`
+	Value  T         `json:"value"`
+}
+
+// persistTo enables the on-disk copy and loads whatever a previous process
+// left there. A file that does not parse (an older build's shape) is skipped;
+// the warm-up replaces it.
+func (c *snapshotCache[T]) persistTo(dir string, log logf) {
+	if dir == "" {
+		return
+	}
+	c.dir = dir
+	_ = os.MkdirAll(dir, 0o755)
+	loaded := 0
+	for _, name := range warmWindows {
+		b, err := os.ReadFile(c.file(name))
+		if err != nil {
+			continue
+		}
+		var p persisted[T]
+		if err := json.Unmarshal(b, &p); err != nil || p.Label != c.label || p.Window != name {
+			continue
+		}
+		c.mu.Lock()
+		c.entries[name] = &snap[T]{v: p.Value, at: p.At, ms: p.Ms}
+		c.mu.Unlock()
+		loaded++
+	}
+	if loaded > 0 && log != nil {
+		log("%s: %d snapshot(s) loaded from disk; serving them while the warm-up runs", c.label, loaded)
+	}
+}
+
+func (c *snapshotCache[T]) file(window string) string {
+	return filepath.Join(c.dir, c.label+"-"+window+".json")
+}
+
+// persist writes one snapshot, atomically. A failure is logged by the
+// caller's next refresh at worst; the in-memory copy is what is served.
+func (c *snapshotCache[T]) persist(window string, s *snap[T]) {
+	if c.dir == "" {
+		return
+	}
+	b, err := json.Marshal(persisted[T]{Label: c.label, Window: window, At: s.at, Ms: s.ms, Value: s.v})
+	if err != nil {
+		return
+	}
+	tmp := c.file(window) + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, c.file(window))
 }
 
 func newSnapshotCache[T any](label string, compute func(context.Context, Window) (T, error)) *snapshotCache[T] {
@@ -193,6 +261,7 @@ func (c *snapshotCache[T]) fill(ctx context.Context, win Window) (*snap[T], erro
 	}
 	s := &snap[T]{v: v, at: start, ms: time.Since(start).Milliseconds()}
 	c.entries[win.Name] = s
+	c.persist(win.Name, s)
 	return s, nil
 }
 

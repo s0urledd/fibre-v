@@ -84,10 +84,19 @@ def expand(word: str, env: dict[str, str]) -> list[str]:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("usage: run-unit.py <unit file> [extra args...]", file=sys.stderr)
+        print("usage: run-unit.py <unit file> [instance] [extra args...]", file=sys.stderr)
         return 2
     unit_path, extra = sys.argv[1], sys.argv[2:]
     text = open(unit_path, encoding="utf-8").read()
+    # A template unit (fibre-scan@.service) takes the network as its instance
+    # name; substitute the specifiers systemd would.
+    if os.path.basename(unit_path).endswith("@.service"):
+        if not extra:
+            print("template unit needs an instance name", file=sys.stderr)
+            return 2
+        instance, extra = extra[0], extra[1:]
+        prefix = os.path.basename(unit_path).split("@")[0]
+        text = text.replace("%i", instance).replace("%I", instance).replace("%p", prefix)
 
     env = dict(os.environ)
     env_path = directive(text, "EnvironmentFile")

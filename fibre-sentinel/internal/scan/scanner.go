@@ -12,6 +12,7 @@ import (
 	fibretypes "github.com/celestiaorg/celestia-app/v10/x/fibre/types"
 	cmttypes "github.com/cometbft/cometbft/types"
 	assign "github.com/plsgiveup/fibre/fibre-assign"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 )
 
 // Config controls a scan run. Zero values fall back to the defaults in Run.
@@ -41,10 +42,12 @@ type Config struct {
 
 // Scanner is the chain scanner: discovery + recording only, no probing.
 type Scanner struct {
-	cfg   Config
-	log   *Logger
-	chain *Chain
-	store *Store
+	cfg    Config
+	log    *Logger
+	chain  *Chain
+	store  *Store
+	status *status.Writer
+	gaps   []ScanGap
 
 	params      *ParamHistory
 	chainID     string
@@ -86,6 +89,7 @@ func New(cfg Config, log *Logger) (*Scanner, error) {
 		return nil, err
 	}
 	return &Scanner{
+		status:  status.New(cfg.DataDir, "scanner", "", ""),
 		cfg:     cfg,
 		log:     log,
 		chain:   ch,
@@ -105,6 +109,8 @@ func (s *Scanner) Run(parent context.Context) error {
 		defer cancel()
 	}
 	defer s.store.Close()
+	s.status.Start()
+	defer s.status.Stop("exit")
 
 	var chainID string
 	var tip int64
@@ -141,6 +147,7 @@ func (s *Scanner) Run(parent context.Context) error {
 			}
 			n := s.processBlock(ctx, h)
 			totalPubs += n
+			s.status.OK()
 			if !s.fibreInactive && h%paramReconcileEvery == 0 {
 				s.reconcileParams(ctx, h)
 			}
@@ -191,6 +198,7 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 		s.params = LoadParamHistory(st.ParamHistory)
 		s.fibreInactive = len(st.ParamHistory) == 0
 		s.startHeight = st.StartHeight
+		s.gaps = st.Gaps
 		resumeAt := st.LastScannedHeight + 1
 		s.log.Printf("resuming: last_scanned=%d, %d param-history entries%s", st.LastScannedHeight, len(st.ParamHistory),
 			map[bool]string{true: " (x/fibre not active yet)", false: ""}[s.fibreInactive])
@@ -240,6 +248,7 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 func (s *Scanner) stopClean(lastScanned int64, reason string, totalPubs int) error {
 	s.checkpoint(lastScanned)
 	s.log.Printf("stopped (%s): scanned through height %d, %d publications recorded this run", reason, lastScanned, totalPubs)
+	s.status.Stop(reason)
 	return nil
 }
 
@@ -253,9 +262,33 @@ func (s *Scanner) checkpoint(lastScanned int64) {
 		LastScannedHeight: lastScanned,
 		ParamFingerprint:  assign.ParamsV10BlobV0.Fingerprint(),
 		ParamHistory:      s.params.Entries(),
+		Gaps:              s.gaps,
 	}); err != nil {
 		s.log.Fatalf("save state: %v", err)
 	}
+	s.status.Progress(lastScanned)
+}
+
+// recordGap notes a height the node could not serve and lets the scan move
+// on. A MsgPayForFibre in that block is lost to this observer, and the gap is
+// published rather than hidden: state.json carries the ranges, the API and
+// the dashboard show them. Consecutive heights merge into one range. Returns
+// false when err is not that kind of failure.
+func (s *Scanner) recordGap(h int64, err error) bool {
+	var ue *ErrHeightUnavailable
+	if !errors.As(err, &ue) {
+		return false
+	}
+	reason := "height unavailable from the RPC node (pruned, or storage.discard_abci_responses = true)"
+	if n := len(s.gaps); n > 0 && s.gaps[n-1].To == h-1 {
+		s.gaps[n-1].To = h
+		s.gaps[n-1].LastError = ue.Err.Error()
+	} else {
+		s.gaps = append(s.gaps, ScanGap{From: h, To: h, Reason: reason, LastError: ue.Err.Error(), At: time.Now().UTC()})
+	}
+	s.log.Printf("WARNING: GAP h=%d not scanned: %v; recorded and moving on (%d gap ranges so far)", h, ue.Err, len(s.gaps))
+	s.status.Error(fmt.Sprintf("gap at h=%d: %v", h, ue.Err))
+	return true
 }
 
 // waitForHeight polls Status until the tip reaches want, or FollowTimeout
@@ -283,6 +316,7 @@ func (s *Scanner) waitForHeight(ctx context.Context, want int64) (int64, error) 
 		if tip >= want {
 			return tip, nil
 		}
+		s.status.Set("chain_tip", tip)
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return 0, fmt.Errorf("no new block: tip stuck at %d, waited %s for height %d", tip, s.cfg.FollowTimeout, want)
 		}
@@ -298,44 +332,94 @@ func (s *Scanner) waitForHeight(ctx context.Context, want int64) (int64, error) 
 	}
 }
 
-// rpcAttempts and rpcBackoff bound the retry of a transient RPC failure
-// (public endpoints hiccup, the block/block_results race at the tip: CometBFT
-// stores the block before the FinalizeBlock response, so block_results for a
-// height /status just reported can be "not found" for a moment).
-const rpcAttempts = 20
-
+// rpcBackoff is the wait before the next attempt at a transient RPC failure:
+// 1, 2, 4, 8, 16, 30, 30, ... seconds. Public endpoints hiccup, and at the
+// tip CometBFT stores the block before the FinalizeBlock response, so
+// block_results for a height /status just reported can be "not found" for a
+// moment.
 func rpcBackoff(attempt int) time.Duration {
-	d := time.Duration(1<<uint(min(attempt, 4))) * time.Second // 1,2,4,8,16,16,...
-	return d
+	if attempt >= 5 {
+		return 30 * time.Second
+	}
+	return time.Duration(1<<uint(attempt)) * time.Second
 }
 
-// retryRPC runs fn up to rpcAttempts times with backoff. It gives up at once
-// on a context cancellation or on a failure retrying cannot fix.
+// unavailableGrace is how long a height that the node says it does not have
+// is retried before the scanner records a gap and moves on. A node that is
+// still catching up, or restarting, answers "not available" for a while and
+// then has the height; a node that pruned it, or runs with
+// storage.discard_abci_responses = true, never will.
+var unavailableGrace = 10 * time.Minute
+
+// rpcWarnEvery is how often a still-failing retry is logged as a WARNING,
+// so a long outage leaves a trail without a line every few seconds.
+const rpcWarnEvery = 5 * time.Minute
+
+// ErrHeightUnavailable wraps an RPC error that means the node cannot serve
+// this height at all: pruned, or ABCI responses discarded. It is returned
+// only after unavailableGrace of retries.
+type ErrHeightUnavailable struct {
+	Height int64
+	Err    error
+}
+
+func (e *ErrHeightUnavailable) Error() string {
+	return fmt.Sprintf("height %d unavailable from this node after %s: %v", e.Height, unavailableGrace, e.Err)
+}
+
+func (e *ErrHeightUnavailable) Unwrap() error { return e.Err }
+
+// retryRPC runs fn until it succeeds. A transient failure (the node is down,
+// a timeout, a tip race) is retried for as long as it takes, with capped
+// backoff and a WARNING every few minutes: an RPC outage is the node's
+// problem, and the scanner should be there when it comes back rather than
+// exit and be restarted in a loop by the supervisor. It gives up at once on
+// a context cancellation or on x/fibre being inactive, and after
+// unavailableGrace on a height the node says it does not have.
 func (s *Scanner) retryRPC(ctx context.Context, what string, fn func() error) error {
-	var last error
-	for attempt := 0; attempt < rpcAttempts; attempt++ {
+	return s.retryRPCAt(ctx, what, 0, fn)
+}
+
+func (s *Scanner) retryRPCAt(ctx context.Context, what string, height int64, fn func() error) error {
+	start := time.Now()
+	nextWarn := start.Add(rpcWarnEvery)
+	for attempt := 0; ; attempt++ {
 		err := fn()
 		if err == nil {
+			if attempt > 0 {
+				s.log.Printf("%s: recovered after %d attempts, %s", what, attempt+1, time.Since(start).Round(time.Second))
+			}
 			return nil
 		}
-		last = err
 		if ctx.Err() != nil {
 			return err
-		}
-		if IsResultsNotPersisted(err) {
-			return fmt.Errorf("%w (the RPC node runs with storage.discard_abci_responses = true or has pruned this height; the scanner needs a node that keeps ABCI responses)", err)
 		}
 		if IsModuleInactive(err) {
 			return err
 		}
-		s.log.Printf("%s: %v (attempt %d/%d, retry in %s)", what, err, attempt+1, rpcAttempts, rpcBackoff(attempt))
+		unavailable := IsHeightUnavailable(err)
+		if unavailable && time.Since(start) >= unavailableGrace {
+			return &ErrHeightUnavailable{Height: height, Err: err}
+		}
+		wait := rpcBackoff(attempt)
+		if unavailable {
+			wait = 30 * time.Second
+		}
+		if attempt < 3 || time.Now().After(nextWarn) {
+			level := ""
+			if attempt >= 3 {
+				level = "WARNING: "
+				nextWarn = time.Now().Add(rpcWarnEvery)
+			}
+			s.log.Printf("%s%s: %v (attempt %d, failing for %s, retry in %s)", level, what, err, attempt+1, time.Since(start).Round(time.Second), wait)
+			s.status.Error(fmt.Sprintf("%s: %v", what, err))
+		}
 		select {
 		case <-ctx.Done():
 			return err
-		case <-time.After(rpcBackoff(attempt)):
+		case <-time.After(wait):
 		}
 	}
-	return last
 }
 
 // processBlock scans one height: first apply any fibre-param updates, then
@@ -440,18 +524,24 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 	}
 	var blk *Block
 	var res *BlockResults
-	if err := s.retryRPC(ctx, fmt.Sprintf("fetch block %d", h), func() error {
+	if err := s.retryRPCAt(ctx, fmt.Sprintf("fetch block %d", h), h, func() error {
 		var err error
 		blk, err = s.chain.Block(ctx, h)
 		return err
 	}); err != nil {
+		if s.recordGap(h, err) {
+			return 0
+		}
 		s.log.Fatalf("fetch block %d: %v", h, err)
 	}
-	if err := s.retryRPC(ctx, fmt.Sprintf("fetch block_results %d", h), func() error {
+	if err := s.retryRPCAt(ctx, fmt.Sprintf("fetch block_results %d", h), h, func() error {
 		var err error
 		res, err = s.chain.BlockResults(ctx, h)
 		return err
 	}); err != nil {
+		if s.recordGap(h, err) {
+			return 0
+		}
 		s.log.Fatalf("fetch block_results %d: %v", h, err)
 	}
 	if len(res.TxCodes) != len(blk.Txs) {

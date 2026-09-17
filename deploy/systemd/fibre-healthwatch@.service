@@ -1,0 +1,16 @@
+[Unit]
+Description=Fibre observer (%i): health check with webhook alert
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=fibre-observer
+EnvironmentFile=/etc/fibre-observer/%i.env
+ExecStart=/usr/local/bin/fibre-healthwatch %i
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/fibre-observer/%i
