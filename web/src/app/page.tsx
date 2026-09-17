@@ -35,10 +35,11 @@ export default function Overview() {
     <>
       <div className="section-head">
         <h1>Network</h1>
-        <span className="sample">
-          {net && (net.window.start && !net.window.start.startsWith("0001-") ? `${utc(net.window.start)} → now` : "since the first record")}
-          {net?.computed_at && <span title={`Snapshot taken ${utc(net.computed_at)}, computed in ${net.compute_ms} ms.`}> · taken {ago(net.computed_at)}</span>}
-        </span>
+        {net?.computed_at && (
+          <span className="sample" title={`${net.window.start && !net.window.start.startsWith("0001-") ? `${utc(net.window.start)} → now` : "since the first record"}. Snapshot taken ${utc(net.computed_at)}, computed in ${net.compute_ms} ms.`}>
+            updated {ago(net.computed_at)}
+          </span>
+        )}
         <span className="spacer" />
         <div className="pills" role="group" aria-label="window">
           {WINDOWS.map((w) => <button key={w} aria-pressed={win === w} onClick={() => setWin(w)}>{w}</button>)}
