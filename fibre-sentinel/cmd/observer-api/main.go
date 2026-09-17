@@ -43,9 +43,23 @@ func main() {
 		*dbPath = filepath.Join(*dataDir, "observer.db")
 	}
 	log := scan.NewLogger(200)
-	st, err := store.OpenReadOnly(*dbPath)
-	if err != nil {
-		log.Fatalf("open store: %v", err)
+	// The collector creates the database and its schema; started in the same
+	// breath, this process used to lose the race by a few milliseconds and
+	// exit. Wait for it instead of insisting on an order between services.
+	var st *store.Store
+	for attempt := 0; ; attempt++ {
+		var err error
+		st, err = store.OpenReadOnly(*dbPath)
+		if err == nil {
+			break
+		}
+		if attempt >= 60 {
+			log.Fatalf("open store: %v", err)
+		}
+		if attempt == 0 {
+			log.Printf("open store: %v; waiting for the collector", err)
+		}
+		time.Sleep(5 * time.Second)
 	}
 	defer st.Close()
 
