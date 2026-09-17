@@ -34,7 +34,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -159,6 +159,61 @@ var migrations = []migration{
 			`CREATE INDEX IF NOT EXISTS probes_validator_window ON probes
 				(validator_address, assigned, phase, started_at, classification,
 				 schedule_label, attested, promise_hash, scheduled_at)`,
+		},
+	},
+	{
+		version: 7,
+		note:    "the escrow side of x/fibre: who paid what, and which promises were abandoned",
+		stmts: []string{
+			// One row per escrow movement the chain recorded: a settlement
+			// (MsgPayForFibre), a timeout (MsgPaymentPromiseTimeout, the
+			// same charge, submitted by whoever held the abandoned promise),
+			// a deposit, a withdrawal request and a withdrawal payout. The
+			// amount of a settlement or timeout is not in any chain event; it
+			// is recomputed from the promise's blob_size with the module's
+			// own gas formula, which is exactly what the module charges.
+			//
+			// publisher is the account the module charged (derived from the
+			// promise's signer key), whoever broadcast the transaction.
+			// processor is that broadcaster: the publisher for a settlement,
+			// anyone for a timeout.
+			`CREATE TABLE IF NOT EXISTS payments (
+				dedupe_key    TEXT PRIMARY KEY,
+				kind          TEXT NOT NULL,
+				height        INTEGER NOT NULL,
+				time          TEXT NOT NULL,
+				tx_hash       TEXT NOT NULL DEFAULT '',
+				tx_index      INTEGER NOT NULL DEFAULT -1,
+				msg_index     INTEGER NOT NULL DEFAULT 0,
+				publisher     TEXT NOT NULL,
+				processor     TEXT NOT NULL DEFAULT '',
+				promise_hash  TEXT NOT NULL DEFAULT '',
+				namespace     TEXT NOT NULL DEFAULT '',
+				blob_size     INTEGER NOT NULL DEFAULT 0,
+				gas_units     INTEGER NOT NULL DEFAULT 0,
+				denom         TEXT NOT NULL DEFAULT '',
+				amount_utia   INTEGER NOT NULL DEFAULT 0,
+				available_at  TEXT,
+				raw_json      TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS payments_time ON payments (time)`,
+			`CREATE INDEX IF NOT EXISTS payments_publisher_time ON payments (publisher, time)`,
+			`CREATE INDEX IF NOT EXISTS payments_kind_time ON payments (kind, time)`,
+			`CREATE INDEX IF NOT EXISTS payments_promise ON payments (promise_hash)`,
+			`CREATE INDEX IF NOT EXISTS payments_processor ON payments (processor, kind)`,
+			// A publisher's escrow balance as the chain holds it, read by
+			// state query (there is no list-all query, so only publishers
+			// the payments table already knows are polled). available is
+			// balance minus a pending withdrawal.
+			`CREATE TABLE IF NOT EXISTS escrow_accounts (
+				publisher      TEXT PRIMARY KEY,
+				found          INTEGER NOT NULL DEFAULT 0,
+				denom          TEXT NOT NULL DEFAULT '',
+				balance_utia   INTEGER NOT NULL DEFAULT 0,
+				available_utia INTEGER NOT NULL DEFAULT 0,
+				height         INTEGER NOT NULL DEFAULT 0,
+				updated_at     TEXT NOT NULL
+			)`,
 		},
 	},
 }
@@ -689,6 +744,73 @@ func (s *Store) ObserveEndpoints(ctx context.Context, providers []scan.FibreProv
 // validator. It is upsert-only: a validator that stops appearing keeps its
 // last known name, because a row in the probe tables with no name is worse
 // than a row with a stale one, and the chain does not forget validators.
+// UpsertPayment inserts one escrow movement; a key already present is left
+// alone (the scanner's dedupe key is stable across re-scans).
+func (s *Store) UpsertPayment(p scan.Payment, raw []byte) (inserted bool, err error) {
+	if p.DedupeKey == "" || p.Publisher == "" || p.Kind == "" {
+		return false, fmt.Errorf("payment without dedupe_key, publisher or kind")
+	}
+	var avail any
+	if p.AvailableAt != nil {
+		avail = ts(*p.AvailableAt)
+	}
+	res, err := s.db.Exec(`INSERT INTO payments
+		(dedupe_key, kind, height, time, tx_hash, tx_index, msg_index, publisher, processor,
+		 promise_hash, namespace, blob_size, gas_units, denom, amount_utia, available_at, raw_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(dedupe_key) DO NOTHING`,
+		p.DedupeKey, p.Kind, p.Height, ts(p.Time), p.TxHash, p.TxIndex, p.MsgIndex, p.Publisher, p.Processor,
+		p.PromiseHash, p.Namespace, int64(p.BlobSize), int64(p.GasUnits), p.Denom, int64(p.AmountUtia), avail, string(raw))
+	if err != nil {
+		return false, fmt.Errorf("payment %s: %w", p.DedupeKey, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// UpsertEscrowAccount records what the chain currently holds for one
+// publisher. A publisher not found on chain is stored with found=0 and zero
+// balances, so the page can say "no escrow" rather than nothing.
+func (s *Store) UpsertEscrowAccount(e scan.Escrow, now time.Time) error {
+	if e.Signer == "" {
+		return fmt.Errorf("escrow account without a signer")
+	}
+	_, err := s.db.Exec(`INSERT INTO escrow_accounts
+		(publisher, found, denom, balance_utia, available_utia, height, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(publisher) DO UPDATE SET
+			found          = excluded.found,
+			denom          = excluded.denom,
+			balance_utia   = excluded.balance_utia,
+			available_utia = excluded.available_utia,
+			height         = excluded.height,
+			updated_at     = excluded.updated_at`,
+		e.Signer, b2i(e.Found), e.Denom, int64(e.BalanceUtia), int64(e.AvailableUtia), e.Height, ts(now))
+	if err != nil {
+		return fmt.Errorf("escrow account %s: %w", e.Signer, err)
+	}
+	return nil
+}
+
+// Publishers lists every account the payments table has seen as an escrow
+// owner, for the collector's escrow poll.
+func (s *Store) Publishers() ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT publisher FROM payments ORDER BY publisher`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpsertValidatorIdentities(ids []scan.ValidatorIdentity, now time.Time) (int, error) {
 	tx, err := s.db.Begin()
 	if err != nil {

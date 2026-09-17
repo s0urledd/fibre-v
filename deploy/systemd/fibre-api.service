@@ -8,7 +8,8 @@ User=fibre-observer
 EnvironmentFile=/etc/fibre-observer/observer.env
 ExecStart=/usr/local/bin/observer-api -data-dir ${DATA_DIR} -listen ${API_LISTEN} -vantage ${VANTAGE} \
   -vantage-location ${VANTAGE_LOCATION} -vantage-provider ${VANTAGE_PROVIDER} \
-  -vantage-asn ${VANTAGE_ASN} -vantage-egress ${VANTAGE_EGRESS}
+  -vantage-asn ${VANTAGE_ASN} -vantage-egress ${VANTAGE_EGRESS} \
+  -publishers /etc/fibre-observer/publishers.yaml
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

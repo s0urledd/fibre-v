@@ -14,6 +14,7 @@ import (
 //
 //	<dir>/state.json          scan cursor + param history + protocol-params pin
 //	<dir>/publications.jsonl  one Publication per line, append-only
+//	<dir>/payments.jsonl      one Payment (escrow movement) per line, append-only
 //
 // Restart safety: publications for a block are appended and fsynced BEFORE the
 // cursor in state.json advances past that block (atomic temp+rename). A crash in
@@ -22,10 +23,13 @@ import (
 type Store struct {
 	dir      string
 	pubPath  string
+	payPath  string
 	statePth string
 
 	pubFile *os.File
+	payFile *os.File
 	seen    map[string]bool
+	paySeen map[string]bool
 }
 
 // PersistState is state.json.
@@ -46,10 +50,15 @@ func OpenStore(dir string) (*Store, error) {
 	s := &Store{
 		dir:      dir,
 		pubPath:  filepath.Join(dir, "publications.jsonl"),
+		payPath:  filepath.Join(dir, "payments.jsonl"),
 		statePth: filepath.Join(dir, "state.json"),
 		seen:     map[string]bool{},
+		paySeen:  map[string]bool{},
 	}
 	if err := s.loadSeen(); err != nil {
+		return nil, err
+	}
+	if err := s.loadPaySeen(); err != nil {
 		return nil, err
 	}
 	f, err := os.OpenFile(s.pubPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -57,6 +66,12 @@ func OpenStore(dir string) (*Store, error) {
 		return nil, fmt.Errorf("open %s: %w", s.pubPath, err)
 	}
 	s.pubFile = f
+	pf, err := os.OpenFile(s.payPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("open %s: %w", s.payPath, err)
+	}
+	s.payFile = pf
 	return s, nil
 }
 
@@ -144,6 +159,41 @@ func (s *Store) loadSeen() error {
 	return nil
 }
 
+func (s *Store) loadPaySeen() error {
+	if cut, err := TruncateTornTail(s.payPath); err != nil {
+		return fmt.Errorf("repair %s: %w", s.payPath, err)
+	} else if cut > 0 {
+		fmt.Fprintf(os.Stderr, "payments: truncated %d bytes of a torn final line in %s\n", cut, s.payPath)
+	}
+	f, err := os.Open(s.payPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open %s: %w", s.payPath, err)
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 1<<20), 1<<26)
+	n := 0
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var p Payment
+		if err := json.Unmarshal(line, &p); err != nil {
+			return fmt.Errorf("%s line %d: %w", s.payPath, n+1, err)
+		}
+		s.paySeen[p.DedupeKey] = true
+		n++
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("scan %s: %w", s.payPath, err)
+	}
+	return nil
+}
+
 // LoadState returns the persisted state, or (nil, nil) if there is none yet.
 func (s *Store) LoadState() (*PersistState, error) {
 	b, err := os.ReadFile(s.statePth)
@@ -183,10 +233,36 @@ func (s *Store) AppendPublication(p Publication) error {
 	return nil
 }
 
-// Sync fsyncs the publications file.
+// AppendPayment writes one escrow movement (skipping an already-seen one)
+// in a single write, under the same crash rules as AppendPublication.
+func (s *Store) AppendPayment(p Payment) error {
+	if p.DedupeKey == "" {
+		return fmt.Errorf("payment without a dedupe key (h=%d kind=%s)", p.Height, p.Kind)
+	}
+	if s.paySeen[p.DedupeKey] {
+		return nil
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		return fmt.Errorf("marshal payment %s: %w", p.DedupeKey, err)
+	}
+	if _, err := s.payFile.Write(append(b, '\n')); err != nil {
+		return fmt.Errorf("write payment: %w", err)
+	}
+	s.paySeen[p.DedupeKey] = true
+	return nil
+}
+
+// PaymentSeen reports whether a payment with this dedupe key is persisted.
+func (s *Store) PaymentSeen(key string) bool { return s.paySeen[key] }
+
+// Sync fsyncs the publications and payments files.
 func (s *Store) Sync() error {
 	if err := s.pubFile.Sync(); err != nil {
 		return fmt.Errorf("fsync publications: %w", err)
+	}
+	if err := s.payFile.Sync(); err != nil {
+		return fmt.Errorf("fsync payments: %w", err)
 	}
 	return nil
 }
@@ -231,13 +307,24 @@ func writeFileSync(path string, b []byte) error {
 	return f.Close()
 }
 
-// Close closes the publications file.
+// Close closes the publications and payments files.
 func (s *Store) Close() error {
+	var first error
 	if s.pubFile != nil {
-		return s.pubFile.Close()
+		if err := s.pubFile.Close(); err != nil {
+			first = err
+		}
 	}
-	return nil
+	if s.payFile != nil {
+		if err := s.payFile.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // PublicationsPath is the jsonl path (for tooling / tests).
 func (s *Store) PublicationsPath() string { return s.pubPath }
+
+// PaymentsPath is the payments jsonl path.
+func (s *Store) PaymentsPath() string { return s.payPath }

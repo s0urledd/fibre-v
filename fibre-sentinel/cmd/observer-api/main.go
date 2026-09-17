@@ -34,6 +34,10 @@ func main() {
 		vProvider = flag.String("vantage-provider", "", `hosting provider, e.g. "Hetzner"`)
 		vASN      = flag.String("vantage-asn", "", `autonomous system, e.g. "AS24940"`)
 		vEgress   = flag.String("vantage-egress", "", "comma-separated source addresses probes leave from")
+		// Names for publisher accounts, maintained by the operator. The
+		// chain has no name for an account, so every label is the operator's
+		// word and is published with its source.
+		labels = flag.String("publishers", "", "path to publishers.yaml, the publisher label registry (optional)")
 	)
 	flag.Parse()
 	if *check != "" {
@@ -77,9 +81,18 @@ func main() {
 			info.Location, info.Provider, info.ASN, len(info.EgressAddresses))
 	}
 
+	reg, err := api.LoadPublisherLabels(*labels)
+	if err != nil {
+		log.Fatalf("publisher labels: %v", err)
+	}
+	if len(reg) > 0 {
+		log.Printf("publisher labels: %d from %s", len(reg), *labels)
+	}
+	handler := api.NewWithVantage(st, info, log, api.WithPublisherLabels(reg))
+
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           api.NewWithVantage(st, info, log),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,

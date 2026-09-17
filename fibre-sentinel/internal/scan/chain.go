@@ -215,6 +215,51 @@ func (c *Chain) FibreParamsAt(parent context.Context, height int64) (fibretypes.
 	return resp.Params, nil
 }
 
+// Escrow is one publisher's x/fibre escrow account as the chain holds it.
+type Escrow struct {
+	Signer        string
+	Denom         string
+	BalanceUtia   uint64
+	AvailableUtia uint64
+	Height        int64 // the height the state was read at (0 = latest)
+	Found         bool
+}
+
+// EscrowAccount reads a publisher's escrow balance at height (<= 0 means
+// latest). A publisher that never deposited is returned with Found=false,
+// not as an error.
+func (c *Chain) EscrowAccount(parent context.Context, signer string, height int64) (Escrow, error) {
+	ctx, cancel := c.ctx(parent)
+	defer cancel()
+
+	const path = "/celestia.fibre.v1.Query/EscrowAccount"
+	req := fibretypes.QueryEscrowAccountRequest{Signer: signer}
+	data, err := req.Marshal()
+	if err != nil {
+		return Escrow{}, fmt.Errorf("marshal escrow request: %w", err)
+	}
+	opts := rpcclient.ABCIQueryOptions{Height: height, Prove: false}
+	res, err := c.rpc.ABCIQueryWithOptions(ctx, path, cmtbytes.HexBytes(data), opts)
+	if err != nil {
+		return Escrow{}, fmt.Errorf("abci query escrow %s h=%d: %w", signer, height, err)
+	}
+	if res.Response.Code != 0 {
+		return Escrow{}, &ABCIError{Path: path, Height: height,
+			Code: res.Response.Code, Codespace: res.Response.Codespace, Log: res.Response.Log}
+	}
+	var resp fibretypes.QueryEscrowAccountResponse
+	if err := resp.Unmarshal(res.Response.Value); err != nil {
+		return Escrow{}, fmt.Errorf("unmarshal escrow response: %w", err)
+	}
+	e := Escrow{Signer: signer, Height: res.Response.Height, Found: resp.Found}
+	if !resp.Found {
+		return e, nil
+	}
+	e.Denom, e.BalanceUtia = coinAmount(resp.EscrowAccount.Balance)
+	_, e.AvailableUtia = coinAmount(resp.EscrowAccount.AvailableBalance)
+	return e, nil
+}
+
 // FibreProvider is one bonded validator's registered fibre service host.
 type FibreProvider struct {
 	ConsAddressBech32 string // celestiavalcons1...

@@ -1,0 +1,663 @@
+package api
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/cosmos/cosmos-sdk/types/bech32"
+	"go.yaml.in/yaml/v3"
+
+	"github.com/celestiaorg/celestia-app/v10/pkg/appconsts"
+)
+
+// The publisher side of Fibre. Everything on these endpoints is a count of
+// something the chain recorded, in the payments table the scanner fills from
+// MsgPayForFibre, MsgPaymentPromiseTimeout, MsgDepositToEscrow,
+// MsgRequestWithdrawal and the begin-block withdrawal payout. Nothing here
+// was measured by this observer, and the response says so.
+//
+// Two honesty rules shape the numbers:
+//
+//   - A settlement amount is not in any chain event. It is recomputed from
+//     the promise's blob_size with the module's own gas formula, which is
+//     what the module charges. PriceFormula publishes that formula.
+//   - A promise that was handed out and never settled leaves no trace on
+//     chain until someone submits its timeout, so "timed out" is a floor on
+//     abandoned promises, never a total. The settlement rate is stated over
+//     settlements plus known timeouts, and its denominator says so.
+
+// MiB is the unit "paid per MiB" is quoted in.
+const MiB = 1 << 20
+
+// priceFormula is the module's charge, published so a reader can recompute
+// every fee on the site from a blob size.
+type priceFormula struct {
+	BaseGas     uint64 `json:"base_gas"`
+	GasPerChunk uint64 `json:"gas_per_chunk"`
+	ChunkBytes  uint64 `json:"chunk_bytes"`
+	UtiaPerGas  uint64 `json:"utia_per_gas"`
+	Note        string `json:"note"`
+}
+
+var formula = priceFormula{
+	BaseGas:     uint64(appconsts.PFBFibreGasFixedCost),
+	GasPerChunk: uint64(appconsts.PFBFibreGasPerChunk),
+	ChunkBytes:  uint64(appconsts.PFBFibreChunkSize),
+	UtiaPerGas:  1,
+	Note:        "fee = (base_gas + gas_per_chunk × ⌈blob_size / chunk_bytes⌉) × utia_per_gas; the same charge whether the promise is settled or timed out",
+}
+
+// sum is a count and a total, the shape every money figure here takes.
+type sum struct {
+	Count int64 `json:"count"`
+	Utia  int64 `json:"utia"`
+}
+
+type dayBucket struct {
+	Day          string `json:"day"` // YYYY-MM-DD, UTC
+	FeesUtia     int64  `json:"fees_utia"`
+	Bytes        int64  `json:"bytes"`
+	Settlements  int64  `json:"settlements"`
+	Timeouts     int64  `json:"timeouts"`
+	TimedOutUtia int64  `json:"timed_out_utia"`
+}
+
+// publisherShare is one slice of the top-N breakdown.
+type publisherShare struct {
+	Publisher   string   `json:"publisher"` // empty for the "other" bucket
+	Label       string   `json:"label,omitempty"`
+	FeesUtia    int64    `json:"fees_utia"`
+	FeesShare   *float64 `json:"fees_share"`
+	Bytes       int64    `json:"bytes"`
+	BytesShare  *float64 `json:"bytes_share"`
+	Settlements int64    `json:"settlements"`
+	// Publishers is how many accounts the "other" bucket folds together.
+	Publishers int64 `json:"publishers,omitempty"`
+}
+
+type marketResponse struct {
+	Window     Window `json:"window"`
+	Vantage    string `json:"vantage"`
+	ComputedAt string `json:"computed_at,omitempty"`
+	ComputeMs  int64  `json:"compute_ms,omitempty"`
+	// Source says where every number on this response comes from.
+	Source string `json:"source"`
+
+	Settlements      int64    `json:"settlements"`
+	FeesSettledUtia  int64    `json:"fees_settled_utia"`
+	Bytes            int64    `json:"bytes"`
+	PublishersActive int64    `json:"publishers_active"`
+	PaidPerMiBUtia   *float64 `json:"paid_per_mib_utia"` // fees / (bytes / MiB); null with no bytes
+	// Timeouts is the floor described above; TimedOutUtia what those
+	// promises were charged.
+	Timeouts       int64 `json:"timeouts"`
+	TimedOutUtia   int64 `json:"timed_out_utia"`
+	SettlementRate Rate  `json:"settlement_rate"` // settlements / (settlements + timeouts)
+	// TimeoutProcessors is how many distinct accounts submitted a timeout.
+	TimeoutProcessors int64 `json:"timeout_processors"`
+
+	Deposits             sum `json:"deposits"`
+	WithdrawalsRequested sum `json:"withdrawals_requested"`
+	WithdrawalsExecuted  sum `json:"withdrawals_executed"`
+	// EscrowHeldUtia is the sum of every known publisher's current balance,
+	// from state queries; EscrowAccounts how many were polled.
+	EscrowHeldUtia int64 `json:"escrow_held_utia"`
+	EscrowAccounts int64 `json:"escrow_accounts"`
+
+	Daily        []dayBucket      `json:"daily"`
+	Top          []publisherShare `json:"top_publishers"`
+	Other        *publisherShare  `json:"other_publishers"`
+	PriceFormula priceFormula     `json:"price_formula"`
+	Notes        []string         `json:"notes"`
+	// LargestPoster is the publisher with the most bytes in the window.
+	LargestPoster *publisherShare `json:"largest_poster"`
+}
+
+var marketNotes = []string{
+	"every figure here is something the chain recorded; none was measured by this observer",
+	"a settlement's fee is not in any chain event; it is recomputed from blob_size with the module's own formula (price_formula)",
+	"blob_size is the padded upload size the module charges for, not the payload",
+	"timeouts count only promises whose timeout somebody submitted; an abandoned promise nobody reports leaves no trace, so this is a floor",
+	"fees go to the fee collector and are distributed by stake; the chain records no per-validator share, so none is shown",
+	"escrow balances are state reads for publishers already seen in a payment; there is no list-all query",
+}
+
+const marketSource = "x/fibre transactions and events (payments table); escrow balances by state query"
+
+// escrowInfo is a publisher's current escrow as the chain holds it.
+type escrowInfo struct {
+	Found         bool   `json:"found"`
+	BalanceUtia   int64  `json:"balance_utia"`
+	AvailableUtia int64  `json:"available_utia"`
+	Height        int64  `json:"height"`
+	UpdatedAt     string `json:"updated_at"`
+}
+
+type publisherRow struct {
+	Publisher   string   `json:"publisher"`
+	Label       string   `json:"label,omitempty"`
+	LabelSource string   `json:"label_source,omitempty"`
+	Settlements int64    `json:"settlements"`
+	Bytes       int64    `json:"bytes"`
+	BytesShare  *float64 `json:"bytes_share"`
+	FeesUtia    int64    `json:"fees_utia"`
+	FeesShare   *float64 `json:"fees_share"`
+	PaidPerMiB  *float64 `json:"paid_per_mib_utia"`
+	AvgBlob     *float64 `json:"avg_blob_bytes"`
+	LargestBlob int64    `json:"largest_blob_bytes"`
+	Timeouts    int64    `json:"timeouts"`
+	TimedOut    int64    `json:"timed_out_utia"`
+	// FirstSeen and LastSeen are the first and last escrow movement of any
+	// kind, over the whole history rather than the window.
+	FirstSeen string      `json:"first_seen_at"`
+	LastSeen  string      `json:"last_seen_at"`
+	Escrow    *escrowInfo `json:"escrow"`
+}
+
+// ---- label registry ----
+
+// PublisherLabel is one entry of the operator-maintained registry: a name
+// for an account, with where the name came from. The registry is a YAML
+// file, checked into the deployment, and the source is published with the
+// label so a reader knows it is the operator's word and not the chain's.
+type PublisherLabel struct {
+	Address string `yaml:"address" json:"address"`
+	Label   string `yaml:"label" json:"label"`
+	Source  string `yaml:"source" json:"source,omitempty"` // e.g. "self-declared", "this observer's test publisher"
+	URL     string `yaml:"url" json:"url,omitempty"`
+}
+
+type labelFile struct {
+	Publishers []PublisherLabel `yaml:"publishers"`
+}
+
+// LoadPublisherLabels reads the registry. A missing file is an empty registry.
+func LoadPublisherLabels(path string) (map[string]PublisherLabel, error) {
+	out := map[string]PublisherLabel{}
+	if path == "" {
+		return out, nil
+	}
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var f labelFile
+	if err := yaml.Unmarshal(b, &f); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	for i, l := range f.Publishers {
+		l.Address = strings.TrimSpace(l.Address)
+		if l.Address == "" || strings.TrimSpace(l.Label) == "" {
+			return nil, fmt.Errorf("%s: publishers[%d]: address and label are required", path, i)
+		}
+		if _, _, err := bech32.DecodeAndConvert(l.Address); err != nil {
+			return nil, fmt.Errorf("%s: publishers[%d]: %q is not a bech32 address: %v", path, i, l.Address, err)
+		}
+		out[l.Address] = l
+	}
+	return out, nil
+}
+
+func (s *Server) label(addr string) (string, string) {
+	if l, ok := s.labels[addr]; ok {
+		return l.Label, l.Source
+	}
+	return "", ""
+}
+
+// ---- queries ----
+
+func share(part, whole int64) *float64 {
+	if whole <= 0 {
+		return nil
+	}
+	v := float64(part) / float64(whole)
+	return &v
+}
+
+func perMiB(fees, bytes int64) *float64 {
+	if bytes <= 0 {
+		return nil
+	}
+	v := float64(fees) / (float64(bytes) / MiB)
+	return &v
+}
+
+func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse, error) {
+	db := s.st.DB()
+	r := &marketResponse{Window: win, Vantage: s.vantage, Source: marketSource, PriceFormula: formula, Notes: marketNotes}
+	start := win.startArg()
+
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(amount_utia),0), COALESCE(SUM(blob_size),0), COUNT(DISTINCT publisher)
+		FROM payments WHERE kind = 'settlement' AND time >= ?`, start).
+		Scan(&r.Settlements, &r.FeesSettledUtia, &r.Bytes, &r.PublishersActive); err != nil {
+		return nil, fmt.Errorf("settlements: %w", err)
+	}
+	r.PaidPerMiBUtia = perMiB(r.FeesSettledUtia, r.Bytes)
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(amount_utia),0), COUNT(DISTINCT processor)
+		FROM payments WHERE kind = 'timeout' AND time >= ?`, start).
+		Scan(&r.Timeouts, &r.TimedOutUtia, &r.TimeoutProcessors); err != nil {
+		return nil, fmt.Errorf("timeouts: %w", err)
+	}
+	r.SettlementRate = rate(r.Settlements, r.Settlements+r.Timeouts)
+	for kind, dst := range map[string]*sum{
+		"deposit": &r.Deposits, "withdrawal_request": &r.WithdrawalsRequested, "withdrawal_executed": &r.WithdrawalsExecuted,
+	} {
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(amount_utia),0) FROM payments WHERE kind = ? AND time >= ?`, kind, start).
+			Scan(&dst.Count, &dst.Utia); err != nil {
+			return nil, fmt.Errorf("%s: %w", kind, err)
+		}
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(balance_utia),0) FROM escrow_accounts WHERE found = 1`).
+		Scan(&r.EscrowAccounts, &r.EscrowHeldUtia); err != nil {
+		return nil, fmt.Errorf("escrow: %w", err)
+	}
+
+	// Daily buckets, over settlements and timeouts. The day is the block
+	// time's UTC date.
+	rows, err := db.QueryContext(ctx, `SELECT substr(time, 1, 10) AS day,
+			COALESCE(SUM(CASE WHEN kind = 'settlement' THEN amount_utia END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'settlement' THEN blob_size END), 0),
+			SUM(CASE WHEN kind = 'settlement' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN kind = 'timeout' THEN 1 ELSE 0 END),
+			COALESCE(SUM(CASE WHEN kind = 'timeout' THEN amount_utia END), 0)
+		FROM payments WHERE kind IN ('settlement','timeout') AND time >= ?
+		GROUP BY day ORDER BY day`, start)
+	if err != nil {
+		return nil, fmt.Errorf("daily: %w", err)
+	}
+	r.Daily = []dayBucket{}
+	for rows.Next() {
+		var d dayBucket
+		if err := rows.Scan(&d.Day, &d.FeesUtia, &d.Bytes, &d.Settlements, &d.Timeouts, &d.TimedOutUtia); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		r.Daily = append(r.Daily, d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Top publishers by fees, the rest folded into one bucket so the
+	// breakdown always sums to the window.
+	prow, err := db.QueryContext(ctx, `SELECT publisher, COUNT(*), COALESCE(SUM(amount_utia),0), COALESCE(SUM(blob_size),0)
+		FROM payments WHERE kind = 'settlement' AND time >= ?
+		GROUP BY publisher ORDER BY SUM(amount_utia) DESC, publisher`, start)
+	if err != nil {
+		return nil, fmt.Errorf("top: %w", err)
+	}
+	r.Top = []publisherShare{}
+	var other publisherShare
+	var largest *publisherShare
+	n := 0
+	for prow.Next() {
+		var p publisherShare
+		if err := prow.Scan(&p.Publisher, &p.Settlements, &p.FeesUtia, &p.Bytes); err != nil {
+			prow.Close()
+			return nil, err
+		}
+		p.Label, _ = s.label(p.Publisher)
+		p.FeesShare = share(p.FeesUtia, r.FeesSettledUtia)
+		p.BytesShare = share(p.Bytes, r.Bytes)
+		if largest == nil || p.Bytes > largest.Bytes {
+			cp := p
+			largest = &cp
+		}
+		if n < 5 {
+			r.Top = append(r.Top, p)
+		} else {
+			other.Publishers++
+			other.FeesUtia += p.FeesUtia
+			other.Bytes += p.Bytes
+			other.Settlements += p.Settlements
+		}
+		n++
+	}
+	prow.Close()
+	if err := prow.Err(); err != nil {
+		return nil, err
+	}
+	if other.Publishers > 0 {
+		other.FeesShare = share(other.FeesUtia, r.FeesSettledUtia)
+		other.BytesShare = share(other.Bytes, r.Bytes)
+		r.Other = &other
+	}
+	r.LargestPoster = largest
+	return r, nil
+}
+
+// publisherRows lists every publisher with a settlement, timeout, deposit or
+// withdrawal in the window (only narrows to one address).
+func (s *Server) publisherRows(ctx context.Context, win Window, only string) ([]publisherRow, error) {
+	db := s.st.DB()
+	start := win.startArg()
+	filter, args := "", []any{start}
+	if only != "" {
+		filter = " AND p.publisher = ?"
+		args = append(args, only)
+	}
+	var totalFees, totalBytes int64
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(amount_utia),0), COALESCE(SUM(blob_size),0)
+		FROM payments WHERE kind = 'settlement' AND time >= ?`, start).Scan(&totalFees, &totalBytes); err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT p.publisher,
+			SUM(CASE WHEN p.kind = 'settlement' AND p.time >= ? THEN 1 ELSE 0 END),
+			COALESCE(SUM(CASE WHEN p.kind = 'settlement' AND p.time >= ? THEN p.blob_size END), 0),
+			COALESCE(SUM(CASE WHEN p.kind = 'settlement' AND p.time >= ? THEN p.amount_utia END), 0),
+			COALESCE(MAX(CASE WHEN p.kind = 'settlement' AND p.time >= ? THEN p.blob_size END), 0),
+			SUM(CASE WHEN p.kind = 'timeout' AND p.time >= ? THEN 1 ELSE 0 END),
+			COALESCE(SUM(CASE WHEN p.kind = 'timeout' AND p.time >= ? THEN p.amount_utia END), 0),
+			MIN(p.time), MAX(p.time),
+			SUM(CASE WHEN p.time >= ? THEN 1 ELSE 0 END),
+			e.found, e.balance_utia, e.available_utia, e.height, e.updated_at
+		FROM payments p
+		LEFT JOIN escrow_accounts e ON e.publisher = p.publisher
+		WHERE 1 = 1`+filter+`
+		GROUP BY p.publisher
+		HAVING SUM(CASE WHEN p.time >= ? THEN 1 ELSE 0 END) > 0
+		ORDER BY 4 DESC, 3 DESC, p.publisher`,
+		append([]any{start, start, start, start, start, start, start}, append(args[1:], start)...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []publisherRow
+	for rows.Next() {
+		var p publisherRow
+		var inWindow int64
+		var found, bal, avail, height sql.NullInt64
+		var updated sql.NullString
+		if err := rows.Scan(&p.Publisher, &p.Settlements, &p.Bytes, &p.FeesUtia, &p.LargestBlob, &p.Timeouts, &p.TimedOut,
+			&p.FirstSeen, &p.LastSeen, &inWindow, &found, &bal, &avail, &height, &updated); err != nil {
+			return nil, err
+		}
+		p.Label, p.LabelSource = s.label(p.Publisher)
+		p.BytesShare = share(p.Bytes, totalBytes)
+		p.FeesShare = share(p.FeesUtia, totalFees)
+		p.PaidPerMiB = perMiB(p.FeesUtia, p.Bytes)
+		if p.Settlements > 0 {
+			v := float64(p.Bytes) / float64(p.Settlements)
+			p.AvgBlob = &v
+		}
+		if updated.Valid {
+			p.Escrow = &escrowInfo{Found: found.Int64 == 1, BalanceUtia: bal.Int64, AvailableUtia: avail.Int64, Height: height.Int64, UpdatedAt: updated.String}
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// paymentRow is one escrow movement as the API shows it.
+type paymentRow struct {
+	Kind        string `json:"kind"`
+	Height      int64  `json:"height"`
+	Time        string `json:"time"`
+	TxHash      string `json:"tx_hash,omitempty"`
+	Publisher   string `json:"publisher"`
+	Processor   string `json:"processor,omitempty"`
+	PromiseHash string `json:"promise_hash,omitempty"`
+	Namespace   string `json:"namespace,omitempty"`
+	BlobSize    int64  `json:"blob_size,omitempty"`
+	GasUnits    int64  `json:"gas_units,omitempty"`
+	AmountUtia  int64  `json:"amount_utia"`
+	AvailableAt string `json:"available_at,omitempty"`
+}
+
+func (s *Server) paymentRows(ctx context.Context, where string, limit int, args ...any) ([]paymentRow, error) {
+	q := `SELECT kind, height, time, tx_hash, publisher, processor, promise_hash, namespace, blob_size, gas_units, amount_utia, COALESCE(available_at, '')
+		FROM payments`
+	if where != "" {
+		q += " WHERE " + where
+	}
+	q += fmt.Sprintf(" ORDER BY height DESC, tx_index DESC, msg_index DESC LIMIT %d", limit)
+	rows, err := s.st.DB().QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []paymentRow{}
+	for rows.Next() {
+		var p paymentRow
+		if err := rows.Scan(&p.Kind, &p.Height, &p.Time, &p.TxHash, &p.Publisher, &p.Processor, &p.PromiseHash, &p.Namespace,
+			&p.BlobSize, &p.GasUnits, &p.AmountUtia, &p.AvailableAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// blobCharge is what the payments table knows about one promise.
+type blobCharge struct {
+	FeeUtia   int64  `json:"fee_utia"`
+	GasUnits  int64  `json:"gas_units"`
+	Publisher string `json:"publisher"`
+	// Settled is true when a MsgPayForFibre for this promise is in the
+	// payments table; TimedOut when a MsgPaymentPromiseTimeout is. Both can
+	// be false for a publication ingested before payments were recorded.
+	Settled   bool   `json:"settled"`
+	TimedOut  bool   `json:"timed_out"`
+	Processor string `json:"processor,omitempty"` // who submitted the timeout
+}
+
+// chargesFor looks up the fee side of a set of promise hashes in one query.
+func (s *Server) chargesFor(ctx context.Context, hashes []string) (map[string]*blobCharge, error) {
+	out := map[string]*blobCharge{}
+	if len(hashes) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(hashes))
+	marks := make([]string, len(hashes))
+	for i, h := range hashes {
+		args[i], marks[i] = h, "?"
+	}
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT promise_hash, kind, amount_utia, gas_units, publisher, processor
+		FROM payments WHERE kind IN ('settlement','timeout') AND promise_hash IN (`+strings.Join(marks, ",")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var h, kind, pub, proc string
+		var amt, gas int64
+		if err := rows.Scan(&h, &kind, &amt, &gas, &pub, &proc); err != nil {
+			return nil, err
+		}
+		c := out[h]
+		if c == nil {
+			c = &blobCharge{}
+			out[h] = c
+		}
+		c.FeeUtia, c.GasUnits, c.Publisher = amt, gas, pub
+		switch kind {
+		case "settlement":
+			c.Settled = true
+		case "timeout":
+			c.TimedOut = true
+			c.Processor = proc
+		}
+	}
+	return out, rows.Err()
+}
+
+// timeoutsByAccount counts timeouts submitted per processor over the window,
+// keyed by the 20 account bytes in hex so a validator's operator address
+// (same bytes, different prefix) can be matched to it.
+func (s *Server) timeoutsByAccount(ctx context.Context, win Window) (map[string]int64, error) {
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT processor, COUNT(*) FROM payments
+		WHERE kind = 'timeout' AND time >= ? AND processor != '' GROUP BY processor`, win.startArg())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var proc string
+		var n int64
+		if err := rows.Scan(&proc, &n); err != nil {
+			return nil, err
+		}
+		if k := accountKey(proc); k != "" {
+			out[k] += n
+		}
+	}
+	return out, rows.Err()
+}
+
+// accountKey is the hex of an address's bytes whatever its bech32 prefix, or
+// "" when it does not decode.
+func accountKey(bech string) string {
+	_, b, err := bech32.DecodeAndConvert(bech)
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%x", b)
+}
+
+// ---- handlers ----
+
+func (s *Server) handleMarket(w http.ResponseWriter, r *http.Request) {
+	win, err := parseWindow(r, time.Now())
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	resp, at, ms, err := s.market.get(r.Context(), s.logf(), win)
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	cp := *resp
+	cp.ComputedAt, cp.ComputeMs = at.UTC().Format(time.RFC3339), ms
+	writeJSON(w, 200, cp)
+}
+
+func (s *Server) handlePublishers(w http.ResponseWriter, r *http.Request) {
+	win, err := parseWindow(r, time.Now())
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	rows, err := s.publisherRows(r.Context(), win, "")
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	if rows == nil {
+		rows = []publisherRow{}
+	}
+	writeJSON(w, 200, map[string]any{
+		"window": win, "publishers": rows, "count": len(rows),
+		"source": marketSource, "price_formula": formula, "notes": marketNotes, "vantage": s.vantage,
+	})
+}
+
+func (s *Server) handlePublisher(w http.ResponseWriter, r *http.Request) {
+	addr := strings.TrimSpace(r.PathValue("addr"))
+	if hrp, _, err := bech32.DecodeAndConvert(addr); err != nil || hrp != "celestia" {
+		writeErr(w, 400, "publisher must be a celestia1... account address")
+		return
+	}
+	now := time.Now()
+	ctx := r.Context()
+	win, err := parseWindow(r, now)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	rows, err := s.publisherRows(ctx, win, addr)
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	if len(rows) == 0 {
+		// Not in this window; try the whole history before saying no.
+		all := Window{Name: "all", End: now}
+		if rows, err = s.publisherRows(ctx, all, addr); err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		if len(rows) == 0 {
+			writeErr(w, 404, "no escrow movement recorded for this account")
+			return
+		}
+		// Zero the window figures: the row was built over all time.
+		p := rows[0]
+		p.Settlements, p.Bytes, p.FeesUtia, p.LargestBlob, p.Timeouts, p.TimedOut = 0, 0, 0, 0, 0, 0
+		p.BytesShare, p.FeesShare, p.PaidPerMiB, p.AvgBlob = nil, nil, nil, nil
+		rows = []publisherRow{p}
+	}
+	type span struct {
+		Window      Window   `json:"window"`
+		Settlements int64    `json:"settlements"`
+		Bytes       int64    `json:"bytes"`
+		FeesUtia    int64    `json:"fees_utia"`
+		Timeouts    int64    `json:"timeouts"`
+		PaidPerMiB  *float64 `json:"paid_per_mib_utia"`
+	}
+	var spans []span
+	for _, name := range []string{"24h", "7d", "30d", "all"} {
+		sw := Window{Name: name, Span: windows[name], End: now}
+		if sw.Span > 0 {
+			sw.Start = now.Add(-sw.Span)
+		}
+		var sp span
+		sp.Window = sw
+		if err := s.st.DB().QueryRowContext(ctx, `SELECT
+				COALESCE(SUM(CASE WHEN kind = 'settlement' THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN kind = 'settlement' THEN blob_size END), 0),
+				COALESCE(SUM(CASE WHEN kind = 'settlement' THEN amount_utia END), 0),
+				COALESCE(SUM(CASE WHEN kind = 'timeout' THEN 1 ELSE 0 END), 0)
+			FROM payments WHERE publisher = ? AND time >= ?`, addr, sw.startArg()).
+			Scan(&sp.Settlements, &sp.Bytes, &sp.FeesUtia, &sp.Timeouts); err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		sp.PaidPerMiB = perMiB(sp.FeesUtia, sp.Bytes)
+		spans = append(spans, sp)
+	}
+	payments, err := s.paymentRows(ctx, `publisher = ?`, 100, addr)
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	blobs, err := s.blobRows(ctx, `signer = ?`, 50, addr)
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	if blobs == nil {
+		blobs = []blobRow{}
+	}
+	writeJSON(w, 200, map[string]any{
+		"window": win, "publisher": rows[0], "windows": spans,
+		"recent_payments": payments, "recent_blobs": blobs,
+		"source": marketSource, "price_formula": formula, "notes": marketNotes, "vantage": s.vantage,
+	})
+}
+
+// sortShares orders a breakdown by fees, then bytes, then address.
+func sortShares(v []publisherShare) {
+	sort.Slice(v, func(i, j int) bool {
+		if v[i].FeesUtia != v[j].FeesUtia {
+			return v[i].FeesUtia > v[j].FeesUtia
+		}
+		if v[i].Bytes != v[j].Bytes {
+			return v[i].Bytes > v[j].Bytes
+		}
+		return v[i].Publisher < v[j].Publisher
+	})
+}

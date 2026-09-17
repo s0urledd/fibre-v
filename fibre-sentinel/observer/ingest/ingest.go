@@ -190,3 +190,17 @@ func Reachability(st *store.Store, path string, now time.Time) (Result, error) {
 		return st.InsertReachability(m, raw)
 	}, now)
 }
+
+// Payments ingests payments.jsonl written by sentinel-scan.
+func Payments(st *store.Store, path string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var p scan.Payment
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return false, fmt.Errorf("%w: decode payment: %v", ErrBadRecord, err)
+		}
+		if p.DedupeKey == "" || p.Publisher == "" {
+			return false, fmt.Errorf("%w: payment without dedupe_key or publisher", ErrBadRecord)
+		}
+		return st.UpsertPayment(p, raw)
+	}, now)
+}

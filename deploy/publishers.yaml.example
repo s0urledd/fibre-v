@@ -1,0 +1,13 @@
+# Publisher labels: names for the accounts that pay for Fibre storage.
+#
+# The chain has no name for an account. Every entry here is the operator's
+# word, and the site shows the source beside the label so a reader knows
+# that. Keep it short: an account that published from a known rollup's
+# sequencer, a team that said so on the forum, this observer's own test
+# publisher. Never label an account from a guess.
+#
+# observer-api -publishers /etc/fibre-observer/publishers.yaml
+publishers:
+  - address: celestia1exampleexampleexampleexampleexampleqqqqqq
+    label: Fibrescope test publisher
+    source: this observer's own devnet publisher

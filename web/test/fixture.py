@@ -65,11 +65,39 @@ N = len(MONIKERS)
 def cons_addr(i):
     return hashlib.sha256(f"fixture-cons-{i}".encode()).hexdigest()[:40]
 
+# Real bech32, because the API validates publisher addresses before it looks
+# them up and a made-up string would 400 on the publisher page. Twenty bytes
+# drawn from the seed, encoded the way the SDK does (BIP-173).
+B32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+def _b32_polymod(values):
+    g = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
+    chk = 1
+    for v in values:
+        b = chk >> 25
+        chk = ((chk & 0x1ffffff) << 5) ^ v
+        for i in range(5):
+            chk ^= g[i] if (b >> i) & 1 else 0
+    return chk
+def _b32_hrp_expand(hrp):
+    return [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+def _convertbits(data, frombits, tobits):
+    acc, bits, ret, maxv = 0, 0, [], (1 << tobits) - 1
+    for v in data:
+        acc = (acc << frombits) | v
+        bits += frombits
+        while bits >= tobits:
+            bits -= tobits
+            ret.append((acc >> bits) & maxv)
+    if bits:
+        ret.append((acc << (tobits - bits)) & maxv)
+    return ret
+def bech32(prefix, raw20):
+    data = _convertbits(raw20, 8, 5)
+    poly = _b32_polymod(_b32_hrp_expand(prefix) + data + [0] * 6) ^ 1
+    chk = [(poly >> 5 * (5 - i)) & 31 for i in range(6)]
+    return prefix + "1" + "".join(B32[d] for d in data + chk)
 def bech32ish(prefix, i):
-    # Not a real bech32; the fixture never leaves this machine and the design
-    # only cares about the string's shape and length.
-    body = hashlib.sha256(f"{prefix}-{i}".encode()).hexdigest()[:38]
-    return f"{prefix}1{body}"
+    return bech32(prefix, hashlib.sha256(f"account-{i}".encode()).digest()[:20])
 
 # --- validator population -------------------------------------------------
 # Voting power follows a steep power law, the way a real active set does: the
@@ -461,6 +489,60 @@ for v in vals:
             "" if up else f"dial tcp {v['host']}: connect: connection refused",
             rnd.randint(20, 200), "{}"))
 
+# --- payments: the escrow side of x/fibre ----------------------------------
+# One settlement per publication at the module's own charge, so the Publishers
+# page shows the fee curve a real network has: many small blobs paying ~0.7 TIA,
+# a few large ones paying tens. Seventeen publishers (the signer set above),
+# skewed by drawing most publications from a handful of them, so the share bar
+# has a "top 5 + other" shape. A few timeouts, submitted by validator operator
+# accounts, and one deposit and one withdrawal per publisher, so every kind the
+# API knows is present.
+def fee(size):
+    return 650_000 + 45_000 * ((size + 262_143) // 262_144)
+
+def payment_row(key, kind, height, at, txh, pub, proc, ph, ns, size, amount, avail=None):
+    return (key, kind, height, ts(at), txh, 0 if txh else -1, 0, pub, proc, ph, ns, size,
+            fee(size) if size else 0, "utia", amount, ts(avail) if avail else None, "{}")
+
+PAYMENTS = []
+publishers = {}
+for p, pub in enumerate(pubs):
+    signer = bech32ish("celestia", p % 17)
+    publishers.setdefault(signer, NOW - timedelta(days=8))
+    txh = hashlib.sha256(f"tx{p}".encode()).hexdigest().upper()
+    PAYMENTS.append(payment_row(f"{txh}:0", "settlement", 800_000 + p + 1, pub["settled"], txh,
+                                signer, signer, pub["ph"], pub["ns"], pub["size"], fee(pub["size"])))
+# Six abandoned promises, reported by three different operator accounts. The
+# operator address shares bytes with the validator's valoper address; the
+# fixture's addresses are not real bech32, so timeouts_enforced stays zero here
+# and is exercised by the Go tests instead.
+for k in range(6):
+    at = NOW - timedelta(hours=3 + 11 * k)
+    signer = bech32ish("celestia", k % 3)
+    size = [262144, 1 << 20, 4 << 20][k % 3]
+    PAYMENTS.append(payment_row(f"T{k}:0", "timeout", 850_000 + k, at, hashlib.sha256(f"to{k}".encode()).hexdigest().upper(),
+                                signer, bech32ish("celestia", 40 + k % 3), hashlib.sha256(f"abandoned{k}".encode()).hexdigest(),
+                                "00" * 18 + hashlib.sha256(f"ns{k}".encode()).hexdigest()[:20], size, fee(size)))
+for i, (signer, since) in enumerate(publishers.items()):
+    PAYMENTS.append(payment_row(f"D{i}:0", "deposit", 790_000 + i, since, hashlib.sha256(f"dep{i}".encode()).hexdigest().upper(),
+                                signer, "", "", "", 0, 6_000_000_000))
+    if i % 4 == 0:
+        at = NOW - timedelta(days=2, hours=i)
+        PAYMENTS.append(payment_row(f"W{i}:0", "withdrawal_request", 880_000 + i, at, hashlib.sha256(f"wr{i}".encode()).hexdigest().upper(),
+                                    signer, "", "", "", 0, 500_000_000, avail=at + timedelta(days=1)))
+        PAYMENTS.append(payment_row(f"h{881_000+i}:executed:0", "withdrawal_executed", 881_000 + i, at + timedelta(days=1), "",
+                                    signer, "", "", "", 0, 500_000_000))
+db.executemany("""INSERT INTO payments (dedupe_key, kind, height, time, tx_hash, tx_index, msg_index, publisher,
+    processor, promise_hash, namespace, blob_size, gas_units, denom, amount_utia, available_at, raw_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", PAYMENTS)
+for i, signer in enumerate(publishers):
+    spent = sum(r[14] for r in PAYMENTS if r[7] == signer and r[1] in ("settlement", "timeout"))
+    withdrawn = sum(r[14] for r in PAYMENTS if r[7] == signer and r[1] == "withdrawal_executed")
+    bal = 6_000_000_000 - spent - withdrawn
+    found = i != 16   # one publisher emptied and closed its escrow
+    db.execute("INSERT INTO escrow_accounts VALUES (?,?,?,?,?,?,?)",
+               (signer, 1 if found else 0, "utia" if found else "", bal if found else 0, bal if found else 0, 900_000, ts(NOW)))
+
 for comp in ("collector", "prober", "api", "heartbeat"):
     db.execute("""INSERT INTO observer_runs
         (component, vantage, version, started_at, last_heartbeat_at, stopped_at, stop_reason)
@@ -481,7 +563,8 @@ for k, val in (("chain_id","mocha-5"), ("last_scanned_height","900000"),
 db.commit()
 n = lambda t: db.execute(f"select count(*) from {t}").fetchone()[0]
 print(f"validators {n('validator_identities')}  publications {n('publications')}  "
-      f"assignments {n('assignments')}  probes {n('probes')}  reach {n('reachability')}")
+      f"assignments {n('assignments')}  probes {n('probes')}  reach {n('reachability')}  "
+      f"payments {n('payments')}  escrow {n('escrow_accounts')}")
 print("verdict mix:")
 for cls, c in sorted(counts.items(), key=lambda x: -x[1]):
     print(f"  {cls:26} {c:7,}")

@@ -207,10 +207,12 @@ main { min-height: 60vh; padding-top: var(--s5); }
 /* One strip, not seven boxes: the figures are read together, like the dials
    of one instrument, so they share one frame and are parted by hairlines. */
 .tiles {
-  display: grid; grid-template-columns: 1.6fr repeat(6, 1fr); gap: 0;
+  display: grid; grid-template-columns: 1.6fr repeat(7, 1fr); gap: 0;
   background: var(--card); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden;
 }
 .tiles.five { grid-template-columns: repeat(5, 1fr); }
+.tiles.six { grid-template-columns: 1.6fr repeat(5, 1fr); }
+.tiles.four { grid-template-columns: 1.6fr repeat(3, 1fr); }
 .tile { background: transparent; border: 0; border-left: 1px solid var(--line); padding: var(--s4) var(--s4) var(--s3); min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .tile:first-child { border-left: 0; }
 .tile.hero { background: linear-gradient(180deg, var(--accent-2), transparent 70%); }
@@ -392,7 +394,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
 .prose li { margin-bottom: var(--s2); }
 
 @media (max-width: 1000px) {
-  .tiles, .tiles.five { grid-template-columns: repeat(3, 1fr); }
+  .tiles, .tiles.five, .tiles.six, .tiles.four { grid-template-columns: repeat(3, 1fr); }
   .tile { border-top: 1px solid var(--line); }
   .tile:nth-child(3n + 1) { border-left: 0; }
   .tile.hero { grid-column: span 3; border-top: 0; }
@@ -402,7 +404,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
   :root { --page: 100%; }
   .wrap { padding: 0 var(--s4); }
   .top .wrap { gap: var(--s3); }
-  .tiles, .tiles.five { grid-template-columns: repeat(2, 1fr); }
+  .tiles, .tiles.five, .tiles.six, .tiles.four { grid-template-columns: repeat(2, 1fr); }
   .tile:nth-child(3n + 1) { border-left: 1px solid var(--line); }
   .tile:nth-child(2n) { border-left: 0; }
   .tile.hero { grid-column: span 2; }
@@ -412,4 +414,32 @@ dl.kv dd { margin: 0; word-break: break-all; }
   .legend > div { grid-template-columns: 1fr; gap: var(--s1); }
   input[type=search] { min-width: 0; width: 100%; }
   .card { padding: var(--s3) var(--s4); }
+}
+
+/* ---- publishers: daily bars and the share bar ---- */
+.bars-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s5); }
+.bars { min-width: 0; }
+.bars-head { display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s2); }
+.bars-plot { display: flex; align-items: flex-end; gap: 3px; height: 132px; border-bottom: 1px solid var(--line-2); padding-bottom: 18px; box-sizing: border-box; position: relative; }
+.bars-plot .slot { flex: 1 1 0; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; position: relative; }
+.bars-plot .bar { width: 72%; max-width: 28px; background: var(--accent); border-radius: 2px 2px 0 0; }
+.bars.fault .bar { background: var(--fault); }
+.bars-plot .bar.quiet { background: var(--line-2); }
+.bars-plot .tick { position: absolute; top: 100%; margin-top: 4px; font-family: var(--mono); font-size: 10px; color: var(--text-3); white-space: nowrap; }
+.bars-plot .tick.hidden { visibility: hidden; }
+.bars.empty p { margin: var(--s2) 0 0; font-size: var(--t-table); }
+.shares-bar { display: flex; height: 14px; border-radius: var(--r-sm); overflow: hidden; background: var(--card-2); }
+.shares-bar .seg { flex: 0 0 auto; background: var(--accent); border-right: 1px solid var(--card); min-width: 2px; }
+.shares-bar .seg.other { background: var(--line-2); }
+.shares-legend { list-style: none; margin: var(--s3) 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--s2) var(--s5); font-size: var(--t-table); }
+.shares-legend li { display: grid; grid-template-columns: 10px 1fr; column-gap: var(--s2); align-items: center; min-width: 0; }
+.shares-legend li .who { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shares-legend li .figs { grid-column: 2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shares-legend .swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--accent); }
+.shares-legend .swatch.other { background: var(--line-2); }
+.notes { margin: var(--s1) 0 0; padding-left: 1.2em; font-size: var(--t-table); color: var(--text-2); }
+.notes li + li { margin-top: 2px; }
+td .sans { font-family: var(--sans); }
+@media (max-width: 720px) {
+  .bars-row { grid-template-columns: 1fr; }
 }

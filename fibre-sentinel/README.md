@@ -124,8 +124,23 @@ sentinel-scan -rpc http://127.0.0.1:26657 -data-dir ./data -follow              
 ```
 
 Output: `<data-dir>/state.json` (cursor + full param history + protocol-params
-fingerprint) and `<data-dir>/publications.jsonl` (one record per line,
-append-only).
+fingerprint), `<data-dir>/publications.jsonl` (one record per line,
+append-only) and `<data-dir>/payments.jsonl` (one escrow movement per line:
+settlement, timeout, deposit, withdrawal request, withdrawal payout).
+
+**Payments.** The scanner records the economy side of `x/fibre` beside the
+publications, from the same blocks. A settlement or timeout carries no amount
+in any chain event, so the charge is recomputed from the promise's padded
+`blob_size` with the module's own formula (`650,000 + 45,000 × ⌈size / 256
+KiB⌉` gas at 1 utia/gas), which is exactly what the module charges; the
+publisher is the account whose key signed the promise, whoever broadcast the
+transaction. A timeout is recorded only when somebody submitted it: an
+abandoned promise nobody reports leaves no trace, so the timeout count is a
+floor. The collector ingests the file and polls each known publisher's escrow
+balance by state query (there is no list-all query); the API publishes it all
+under `/v1/market`, `/v1/publishers` and `/v1/publishers/{addr}`, and names
+accounts from an optional `publishers.yaml` registry (`observer-api
+-publishers`), whose source is shown with every label.
 
 **Assignment constants.** `OriginalRows`, `TotalRows`, `MinRowsPerValidator`,
 `LivenessThreshold` are not on chain — see `fibre-assign`. They come from the
@@ -307,7 +322,7 @@ Sample outputs from that run are committed under [`sample/`](sample/).
 ```
 cmd/sentinel-scan          the scanner CLI
 cmd/sentinel-probe         the probe scheduler / measurement service
-cmd/sentinel-pub           devnet publish helper (drives fibre.Client.Upload + MsgPayForFibre)
+cmd/sentinel-pub           devnet publish helper (fibre.Client.Upload + MsgPayForFibre; -abandon / -timeout / -withdraw for the escrow side)
 cmd/sentinel-verify        checks publications.jsonl against expected commitments
 cmd/sentinel-measure-check checks measurements.jsonl against the taxonomy
 internal/scan              scanner, param history, record schema, store, CometBFT RPC client

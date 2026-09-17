@@ -3,9 +3,9 @@
 One VM runs everything. Five processes, one SQLite file, Caddy in front.
 
 ```
-sentinel-scan ──► publications.jsonl, state.json ─┐
-sentinel-probe ─► measurements.jsonl ─────────────┼─► observer-collector ─► observer.db ─► observer-api ─► Caddy ─► web/out
-observer-heartbeat ─► reachability.jsonl ─────────┘                         (also polls x/valaddr)
+sentinel-scan ──► publications.jsonl, payments.jsonl, state.json ─┐
+sentinel-probe ─► measurements.jsonl ─────────────────────────────┼─► observer-collector ─► observer.db ─► observer-api ─► Caddy ─► web/out
+observer-heartbeat ─► reachability.jsonl ─────────────────────────┘                         (also polls x/valaddr and escrow balances)
 ```
 
 The JSONL files are the append-only raw record; the SQLite database is
@@ -87,6 +87,7 @@ make build            # fibre-sentinel/bin/* and web/out/
 sudo install -d -m 0755 /etc/fibre-observer
 sudo cp deploy/observer.env.example /etc/fibre-observer/observer.env
 sudo cp fibre-sentinel/observer/policy/policy.mocha.yaml /etc/fibre-observer/policy.yaml   # mocha-5; policy.example.yaml for mainnet
+sudo cp deploy/publishers.yaml.example /etc/fibre-observer/publishers.yaml                   # publisher labels; optional, the API runs without it
 ```
 
 Edit `observer.env`: set `RPC`, `VANTAGE`, `DATA_DIR`. The shipped

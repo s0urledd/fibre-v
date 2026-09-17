@@ -49,3 +49,40 @@ func LoadPublications(path string) ([]Publication, error) {
 	}
 	return out, nil
 }
+
+// LoadPayments reads a payments.jsonl file under the same rules as
+// LoadPublications.
+func LoadPayments(path string) ([]Payment, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	r := bufio.NewReaderSize(f, 1<<20)
+	var out []Payment
+	line := 0
+	for {
+		raw, rerr := r.ReadBytes('\n')
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			return nil, fmt.Errorf("read %s: %w", path, rerr)
+		}
+		complete := len(raw) > 0 && raw[len(raw)-1] == '\n'
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) > 0 {
+			line++
+			var p Payment
+			if err := json.Unmarshal(trimmed, &p); err != nil {
+				if !complete {
+					break
+				}
+				return nil, fmt.Errorf("%s line %d: %w", path, line, err)
+			}
+			out = append(out, p)
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	return out, nil
+}
