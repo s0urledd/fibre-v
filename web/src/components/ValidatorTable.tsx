@@ -17,8 +17,8 @@ type SortKey = "power" | "serve" | "faults" | "uptime" | "throughput";
 
 const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode | null }[] = [
   { key: "uptime", label: "Uptime", dir: 1, info: <>
-      <p>Share of checks where the endpoint completed a TLS handshake. We dial every registered endpoint every 10 minutes, assigned or not; validators send nothing.</p>
-      <p>Checks run from one location, so a dip can be a network problem on our side.</p>
+      <p>TLS handshakes completed, over handshakes attempted. We open a connection to the registered Fibre endpoint every 10 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>
+      <p>Handshakes run from one location, so a dip can be a network problem on our side.</p>
     </> },
   { key: "serve", label: "Serve rate", dir: 1, info: <>
       <p>Shards handed over, out of the shards this validator signed for. Counted inside the retention window only.</p>
@@ -53,11 +53,11 @@ function status(v: Validator): { tone: "ok" | "hold" | "fault" | ""; word: strin
   const faults = v.classes.FAULT ?? 0;
   if (faults > 0) return { tone: "fault", word: "faults", title: `${faults} probe${faults === 1 ? "" : "s"} where the validator answered but did not hand over a shard it had signed for.` };
   if (!v.host) return { tone: "", word: "no host", title: "No Fibre endpoint registered in x/valaddr." };
-  if (v.reachable === null) return { tone: "", word: "not checked", title: "Not checked yet." };
-  if (v.reachable === false) return { tone: "hold", word: "down", title: `Could not reach ${v.host} at the last check${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}.` };
+  if (v.reachable === null) return { tone: "", word: "no handshake", title: "No handshake attempted yet." };
+  if (v.reachable === false) return { tone: "hold", word: "down", title: `Handshake with ${v.host} failed at the last attempt${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}.` };
   if (v.identity_status === "mismatch") return { tone: "hold", word: "bad cert", title: v.identity_reason || "Certificate not signed by this validator's consensus key." };
   if (v.identity_status === "no_tls") return { tone: "hold", word: "no tls", title: v.identity_reason || "TLS handshake failed." };
-  return { tone: "ok", word: "up", title: `Reached at the last check${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}.` };
+  return { tone: "ok", word: "up", title: `Handshake completed at the last attempt${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}.` };
 }
 
 function initials(v: Validator): string {
@@ -184,7 +184,7 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                     <span className="verdict"><i className={"dot " + st.tone} /><span className={"w " + (st.tone === "fault" ? "err" : "muted")}>{st.word}</span></span>
                   </td>
                   <td className="right">
-                    <RateCell r={v.reachability_window} sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} checks` : undefined} />
+                    <RateCell r={v.reachability_window} sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined} />
                   </td>
                   <td className="right"><RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation} /></td>
                   <td className="right" title="Answered, but did not hand over a shard it had signed for."><Count n={v.classes.FAULT} tier="fault" /></td>

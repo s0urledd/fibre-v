@@ -69,11 +69,11 @@ export default function Overview() {
         <Tile label="Uptime" loading={busy}
           value={net?.reachability_window?.den ? fmtPct(net.reachability_window) : "—"}
           tone={net?.reachability_window?.den ? undefined : "absent"}
-          sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} checks` : "no check yet"}
-          info={<p>Share of checks where a registered endpoint completed a TLS handshake. We dial every registered endpoint every 10 minutes, assigned or not; validators send nothing.</p>} />
+          sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} handshakes` : "no handshake yet"}
+          info={<p>TLS handshakes completed, over handshakes attempted. We open a connection to every registered Fibre endpoint every 10 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>} />
         <Tile label="Endpoints" loading={busy}
           value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
-          sub={net ? `${net.reachability.num} reachable now · ${net.validators_probed} probed` : undefined} />
+          sub={net ? `${net.reachability.num} answering now · ${net.validators_probed} probed` : undefined} />
         <Tile label="Publications" loading={busy}
           value={net ? net.publications.toLocaleString("en-US") : "—"}
           sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined} />
@@ -82,7 +82,7 @@ export default function Overview() {
           tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}
           sub={recon && recon.recoverable.den > 0 ? `${recon.recoverable.num} of ${recon.recoverable.den} blobs · ${recon.rate.num} fully served` : "no blob judged yet"}
           info={<>
-            <p>Blobs that could be rebuilt from the rows we fetched at the last check inside the window.</p>
+            <p>Blobs that could be rebuilt from the rows we fetched at the last probe inside the window.</p>
             <p>Fully served: every validator that signed for the blob answered. Recoverable: enough rows came back, whoever answered.</p>
           </>} />
       </div>
@@ -102,7 +102,7 @@ export default function Overview() {
                 No Fibre publication recorded yet. Collector at height {meta!.last_scanned_height || "?"} on {meta!.chain_id || "?"}.{" "}
                 {meta!.counts.OpenEndpoints === 0
                   ? "Fibre is live; no validator has registered an endpoint yet."
-                  : `${meta!.counts.OpenEndpoints} validators have registered an endpoint. Reachability is checked every 10 minutes.`}
+                  : `${meta!.counts.OpenEndpoints} validators have registered an endpoint. A TLS handshake is attempted with each every 10 minutes.`}
               </>
             )}
           </p>
