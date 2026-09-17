@@ -15,9 +15,9 @@ import Info from "./Info";
 
 type SortKey = "power" | "serve" | "faults" | "uptime" | "throughput";
 
-const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode }[] = [
+const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode | null }[] = [
   { key: "uptime", label: "Uptime", dir: 1, info: <>
-      <p>Share of 10-minute checks where the endpoint completed a TLS handshake. Every registered endpoint is checked, assigned or not.</p>
+      <p>Share of checks where the endpoint completed a TLS handshake. We dial every registered endpoint every 10 minutes, assigned or not; validators send nothing.</p>
       <p>Checks run from one location, so a dip can be a network problem on our side.</p>
     </> },
   { key: "serve", label: "Serve rate", dir: 1, info: <>
@@ -32,7 +32,7 @@ const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode }[
       <p>Rows delivered per second, from connect to verified rows, over healthy probes.</p>
       <p>Rows per second rather than milliseconds, because assignments run from 148 to 4,096 rows and a bigger shard takes longer.</p>
     </> },
-  { key: "power", label: "Voting power", dir: -1, info: <p>From the staking module.</p> },
+  { key: "power", label: "Voting power", dir: -1, info: null },
 ];
 
 const rv = (r: Rate | null | undefined) => (r && r.den > 0 && r.value !== null ? r.value : null);
@@ -142,15 +142,13 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
             <tr>
               <th className="rank">#</th>
               <th className="col-pin">Validator</th>
-              <th>Status<Info label="Status">
-                <p>Faults if any probe in the window was a fault; otherwise the result of the last 10-minute check.</p>
-              </Info></th>
+              <th>Status</th>
               {COLS.map((c) => (
                 <th key={c.key} className="right">
                   <button className="sort" aria-pressed={sort.key === c.key} onClick={() => clickSort(c.key, c.dir)} title={`Sort by ${c.label.toLowerCase()}`}>
                     {c.label}{arrow(c.key)}
                   </button>
-                  <Info label={c.label}>{c.info}</Info>
+                  {c.info && <Info label={c.label}>{c.info}</Info>}
                 </th>
               ))}
             </tr>

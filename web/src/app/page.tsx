@@ -69,16 +69,14 @@ export default function Overview() {
         <Tile label="Uptime" loading={busy}
           value={net?.reachability_window?.den ? fmtPct(net.reachability_window) : "—"}
           tone={net?.reachability_window?.den ? undefined : "absent"}
-          sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} heartbeats` : "no heartbeat yet"}
-          info={<p>Share of 10-minute checks where a registered endpoint completed a TLS handshake. Every registered endpoint is checked, assigned or not.</p>} />
+          sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} checks` : "no check yet"}
+          info={<p>Share of checks where a registered endpoint completed a TLS handshake. We dial every registered endpoint every 10 minutes, assigned or not; validators send nothing.</p>} />
         <Tile label="Endpoints" loading={busy}
           value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
-          sub={net ? `${net.reachability.num} reachable now · ${net.validators_probed} probed` : undefined}
-          info={<p>Validators with a Fibre host registered in <code>x/valaddr</code>. Reachable now: the last check completed TLS.</p>} />
+          sub={net ? `${net.reachability.num} reachable now · ${net.validators_probed} probed` : undefined} />
         <Tile label="Publications" loading={busy}
           value={net ? net.publications.toLocaleString("en-US") : "—"}
-          sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined}
-          info={<p><code>MsgPayForFibre</code> transactions settled in this window, and their total padded upload size.</p>} />
+          sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined} />
         <Tile label="Recoverable" loading={busy}
           value={recon && recon.recoverable.den > 0 ? fmtPct(recon.recoverable) : "—"}
           tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}

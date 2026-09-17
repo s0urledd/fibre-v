@@ -62,7 +62,7 @@ function Page() {
           <span className="spacer" />
           <span className="chips">
             {v.reachable === true && v.identity_status === "verified" && <span className="chip ok"><i className="dot ok" />up</span>}
-            {v.reachable === false && <span className="chip hold" title={`Could not reach ${v.host} at the last heartbeat.`}><i className="dot hold" />down</span>}
+            {v.reachable === false && <span className="chip hold" title={`Could not reach ${v.host} at the last check.`}><i className="dot hold" />down</span>}
             {v.reachable === true && v.identity_status !== "verified" && <span className="chip hold" title={v.identity_reason}><i className="dot hold" />{v.identity_status.replace("_", " ")}</span>}
             {!v.host && <span className="chip">no Fibre endpoint</span>}
             {v.jailed && <span className="chip hold" title="Jailed by the chain. Shards it signed for are still owed.">jailed</span>}
@@ -71,7 +71,7 @@ function Page() {
         </div>
         <dl className="kv">
           <dt>Fibre endpoint</dt><dd className="mono">{v.host || "— not registered"}{v.endpoint_since && <span className="muted"> · since {utc(v.endpoint_since)}</span>}</dd>
-          <dt>last heartbeat</dt><dd>{v.reachable == null ? "not probed" : v.reachable ? "reached" : <span className="err">unreachable</span>}{v.last_seen_at && <span className="muted"> · {utc(v.last_seen_at)} ({ago(v.last_seen_at)})</span>}{v.last_unreachable_at && <span className="muted"> · last failed {ago(v.last_unreachable_at)}</span>}</dd>
+          <dt>last check</dt><dd>{v.reachable == null ? "not probed" : v.reachable ? "reached" : <span className="err">unreachable</span>}{v.last_seen_at && <span className="muted"> · {utc(v.last_seen_at)} ({ago(v.last_seen_at)})</span>}{v.last_unreachable_at && <span className="muted"> · last failed {ago(v.last_unreachable_at)}</span>}</dd>
           <dt>TLS identity</dt><dd>{v.identity_status}{v.identity_reason && <span className="muted"> ({v.identity_reason})</span>}</dd>
           <dt>voting power</dt><dd className="mono">{v.voting_power.toLocaleString("en-US")}{v.assigned_rows_last ? <span className="muted"> · {v.assigned_rows_last} rows per blob ({v.expected_load_band})</span> : null}</dd>
           {v.attestation && v.attestation.blob_coverage.den > 0 && (
@@ -102,7 +102,7 @@ function Page() {
         <span className="chip" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name}</span>
         <Info label="These five figures">
           <p>Five checks, in the order you would debug them.</p>
-          <p>Uptime and Endorsed come from the 10-minute check of every registered endpoint. Served, Held to the end and Throughput only cover blobs this validator signed for.</p>
+          <p>Uptime and Endorsed come from our 10-minute check of every registered endpoint. Served, Held to the end and Throughput only cover blobs this validator signed for.</p>
           <p>No figure has a threshold. Checks run from one location.</p>
         </Info>
       </div>
@@ -110,8 +110,7 @@ function Page() {
         <Layer label="Uptime" r={v.reachability_window}
           sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} checks` : undefined}
           what={<>
-            <p>Share of 10-minute checks where the endpoint completed a TLS handshake.</p>
-            <p>Runs for every validator with a host in <code>x/valaddr</code>, assigned or not.</p>
+            <p>Share of checks where the endpoint completed a TLS handshake. We dial every registered endpoint every 10 minutes; validators send nothing.</p>
           </>} />
         <Layer label="Endorsed" r={v.identity_rate_window}
           what={<>
