@@ -99,6 +99,7 @@ export type Network = {
   attestation: Attestation;
   probe_count: number;
   classes: ClassCounts;
+  faults?: number; // FAULT of an assigned shard in any phase; the rate is in-window only
   publications: number;
   publication_bytes: number;
   reconstructable: Reconstructable;
@@ -156,10 +157,10 @@ export type Validator = {
   identity_reason?: string;
   /**
    * How often this observer completed a TLS conversation with the endpoint
-   * over the window, from the ten-minute heartbeat. The one stability figure
+   * over the window, from the five-minute handshake. The one stability figure
    * here whose coverage does not depend on being assigned or attested
    * anything: a validator the publisher never collected a signature from
-   * still gets 144 samples a day.
+   * still gets 288 samples a day.
    */
   reachability_window: Rate;
   /** of the heartbeats that saw a certificate, how many were endorsed */
@@ -172,6 +173,7 @@ export type Validator = {
   attestation: Attestation;
   probe_count: number;
   classes: ClassCounts;
+  faults?: number; // FAULT of an assigned shard in any phase; the rate is in-window only
   assigned_rows_last: number;
   expected_load_band: string;
   /** this validator's serve rate per schedule point: early vs late retention */
@@ -333,17 +335,15 @@ export function useApi<T>(path: string | null, refreshMs = 30000): Fetch<T> {
 
 // ---- formatting ----
 
-export function fmtRate(r: Rate | undefined | null): string {
-  if (!r || r.den === 0 || r.value === null) return "—";
-  // Too few observations to state as a percentage: show the counts instead.
-  if (r.den < MIN_RATED) return fmtCount(r);
-  return (r.value * 100).toFixed(1) + "%";
-}
-
-/** the percentage whenever there is anything to divide; the floor only decides emphasis */
+/** the percentage whenever there is anything to divide; the floor only decides
+ *  emphasis. One decimal never rounds a record with a fault up to 100.0% or a
+ *  record with a success down to 0.0%: those print as bounds. */
 export function fmtPct(r: Rate | undefined | null): string {
   if (!r || r.den === 0 || r.value === null) return "—";
-  return (r.value * 100).toFixed(1) + "%";
+  const s = (r.value * 100).toFixed(1);
+  if (s === "100.0" && r.num < r.den) return ">99.9%";
+  if (s === "0.0" && r.num > 0) return "<0.1%";
+  return s + "%";
 }
 
 /** whether a rate has enough observations behind it to rank or compare. */

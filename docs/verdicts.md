@@ -26,11 +26,16 @@ Source of truth:
 | `post` | after the grace span | the obligation is over; the blob is expected to be gone |
 
 `must_serve_until = creation_timestamp + max(payment_promise_timeout, shard_retention)`,
-using the on-chain params in force when the blob settled. The server itself
-reads the params when the shard is uploaded, which happens between the
-promise height and the settlement tx; the scanner evaluates both ends of that
-interval and, if a params change landed in between, records the earlier
-bound and sets `must_serve_until_ambiguous` on the publication.
+using the on-chain params. The server itself reads the params when the shard
+is uploaded, which happens somewhere between the promise height and the
+settlement tx; the scanner evaluates every params entry in force anywhere in
+that interval and, if they do not all agree, records the earliest bound and
+sets `must_serve_until_ambiguous` on the publication. The earliest bound is
+the one no server could have undershot, so a later window on the server can
+only produce `SERVED_PAST_WINDOW` or `EXPECTED_GONE`, never a fault. The
+scanner also re-reads the params from state every 300 blocks: a governance
+change announces itself with an event, an upgrade handler does not, and a
+change that arrived silently is recorded as in force from the next block.
 
 ## Who is actually obliged
 
@@ -72,7 +77,8 @@ by `TestClassify_UnattestedIsNeverAFault`.
 | outcome | meaning |
 |---|---|
 | `SERVED_OK` | shard returned, every row verifies against the commitment and the returned indices equal the assigned set |
-| `SERVER_ERROR` | the endpoint was reached, completed TLS, proved its identity and answered the RPC with an application error (gRPC `Internal`, `Unknown`, `DataLoss`, `Aborted`). Deliberately not a reachability failure: calling it "unreachable" would be false about a server the observer just talked to |
+| `SERVER_ERROR` | the endpoint was reached, completed TLS, proved its identity and answered the RPC with an application error (gRPC `Internal`, `Unknown`, `DataLoss`, `Aborted`). Deliberately not a reachability failure: calling it "unreachable" would be false about a server the observer just talked to. Deliberately not a fault either: the server did not say it lacks the shard |
+| `RPC_THROTTLED` | the endpoint was reached, proved its identity and refused the request with `ResourceExhausted` that is not the observer's own receive bound: a server-side limit. Celestia has said a per-peer rate limiter is coming to the Fibre server. Never a fault, and not the observer's error either; the probe policy counts it as a failure for backoff |
 | `PARTIAL` | fewer rows than assigned, the ones returned are valid |
 | `WRONG_ROWS` | rows returned but not the assigned set (`ShardMap.Verify` failed) |
 | `INVALID_ROWS` | rows returned but they fail commitment verification |
@@ -99,11 +105,14 @@ One sentence each, and what a reader should conclude.
 | classification | when | conclude |
 |---|---|---|
 | `HEALTHY` | assigned validator returned `SERVED_OK` in window or in grace | the validator kept its promise at this point in time |
-| `FAULT` | the observer **reached** the validator and it failed to hand over a shard the chain proves it stored. In window: `NOT_FOUND`, `INVALID_ROWS`, `SERVER_ERROR`, or rows that verify against neither the commitment nor the assignment. In grace and post: `INVALID_ROWS`, and in grace also wrong or partial rows. Any validator, any phase: a TLS certificate signed by the wrong consensus key (identity is a property of the endpoint, not of one shard) | the validator broke its retention promise or is not who the chain says it is; this is the only class that counts against a validator |
+| `FAULT` | an identity-verified endpoint, for a shard the chain proves it stored, **said it has no such shard** (`NOT_FOUND` in window), **returned bytes that do not verify against the commitment** (`INVALID_ROWS`, any phase), or **returned rows outside this promise's assignment** that verify against nothing (`WRONG_ROWS`/`PARTIAL` in window or grace) | the validator broke its retention promise; this is the only class that counts against a validator. Three conditions, each reproducible by anyone who repeats the probe. One margin: a `NOT_FOUND` whose answer arrives within 30 s of `must_serve_until` is graded as grace (`TOLERATED`) and the row says `phase_note: not_found_at_deadline`, because the server prunes on a minute tick against its own clock and the RPC reaches it tens of seconds after the probe's phase was fixed. The fault count on the overview and per validator counts every phase; the serve rate's population is in-window only |
 | `UNREACHABLE` | assigned and attested, in window, and the observer could not complete a conversation at all: `DNS_FAIL`, `TCP_REFUSED`, `TCP_TIMEOUT`, `TCP_UNREACHABLE`, `TLS_HANDSHAKE_FAIL`, `RPC_UNAVAILABLE`, `RPC_ERROR` | we could not get to it. From one vantage that is not distinguishable from a route, firewall or peering problem on the observer's own path, so it is published in full beside the serve rate and kept out of it |
-| `NOT_REGISTERED` | assigned validator with no Fibre host in `x/valaddr` at the time of the probe (`NO_REGISTERED_HOST`) | a registry state, not a refusal. Jailing and unbonding remove a provider from `AllBondedFibreProviders` while the chain keeps the entry for the jailed grace period |
+| `NOT_REGISTERED` | assigned validator with no Fibre host in `x/valaddr` at the time of the probe (`NO_REGISTERED_HOST`) | a registry state, not a refusal. Jailing and unbonding remove a provider from `AllBondedFibreProviders` while the chain keeps the entry: it is garbage-collected only once the validator is gone from staking state, or jailed and unbonded for longer than the unbonding time plus seven days |
 | `SHADOWED_SHARD` | assigned validator returned rows that **verify against the blob commitment** but whose indices are not this promise's assignment (`WRONG_ROWS` or `PARTIAL` with `commitment_verified`) | another promise over the same blob answered in this one's place. `DownloadShard` is addressed by the commitment alone and a store keeps one shard per commitment, so the validator has no way to tell the two apart. Never a fault |
 | `IDENTITY_EXPIRED` | certificate endorsed by the right consensus key, but its signed validity window has lapsed or has not started | a renewal running late. Endpoint hygiene, not impersonation and not a retention failure |
+| `IDENTITY_MISMATCH` | certificate not endorsed by this validator's consensus key, any validator, any phase (judged before attestation: a certificate is a property of the endpoint) | no client will download from this endpoint, so it is as unusable as one that does not answer. Shown as the endpoint's status and in the endorsement rate, held out of the serve rate: a wrong certificate proves nothing about any shard |
+| `SERVER_ERROR` | assigned and attested, in window, and the endpoint answered with an application error instead of the shard (`SERVER_ERROR` outcome) | the server was reached and did not say it lacks the shard. From one probe this is not distinguishable from a transient fault (an overloaded process, a disk hiccup), so it is shown beside the rate and never inside it; a server that errors at every point is visible as such on its own page. In grace it is `TOLERATED`, after the window `UNREACHABLE_POST_WINDOW` |
+| `THROTTLED` | assigned and attested, in window, and the endpoint refused the download with a rate limit (`RPC_THROTTLED` outcome) | the server was reached and declined to serve this request. That says nothing about the shard, so it is shown beside the rate and never inside it; the prober backs off from a validator that says so, and a limit set tight enough to turn away real clients is visible as such on the validator's own page. In grace it is `TOLERATED`, after the window `UNREACHABLE_POST_WINDOW` |
 | `TOLERATED` | assigned validator, grace phase: `NOT_FOUND` or unreachable | honest pruning lag; do not read anything into it |
 | `EXPECTED_GONE` | assigned validator, post phase: `NOT_FOUND` | correct behaviour after the window |
 | `SERVED_PAST_WINDOW` | assigned validator, post phase: still serving (`SERVED_OK`, `PARTIAL`, or `WRONG_ROWS`) | not a fault; the validator keeps data longer than it must. `WRONG_ROWS` is here rather than under FAULT because `DownloadShard` performs no assignment check at all — assignment is enforced only at upload — so rows outside an assignment, after the obligation ended, are not a rule the validator broke |
@@ -143,17 +152,22 @@ One sentence each, and what a reader should conclude.
   around this number, never around the probe count, and the dashboard states
   it as an **upper bound on the fault rate**, because that is the direction an
   accusation is made in.
-- Below **20** rated observations no percentage is printed at all; the counts
-  are shown instead, and the validator is not ranked among the worst. A single
-  unlucky probe used to render as "0.0%" beside a named validator and sort it
-  above one with a hundred real faults.
+- Below **20** rated observations the percentage is printed dimmed, with no
+  gauge, and the validator is not ranked by it in either direction (it sorts
+  with the rows that have no rate at all). A single unlucky probe used to
+  render as "0.0%" beside a named validator and sort it above one with a
+  hundred real faults.
 - **Reachability** on the overview and validator pages is the latest
   evidence per endpoint: the newest heartbeat or probe (any phase, assigned
   or not, gaps excluded) with TCP and TLS both successful. It is "reachable
   now", not a rate: reachability is a property of the endpoint, not of one
   blob.
-- **TLS identity status** = the latest identity result: verified, mismatch
-  (`IDENTITY_FAIL`), no TLS (`TLS_HANDSHAKE_FAIL`), or unreachable.
+- **TLS identity status** = the latest identity result: verified; expired
+  (`IDENTITY_FAIL` with a stale reason: the right key, a lapsed window);
+  mismatch (any other `IDENTITY_FAIL`); unverified (TLS completed, no
+  identity verdict recorded); no TLS (`TLS_HANDSHAKE_FAIL`); or unreachable.
+  Observer-side `PROBE_ERROR` heartbeats are left out of every reachability
+  figure, as their probe-side twins are.
 - **Reconstructable** for a blob is judged at the latest **complete**
   in-window probe point: the newest point at which every assigned validator
   has a real result (a verdict, not a gap). Grace and post points are never
@@ -210,6 +224,9 @@ column:
 | no Fibre host in the registry | `NOT_REGISTERED` | jailing and unbonding remove the provider from the bonded list; the chain keeps the entry |
 | another promise's rows for the same blob | `SHADOWED_SHARD` | `DownloadShard` takes a commitment, not a promise hash; the validator cannot tell them apart |
 | a lapsed but correctly signed certificate | `IDENTITY_EXPIRED` | a late renewal, not someone else answering |
+| a certificate signed by the wrong consensus key | `IDENTITY_MISMATCH` | an unusable endpoint, which is a statement about the endpoint (its status says so), not about a shard |
+| an application error instead of the shard | `SERVER_ERROR` | the server did not say it lacks the shard; from one probe a hiccup and a loss look the same |
+| a rate limit instead of the shard | `THROTTLED` | the server declined this request; it said nothing about the shard |
 | an outcome the taxonomy does not recognise | `PROBE_ERROR` | "we have not taught the observer about this" is not evidence |
 | a local socket error, a cancelled probe, a verification that timed out | `PROBE_ERROR` | the packets never left this machine |
 

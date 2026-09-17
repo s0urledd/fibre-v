@@ -22,9 +22,9 @@ export default function Overview() {
 
   const notLive = !!(meta?.app_version && !meta.fibre_active);
   const noPubs = !!meta && meta.counts.Publications === 0;
-  const faults = net?.classes?.FAULT ?? 0;
+  const faults = net?.faults ?? net?.classes?.FAULT ?? 0;
   const list = vals?.validators ?? [];
-  const faulted = list.filter((v) => (v.classes.FAULT ?? 0) > 0).length;
+  const faulted = list.filter((v) => (v.faults ?? v.classes.FAULT ?? 0) > 0).length;
   const busy = loading && !net;
 
   const sr = net?.serve_rate;
@@ -70,17 +70,27 @@ export default function Overview() {
           value={net?.reachability_window?.den ? fmtPct(net.reachability_window) : "—"}
           tone={net?.reachability_window?.den ? undefined : "absent"}
           sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} handshakes` : "no handshake yet"}
-          info={<p>TLS handshakes completed, over handshakes attempted. We open a connection to every registered Fibre endpoint every 10 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>} />
+          info={<p>TLS handshakes completed, over handshakes attempted. We open a connection to every registered Fibre endpoint every 5 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>} />
         <Tile label="Endpoints" loading={busy}
           value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
           sub={net ? `${net.reachability.num} answering now · ${net.validators_probed} probed` : undefined} />
         <Tile label="Publications" loading={busy}
           value={net ? net.publications.toLocaleString("en-US") : "—"}
           sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined} />
+        <Tile label="Signed" loading={busy}
+          value={net?.attestation?.blob_coverage?.den ? fmtPct(net.attestation.blob_coverage) : "—"}
+          tone={net?.attestation?.blob_coverage?.den ? undefined : "absent"}
+          sub={net?.attestation?.blob_coverage?.den ? `${net.attestation.attested_blobs.toLocaleString("en-US")} of ${net.attestation.blob_coverage.den.toLocaleString("en-US")} assigned shards` : "no assignment yet"}
+          info={<>
+            <p>Assigned shards whose validator&rsquo;s signature reached the chain. Only these are proven stored and count in the serve rate.</p>
+            <p>Publishers stop collecting signatures at two thirds of stake, so this is the size of the quorum in practice, not a duty anyone missed.</p>
+          </>} />
         <Tile label="Recoverable" loading={busy}
           value={recon && recon.recoverable.den > 0 ? fmtPct(recon.recoverable) : "—"}
           tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}
-          sub={recon && recon.recoverable.den > 0 ? `${recon.recoverable.num} of ${recon.recoverable.den} blobs · ${recon.rate.num} fully served` : "no blob judged yet"}
+          sub={recon && recon.recoverable.den > 0
+            ? `${recon.recoverable.num} of ${recon.recoverable.den} blobs · ${recon.rate.num} fully served${recon.publications_in_window > recon.publications_examined ? ` · newest ${recon.publications_examined.toLocaleString("en-US")} of ${recon.publications_in_window.toLocaleString("en-US")}` : ""}`
+            : "no blob judged yet"}
           info={<>
             <p>Blobs that could be rebuilt from the rows we fetched at the last probe inside the window.</p>
             <p>Fully served: every validator that signed for the blob answered. Recoverable: enough rows came back, whoever answered.</p>
@@ -102,7 +112,7 @@ export default function Overview() {
                 No Fibre publication recorded yet. Collector at height {meta!.last_scanned_height || "?"} on {meta!.chain_id || "?"}.{" "}
                 {meta!.counts.OpenEndpoints === 0
                   ? "Fibre is live; no validator has registered an endpoint yet."
-                  : `${meta!.counts.OpenEndpoints} validators have registered an endpoint. A TLS handshake is attempted with each every 10 minutes.`}
+                  : `${meta!.counts.OpenEndpoints} validators have registered an endpoint. A TLS handshake is attempted with each every 5 minutes.`}
               </>
             )}
           </p>

@@ -6,6 +6,7 @@ import { useApi, type Blob, type Probe, utc, ago, bytes, nsDisplay } from "@/lib
 import Verdict from "@/components/Verdict";
 import Timeline from "@/components/Timeline";
 import Square from "@/components/Square";
+import Info from "@/components/Info";
 
 type Detail = {
   blob: Blob;
@@ -17,31 +18,44 @@ type Detail = {
 function Recon({ b }: { b: Blob }) {
   const r = b.reconstructable;
   if (!r || r.status === "unknown") {
-    return <div className="notice"><strong>Reconstructable: unknown.</strong> <span className="muted">{b.probe_count === 0 ? "No probe has run for this blob yet." : "Row lists were not recorded for this publication, or no in-window point has been probed."}</span></div>;
+    return <div className="note"><span className="label">Reconstructable: unknown</span><p>{b.probe_count === 0 ? "No probe has run for this blob yet." : "No in-window probe point has been completed yet."}</p></div>;
   }
   if (r.status === "pending") {
-    return <div className="notice"><strong>Reconstructable: pending.</strong> <span className="muted">No in-window point is complete yet: {r.probed_validators} of {r.assigned_validators} assigned validators have a result at point <span className="mono">{r.point}</span>. A validator without a row is a gap in observation, not a failure to serve.</span></div>;
+    return <div className="note"><span className="label">Reconstructable: pending</span><p>{r.probed_validators} of {r.assigned_validators} assigned validators have a result at probe {r.point}. A validator without a result is a gap, not a failure.</p></div>;
   }
-  // The encoded row count comes from the API (blob v0: 16,384); never assume a
-  // ratio. The square is the figure; the sentence under it is the qualification.
   const total = r.total_rows > 0 ? r.total_rows : r.needed_rows;
+  const tone = r.status === "yes" ? "ok" : r.status === "degraded" ? "hold" : "fault";
+  const word = r.status === "yes" ? "yes" : r.status === "degraded" ? "degraded" : "no";
   return (
-    <div className="figure">
-      <span className="label">Reconstructable: {r.status}</span>
-      <Square served={r.served_distinct_rows} needed={r.needed_rows} total={total}
-        label={`at point ${r.point}`} />
-      <p className="sample">
-        {r.served_by_validators} of {r.assigned_validators} assigned validators served at point{" "}
-        <span className="mono">{r.point}</span>
-        {r.attestation_known && <>, {r.served_by_attested} of the {r.attested_validators} the promise proves stored it</>}.
-        {" "}Based on rows observed from one location at the last in-window probe ({utc(r.point_at)}); rows not probed are not counted.
-        {r.window_over && " The retention window has since ended, so shards may be pruned as specified."}
-        {" "}Degraded means enough rows were served but not every validator proven to owe this blob answered.
-        {r.attestation_known && r.attested_validators < r.assigned_validators && (
-          <> {r.assigned_validators - r.attested_validators} of the {r.assigned_validators} assigned validators carry no verified
-          signature on this promise, so nothing proves they ever stored it. They cannot demote this verdict by staying quiet.</>
-        )}
-      </p>
+    <div className="recon">
+      <div className="card-head">
+        <span className="label">Reconstructable</span>
+        <span className={"chip " + tone}>{word}</span>
+        <span className="sample">at probe {r.point} · {utc(r.point_at)}{r.window_over && " · window closed since"}</span>
+        <span className="spacer" />
+        <Info label="Reconstructable">
+          <p>Whether the blob could be rebuilt from the rows that came back at the last probe inside the retention window. Rows not probed are not counted; everything is measured from one location.</p>
+          <p><strong>yes</strong>: enough rows, and every validator that signed for the blob answered. <strong>degraded</strong>: enough rows, but a signed validator did not answer. <strong>no</strong>: fewer rows than the blob needs.</p>
+          {r.attestation_known && r.attested_validators < r.assigned_validators && (
+            <p>{r.assigned_validators - r.attested_validators} of the {r.assigned_validators} assigned validators carry no signature on this promise; they cannot lower this verdict by staying quiet.</p>
+          )}
+        </Info>
+      </div>
+      <div className="recon-body">
+        <Square served={r.served_distinct_rows} needed={r.needed_rows} total={total} />
+        <div className="recon-figs">
+          <div className="tile">
+            <span className="label">Rows served</span>
+            <span className="value">{r.served_distinct_rows.toLocaleString("en-US")}<span className="unit">/ {total.toLocaleString("en-US")}</span></span>
+            <span className="sub">{r.needed_rows.toLocaleString("en-US")} needed to rebuild</span>
+          </div>
+          <div className="tile">
+            <span className="label">Validators served</span>
+            <span className="value">{r.served_by_validators}<span className="unit">/ {r.assigned_validators}</span></span>
+            <span className="sub">{r.attestation_known ? `${r.served_by_attested} of ${r.attested_validators} that signed` : "signatures not recorded"}</span>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -77,7 +91,7 @@ function Page() {
       </dl>
       </section>
       <section className="card"><Recon b={b} /></section>
-      <h2>Probe timeline</h2>
+      <h2>Probes</h2>
       {data.probes.length === 0 ? <p className="muted">No probes yet.</p> : (
         <Timeline probes={data.probes} validators={byPower.map((a) => ({ address: a.validator_address, row_count: a.row_count, moniker: a.moniker }))} settled={b.settlement_time} mustServeUntil={b.must_serve_until} graceEnd={graceEnd} />
       )}
@@ -85,7 +99,7 @@ function Page() {
       <h2>Assigned validators</h2>
       <div className="tablewrap">
         <table>
-          <caption>Rows recomputed with fibre-assign from the validator set at the promise height; last verdict per validator.</caption>
+          <caption>Rows recomputed with fibre-assign from the validator set at the promise height. Last verdict per validator.</caption>
           <thead><tr><th>validator</th><th className="right">voting power</th><th className="right">rows</th><th>obligation</th><th>last verdict</th><th>last probe (UTC)</th><th className="right">rows served</th></tr></thead>
           <tbody>
             {byPower.map((a) => {

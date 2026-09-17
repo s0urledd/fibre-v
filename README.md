@@ -53,7 +53,7 @@ cd fibre-tlsverify && go test -race ./...
 cd fibre-assign         && go test -race ./...
 cd fibre-assign/reftest && go test ./...
 
-# fibre-sentinel — 92 unit tests, including the verdict taxonomy table
+# fibre-sentinel — 96 unit tests, including the verdict taxonomy table
 cd fibre-sentinel && go test ./...
 
 # fibre-sentinel — full devnet run with fault injection: 60 measurements, 0 misclassifications
@@ -70,7 +70,7 @@ The product built on the modules above lives in `fibre-sentinel/observer/`,
 |---|---|
 | `observer-collector` | tails `publications.jsonl`, `measurements.jsonl`, `reachability.jsonl` and `state.json` into SQLite (`observer/store`), polls `x/valaddr` into an endpoint history, records its own run span so downtime renders as a gap |
 | `sentinel-probe -policy` | the R4 load policy (`observer/policy`): deterministic per-blob sampling, per-validator and global byte and request caps, backoff that never adds requests |
-| `observer-heartbeat` | dials every registered endpoint every 10 minutes (DNS, TCP, TLS, identity, no download) |
+| `observer-heartbeat` | dials every registered endpoint every 5 minutes (DNS, TCP, TLS, identity, no download) |
 | `observer-api` | read-only JSON under `/v1/`; every rate carries its numerator and denominator |
 | `web/` | static Next.js export: network overview, validator detail, blob detail, methodology, about, API |
 | `deploy/` | systemd units, Caddyfile, docker-compose, litestream config |

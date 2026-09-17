@@ -10,6 +10,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	tlsverify "github.com/plsgiveup/fibre/fibre-tlsverify"
+
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 )
 
@@ -147,8 +149,9 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeServedOK, want: ClassHealthy},
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeNotFound, want: ClassFault},
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeInvalidRows, want: ClassFault},
-		{assigned: true, phase: PhaseInWindow, outcome: OutcomeServerError, want: ClassFault},
-		{assigned: true, phase: PhaseInWindow, outcome: OutcomeIdentityFail, want: ClassFault},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeServerError, want: ClassServerError},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeThrottled, want: ClassThrottled},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeIdentityFail, want: ClassIdentityMismatch},
 		// unreachable is not a retention verdict: from one vantage it is not
 		// distinguishable from a problem on the observer's own path.
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeRPCUnavailable, want: ClassUnreachable},
@@ -173,10 +176,11 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeNotFound, want: ClassTolerated},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeRPCUnavailable, want: ClassTolerated},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeServedOK, want: ClassHealthy},
-		{assigned: true, phase: PhaseGrace, outcome: OutcomeIdentityFail, want: ClassFault},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeIdentityFail, want: ClassIdentityMismatch},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomePartial, want: ClassFault},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeWrongRows, want: ClassFault},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeServerError, want: ClassTolerated},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeThrottled, want: ClassTolerated},
 		// assigned, post
 		{assigned: true, phase: PhasePost, outcome: OutcomeNotFound, want: ClassExpectedGone},
 		{assigned: true, phase: PhasePost, outcome: OutcomeServedOK, want: ClassServedPastWindow},
@@ -187,6 +191,7 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{assigned: true, phase: PhasePost, outcome: OutcomeWrongRows, want: ClassServedPastWindow},
 		{assigned: true, phase: PhasePost, outcome: OutcomePartial, want: ClassServedPastWindow},
 		{assigned: true, phase: PhasePost, outcome: OutcomeServerError, want: ClassUnreachablePostWindow},
+		{assigned: true, phase: PhasePost, outcome: OutcomeThrottled, want: ClassUnreachablePostWindow},
 		// unassigned
 		{assigned: false, phase: PhaseInWindow, outcome: OutcomeNotFound, want: ClassExpectedUnassigned},
 		{assigned: false, phase: PhaseInWindow, outcome: OutcomeServedOK, want: ClassServingUnassigned},
@@ -195,9 +200,10 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{assigned: false, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassServingUnassigned},
 		{assigned: false, phase: PhaseInWindow, outcome: OutcomeInvalidRows, want: ClassServingUnassigned},
 		{assigned: false, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassServingUnassigned},
-		{assigned: false, phase: PhaseInWindow, outcome: OutcomeIdentityFail, want: ClassFault},
+		{assigned: false, phase: PhaseInWindow, outcome: OutcomeIdentityFail, want: ClassIdentityMismatch},
 		{assigned: false, phase: PhaseGrace, outcome: OutcomeNoHost, want: ClassExpectedUnassigned},
 		{assigned: false, phase: PhaseInWindow, outcome: OutcomeServerError, want: ClassExpectedUnassigned},
+		{assigned: false, phase: PhaseInWindow, outcome: OutcomeThrottled, want: ClassExpectedUnassigned},
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeReachable, want: ClassNotProbed},
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeRPCDeadline, want: ClassProbeError},
 		{assigned: false, phase: PhasePost, outcome: OutcomeRPCDeadline, want: ClassProbeError},
@@ -259,12 +265,19 @@ func TestClassify_UnreachableIsNotAFault(t *testing.T) {
 			t.Errorf("%s reached the serve rate as %s", o, got)
 		}
 	}
-	// but a server that answered and failed to produce the shard is a fault
-	for _, o := range []Outcome{OutcomeNotFound, OutcomeInvalidRows, OutcomeServerError} {
+	// but a server that answered and said it has no shard, or handed over
+	// bytes that do not verify, is a fault
+	for _, o := range []Outcome{OutcomeNotFound, OutcomeInvalidRows} {
 		got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: o})
 		if !got.CountsAgainst() {
 			t.Errorf("in-window %s = %s, want a fault: the validator answered and did not serve", o, got)
 		}
+	}
+	// an application error is neither: the server was reached and did not
+	// say it lacks the shard. It has its own class, outside the rate.
+	got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeServerError})
+	if got != ClassServerError || got.Rated() {
+		t.Errorf("in-window SERVER_ERROR = %s, want %s outside the rate", got, ClassServerError)
 	}
 }
 
@@ -305,11 +318,13 @@ func TestClassify_StaleIdentityIsNotImpersonation(t *testing.T) {
 	if stale.CountsAgainst() || stale.Rated() {
 		t.Errorf("lapsed identity reached the serve rate as %s", stale)
 	}
+	// A certificate signed by the wrong key is an unusable endpoint, not a
+	// shard the validator failed to serve: its own class, outside the rate.
 	wrong, _ := Classify(Evidence{
 		Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeIdentityFail,
 	})
-	if !wrong.CountsAgainst() {
-		t.Errorf("a wrong consensus key = %s, want a fault", wrong)
+	if wrong != ClassIdentityMismatch || wrong.Rated() {
+		t.Errorf("a wrong consensus key = %s, want %s outside the rate", wrong, ClassIdentityMismatch)
 	}
 }
 
@@ -354,10 +369,10 @@ func TestClassify_UnattestedIsNeverAFault(t *testing.T) {
 		t.Errorf("a served shard from an unattested validator should say so: %q", reason)
 	}
 
-	// identity is a property of the endpoint, not of one shard, so it is a
-	// fault even with no attestation for this blob
-	if got, _ := Classify(Evidence{Assigned: true, Phase: PhaseInWindow, Outcome: OutcomeIdentityFail}); got != ClassFault {
-		t.Errorf("unattested IDENTITY_FAIL = %s, want %s", got, ClassFault)
+	// identity is a property of the endpoint, not of one shard, so it is
+	// judged the same with or without attestation for this blob
+	if got, _ := Classify(Evidence{Assigned: true, Phase: PhaseInWindow, Outcome: OutcomeIdentityFail}); got != ClassIdentityMismatch {
+		t.Errorf("unattested IDENTITY_FAIL = %s, want %s", got, ClassIdentityMismatch)
 	}
 	// observer-side classes are unchanged by attestation
 	for _, o := range []Outcome{OutcomeProbeError, OutcomeMissed, OutcomeRPCDeadline, OutcomeReachable} {
@@ -538,5 +553,77 @@ func TestScheduleFor_DegenerateWindowUsesRecordParams(t *testing.T) {
 	}
 	if span := msu.Sub(pts[0].At); span > 10*time.Minute {
 		t.Fatalf("no-params fallback spans %s, want <= 10m", span)
+	}
+}
+
+// A publication record from before signature verification carries no
+// attestation evidence. Such a blob is judged under the older rules, never
+// filed as UNATTESTED: "not recorded" is not "did not attest".
+func TestClassify_UnknownAttestationUsesOlderRules(t *testing.T) {
+	cases := []struct {
+		outcome Outcome
+		want    Classification
+	}{
+		{OutcomeServedOK, ClassHealthy},
+		{OutcomeNotFound, ClassFault},
+		{OutcomeTCPRefused, ClassUnreachable},
+	}
+	for _, c := range cases {
+		got, _ := Classify(Evidence{Assigned: true, Attested: false, AttestationUnknown: true, Phase: PhaseInWindow, Outcome: c.outcome})
+		if got != c.want {
+			t.Errorf("unknown attestation, %s: got %s, want %s", c.outcome, got, c.want)
+		}
+		if got == ClassUnattested {
+			t.Errorf("unknown attestation, %s: filed as UNATTESTED", c.outcome)
+		}
+	}
+	// and the measurement says so
+	m := Measurement{SchemaVersion: MeasurementSchemaVersion, AttestationUnknown: true}
+	if m.HasAttestation() {
+		t.Errorf("HasAttestation() = true with AttestationUnknown set")
+	}
+}
+
+// ResourceExhausted is two things: the observer's own receive bound (a probe
+// error) and a server-side limit (a throttle, never a fault, never ours).
+func TestClassifyDownloadError_ResourceExhausted(t *testing.T) {
+	if got := classifyDownloadError(status.Error(codes.ResourceExhausted, "rpc error: grpc: received message larger than max (5000000 vs. 4194304)")); got != OutcomeProbeError {
+		t.Errorf("own receive bound: got %s, want %s", got, OutcomeProbeError)
+	}
+	if got := classifyDownloadError(status.Error(codes.ResourceExhausted, "rate limit exceeded for peer")); got != OutcomeThrottled {
+		t.Errorf("server limit: got %s, want %s", got, OutcomeThrottled)
+	}
+	if cls, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeThrottled}); cls.Rated() {
+		t.Errorf("THROTTLED is rated: %s", cls)
+	}
+}
+
+// A NOT_FOUND that arrives inside NotFoundGuard of the deadline is graded in
+// grace; one that arrives earlier keeps its in-window phase, and a probe that
+// started outside the window is never regraded.
+func TestNotFoundPhaseGuard(t *testing.T) {
+	msu := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	tol := 150 * time.Second
+	if p, re := notFoundPhase(msu.Add(-NotFoundGuard-time.Second), PhaseInWindow, msu, tol); re || p != PhaseInWindow {
+		t.Errorf("outside the guard: regraded=%v phase=%s", re, p)
+	}
+	if p, re := notFoundPhase(msu.Add(-NotFoundGuard+time.Second), PhaseInWindow, msu, tol); !re || p != PhaseGrace {
+		t.Errorf("inside the guard: regraded=%v phase=%s, want grace", re, p)
+	}
+	if p, re := notFoundPhase(msu.Add(time.Hour), PhaseGrace, msu, tol); re || p != PhaseGrace {
+		t.Errorf("started in grace: regraded=%v phase=%s", re, p)
+	}
+}
+
+// The verifying dial's refusal carries the tlsverify reason in its text; the
+// row must keep it, and a lapsed certificate on that path is stale, not a
+// mismatch.
+func TestReasonInText(t *testing.T) {
+	r, ok := reasonInText("rpc error: code = Unavailable desc = connection error: fibre tls identity [cert_expired]: peer certificate expired")
+	if !ok || r != tlsverify.ReasonCertExpired || !identityStale(r) {
+		t.Errorf("got %q ok=%v stale=%v", r, ok, identityStale(r))
+	}
+	if _, ok := reasonInText("rpc error: code = Unavailable desc = connection refused"); ok {
+		t.Errorf("found a reason in an error that has none")
 	}
 }

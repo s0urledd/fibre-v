@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -233,6 +234,12 @@ func loadOrCreateSecret(path string) ([]byte, error) {
 	b = make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return nil, err
+	}
+	// The default path sits under /var/lib/fibre-observer, which a first run on
+	// a fresh host does not have yet; failing here took the prober down with
+	// "no such file or directory" on the secret it was about to create.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create master secret directory: %w", err)
 	}
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return nil, fmt.Errorf("write master secret: %w", err)
@@ -613,7 +620,8 @@ func (p *Policy) AfterProbe(pub scan.Publication, m probe.Measurement) {
 
 	switch m.Outcome {
 	case probe.OutcomeDNSFail, probe.OutcomeTCPRefused, probe.OutcomeTCPTimeout, probe.OutcomeTCPUnreachable,
-		probe.OutcomeTLSFail, probe.OutcomeRPCUnavailable, probe.OutcomeRPCDeadline, probe.OutcomeRPCError:
+		probe.OutcomeTLSFail, probe.OutcomeRPCUnavailable, probe.OutcomeRPCDeadline, probe.OutcomeRPCError,
+		probe.OutcomeThrottled:
 		vs.consecFail++
 		vs.lastFailAt = m.StartedAt
 	case probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomePartial,

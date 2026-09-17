@@ -20,6 +20,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,12 +35,13 @@ func main() {
 		rpc      = flag.String("rpc", "http://127.0.0.1:26657", "CometBFT RPC endpoint")
 		dataDir  = flag.String("data-dir", "./sentinel-data", "reachability.jsonl is written here")
 		vantage  = flag.String("vantage", "local", "vantage name recorded on every measurement")
-		interval = flag.Duration("interval", 10*time.Minute, "how often every registered endpoint is dialled")
+		interval = flag.Duration("interval", 5*time.Minute, "how often every registered endpoint is dialled")
 		once     = flag.Bool("once", false, "one round, then exit")
 		rpcTO    = flag.Duration("rpc-timeout", 15*time.Second, "per-RPC-call timeout")
 		dnsTO    = flag.Duration("dns-timeout", 5*time.Second, "")
 		tcpTO    = flag.Duration("tcp-timeout", 5*time.Second, "")
 		tlsTO    = flag.Duration("tls-timeout", 10*time.Second, "")
+		parallel = flag.Int("parallel", 16, "handshakes in flight at once; one TLS handshake per endpoint per round either way")
 		logLines = flag.Int("log-ring", 300, "log lines kept in memory for the crash dump")
 	)
 	flag.Parse()
@@ -87,10 +89,21 @@ func main() {
 		}
 		sort.Slice(provs, func(i, j int) bool { return provs[i].ConsAddressBech32 < provs[j].ConsAddressBech32 })
 		scheduled := time.Now().UTC().Truncate(time.Second)
-		n, ok := 0, 0
+		// Handshakes run a bounded number at a time. Done one after another,
+		// a round over eighty endpoints with a third of them timing out took
+		// longer than the interval, the ticker dropped ticks, and the "every
+		// five minutes" on the dashboard was not true. Writes stay serialised
+		// so a crash never leaves a half record for the next round to append
+		// after.
+		var (
+			mu    sync.Mutex
+			wg    sync.WaitGroup
+			sem   = make(chan struct{}, *parallel)
+			n, ok int
+		)
 		for _, pr := range provs {
 			if ctx.Err() != nil {
-				return
+				break
 			}
 			_, raw, err := bech32.DecodeAndConvert(pr.ConsAddressBech32)
 			if err != nil || len(raw) != 20 {
@@ -106,26 +119,34 @@ func main() {
 				SchedulePoint: probe.SchedulePoint{At: scheduled, Label: "heartbeat", Phase: probe.PhasePost},
 				SkipDownload:  true,
 			}
-			m := probe.Run(ctx, in, nil, timeouts)
-			m.ValidatorSetHeight = tip
-			b, err := json.Marshal(m)
-			if err != nil {
-				log.Fatalf("marshal: %v", err)
-			}
-			// one write + fsync per record, like the prober's store: a crash
-			// never leaves a half record for the next round to append after.
-			if _, err := out.Write(append(b, '\n')); err != nil {
-				log.Fatalf("write: %v", err)
-			}
-			if err := out.Sync(); err != nil {
-				log.Fatalf("sync: %v", err)
-			}
-			n++
-			if m.Outcome == probe.OutcomeReachable {
-				ok++
-			}
-			log.Printf("%s %s -> %s (%d ms)", pr.ConsAddressBech32[:20], pr.Host, m.Outcome, m.TotalDurationMS)
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(in probe.Input, who, host string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				m := probe.Run(ctx, in, nil, timeouts)
+				m.ValidatorSetHeight = tip
+				b, err := json.Marshal(m)
+				if err != nil {
+					log.Fatalf("marshal: %v", err)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				// one write + fsync per record, like the prober's store
+				if _, err := out.Write(append(b, '\n')); err != nil {
+					log.Fatalf("write: %v", err)
+				}
+				if err := out.Sync(); err != nil {
+					log.Fatalf("sync: %v", err)
+				}
+				n++
+				if m.Outcome == probe.OutcomeReachable {
+					ok++
+				}
+				log.Printf("%s %s -> %s (%d ms)", who, host, m.Outcome, m.TotalDurationMS)
+			}(in, pr.ConsAddressBech32[:20], pr.Host)
 		}
+		wg.Wait()
 
 		log.Printf("round done: h=%d registered=%d probed=%d reachable=%d", tip, len(provs), n, ok)
 	}

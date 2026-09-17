@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type Validator, type Rate, shortBech, ago, MIN_RATED } from "@/lib/api";
+import { type Validator, type Rate, shortBech, ago, MIN_RATED, enoughToRank } from "@/lib/api";
 import RateCell from "./Rate";
 import { Count } from "./Verdict";
 import Info from "./Info";
@@ -17,11 +17,11 @@ type SortKey = "power" | "serve" | "faults" | "uptime" | "throughput";
 
 const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode | null }[] = [
   { key: "uptime", label: "Uptime", dir: 1, info: <>
-      <p>TLS handshakes completed, over handshakes attempted. We open a connection to the registered Fibre endpoint every 10 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>
+      <p>TLS handshakes completed, over handshakes attempted. We open a connection to the registered Fibre endpoint every 5 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>
       <p>Handshakes run from one location, so a dip can be a network problem on our side.</p>
     </> },
   { key: "serve", label: "Serve rate", dir: 1, info: <>
-      <p>Shards handed over, out of the shards this validator signed for. Counted inside the retention window only.</p>
+      <p>When we reached it: shards handed over, out of the shards this validator signed for, inside the retention window. Probes that could not reach it are listed beside the rate as unreachable; being down shows in Uptime.</p>
       <p>Under {MIN_RATED} rated probes the figure is dimmed: too few to lean on.</p>
     </> },
   { key: "faults", label: "Faults", dir: -1, info: <>
@@ -39,8 +39,10 @@ const rv = (r: Rate | null | undefined) => (r && r.den > 0 && r.value !== null ?
 function keyValue(v: Validator, k: SortKey): number | null {
   switch (k) {
     case "power": return v.voting_power;
-    case "serve": return rv(v.serve_rate);
-    case "faults": return v.classes.FAULT ?? 0;
+    // Under the floor a rate is printed dimmed and not ranked: it sorts with
+    // the rows that have no rate at all, in either direction.
+    case "serve": return enoughToRank(v.serve_rate) ? rv(v.serve_rate) : null;
+    case "faults": return v.faults ?? v.classes.FAULT ?? 0;
     case "uptime": return rv(v.reachability_window);
     case "throughput": return v.serve_rows_per_second ?? null;
     default: return null;
@@ -50,23 +52,30 @@ function keyValue(v: Validator, k: SortKey): number | null {
 // The state word: what an operator looks at first. Faults win over
 // everything, then the last check's result.
 function status(v: Validator): { tone: "ok" | "hold" | "fault" | ""; word: string; title: string } {
-  const faults = v.classes.FAULT ?? 0;
+  const faults = v.faults ?? v.classes.FAULT ?? 0;
   if (faults > 0) return { tone: "fault", word: "faults", title: `${faults} probe${faults === 1 ? "" : "s"} where the validator answered but did not hand over a shard it had signed for.` };
   if (!v.host) return { tone: "", word: "no host", title: "No Fibre endpoint registered in x/valaddr." };
   if (v.reachable === null) return { tone: "", word: "no handshake", title: "No handshake attempted yet." };
   if (v.reachable === false) return { tone: "hold", word: "down", title: `Handshake with ${v.host} failed at the last attempt${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}.` };
   if (v.identity_status === "mismatch") return { tone: "hold", word: "bad cert", title: v.identity_reason || "Certificate not signed by this validator's consensus key." };
+  if (v.identity_status === "expired") return { tone: "hold", word: "cert expired", title: v.identity_reason || "Certificate endorsed by the right key, but its signed validity window has lapsed." };
   if (v.identity_status === "no_tls") return { tone: "hold", word: "no tls", title: v.identity_reason || "TLS handshake failed." };
+  if (v.identity_status === "unverified") return { tone: "hold", word: "unverified", title: "Handshake completed, but the certificate was not checked on the last attempt." };
   return { tone: "ok", word: "up", title: `Handshake completed at the last attempt${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}.` };
 }
 
-function initials(v: Validator): string {
-  const m = (v.moniker || "").trim();
-  if (!m) return v.address.slice(0, 2);
+/** avatar text: "node10" → N10, "Kiln" → KI, "P-OPS Team" → PT; the same
+ *  rule on every page so one validator wears one badge. */
+export function initialsOf(moniker: string | undefined, address: string): string {
+  const m = (moniker || "").trim();
+  if (!m) return address.slice(0, 2);
   const parts = m.split(/[\s._-]+/).filter(Boolean);
-  if (parts.length > 1) return parts[0][0] + parts[1][0];
-  // "node10" → N10, "Kiln" → KI
   const tail = m.match(/\d+$/);
+  if (parts.length > 1) {
+    // "node 10" keeps its number the way "node10" does
+    if (parts.length === 2 && /^\d+$/.test(parts[1])) return (parts[0][0] + parts[1]).slice(0, 3);
+    return parts[0][0] + parts[1][0];
+  }
   return tail ? (m[0] + tail[0]).slice(0, 3) : m.slice(0, 2);
 }
 
@@ -137,7 +146,7 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
         <input type="search" placeholder="Search name, address, host" value={q} onChange={(e) => setQ(e.target.value)} aria-label="search validators" />
       </div>
       <div className="tablewrap">
-        <table>
+        <table className="vtable">
           <thead>
             <tr>
               <th className="rank">#</th>
@@ -168,7 +177,7 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                   <td className="rank">{i + 1}</td>
                   <td className="col-pin">
                     <span className="who">
-                      <span className="avatar" aria-hidden="true">{initials(v)}</span>
+                      <span className="avatar" aria-hidden="true">{initialsOf(v.moniker, v.address)}</span>
                       <span>
                         <Link className="name" href={`/validator/?addr=${v.address}`}>
                           {v.moniker || (v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 8) + "…" + v.address.slice(-6))}
@@ -186,8 +195,9 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                   <td className="right">
                     <RateCell r={v.reachability_window} sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined} />
                   </td>
-                  <td className="right"><RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation} /></td>
-                  <td className="right" title="Answered, but did not hand over a shard it had signed for."><Count n={v.classes.FAULT} tier="fault" /></td>
+                  <td className="right"><RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation} unreachable={v.serve_rate_held_out?.UNREACHABLE ?? 0}
+                    sample={(v.serve_rate_held_out?.UNREACHABLE ?? 0) > 0 ? `${v.serve_rate.num} / ${v.serve_rate.den} · ${v.serve_rate_held_out.UNREACHABLE} unreachable` : undefined} /></td>
+                  <td className="right" title="Answered, but did not hand over a shard it had signed for."><Count n={v.faults ?? v.classes.FAULT} tier="fault" /></td>
                   <td className="right" title={v.serve_rows_per_second == null ? "No healthy probe of an assigned shard in this window." :
                     `${v.serve_latency_p50_ms?.toLocaleString("en-US") ?? "—"} ms typical, ${v.serve_latency_p95_ms?.toLocaleString("en-US") ?? "—"} ms at p95, over ${v.serve_latency_sample.toLocaleString("en-US")} healthy probes.`}>
                     {v.serve_rows_per_second == null

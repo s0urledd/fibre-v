@@ -141,8 +141,18 @@ func main() {
 		tr, err := txc.ConfirmTx(ctx, br.TxHash)
 		must(err, fmt.Sprintf("confirm PayForFibre %d", i))
 
-		fmt.Printf("PUB| #%d PUBLISHED promise_height=%d commitment=%s blob_v%d size=%d sigs=%d creation=%s settle_height=%d settle_tx=%s dur=%s\n",
-			i, sp.Height, hex.EncodeToString(sp.Commitment[:]), sp.BlobVersion, sp.UploadSize, len(sp.ValidatorSignatures),
+		// ValidatorSignatures is positional over the validator set: a slot the
+		// publisher never filled is an empty entry, so len() is the set size,
+		// not the signature count. Report both so a run at the two-thirds
+		// threshold reads as what it is.
+		signed := 0
+		for _, sig := range sp.ValidatorSignatures {
+			if len(sig) > 0 {
+				signed++
+			}
+		}
+		fmt.Printf("PUB| #%d PUBLISHED promise_height=%d commitment=%s blob_v%d size=%d sigs=%d/%d creation=%s settle_height=%d settle_tx=%s dur=%s\n",
+			i, sp.Height, hex.EncodeToString(sp.Commitment[:]), sp.BlobVersion, sp.UploadSize, signed, len(sp.ValidatorSignatures),
 			sp.CreationTimestamp.UTC().Format(time.RFC3339Nano), tr.Height, br.TxHash, time.Since(t0).Round(time.Millisecond))
 
 		if i < *count-1 {

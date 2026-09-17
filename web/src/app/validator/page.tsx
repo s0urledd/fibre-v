@@ -1,10 +1,10 @@
 "use client";
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type Window, type Rate, type ClassCounts, fmtPct, fmtCount, utc, ago, shortHex } from "@/lib/api";
+import { useApi, type Validator, type Probe, type Window, type Rate, fmtPct, fmtCount, utc, ago, shortHex } from "@/lib/api";
+import { initialsOf } from "@/components/ValidatorTable";
 import Verdict from "@/components/Verdict";
-import RateCell from "@/components/Rate";
 import Info from "@/components/Info";
 import Graduation from "@/components/Graduation";
 import Tile from "@/components/Tile";
@@ -12,17 +12,19 @@ import Tile from "@/components/Tile";
 type Detail = {
   window: Window;
   validator: Validator;
-  windows: {
-    window: Window;
-    serve_rate: Rate;
-    rated_probe_count: number;
-    classes: ClassCounts;
-    serve_rate_coverage: Rate;
-    serve_rate_by_obligation: Rate;
-    serve_rate_held_out: ClassCounts;
-  }[];
   recent_probes: Probe[];
 };
+
+// the same words the overview table uses for the same states
+function identityWord(status: string): string {
+  switch (status) {
+    case "mismatch": return "bad cert";
+    case "expired": return "cert expired";
+    case "no_tls": return "no tls";
+    case "unverified": return "unverified";
+    default: return status.replace(/_/g, " ");
+  }
+}
 
 function Layer({ label, r, what, sample }: { label: string; r: Rate | null | undefined; what: React.ReactNode; sample?: string }) {
   const absent = !r || r.den === 0;
@@ -36,7 +38,8 @@ function Layer({ label, r, what, sample }: { label: string; r: Rate | null | und
 
 function Page() {
   const addr = useSearchParams().get("addr") ?? "";
-  const { data, error, loading } = useApi<Detail>(addr ? `/v1/validators/${addr}` : null);
+  const [win, setWin] = useState("24h");
+  const { data, error, loading } = useApi<Detail>(addr ? `/v1/validators/${addr}?window=${win}` : null);
   if (!addr) return <p className="notice">Open a validator from the <Link href="/">overview</Link>, or add <code>?addr=&lt;consensus address&gt;</code>.</p>;
   if (error) return <p className="notice err">{error}</p>;
   if (loading || !data) return <p className="muted">Loading…</p>;
@@ -53,7 +56,7 @@ function Page() {
       <section className="card">
         <div className="card-head">
           <span className="who">
-            <span className="avatar" aria-hidden="true">{(v.moniker || v.address).slice(0, 2)}</span>
+            <span className="avatar" aria-hidden="true">{initialsOf(v.moniker, v.address)}</span>
             <span>
               <h1 style={{ margin: 0 }}>{v.moniker || <span className="mono">{v.cons_address || v.address}</span>}</h1>
               {v.moniker && <span className="addr mono faint">{v.cons_address || v.address}</span>}
@@ -63,7 +66,7 @@ function Page() {
           <span className="chips">
             {v.reachable === true && v.identity_status === "verified" && <span className="chip ok"><i className="dot ok" />up</span>}
             {v.reachable === false && <span className="chip hold" title={`Could not reach ${v.host} at the last attempt.`}><i className="dot hold" />down</span>}
-            {v.reachable === true && v.identity_status !== "verified" && <span className="chip hold" title={v.identity_reason}><i className="dot hold" />{v.identity_status.replace("_", " ")}</span>}
+            {v.reachable === true && v.identity_status !== "verified" && <span className="chip hold" title={v.identity_reason}><i className="dot hold" />{identityWord(v.identity_status)}</span>}
             {!v.host && <span className="chip">no Fibre endpoint</span>}
             {v.jailed && <span className="chip hold" title="Jailed by the chain. Shards it signed for are still owed.">jailed</span>}
             {v.bond_status && <span className="chip">{v.bond_status.replace("BOND_STATUS_", "").toLowerCase()}</span>}
@@ -99,18 +102,22 @@ function Page() {
           reader has no way to tell which one the readings above are from. */}
       <div className="section-head" style={{ marginTop: "var(--s5)" }}>
         <h2 style={{ margin: 0 }}>Service</h2>
-        <span className="chip" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name}</span>
+        <span className="sample" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name} window</span>
         <Info label="These five figures">
           <p>Five figures, in the order you would debug them.</p>
-          <p>Uptime and Endorsed come from a TLS handshake with the endpoint every 10 minutes. Served, Held to the end and Throughput only cover blobs this validator signed for.</p>
+          <p>Uptime and Endorsed come from a TLS handshake with the endpoint every 5 minutes. Served, Held to the end and Throughput only cover blobs this validator signed for.</p>
           <p>No figure has a threshold. Checks run from one location.</p>
         </Info>
+        <span className="spacer" />
+        <div className="pills" role="group" aria-label="window">
+          {["24h", "7d", "30d", "all"].map((w) => <button key={w} aria-pressed={win === w} onClick={() => setWin(w)}>{w}</button>)}
+        </div>
       </div>
       <div className="tiles five">
         <Layer label="Uptime" r={v.reachability_window}
           sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined}
           what={<>
-            <p>TLS handshakes completed, over handshakes attempted. We open a connection to the endpoint every 10 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>
+            <p>TLS handshakes completed, over handshakes attempted. We open a connection to the endpoint every 5 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>
           </>} />
         <Layer label="Endorsed" r={v.identity_rate_window}
           what={<>
@@ -118,9 +125,10 @@ function Page() {
             <p>Handshakes that never reached a certificate are not counted here, so an outage is not reported twice.</p>
           </>} />
         <Layer label="Served" r={v.serve_rate}
+          sample={(v.serve_rate_held_out?.UNREACHABLE ?? 0) > 0 ? `${fmtCount(v.serve_rate)} · ${v.serve_rate_held_out.UNREACHABLE} unreachable` : undefined}
           what={<>
-            <p>Shards handed over, out of the shards this validator signed for, inside the retention window.</p>
-            <p>Blobs without this validator&rsquo;s signature on chain are not counted either way.</p>
+            <p>When we reached it: shards handed over, out of the shards this validator signed for, inside the retention window.</p>
+            <p>Probes that could not reach it are counted beside the rate as unreachable, not inside it; Uptime is where being down shows. Blobs without this validator&rsquo;s signature on chain are not counted either way.</p>
           </>} />
         <Layer label="Held to the end" r={last?.serve_rate}
           sample={last ? `${fmtCount(last.serve_rate)} at ${last.key}` : undefined}
@@ -149,15 +157,8 @@ function Page() {
           </>} />
       </div>
 
-      {points.length > 0 && <section className="card" style={{ marginTop: "var(--s4)" }}><Graduation points={points} /></section>}
+      {points.some((p) => p.serve_rate.den > 0) && <section className="card" style={{ marginTop: "var(--s4)" }}><Graduation points={points} /></section>}
 
-      <h2>Serve rate</h2>
-      {/*
-        Counted in blobs, not in probes. Each obligation is probed at four
-        schedule points, so the probe count reads four times larger than the
-        thing it describes, and an operator seeing a four-figure number beside
-        their own name reads an accusation where the chain is merely silent.
-      */}
       {(unattested > 0 || unknown > 0) && (
         <p className="coverage">
           {unattested.toLocaleString("en-US")} blob{unattested === 1 ? "" : "s"} in this window carry no signature from this validator and are not in these rates.
@@ -171,24 +172,6 @@ function Page() {
           </Info>
         </p>
       )}
-      <div className="tablewrap">
-        <table>
-          <caption>healthy / (healthy + fault) over in-window probes of shards this validator signed for. Grace-period probes are recorded but not counted; other classes are listed beside the rate.</caption>
-          <thead><tr><th>window</th><th className="right">serve rate</th><th className="right">probes</th><th className="right">coverage</th><th>verdicts</th></tr></thead>
-          <tbody>
-            {data.windows.map((w) => (
-              <tr key={w.window.name}>
-                <td className="mono">{w.window.name} <span className="faint">{utc(w.window.start)} →</span></td>
-                <td className="right mono"><RateCell r={w.serve_rate} obligations={w.serve_rate_by_obligation} /></td>
-                <td className="right mono">{w.rated_probe_count}</td>
-                <td className="right mono faint" title={"this span's rate speaks for " + w.serve_rate_coverage.num + " of " + w.serve_rate_coverage.den + " in-window probes of an assigned shard"}>{w.serve_rate_coverage.den > 0 ? Math.round((w.serve_rate_coverage.value ?? 0) * 100) + "%" : "·"}</td>
-                <td>{Object.entries(w.classes).sort().map(([k, n]) => <span key={k} style={{ marginRight: 8 }}><Verdict cls={k} /> <span className="mono">{n}</span></span>)}{Object.keys(w.classes).length === 0 && <span className="muted">— (0 probes)</span>}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
       <h2>Recent probes</h2>
       <div className="tablewrap">
         <table>
@@ -197,7 +180,7 @@ function Page() {
           <tbody>
             {data.recent_probes.length === 0 && <tr><td colSpan={8} className="muted">No probes for this validator yet.</td></tr>}
             {data.recent_probes.map((p) => (
-              <tr key={p.promise_hash + p.scheduled_at}>
+              <tr key={`${p.vantage}|${p.promise_hash}|${p.scheduled_at}`}>
                 <td className="mono">{utc(p.started_at)}</td>
                 <td className="mono"><Link href={`/blob/?hash=${p.promise_hash}`}>{shortHex(p.promise_hash, 6)}</Link></td>
                 <td className="mono">{p.schedule_label}</td>

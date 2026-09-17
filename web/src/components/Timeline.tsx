@@ -1,11 +1,12 @@
 import Link from "next/link";
 import { type Probe, utc } from "@/lib/api";
-import { verdictDef, tierColor } from "./Verdict";
+import { verdictDef, Mark } from "./Verdict";
 
-// Probe timeline (R9 section 6.5): x = time from settlement through
-// must_serve_until and the grace boundary; one row per assigned validator;
-// one cell per probe, filled by verdict, glyph inside. NOT_PROBED cells are
-// dashed outlines. No animation.
+/**
+ * One row per assigned validator, one dot per probe, placed by the time it
+ * ran between settlement and the end of the grace period. Colour and shape
+ * follow the verdict marks used everywhere else on the site.
+ */
 export default function Timeline({ probes, validators, settled, mustServeUntil, graceEnd }: {
   probes: Probe[];
   validators: { address: string; row_count: number; moniker?: string }[];
@@ -17,84 +18,84 @@ export default function Timeline({ probes, validators, settled, mustServeUntil, 
   const tMsu = new Date(mustServeUntil).getTime();
   const tGrace = new Date(graceEnd).getTime();
   const last = Math.max(tGrace, ...probes.map((p) => new Date(p.started_at).getTime()));
-  const t1 = last + (last - t0) * 0.05;
-  const W = 900, L = 150, R = 20, rowH = 22, top = 40;
-  const H = top + validators.length * rowH + 30;
+  const t1 = last + (last - t0) * 0.04;
+  const W = 900, L = 176, R = 24, rowH = 20, top = 44;
+  const H = top + validators.length * rowH + 26;
   const x = (t: number) => L + ((t - t0) / Math.max(1, t1 - t0)) * (W - L - R);
   const byVal = new Map<string, Probe[]>();
   for (const p of probes) {
     if (!byVal.has(p.validator_address)) byVal.set(p.validator_address, []);
     byVal.get(p.validator_address)!.push(p);
   }
+  const marks: [number, string][] = [[t0, "settled"], [tMsu, "must serve until"], [tGrace, "grace end"]];
+  const bottom = top + validators.length * rowH;
   return (
     <div className="timeline">
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="xMinYMid meet" role="img" aria-label="probe timeline">
-        <rect x={x(t0)} y={top - 4} width={x(tMsu) - x(t0)} height={validators.length * rowH + 8} fill="var(--paper-2)" />
+        <rect x={x(t0)} y={top - 8} width={x(tMsu) - x(t0)} height={validators.length * rowH + 12} fill="var(--wash)" rx={3} />
         {(() => {
-          const marks: [number, string][] = [[t0, "settled"], [tMsu, "must serve until"], [tGrace, "grace end"]];
-          let lastX = -1e9, tier = 0;
-          return marks.map(([t, label]) => {
+          // Two marks closer than a label's width share the top edge, so the
+          // second one moves up a line instead of printing over the first.
+          let lastX = -1e9, lifted = false;
+          return marks.map(([t, label], i) => {
             const cx = x(t);
-            // ~5.5px per character at 10px: enough to know when two collide.
-            tier = cx - lastX < label.length * 5.5 ? 1 - tier : 0;
+            lifted = cx - lastX < label.length * 6 ? !lifted : false;
             lastX = cx;
             return (
               <g key={label}>
-                <line x1={cx} x2={cx} y1={top - 12} y2={top + validators.length * rowH + 4} stroke="var(--rule)" strokeDasharray="3 3" />
-                <text x={cx + 3} y={top - 14 - tier * 11} fontSize="10" fill="var(--text-2)">{label}</text>
+                <line x1={cx} x2={cx} y1={top - 8} y2={bottom + 4} stroke="var(--line-2)" strokeDasharray="2 3" />
+                <text x={cx} y={top - 14 - (lifted ? 12 : 0)} fontSize="10" fill="var(--text-3)" textAnchor={i === 0 ? "start" : "middle"}>{label}</text>
               </g>
             );
           });
         })()}
         {validators.map((v, i) => {
-          const y = top + i * rowH;
+          const y = top + i * rowH + rowH / 2;
           const ps = byVal.get(v.address) ?? [];
           return (
             <g key={v.address}>
-              <text x={4} y={y + 14} fontSize="11" fontFamily="ui-monospace, Menlo, monospace" fill="var(--text)">
+              <text x={4} y={y + 4} fontSize="11" fontFamily="ui-monospace, Menlo, monospace" fill="var(--text-2)">
                 <title>{v.address}</title>
                 <a href={`/validator/?addr=${v.address}`}>{label(v)}</a>
-                <tspan fill="var(--text-2)"> {v.row_count}r</tspan>
+                <tspan fill="var(--text-3)"> {v.row_count}</tspan>
               </text>
-              <line x1={L} x2={W - R} y1={y + 10} y2={y + 10} stroke="var(--rule)" />
+              <line x1={L} x2={W - R} y1={y} y2={y} stroke="var(--line)" />
               {ps.map((p) => {
                 const d = verdictDef(p.classification);
-                const fill = tierColor(d.tier);
                 const cx = x(new Date(p.started_at).getTime());
-                const gap = d.tier === "gap";
+                const t = `${d.label} · ${p.schedule_label} · ${utc(p.started_at)} · ${p.outcome} · ${p.rows_returned}/${p.rows_expected} rows · ${p.total_duration_ms} ms${p.raw_error ? " · " + p.raw_error : ""}`;
                 return (
-                  <g key={p.scheduled_at}>
-                    <title>{`${p.classification} · ${p.schedule_label} · ${utc(p.started_at)} · ${p.outcome} · ${p.rows_returned}/${p.rows_expected} rows · ${p.total_duration_ms} ms${p.raw_error ? " · " + p.raw_error : ""}`}</title>
-                    <rect x={cx - 7} y={y + 2} width={14} height={16} rx={1}
-                      fill={gap ? "transparent" : "var(--paper)"} stroke={gap ? "var(--edge)" : fill}
-                      strokeDasharray={gap ? "2 2" : undefined} strokeWidth={1} />
-                    <g transform={`translate(${cx - 5} ${y + 5})`} fill="none" stroke={fill} strokeWidth={1.25}>
-                      {d.tier === "fault" && <path d="M5 1 L9.2 8.6 H0.8 Z" fill={fill} stroke="none" />}
-                      {d.tier === "kept" && <circle cx={5} cy={5} r={3.2} fill={fill} stroke="none" />}
-                      {d.tier === "hold" && <><circle cx={5} cy={5} r={3.2} /><path d="M5 1.8 A3.2 3.2 0 0 1 5 8.2 Z" fill={fill} stroke="none" /></>}
-                      {d.tier === "held" && <circle cx={5} cy={5} r={3.2} />}
-                      {d.tier === "gap" && <path d="M1.8 5 H8.2" strokeLinecap="round" />}
-                    </g>
+                  <g key={`${p.vantage}|${p.scheduled_at}`} transform={`translate(${cx} ${y})`}>
+                    <title>{t}</title>
+                    <circle r={7} fill="var(--card)" />
+                    {d.tier === "kept" && <circle r={4} fill="var(--ok)" />}
+                    {d.tier === "fault" && <path d="M0 -4.6 L4.4 3.4 H-4.4 Z" fill="var(--fault)" />}
+                    {d.tier === "hold" && <circle r={4} fill="var(--hold)" />}
+                    {d.tier === "held" && <circle r={3.6} fill="none" stroke="var(--text-3)" strokeWidth={1.3} />}
+                    {d.tier === "gap" && <path d="M-3.5 0 H3.5" stroke="var(--text-3)" strokeWidth={1.3} strokeLinecap="round" />}
                   </g>
                 );
               })}
             </g>
           );
         })}
-        <text x={L} y={H - 8} fontSize="10" fill="var(--text-2)">{utc(settled)}</text>
-        <text x={W - R} y={H - 8} fontSize="10" fill="var(--text-2)" textAnchor="end">{utc(new Date(t1).toISOString())}</text>
+        <text x={L} y={H - 6} fontSize="10" fill="var(--text-3)">{utc(settled)}</text>
+        <text x={W - R} y={H - 6} fontSize="10" fill="var(--text-3)" textAnchor="end">{utc(new Date(t1).toISOString())}</text>
       </svg>
-      <p className="faint">Rows: assigned validators, ordered by voting power. Hover a cell for the probe's outcome, rows and error. <Link href="/methodology/#verdicts">Verdict definitions</Link>.</p>
+      <ul className="tl-key">
+        <li><Mark tier="kept" /> served</li>
+        <li><Mark tier="held" /> not counted</li>
+        <li><Mark tier="hold" /> held out</li>
+        <li><Mark tier="fault" /> fault</li>
+        <li><Mark tier="gap" /> not probed</li>
+        <li className="faint">rows assigned after each name · <Link href="/methodology/#verdicts">definitions</Link></li>
+      </ul>
     </div>
   );
 }
 
-// label names the row the way the table below it does: the validator's own
-// moniker when the chain gives us one, the address otherwise. The label column
-// is 150px of monospace, so a long moniker is cut; the full address is in the
-// <title> either way, so nothing here is the only place a row is identified.
 function label(v: { address: string; moniker?: string }) {
   const m = (v.moniker ?? "").trim();
-  if (!m) return v.address.slice(0, 10) + "\u2026";
-  return m.length > 14 ? m.slice(0, 13) + "\u2026" : m;
+  if (!m) return v.address.slice(0, 10) + "…";
+  return m.length > 16 ? m.slice(0, 15) + "…" : m;
 }
