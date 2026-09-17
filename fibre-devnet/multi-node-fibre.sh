@@ -376,9 +376,14 @@ build_genesis() {
 # ----------------------------------------------------------------------------
 start_nodes() {
   for i in $(seq 0 $((N - 1))); do
+    # --force-no-bbr: v10 refuses to start unless the host's TCP congestion
+    # control is BBR. On a devnet where every peer is on the same machine the
+    # setting is irrelevant, and celestia-app's own local_devnet passes the
+    # same flag.
     celestia-appd start --home "$(APP_HOME "$i")" \
       --grpc.enable --api.enable \
       --delayed-precommit-timeout 1s \
+      --force-no-bbr \
       > "${LOGDIR}/app${i}.log" 2>&1 &
     APP_PIDS+=($!)
     echo "--> node ${i} pid ${APP_PIDS[$i]}  rpc :$(rpc_port "$i")  grpc :$(grpc_port "$i")  privval :$(privval_port "$i")"
