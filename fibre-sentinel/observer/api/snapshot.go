@@ -85,6 +85,7 @@ type snap[T any] struct {
 type snapshotCache[T any] struct {
 	label      string
 	compute    func(context.Context, Window) (T, error)
+	born       time.Time
 	mu         sync.Mutex
 	entries    map[string]*snap[T]
 	refreshing map[string]bool
@@ -92,9 +93,26 @@ type snapshotCache[T any] struct {
 
 func newSnapshotCache[T any](label string, compute func(context.Context, Window) (T, error)) *snapshotCache[T] {
 	return &snapshotCache[T]{
-		label: label, compute: compute,
+		label: label, compute: compute, born: time.Now(),
 		entries: map[string]*snap[T]{}, refreshing: map[string]bool{},
 	}
+}
+
+// ttl is ttlFor scaled down while the cache is young. The long windows' TTLs
+// assume a long history, where a minute of new data cannot move an "all"
+// figure; on a fresh deployment the whole history is minutes old and the
+// "all" tile showed one publication for half an hour while 24h showed eight.
+// A tenth of the cache's age, never under a minute, converges on the table
+// above within hours and costs nothing once it has.
+func (c *snapshotCache[T]) ttl(name string) time.Duration {
+	t := ttlFor(name)
+	if young := time.Since(c.born) / 10; young < t {
+		if young < time.Minute {
+			return time.Minute
+		}
+		return young
+	}
+	return t
 }
 
 // get returns the snapshot for win with the moment it was taken and what it
@@ -104,7 +122,7 @@ func (c *snapshotCache[T]) get(ctx context.Context, log logf, win Window) (T, ti
 	var zero T
 	c.mu.Lock()
 	s := c.entries[win.Name]
-	if s != nil && time.Since(s.at) >= ttlFor(win.Name) && !c.refreshing[win.Name] {
+	if s != nil && time.Since(s.at) >= c.ttl(win.Name) && !c.refreshing[win.Name] {
 		c.refreshing[win.Name] = true
 		go c.background(log, win)
 	}

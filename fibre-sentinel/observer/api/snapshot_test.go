@@ -139,3 +139,23 @@ func TestSnapshotTTLGrowsWithTheWindow(t *testing.T) {
 		t.Error("an unrecognised window should get the most conservative refresh rate, not the cheapest")
 	}
 }
+
+// A cache younger than the long windows' TTLs refreshes them faster: a fresh
+// deployment's "all" window is minutes of data, not months.
+func TestSnapshotTTLScalesWithCacheAge(t *testing.T) {
+	c := newSnapshotCache("t", func(context.Context, Window) (int, error) { return 0, nil })
+	if got := c.ttl("all"); got != time.Minute {
+		t.Fatalf("new cache: ttl(all) = %s, want 1m", got)
+	}
+	c.born = time.Now().Add(-100 * time.Minute)
+	if got := c.ttl("all"); got != 10*time.Minute {
+		t.Fatalf("100 min old: ttl(all) = %s, want 10m", got)
+	}
+	c.born = time.Now().Add(-48 * time.Hour)
+	if got := c.ttl("all"); got != ttlFor("all") {
+		t.Fatalf("two days old: ttl(all) = %s, want %s", got, ttlFor("all"))
+	}
+	if got := c.ttl("24h"); got != time.Minute {
+		t.Fatalf("24h never below its own floor: %s", got)
+	}
+}
