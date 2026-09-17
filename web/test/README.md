@@ -33,8 +33,8 @@ outages that begin at a known hour, a validator with no registered host, one
 whose certificate has lapsed, one that never signed, and one that prunes before
 the deadline.
 
-The reachability heartbeat is generated at its real cadence — every ten
-minutes for seven days, so 1,008 samples per registered validator — because
+The reachability heartbeat is generated at its real cadence — every five
+minutes for seven days, so 2,016 samples per registered validator — because
 that is the one stability signal whose coverage does not depend on the chain
 proving an obligation, and a dozen rows an hour deep put every validator under
 the twenty-observation floor so the uptime column was never exercised.

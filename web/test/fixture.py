@@ -415,8 +415,8 @@ db.executemany("""INSERT INTO probes (
     [r[1] for r in PROBE_ROWS])
 
 # --- reachability heartbeats ---------------------------------------------
-# The real heartbeat dials every registered endpoint every ten minutes without
-# downloading, for as long as the endpoint is registered. That is 144 samples a
+# The real heartbeat dials every registered endpoint every five minutes without
+# downloading, for as long as the endpoint is registered. That is 288 samples a
 # day per validator regardless of what the chain assigned or attested, which is
 # why it is the one stability figure on the site whose coverage does not depend
 # on a quorum — and it is the reason the history is generated here at its true
@@ -424,7 +424,7 @@ db.executemany("""INSERT INTO probes (
 # an hour deep. Twelve rows put every validator under the twenty-observation
 # floor, so the uptime column showed "under floor" for the entire set and the
 # design was never actually exercised.
-HEARTBEAT_EVERY = timedelta(minutes=10)
+HEARTBEAT_EVERY = timedelta(minutes=5)
 HEARTBEAT_SPAN = timedelta(days=7)
 # A couple of otherwise healthy endpoints flap, because a fixture where uptime
 # is 100.0% or 0.0% and nothing between never shows what a real reading looks

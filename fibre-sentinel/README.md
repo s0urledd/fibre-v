@@ -190,7 +190,10 @@ and which phase the probe's *actual start time* falls in), never an aggregate:
 | assigned | attested | phase | outcome | classification |
 |---|---|---|---|---|
 | yes | no | any | any | **UNATTESTED** (no proof this validator ever stored the shard; outside every rate, in both directions) |
-| yes | yes | in-window (`t < must_serve_until`) | `NOT_FOUND` / `INVALID_ROWS` / `SERVER_ERROR` / wrong key | **FAULT** (reached, and it did not serve what it holds) |
+| yes | yes | in-window (`t < must_serve_until`) | `NOT_FOUND` / `INVALID_ROWS` | **FAULT** (identity verified, and it did not serve what the chain proves it holds; a `NOT_FOUND` within 30 s of the deadline is `TOLERATED`) |
+| yes | yes | in-window | `SERVER_ERROR` | **SERVER_ERROR** (reached, answered with an application error; not distinguishable from a hiccup from one probe) |
+| yes | yes | in-window | `RPC_THROTTLED` | **THROTTLED** (reached, refused with a rate limit; says nothing about the shard) |
+| any | any | any | certificate not endorsed by this validator's consensus key | **IDENTITY_MISMATCH** (an unusable endpoint, shown as its status; not a fault) |
 | yes | yes | in-window | `DNS_FAIL` / `TCP_*` / `TLS_HANDSHAKE_FAIL` / `RPC_UNAVAILABLE` / `RPC_ERROR` | **UNREACHABLE** (not a fault: from one vantage this is our path too) |
 | yes | yes | any | `NO_REGISTERED_HOST` | **NOT_REGISTERED** (jailing and unbonding drop the bonded entry) |
 | yes | yes | any | `WRONG_ROWS` / `PARTIAL` whose rows verify against the commitment | **SHADOWED_SHARD** (another promise over the same blob answered) |

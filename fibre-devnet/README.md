@@ -67,9 +67,10 @@ server) that needs about 35 GB of RAM.
 
 ### Producing each verdict class on purpose
 
-The taxonomy has nine classes and a devnet that just runs produces two of them.
-The rest come from doing something to it, and the two that matter most come from
-the same action at different times:
+A devnet that just runs produces `HEALTHY`, and once windows close, `TOLERATED`
+and `EXPECTED_GONE`. Everything else comes from doing something to it. The two
+that the taxonomy exists to tell apart come from the same action at different
+times:
 
 ```bash
 # 1. start the devnet on a real curve, publish a few blobs
@@ -88,12 +89,59 @@ the chain proves they held the shard: a probe that cannot reach them afterwards
 is **UNREACHABLE**. Blobs from step 3 never reached them, so they never signed
 and nothing proves they were ever sent anything: a probe is **UNATTESTED**,
 whatever happened on the wire. Same two validators, same downtime, two different
-classes, and only one of them is ever held against anyone — which is the
-distinction the whole taxonomy exists to make.
+classes, and neither is held against anyone.
+
+The three classes that say something about a server that *is* up come from
+three different layers of the same process, and each has a one-line trigger.
+Nothing here needs a restart except the last one.
+
+```bash
+H=${FIBRE_DEVNET_HOME:-$HOME/.fibre-devnet}; O=${FIBRE_DEVNET_PORT_OFFSET:-0}
+
+# FAULT: identity verifies, the chain proves it signed for the shard, and it
+# answers NotFound. Delete the flat shard files under one server's store; the
+# pebble marker stays, store.Get finds no file behind it and DownloadShard
+# returns codes.NotFound.
+rm "$H"/fibre3/shards/*
+
+# SERVER_ERROR: same state, but the store fails for a reason other than
+# "not there". Cut every shard file down to its 4-byte codec-version header;
+# the decoder fails on the next field and DownloadShard returns codes.Internal.
+truncate -s 4 "$H"/fibre5/shards/*
+
+# IDENTITY_MISMATCH: the certificate is endorsed by a consensus key that is not
+# this validator's. Restart fibre 7 against node 2's signer; the certificate it
+# mints is endorsed by val2's key and a client expecting val7 refuses it.
+# --unlimited-budget is what lets it boot: with a budget, start refuses a
+# signer that is not in the active set. On a real network the same thing is a
+# TLS-terminating proxy in front of the server, or a signer swapped without
+# restarting Fibre.
+kill "$(awk '$1==7{print $2}' "$H"/logs/fibre-pids)"
+fibre start --home "$H"/fibre7 \
+  --app-grpc-address 127.0.0.1:$((9090+O+70)) \
+  --signer-grpc-address 127.0.0.1:$((26669+O+200)) \
+  --server-listen-address 127.0.0.1:$((7980+O+7)) \
+  --unlimited-budget >> "$H"/logs/fibre7.log 2>&1 &
+sed -i "s/^7 .*/7 $! $((7980+O+7))/" "$H"/logs/fibre-pids
+```
+
+Only blobs a server signed for before the change are rated, and the probes
+that rate them run at fixed points inside the ten-minute window, so each class
+shows up within one retention window of the command:
+
+```bash
+curl -s 'http://127.0.0.1:8080/v1/probes?class=SERVER_ERROR&limit=5'
+```
+
+What happens next differs per server. The upload path never reads the shard
+files, so val3 and val5 keep signing new uploads and their new blobs are
+`HEALTHY` again until the command is repeated. val7's uploads are signed with
+the wrong key, the publisher drops them, and its new blobs are `UNATTESTED`;
+its 5-minute handshake reads `bad certificate` on the overview until it is
+restarted against its own signer.
 
 `IDENTITY_EXPIRED` needs a certificate whose signed validity window has lapsed;
-`NOT_REGISTERED` needs a validator with no `x/valaddr` entry; `TOLERATED` and
-`EXPECTED_GONE` arrive on their own once a blob's retention window closes.
+`NOT_REGISTERED` needs a validator with no `x/valaddr` entry.
 
 **`sentinel-pub` publishes at the protocol's safety threshold by default.** It
 used to pass `WithAwaitAllSignatures()` unconditionally, which waits for every
