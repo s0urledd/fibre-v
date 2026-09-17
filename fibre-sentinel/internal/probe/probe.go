@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
@@ -172,6 +173,7 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		HostSource:         in.Target.HostSource,
 		Assigned:           in.Target.Assigned,
 		Attested:           in.Target.Attested,
+		AttestationUnknown: in.Target.AttestationUnknown,
 		AssignedRowCount:   in.Target.RowCount,
 		ScheduleLabel:      in.SchedulePoint.Label,
 		ScheduledAt:        in.SchedulePoint.At.UTC(),
@@ -198,6 +200,7 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		m.Classification, m.ClassificationReason = Classify(Evidence{
 			Assigned:           m.Assigned,
 			Attested:           m.Attested,
+			AttestationUnknown: m.AttestationUnknown,
 			Phase:              m.Phase,
 			Outcome:            m.Outcome,
 			CommitmentVerified: m.Download.CommitmentVerified,
@@ -398,7 +401,60 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 	if dl.rawErr != "" {
 		m.RawError = dl.rawErr
 	}
+	switch dl.outcome {
+	case OutcomeNotFound:
+		if p, regraded := notFoundPhase(time.Now().UTC(), m.Phase, in.MustServeUntil, in.PruneTolerance); regraded {
+			m.Phase = p
+			m.PhaseNote = "not_found_at_deadline"
+		}
+	case OutcomeIdentityFail:
+		// L3 accepted a certificate a moment ago and the verifying dial for
+		// L4 refused one: a second backend behind the same host:port, or a
+		// validity edge crossed between the two connections. Without this
+		// the row said identity.ok=true beside an IDENTITY_FAIL outcome,
+		// and a lapsed certificate on this path was filed as a mismatch.
+		if m.Identity.OK {
+			m.Identity.OK = false
+			if r, ok := reasonInText(dl.rawErr); ok {
+				m.Identity.Reason = string(r)
+				m.Identity.Stale = identityStale(r)
+			}
+		}
+	}
 	return m
+}
+
+// NotFoundGuard is how close to must_serve_until a NOT_FOUND answer may
+// arrive and still be graded as if it arrived at the deadline. The phase is
+// fixed when the probe starts, but the RPC reaches the server after DNS, TCP,
+// TLS and the identity check, up to tens of seconds later, and the server
+// prunes on a minute tick against its own clock, which the observer's need
+// not match to the second. A NOT_FOUND inside this band is TOLERATED, never
+// a FAULT. Thirty seconds is the observer's own clock-skew warning level;
+// the last in-window schedule point sits well outside it on any real window.
+const NotFoundGuard = 30 * time.Second
+
+// notFoundPhase returns the phase a NOT_FOUND answered at now should be graded
+// in, and whether that differs from the phase the probe started in. Only an
+// in-window start is ever regraded, and only forward.
+func notFoundPhase(now time.Time, started Phase, mustServeUntil time.Time, tol time.Duration) (Phase, bool) {
+	if started != PhaseInWindow {
+		return started, false
+	}
+	p := PhaseAtWindow(now.Add(NotFoundGuard), mustServeUntil, tol)
+	return p, p != PhaseInWindow
+}
+
+var identityReasonRe = regexp.MustCompile(`fibre tls identity \[([a-z_]+)\]`)
+
+// reasonInText recovers the tlsverify reason from an error the gRPC transport
+// has already flattened to a string.
+func reasonInText(s string) (tlsverify.Reason, bool) {
+	m := identityReasonRe.FindStringSubmatch(s)
+	if m == nil {
+		return "", false
+	}
+	return tlsverify.Reason(m[1]), true
 }
 
 // dlResult carries the raw outcome + error out of downloadAndVerify without
@@ -638,9 +694,19 @@ func classifyDownloadError(err error) Outcome {
 			return OutcomeRPCUnavailable
 		case codes.DeadlineExceeded:
 			return OutcomeRPCDeadline
-		case codes.ResourceExhausted, codes.InvalidArgument:
-			// our request was refused as too large / malformed, or a server
-			// limit answered: not a retention verdict.
+		case codes.ResourceExhausted:
+			// Two very different things share this code. The observer's own
+			// receive bound ("received message larger than max") is a probe
+			// error. Anything else is the server declining to serve this
+			// request: the storage limiter today (upload path only), the
+			// per-peer rate limiter Celestia has announced for the download
+			// path, or any limiter an operator puts in front of the port.
+			if strings.Contains(ls, "larger than max") {
+				return OutcomeProbeError
+			}
+			return OutcomeThrottled
+		case codes.InvalidArgument:
+			// our request was refused as malformed: not a retention verdict.
 			return OutcomeProbeError
 		case codes.Canceled:
 			return OutcomeProbeError

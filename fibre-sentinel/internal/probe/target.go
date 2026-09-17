@@ -27,9 +27,12 @@ type Target struct {
 	// settled promise carries a signature from this validator that verified
 	// against its consensus key. Only an attested validator is provably under
 	// the retention obligation for this blob.
-	Attested     bool
-	AssignedRows []int // recomputed by fibre-assign; empty if unassigned
-	RowCount     int
+	Attested bool
+	// AttestationUnknown: the publication record predates signature
+	// verification (scan schema 1), so Attested carries no evidence.
+	AttestationUnknown bool
+	AssignedRows       []int // recomputed by fibre-assign; empty if unassigned
+	RowCount           int
 
 	// HostSource says where Host came from. "bonded" means the validator is
 	// in AllBondedFibreProviders right now. "last_known" means it is not, but
@@ -283,17 +286,18 @@ func (r *Resolver) TargetsFor(ctx context.Context, p scan.Publication, includeUn
 		addrHex := v.Address.String()
 		host, source, seenAt := r.hostFor(hosts, addrHex)
 		out = append(out, Target{
-			Address:      v.Address,
-			AddressHex:   addrHex,
-			PubKey:       pubByAddr[v.Address],
-			Host:         host,
-			HostSource:   source,
-			HostSeenAt:   seenAt,
-			VotingPower:  powerByAddr[v.Address],
-			Assigned:     assigned,
-			Attested:     attestedByAddr[strings.ToLower(addrHex)],
-			AssignedRows: append([]int(nil), rows...),
-			RowCount:     len(rows),
+			Address:            v.Address,
+			AddressHex:         addrHex,
+			PubKey:             pubByAddr[v.Address],
+			Host:               host,
+			HostSource:         source,
+			HostSeenAt:         seenAt,
+			VotingPower:        powerByAddr[v.Address],
+			Assigned:           assigned,
+			Attested:           attestedByAddr[strings.ToLower(addrHex)],
+			AttestationUnknown: !p.HasAttestation(),
+			AssignedRows:       append([]int(nil), rows...),
+			RowCount:           len(rows),
 		})
 	}
 	return out, nil

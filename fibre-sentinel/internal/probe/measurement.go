@@ -26,7 +26,9 @@ const MeasurementSchemaVersion = 2
 const AttestationSchemaVersion = 2
 
 // HasAttestation reports whether Attested carries evidence.
-func (m Measurement) HasAttestation() bool { return m.SchemaVersion >= AttestationSchemaVersion }
+func (m Measurement) HasAttestation() bool {
+	return m.SchemaVersion >= AttestationSchemaVersion && !m.AttestationUnknown
+}
 
 // Measurement is one probe's raw result: which vantage, when, each network
 // layer timed and judged separately, plus the raw error text. No scores — a
@@ -59,8 +61,13 @@ type Measurement struct {
 	// server writes the shard before it signs. False means unproven, not
 	// absent: the publisher stops collecting signatures at the safety
 	// threshold and keeps delivering in the background.
-	Attested         bool `json:"attested"`
-	AssignedRowCount int  `json:"assigned_row_count"`
+	Attested bool `json:"attested"`
+	// AttestationUnknown is set when the publication record the probe was
+	// built from predates signature verification, so Attested is not
+	// evidence. Omitted (false) on every row that carries evidence, which is
+	// also every row written before the field existed.
+	AttestationUnknown bool `json:"attestation_unknown,omitempty"`
+	AssignedRowCount   int  `json:"assigned_row_count"`
 
 	// scheduling
 	ScheduleLabel string    `json:"schedule_label"` // w1..wN, grace, post
@@ -77,7 +84,11 @@ type Measurement struct {
 	Download DownloadResult `json:"download"`
 
 	// verdict
-	Phase                Phase          `json:"phase"` // from StartedAt
+	Phase Phase `json:"phase"` // from StartedAt
+	// PhaseNote says why Phase differs from the phase at StartedAt, when it
+	// does: "not_found_at_deadline" is a NOT_FOUND that arrived within
+	// NotFoundGuard of must_serve_until and was graded as grace.
+	PhaseNote            string         `json:"phase_note,omitempty"`
 	Outcome              Outcome        `json:"outcome"`
 	Classification       Classification `json:"classification"`
 	ClassificationReason string         `json:"classification_reason"`

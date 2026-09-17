@@ -22,6 +22,13 @@ const (
 	// or Unknown). It is NOT a reachability failure: calling it "unreachable"
 	// would be factually wrong about a server the observer just talked to.
 	OutcomeServerError Outcome = "SERVER_ERROR"
+	// OutcomeThrottled: the validator was reached, proved its identity and
+	// refused the request with ResourceExhausted that is not the observer's
+	// own receive bound: a server-side limit. Celestia has said a per-peer
+	// rate limiter is coming to the Fibre server; a probe it turns away says
+	// nothing about the shard, and filing it as the observer's own error
+	// would hide a limit set tight enough to keep real clients out.
+	OutcomeThrottled Outcome = "RPC_THROTTLED"
 	// OutcomeRPCDeadline: the download did not finish within the observer's
 	// own deadline (base + size-scaled). Never a verdict about the validator.
 	OutcomeRPCDeadline Outcome = "RPC_DEADLINE"
@@ -39,7 +46,7 @@ const (
 var AllOutcomes = []Outcome{
 	OutcomeServedOK, OutcomeNotFound, OutcomeWrongRows, OutcomeInvalidRows, OutcomePartial,
 	OutcomeDNSFail, OutcomeTCPRefused, OutcomeTCPTimeout, OutcomeTCPUnreachable, OutcomeTLSFail,
-	OutcomeIdentityFail, OutcomeRPCUnavailable, OutcomeServerError, OutcomeRPCDeadline,
+	OutcomeIdentityFail, OutcomeRPCUnavailable, OutcomeServerError, OutcomeThrottled, OutcomeRPCDeadline,
 	OutcomeNoHost, OutcomeRPCError, OutcomeProbeError, OutcomeMissed, OutcomeReachable,
 }
 
@@ -50,7 +57,8 @@ type Classification string
 
 const (
 	// ClassHealthy: assigned validator served its exact rows while under
-	// obligation (or still serving in grace/post — over-serving is fine).
+	// obligation, or still in grace; after the window the same answer is
+	// ClassServedPastWindow.
 	ClassHealthy Classification = "HEALTHY"
 	// ClassFault: an identity-verified endpoint, while the promise held,
 	// said it has no such shard, returned bytes that do not verify against
@@ -107,6 +115,11 @@ const (
 	// beside the rate, never inside it. A server that errors at every probe
 	// point is visible as such on its own page.
 	ClassServerError Classification = "SERVER_ERROR"
+	// ClassThrottled: the endpoint was reached, proved its identity and
+	// answered the download with a rate limit. Shown beside the rate under
+	// its own name, never inside it, and the probe policy backs off from a
+	// validator that says so.
+	ClassThrottled Classification = "THROTTLED"
 	// ClassTolerated: NOT_FOUND / unreachable in the grace window right after
 	// must_serve_until. Within measured prune lag; not held against the
 	// validator.
@@ -179,6 +192,12 @@ type Evidence struct {
 	// that the observer verified against its consensus key, which is the only
 	// on-chain proof that it ever stored the shard.
 	Attested bool
+	// AttestationUnknown: the publication record predates signature
+	// verification, so Attested carries no evidence either way. Such a blob
+	// is judged under the older rules, where assignment alone was the
+	// obligation; it is never filed as UNATTESTED, which would turn "not
+	// recorded" into "did not attest".
+	AttestationUnknown bool
 	// Phase is derived from the ACTUAL probe start time.
 	Phase Phase
 	// Outcome is what happened on the wire.
@@ -233,7 +252,7 @@ func Classify(in Evidence) (Classification, string) {
 		return ClassNotRegistered, "no Fibre host registered for this validator at the time of the probe, so nobody could fetch its rows"
 	}
 
-	if in.Assigned && !in.Attested {
+	if in.Assigned && !in.Attested && !in.AttestationUnknown {
 		// No verified signature over this promise, so nothing proves this
 		// validator was ever sent the shard. Serving it anyway proves it has
 		// it; failing to serve it proves nothing at all. Counted neither for
@@ -250,7 +269,7 @@ func Classify(in Evidence) (Classification, string) {
 			return ClassExpectedUnassigned, "validator not assigned this shard; NOT_FOUND expected"
 		case o.served() || o == OutcomeWrongRows || o == OutcomeInvalidRows:
 			return ClassServingUnassigned, "validator returned data for a shard it was not assigned — misassignment or over-serving"
-		case o.reachFailure() || o == OutcomeServerError:
+		case o.reachFailure() || o == OutcomeServerError || o == OutcomeThrottled:
 			return ClassExpectedUnassigned, "validator not assigned this shard; reachability not required"
 		default:
 			return ClassExpectedUnassigned, "validator not assigned this shard"
@@ -279,6 +298,8 @@ func Classify(in Evidence) (Classification, string) {
 			return ClassFault, "returned rows that verify against neither the commitment nor this promise's assignment"
 		case o == OutcomeServerError:
 			return ClassServerError, "endpoint reached and identity verified; the server answered with an application error instead of the shard, which from one probe is not distinguishable from a transient fault"
+		case o == OutcomeThrottled:
+			return ClassThrottled, "endpoint reached and identity verified; the server refused the download with a rate limit, which says nothing about the shard"
 		case o.reachFailure():
 			return ClassUnreachable, "could not complete a conversation with the endpoint while it was under obligation; from one vantage this is not distinguishable from a problem on the observer's own path"
 		default:
@@ -298,6 +319,8 @@ func Classify(in Evidence) (Classification, string) {
 			return ClassFault, "returned rows that verify against neither the commitment nor this promise's assignment"
 		case o == OutcomeServerError:
 			return ClassTolerated, "server error within prune-lag tolerance after must_serve_until"
+		case o == OutcomeThrottled:
+			return ClassTolerated, "rate limited within prune-lag tolerance after must_serve_until"
 		case o.reachFailure():
 			return ClassTolerated, "unreachable within prune-lag tolerance"
 		default:
@@ -322,6 +345,8 @@ func Classify(in Evidence) (Classification, string) {
 			return ClassServedPastWindow, "still serving (part of the shard) after the obligation ended"
 		case o == OutcomeServerError:
 			return ClassUnreachablePostWindow, "server error after the obligation ended"
+		case o == OutcomeThrottled:
+			return ClassUnreachablePostWindow, "rate limited after the obligation ended"
 		case o.reachFailure():
 			return ClassUnreachablePostWindow, "unreachable after the obligation ended"
 		default:

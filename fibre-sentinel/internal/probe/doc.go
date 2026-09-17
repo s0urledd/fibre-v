@@ -35,11 +35,13 @@
 //
 // # Taxonomy
 //
-// Classify keeps the error classes apart. An assigned validator that answers
-// NOT_FOUND (or is unreachable, or fails identity) BEFORE must_serve_until is a
-// FAULT. The same NOT_FOUND in the grace window right after must_serve_until is
-// TOLERATED (within the ~1-2 min prune lag measured on the devnet). After the
-// tolerance it is EXPECTED_GONE. A validator that was never assigned the shard
+// Classify keeps the error classes apart. An assigned, attested validator
+// whose identity verified and that answers NOT_FOUND (or returns rows that do
+// not verify) BEFORE must_serve_until is a FAULT; unreachable is UNREACHABLE
+// and an identity failure is IDENTITY_MISMATCH or IDENTITY_EXPIRED, none of
+// them faults. The same NOT_FOUND in the grace window right after
+// must_serve_until is TOLERATED (within the ~1-2 min prune lag measured on the
+// devnet). After the tolerance it is EXPECTED_GONE. A validator that was never assigned the shard
 // answering NOT_FOUND is EXPECTED_UNASSIGNED. Every measurement carries its
 // class and the reason.
 package probe
