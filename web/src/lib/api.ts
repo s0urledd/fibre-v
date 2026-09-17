@@ -200,6 +200,12 @@ export type Validator = {
    * figures, and this says how stale they are.
    */
   assignment_height?: number;
+  /**
+   * MsgPaymentPromiseTimeout submitted by this validator's operator account
+   * in the window. The chain pays nothing for it; above zero says the
+   * operator runs the enforcement path at all.
+   */
+  timeouts_enforced?: number;
 };
 
 export type Probe = {
@@ -254,6 +260,7 @@ export type Reconstruct = {
 };
 
 export type Blob = {
+  charge?: Charge | null;
   promise_hash: string;
   commitment: string;
   namespace: string;
@@ -270,6 +277,106 @@ export type Blob = {
   probe_count: number;
   classes: ClassCounts;
   reconstructable: Reconstruct | null;
+};
+
+/**
+ * The fee side of one promise, from the payments table. Null when the
+ * publication was ingested before payments were recorded.
+ */
+export type Charge = {
+  fee_utia: number;
+  gas_units: number;
+  publisher: string;
+  settled: boolean;
+  timed_out: boolean;
+  processor?: string;
+};
+
+/** a count and a total in utia, the shape every money figure takes */
+export type Sum = { count: number; utia: number };
+
+export type PriceFormula = { base_gas: number; gas_per_chunk: number; chunk_bytes: number; utia_per_gas: number; note: string };
+
+export type PublisherShare = {
+  publisher: string;
+  label?: string;
+  fees_utia: number;
+  fees_share: number | null;
+  bytes: number;
+  bytes_share: number | null;
+  settlements: number;
+  publishers?: number;
+};
+
+export type DayBucket = { day: string; fees_utia: number; bytes: number; settlements: number; timeouts: number; timed_out_utia: number };
+
+/**
+ * The publisher side of Fibre over a window. Every figure is something the
+ * chain recorded; none was measured here. `timeouts` is a floor: a promise
+ * nobody reports leaves no trace.
+ */
+export type Market = {
+  window: Window;
+  vantage: string;
+  computed_at?: string;
+  compute_ms?: number;
+  source: string;
+  settlements: number;
+  fees_settled_utia: number;
+  bytes: number;
+  publishers_active: number;
+  paid_per_mib_utia: number | null;
+  timeouts: number;
+  timed_out_utia: number;
+  settlement_rate: Rate;
+  timeout_processors: number;
+  deposits: Sum;
+  withdrawals_requested: Sum;
+  withdrawals_executed: Sum;
+  escrow_held_utia: number;
+  escrow_accounts: number;
+  daily: DayBucket[];
+  top_publishers: PublisherShare[];
+  other_publishers: PublisherShare | null;
+  largest_poster: PublisherShare | null;
+  price_formula: PriceFormula;
+  notes: string[];
+};
+
+export type Escrow = { found: boolean; balance_utia: number; available_utia: number; height: number; updated_at: string };
+
+export type Publisher = {
+  publisher: string;
+  label?: string;
+  label_source?: string;
+  settlements: number;
+  bytes: number;
+  bytes_share: number | null;
+  fees_utia: number;
+  fees_share: number | null;
+  paid_per_mib_utia: number | null;
+  avg_blob_bytes: number | null;
+  largest_blob_bytes: number;
+  timeouts: number;
+  timed_out_utia: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  escrow: Escrow | null;
+};
+
+export type Payment = {
+  kind: "settlement" | "timeout" | "deposit" | "withdrawal_request" | "withdrawal_executed";
+  height: number;
+  time: string;
+  tx_hash?: string;
+  publisher: string;
+  processor?: string;
+  promise_hash?: string;
+  namespace?: string;
+  blob_size?: number;
+  gas_units?: number;
+  amount_utia: number;
+  available_at?: string;
 };
 
 export type Fetch<T> = { data: T | null; error: string | null; loading: boolean };
@@ -423,4 +530,39 @@ export function faultRateUpper(r: Rate | undefined | null): number | null {
   if (!r || r.den === 0) return null;
   const w = wilson(r.den - r.num, r.den);
   return w && w[1];
+}
+
+// ---- money ----
+
+/** one TIA in utia */
+export const UTIA = 1_000_000;
+
+/**
+ * utia as TIA with the precision the size of the figure deserves: a fee is
+ * 0.695 TIA, a day is 12.4 TIA, an escrow is 6,000 TIA. Never more than
+ * three decimals, never a bare "0" for a non-zero amount.
+ */
+export function tia(utia: number | null | undefined, opts: { unit?: boolean } = {}): string {
+  if (utia == null) return "—";
+  const v = utia / UTIA;
+  let s: string;
+  if (v === 0) s = "0";
+  else if (Math.abs(v) >= 1000) s = Math.round(v).toLocaleString("en-US");
+  else if (Math.abs(v) >= 100) s = v.toFixed(1);
+  else if (Math.abs(v) >= 10) s = v.toFixed(2);
+  else if (Math.abs(v) >= 0.001) s = v.toFixed(3);
+  else s = `${utia} utia`;
+  return opts.unit === false ? s : `${s} TIA`;
+}
+
+/** the publisher a row belongs to: its registry label if one exists, else the short address */
+export function publisherName(p: { publisher: string; label?: string }): string {
+  return p.label || shortBech(p.publisher);
+}
+
+export function fmtShare(v: number | null | undefined): string {
+  if (v == null) return "—";
+  const s = (v * 100).toFixed(1);
+  if (s === "0.0" && v > 0) return "<0.1%";
+  return s + "%";
 }

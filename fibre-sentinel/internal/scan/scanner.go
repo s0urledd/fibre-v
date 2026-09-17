@@ -533,6 +533,11 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 			s.log.Printf("  assignment note: %s", a.Error)
 		}
 	}
+
+	// 3) Escrow movements: deposits, withdrawals, and what each promise
+	//    charged. Recorded whether or not x/fibre params could be read; they
+	//    need only the tx bytes.
+	recorded += s.recordEconomy(blk, res, h)
 	return recorded
 }
 

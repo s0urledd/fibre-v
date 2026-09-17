@@ -2,7 +2,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Blob, type Probe, utc, ago, bytes, nsDisplay } from "@/lib/api";
+import { useApi, type Blob, type Probe, utc, ago, bytes, nsDisplay, tia, shortBech } from "@/lib/api";
 import Verdict from "@/components/Verdict";
 import Timeline from "@/components/Timeline";
 import Square from "@/components/Square";
@@ -83,7 +83,10 @@ function Page() {
         <dt>commitment</dt><dd className="mono">{b.commitment}</dd>
         <dt>namespace</dt><dd className="mono">{nsDisplay(b.namespace)} <span className="faint">{b.namespace}</span></dd>
         <dt>size</dt><dd className="mono">{bytes(b.blob_size)} <span className="muted">padded upload size</span></dd>
-        <dt>publisher</dt><dd className="mono">{b.signer}</dd>
+        <dt>publisher</dt><dd className="mono"><Link href={`/publisher/?addr=${b.signer}`}>{b.signer}</Link></dd>
+        <dt>fee</dt><dd className="mono">{b.charge
+          ? <>{tia(b.charge.fee_utia)} <span className="muted">· {b.charge.gas_units.toLocaleString("en-US")} gas at 1 utia/gas, from the padded size · {b.charge.settled ? "settled from escrow" : "not settled"}{b.charge.timed_out && <span className="err"> · timed out{b.charge.processor && b.charge.processor !== b.signer ? `, reported by ${shortBech(b.charge.processor)}` : ""}</span>}</span></>
+          : <span className="muted">not recorded (publication ingested before payments were)</span>}</dd>
         <dt>settled</dt><dd className="mono">height {b.settlement_height.toLocaleString("en-US")} · {utc(b.settlement_time)} ({ago(b.settlement_time)})</dd>
         <dt>created</dt><dd className="mono">{utc(b.creation_timestamp)}</dd>
         <dt>must serve until</dt><dd className="mono">{utc(b.must_serve_until)} <span className="muted">= creation + max(payment_promise_timeout {data.params.payment_promise_timeout_s}s, shard_retention {data.params.shard_retention_s}s)</span></dd>

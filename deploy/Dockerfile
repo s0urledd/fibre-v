@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=go /out/ /usr/local/bin/
 COPY --from=web /src/web/out/ /var/www/fibre-observer/
 COPY fibre-sentinel/observer/policy/policy.example.yaml /etc/fibre-observer/policy.example.yaml
+COPY deploy/publishers.yaml.example /etc/fibre-observer/publishers.yaml.example
 COPY fibre-sentinel/observer/policy/policy.mocha.yaml /etc/fibre-observer/policy.mocha.yaml
 RUN useradd --system --uid 10001 --home /data fibre-observer && install -d -o fibre-observer /data
 USER fibre-observer

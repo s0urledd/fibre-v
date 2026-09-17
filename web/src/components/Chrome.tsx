@@ -7,6 +7,7 @@ import { useApi, type Meta } from "@/lib/api";
 const NAV: [string, string][] = [
   ["/", "Overview"],
   ["/blobs/", "Blobs"],
+  ["/publishers/", "Publishers"],
   ["/methodology/", "Methodology"],
 ];
 

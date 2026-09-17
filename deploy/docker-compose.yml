@@ -29,7 +29,8 @@ services:
     build: { context: .., dockerfile: deploy/Dockerfile }
     command: ["observer-api", "-data-dir", "/data", "-listen", "0.0.0.0:8080", "-vantage", "${VANTAGE}",
               "-vantage-location", "${VANTAGE_LOCATION:-}", "-vantage-provider", "${VANTAGE_PROVIDER:-}",
-              "-vantage-asn", "${VANTAGE_ASN:-}", "-vantage-egress", "${VANTAGE_EGRESS:-}"]
+              "-vantage-asn", "${VANTAGE_ASN:-}", "-vantage-egress", "${VANTAGE_EGRESS:-}",
+              "-publishers", "${PUBLISHERS:-/etc/fibre-observer/publishers.yaml}"]
     volumes: ["observer-data:/data"]
     depends_on: [collector]
     healthcheck:

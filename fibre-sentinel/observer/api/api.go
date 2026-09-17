@@ -87,6 +87,10 @@ type Server struct {
 	// waits for one and never sees one without its age.
 	net  *snapshotCache[*networkResponse]
 	vals *snapshotCache[[]validatorRow]
+	// The publisher-side summary, same treatment: see market.go.
+	market *snapshotCache[*marketResponse]
+	// labels is the operator-maintained publisher name registry.
+	labels map[string]PublisherLabel
 
 	// How many vantages the store holds, and the table watermarks it was
 	// counted at: see vantageCount.
@@ -97,6 +101,18 @@ type Server struct {
 	// Per-publication verdicts, keyed by what the publication's probes look
 	// like right now. See blobcache.go.
 	blobs *blobCache
+}
+
+// Option configures a Server before it warms its caches.
+type Option func(*Server)
+
+// WithPublisherLabels installs the publisher name registry (see market.go).
+func WithPublisherLabels(m map[string]PublisherLabel) Option {
+	return func(s *Server) {
+		if m != nil {
+			s.labels = m
+		}
+	}
 }
 
 // New builds a Server. vantage is the label rendered on every response.
@@ -110,7 +126,7 @@ func NewWithLogger(st *store.Store, vantage string, log *scan.Logger) *Server {
 
 // NewWithVantage is NewWithLogger with the vantage described rather than only
 // named.
-func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger) *Server {
+func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ...Option) *Server {
 	info.Verifiability = map[string]string{
 		"egress_addresses": "the anchor: match these against the source addresses hitting your Fibre port",
 		"asn":              "check it against egress_addresses through public routing data (whois, RIPEstat, bgp.tools); it names the network, not a place",
@@ -118,14 +134,19 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger) *Server
 		"location":         "the operator's word: geolocating an address is a guess, so nothing here proves it",
 	}
 	info.Complete = info.Location != "" && info.Provider != "" && info.ASN != "" && len(info.EgressAddresses) > 0
-	s := &Server{st: st, vantage: info.Name, info: info, mux: http.NewServeMux(), log: log, blobs: newBlobCache()}
+	s := &Server{st: st, vantage: info.Name, info: info, mux: http.NewServeMux(), log: log, blobs: newBlobCache(), labels: map[string]PublisherLabel{}}
+	for _, o := range opts {
+		o(s)
+	}
 	s.net = newSnapshotCache("network", s.computeNetwork)
+	s.market = newSnapshotCache("market", s.computeMarket)
 	s.vals = newSnapshotCache("validators", func(ctx context.Context, win Window) ([]validatorRow, error) {
 		return s.validatorRows(ctx, win, "")
 	})
 	// Warm every window now, so the first visitor is not the one who waits.
 	s.net.warm(s.logf(), time.Now())
 	s.vals.warm(s.logf(), time.Now())
+	s.market.warm(s.logf(), time.Now())
 	// And the first page of blobs, for the same reason: with the verdict cache
 	// empty that page costs six queries per row, which is the one cold path
 	// left on the site. It is a single read of what /v1/blobs answers by
@@ -146,6 +167,9 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger) *Server
 	s.mux.HandleFunc("GET /v1/probes", s.handleProbes)
 	s.mux.HandleFunc("GET /v1/runs", s.handleRuns)
 	s.mux.HandleFunc("GET /v1/sampling", s.handleSampling)
+	s.mux.HandleFunc("GET /v1/market", s.handleMarket)
+	s.mux.HandleFunc("GET /v1/publishers", s.handlePublishers)
+	s.mux.HandleFunc("GET /v1/publishers/{addr}", s.handlePublisher)
 	return s
 }
 
@@ -1140,6 +1164,13 @@ type validatorRow struct {
 	// a validator that has left the set keeps the figures from when it was
 	// last assigned, and this says when that was.
 	AssignmentHeight int64 `json:"assignment_height"`
+	// TimeoutsEnforced is how many MsgPaymentPromiseTimeout this validator's
+	// operator account submitted in the window: promises it held that the
+	// publisher abandoned, reported to the chain so the escrow was charged.
+	// The chain pays nothing for it; a count above zero says the operator
+	// runs the enforcement path at all. Matched on address bytes, so an
+	// operator that submits from another account is not counted.
+	TimeoutsEnforced int64 `json:"timeouts_enforced"`
 }
 
 func loadBand(rows int) string {
@@ -1632,6 +1663,10 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		return nil, err
 	}
 
+	timeouts, err := s.timeoutsByAccount(ctx, win)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]validatorRow, 0, len(byAddr))
 	for addr, v := range byAddr {
 		if only != "" && addr != only {
@@ -1641,6 +1676,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		v.Coverage = coverage(v.Classes)
 		v.HeldOut = heldOut(v.Classes)
 		v.ByObligation = byObligation[addr]
+		if v.Operator != "" {
+			v.TimeoutsEnforced = timeouts[accountKey(v.Operator)]
+		}
 		out = append(out, *v)
 	}
 	// voting power desc, then address
@@ -1797,6 +1835,11 @@ type blobRow struct {
 	ProbeCount         int64        `json:"probe_count"`
 	Classes            classCounts  `json:"classes"`
 	Reconstructable    *reconstruct `json:"reconstructable"`
+	// Charge is the fee side of this promise from the payments table: what
+	// the module charged, and whether the promise settled or timed out. Null
+	// for a publication whose payment was not recorded (ingested before the
+	// scanner wrote payments).
+	Charge *blobCharge `json:"charge"`
 }
 
 // reconstruct is the per-blob reconstructability verdict at the latest
@@ -1858,6 +1901,17 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	hashes := make([]string, len(out))
+	for i := range out {
+		hashes[i] = out[i].PromiseHash
+	}
+	charges, err := s.chargesFor(ctx, hashes)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Charge = charges[out[i].PromiseHash]
 	}
 	// Per blob, deliberately. Batching both of these was tried and measured on
 	// a store with 2,200 publications: the class tally got about 8% slower,

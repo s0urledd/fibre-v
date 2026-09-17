@@ -155,6 +155,48 @@ any validator was down, with `not enough voting power: collected X, required Y`
 where Y is the whole set rather than two thirds. Pass `-await-all` if you
 deliberately want every signature.
 
+### Producing escrow events on purpose
+
+A publisher that always pays produces settlements and nothing else, so the
+Publishers page shows one column. The rest of the escrow side of `x/fibre`
+comes from `sentinel-pub`'s other modes. The devnet sets
+`payment_promise_timeout` to its floor of ten minutes, so an abandoned promise
+becomes reportable ten minutes after it was created.
+
+```bash
+# 1. a publisher with a persistent key, so later runs act as the same account
+sentinel-pub -key-file ~/pub-a.key -count 3 -gap 10s
+
+# 2. obtain signatures for two blobs and never settle them. Validators hold
+#    the shards; nothing about it reaches the chain yet.
+sentinel-pub -key-file ~/pub-a.key -deposit 0 -abandon -count 2 -gap 10s
+#    -> abandoned-<commitment8>.json, one per blob
+
+# 3. ten minutes later, report the timeouts from a DIFFERENT account, the way
+#    a validator that stored the shards for nothing would. The chain charges
+#    pub-a's escrow the same fee a settlement would have cost and pays the
+#    reporter nothing.
+sentinel-pub -key-file ~/pub-b.key -deposit 0 -timeout abandoned-*.json
+
+# 4. ask for some of the escrow back; the payout lands in a begin-block after
+#    withdrawal_delay (43,800 s on the devnet: it cannot go below the
+#    protocol's 12h10m floor).
+sentinel-pub -key-file ~/pub-a.key -deposit 0 -withdraw 1000000000
+```
+
+Each step shows up on the Publishers tab within one collector pass: step 2
+changes nothing (that is the point: an unsettled promise is invisible on
+chain), step 3 raises *Timed out* and lowers pub-a's settlement rate, step 4
+appears as a withdrawal request and, half a day later, a payout. A timeout
+submitted from a key whose bytes match a validator's operator address is
+counted on that validator's page as *timeouts enforced*; the devnet's
+validator keys live in `$FIBRE_DEVNET_HOME/appN`, so `-key-file` a mnemonic of
+one of them if you want to see that row.
+
+The chain refuses a timeout before `creation + payment_promise_timeout`
+(`payment promise has not yet timed out`) and after the escrow is gone; a
+promise settled in the meantime is refused as already processed.
+
 ### Two thirds, and why most validators have no signature on chain
 
 The publisher stops collecting signatures once **two thirds of voting power**

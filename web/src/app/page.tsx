@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Network, type Validator, type Meta, fmtCount, fmtPct, bytes, utc, ago } from "@/lib/api";
+import { useApi, type Network, type Validator, type Meta, type Market, fmtCount, fmtPct, bytes, utc, ago, tia } from "@/lib/api";
 import ValidatorTable from "@/components/ValidatorTable";
 import Tile from "@/components/Tile";
 import { Mark } from "@/components/Verdict";
@@ -19,6 +19,7 @@ export default function Overview() {
   const { data: meta } = useApi<Meta>("/v1/meta");
   const { data: net, error: netErr, loading } = useApi<Network>(`/v1/network?window=${win}`);
   const { data: vals } = useApi<{ validators: Validator[] }>(`/v1/validators?window=${win}`);
+  const { data: market } = useApi<Market>(`/v1/market?window=${win}`);
 
   const notLive = !!(meta?.app_version && !meta.fibre_active);
   const noPubs = !!meta && meta.counts.Publications === 0;
@@ -78,6 +79,14 @@ export default function Overview() {
         <Tile label="Publications" loading={busy}
           value={net ? net.publications.toLocaleString("en-US") : "—"}
           sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined} />
+        <Tile label="Fees settled" loading={busy}
+          value={market ? tia(market.fees_settled_utia, { unit: false }) : "—"} unit={market ? "TIA" : undefined}
+          tone={market && market.settlements === 0 ? "absent" : undefined}
+          sub={market ? (market.timeouts > 0 ? `${market.publishers_active} publisher${market.publishers_active === 1 ? "" : "s"} · ${market.timeouts} timed out` : `${market.publishers_active} publisher${market.publishers_active === 1 ? "" : "s"}`) : undefined}
+          info={<>
+            <p>What publishers paid for the blobs settled in this window, from the chain&rsquo;s own records. Not a measurement of ours.</p>
+            <p><Link href="/publishers/">Publishers</Link></p>
+          </>} />
         <Tile label="Signed" loading={busy}
           value={net?.attestation?.blob_coverage?.den ? fmtPct(net.attestation.blob_coverage) : "—"}
           tone={net?.attestation?.blob_coverage?.den ? undefined : "absent"}

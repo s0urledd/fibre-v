@@ -33,6 +33,7 @@ func main() {
 		vantage   = flag.String("vantage", "local", "vantage name recorded on this run")
 		interval  = flag.Duration("interval", 10*time.Second, "how often to tail the files")
 		epEvery   = flag.Duration("endpoints-every", 60*time.Second, "how often to poll AllBondedFibreProviders (0 = never)")
+		escEvery  = flag.Duration("escrow-every", 5*time.Minute, "how often to read every known publisher's escrow balance (one state query each; 0 = never)")
 		rpcTO     = flag.Duration("rpc-timeout", 15*time.Second, "per-RPC-call timeout")
 		once      = flag.Bool("once", false, "ingest everything currently on disk, poll endpoints once, then exit")
 		logLines  = flag.Int("log-ring", 300, "log lines kept in memory for the crash dump")
@@ -40,6 +41,7 @@ func main() {
 		statePath = flag.String("state", "", "path to state.json (default <data-dir>/state.json)")
 		measPath  = flag.String("measurements", "", "path to measurements.jsonl (default <data-dir>/measurements.jsonl)")
 		reachPath = flag.String("reachability", "", "path to reachability.jsonl (default <data-dir>/reachability.jsonl)")
+		payPath   = flag.String("payments", "", "path to payments.jsonl (default <data-dir>/payments.jsonl)")
 	)
 	flag.Parse()
 
@@ -57,6 +59,9 @@ func main() {
 	}
 	if *reachPath == "" {
 		*reachPath = filepath.Join(*dataDir, "reachability.jsonl")
+	}
+	if *payPath == "" {
+		*payPath = filepath.Join(*dataDir, "payments.jsonl")
 	}
 
 	log := scan.NewLogger(*logLines)
@@ -84,6 +89,7 @@ func main() {
 	}
 	log.Printf("collector up: run=%d vantage=%s db=%s data=%s", runID, *vantage, *dbPath, *dataDir)
 
+	var lastEscrow time.Time
 	pass := func(pollEndpoints bool) {
 		now := time.Now()
 		if err := ingest.State(st, *statePath, now); err != nil {
@@ -117,6 +123,48 @@ func main() {
 			}
 			if r.Skipped > 0 {
 				log.Printf("reachability: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
+			}
+		}
+		if r, err := ingest.Payments(st, *payPath, now); err != nil {
+			log.Printf("payments: %v", err)
+		} else {
+			if r.Inserted > 0 {
+				log.Printf("payments: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
+			}
+			if r.Skipped > 0 {
+				log.Printf("payments: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
+			}
+		}
+		if chain != nil && *escEvery > 0 && time.Since(lastEscrow) >= *escEvery {
+			// Escrow balances, one state query per publisher the payments
+			// table has seen. There is no list-all-escrow query, so an account
+			// that deposited but never appeared in a payment we ingested is
+			// not polled; it also has nothing to show. On its own, slower
+			// clock: a balance moves when a payment lands, and the payments
+			// themselves arrive through the file, not this poll.
+			lastEscrow = now
+			if pubs, err := st.Publishers(); err != nil {
+				log.Printf("escrow: publishers: %v", err)
+			} else {
+				polled := 0
+				for _, pub := range pubs {
+					if ctx.Err() != nil {
+						break
+					}
+					e, err := chain.EscrowAccount(ctx, pub, 0)
+					if err != nil {
+						log.Printf("escrow: %s: %v", pub, err)
+						continue
+					}
+					if err := st.UpsertEscrowAccount(e, now); err != nil {
+						log.Printf("escrow: store: %v", err)
+						continue
+					}
+					polled++
+				}
+				if polled > 0 {
+					_ = st.SetMeta("escrow_accounts", itoa(int64(polled)), now)
+				}
 			}
 		}
 		if pollEndpoints && chain != nil {

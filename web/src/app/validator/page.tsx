@@ -83,6 +83,11 @@ function Page() {
               <span className="muted"> · {fmtPct(v.attestation.blob_coverage)}</span>
             </dd></>
           )}
+          {(v.timeouts_enforced ?? 0) > 0 && (
+            <><dt>timeouts enforced</dt><dd className="mono" title="MsgPaymentPromiseTimeout submitted by this validator's operator account in the window: promises it held that the publisher abandoned, reported so the escrow was charged. The chain pays nothing for it.">
+              {v.timeouts_enforced!.toLocaleString("en-US")} <span className="muted">abandoned promise{v.timeouts_enforced === 1 ? "" : "s"} reported to the chain</span>
+            </dd></>
+          )}
           {v.operator_address && <><dt>operator</dt><dd className="mono">{v.operator_address}</dd></>}
           <dt>consensus (hex)</dt><dd className="mono">{v.address}</dd>
           {v.website && <><dt>website</dt><dd><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website}</a></dd></>}
