@@ -34,7 +34,7 @@ func main() {
 		rpc      = flag.String("rpc", "http://127.0.0.1:26657", "CometBFT RPC endpoint")
 		dataDir  = flag.String("data-dir", "./sentinel-data", "reachability.jsonl is written here")
 		vantage  = flag.String("vantage", "local", "vantage name recorded on every measurement")
-		interval = flag.Duration("interval", 10*time.Minute, "how often every registered endpoint is dialled")
+		interval = flag.Duration("interval", 5*time.Minute, "how often every registered endpoint is dialled")
 		once     = flag.Bool("once", false, "one round, then exit")
 		rpcTO    = flag.Duration("rpc-timeout", 15*time.Second, "per-RPC-call timeout")
 		dnsTO    = flag.Duration("dns-timeout", 5*time.Second, "")

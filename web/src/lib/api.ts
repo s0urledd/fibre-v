@@ -156,10 +156,10 @@ export type Validator = {
   identity_reason?: string;
   /**
    * How often this observer completed a TLS conversation with the endpoint
-   * over the window, from the ten-minute heartbeat. The one stability figure
+   * over the window, from the five-minute handshake. The one stability figure
    * here whose coverage does not depend on being assigned or attested
    * anything: a validator the publisher never collected a signature from
-   * still gets 144 samples a day.
+   * still gets 288 samples a day.
    */
   reachability_window: Rate;
   /** of the heartbeats that saw a certificate, how many were endorsed */

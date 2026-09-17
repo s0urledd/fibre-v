@@ -70,7 +70,7 @@ export default function Overview() {
           value={net?.reachability_window?.den ? fmtPct(net.reachability_window) : "—"}
           tone={net?.reachability_window?.den ? undefined : "absent"}
           sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} handshakes` : "no handshake yet"}
-          info={<p>TLS handshakes completed, over handshakes attempted. We open a connection to every registered Fibre endpoint every 10 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>} />
+          info={<p>TLS handshakes completed, over handshakes attempted. We open a connection to every registered Fibre endpoint every 5 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>} />
         <Tile label="Endpoints" loading={busy}
           value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
           sub={net ? `${net.reachability.num} answering now · ${net.validators_probed} probed` : undefined} />
@@ -102,7 +102,7 @@ export default function Overview() {
                 No Fibre publication recorded yet. Collector at height {meta!.last_scanned_height || "?"} on {meta!.chain_id || "?"}.{" "}
                 {meta!.counts.OpenEndpoints === 0
                   ? "Fibre is live; no validator has registered an endpoint yet."
-                  : `${meta!.counts.OpenEndpoints} validators have registered an endpoint. A TLS handshake is attempted with each every 10 minutes.`}
+                  : `${meta!.counts.OpenEndpoints} validators have registered an endpoint. A TLS handshake is attempted with each every 5 minutes.`}
               </>
             )}
           </p>

@@ -17,7 +17,7 @@ services:
     restart: unless-stopped
   heartbeat:
     build: { context: .., dockerfile: deploy/Dockerfile }
-    command: ["observer-heartbeat", "-rpc", "${RPC}", "-data-dir", "/data", "-vantage", "${VANTAGE}", "-interval", "10m"]
+    command: ["observer-heartbeat", "-rpc", "${RPC}", "-data-dir", "/data", "-vantage", "${VANTAGE}", "-interval", "5m"]
     volumes: ["observer-data:/data"]
     restart: unless-stopped
   collector:

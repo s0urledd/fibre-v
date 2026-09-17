@@ -17,11 +17,11 @@ type SortKey = "power" | "serve" | "faults" | "uptime" | "throughput";
 
 const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode | null }[] = [
   { key: "uptime", label: "Uptime", dir: 1, info: <>
-      <p>TLS handshakes completed, over handshakes attempted. We open a connection to the registered Fibre endpoint every 10 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>
+      <p>TLS handshakes completed, over handshakes attempted. We open a connection to the registered Fibre endpoint every 5 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>
       <p>Handshakes run from one location, so a dip can be a network problem on our side.</p>
     </> },
   { key: "serve", label: "Serve rate", dir: 1, info: <>
-      <p>Shards handed over, out of the shards this validator signed for. Counted inside the retention window only.</p>
+      <p>When we reached it: shards handed over, out of the shards this validator signed for, inside the retention window. Probes that could not reach it are listed beside the rate as unreachable; being down shows in Uptime.</p>
       <p>Under {MIN_RATED} rated probes the figure is dimmed: too few to lean on.</p>
     </> },
   { key: "faults", label: "Faults", dir: -1, info: <>
@@ -186,7 +186,8 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                   <td className="right">
                     <RateCell r={v.reachability_window} sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined} />
                   </td>
-                  <td className="right"><RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation} /></td>
+                  <td className="right"><RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation}
+                    sample={(v.serve_rate_held_out?.UNREACHABLE ?? 0) > 0 ? `${v.serve_rate.num} / ${v.serve_rate.den} · ${v.serve_rate_held_out.UNREACHABLE} unreachable` : undefined} /></td>
                   <td className="right" title="Answered, but did not hand over a shard it had signed for."><Count n={v.classes.FAULT} tier="fault" /></td>
                   <td className="right" title={v.serve_rows_per_second == null ? "No healthy probe of an assigned shard in this window." :
                     `${v.serve_latency_p50_ms?.toLocaleString("en-US") ?? "—"} ms typical, ${v.serve_latency_p95_ms?.toLocaleString("en-US") ?? "—"} ms at p95, over ${v.serve_latency_sample.toLocaleString("en-US")} healthy probes.`}>
