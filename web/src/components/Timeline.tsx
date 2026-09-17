@@ -19,7 +19,7 @@ export default function Timeline({ probes, validators, settled, mustServeUntil, 
   const tGrace = new Date(graceEnd).getTime();
   const last = Math.max(tGrace, ...probes.map((p) => new Date(p.started_at).getTime()));
   const t1 = last + (last - t0) * 0.04;
-  const W = 900, L = 176, R = 24, rowH = 20, top = 34;
+  const W = 900, L = 176, R = 24, rowH = 20, top = 44;
   const H = top + validators.length * rowH + 26;
   const x = (t: number) => L + ((t - t0) / Math.max(1, t1 - t0)) * (W - L - R);
   const byVal = new Map<string, Probe[]>();
@@ -33,15 +33,22 @@ export default function Timeline({ probes, validators, settled, mustServeUntil, 
     <div className="timeline">
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="xMinYMid meet" role="img" aria-label="probe timeline">
         <rect x={x(t0)} y={top - 8} width={x(tMsu) - x(t0)} height={validators.length * rowH + 12} fill="var(--wash)" rx={3} />
-        {marks.map(([t, label], i) => {
-          const cx = x(t);
-          return (
-            <g key={label}>
-              <line x1={cx} x2={cx} y1={top - 8} y2={bottom + 4} stroke="var(--line-2)" strokeDasharray="2 3" />
-              <text x={cx} y={top - 14} fontSize="10" fill="var(--text-3)" textAnchor={i === 0 ? "start" : "middle"}>{label}</text>
-            </g>
-          );
-        })}
+        {(() => {
+          // Two marks closer than a label's width share the top edge, so the
+          // second one moves up a line instead of printing over the first.
+          let lastX = -1e9, lifted = false;
+          return marks.map(([t, label], i) => {
+            const cx = x(t);
+            lifted = cx - lastX < label.length * 6 ? !lifted : false;
+            lastX = cx;
+            return (
+              <g key={label}>
+                <line x1={cx} x2={cx} y1={top - 8} y2={bottom + 4} stroke="var(--line-2)" strokeDasharray="2 3" />
+                <text x={cx} y={top - 14 - (lifted ? 12 : 0)} fontSize="10" fill="var(--text-3)" textAnchor={i === 0 ? "start" : "middle"}>{label}</text>
+              </g>
+            );
+          });
+        })()}
         {validators.map((v, i) => {
           const y = top + i * rowH + rowH / 2;
           const ps = byVal.get(v.address) ?? [];
