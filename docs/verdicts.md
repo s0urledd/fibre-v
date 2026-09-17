@@ -152,9 +152,9 @@ One sentence each, and what a reader should conclude.
   around this number, never around the probe count, and the dashboard states
   it as an **upper bound on the fault rate**, because that is the direction an
   accusation is made in.
-- Below **20** rated observations the percentage is printed dimmed, with no
-  gauge, and the validator is not ranked by it in either direction (it sorts
-  with the rows that have no rate at all). A single unlucky probe used to
+- Below **20** rated observations the percentage is printed without a gauge
+  and the validator is not ranked by it in either direction (it sorts with
+  the rows that have no rate at all). A single unlucky probe used to
   render as "0.0%" beside a named validator and sort it above one with a
   hundred real faults.
 - **Reachability** on the overview and validator pages is the latest

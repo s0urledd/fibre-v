@@ -16,23 +16,23 @@ import Info from "./Info";
 type SortKey = "power" | "serve" | "faults" | "uptime" | "throughput";
 
 const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode | null }[] = [
+  { key: "power", label: "Voting power", dir: -1, info: null },
   { key: "uptime", label: "Uptime", dir: 1, info: <>
       <p>TLS handshakes completed, over handshakes attempted. We open a connection to the registered Fibre endpoint every 5 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>
       <p>Handshakes run from one location, so a dip can be a network problem on our side.</p>
     </> },
   { key: "serve", label: "Serve rate", dir: 1, info: <>
       <p>When we reached it: shards handed over, out of the shards this validator signed for, inside the retention window. Probes that could not reach it are listed beside the rate as unreachable; being down shows in Uptime.</p>
-      <p>Under {MIN_RATED} rated probes the figure is dimmed: too few to lean on.</p>
-    </> },
-  { key: "faults", label: "Faults", dir: -1, info: <>
-      <p>The validator answered but did not hand over a shard it had signed for.</p>
-      <p>The only number counted against a validator. Unreachable, unproven and unregistered are not faults.</p>
+      <p>Under {MIN_RATED} rated probes the figure has no gauge and is not ranked: too few to lean on.</p>
     </> },
   { key: "throughput", label: "Throughput", dir: -1, info: <>
       <p>Rows delivered per second, from connect to verified rows, over healthy probes.</p>
       <p>Rows per second rather than milliseconds, because assignments run from 148 to 4,096 rows and a bigger shard takes longer.</p>
     </> },
-  { key: "power", label: "Voting power", dir: -1, info: null },
+  { key: "faults", label: "Faults", dir: -1, info: <>
+      <p>The validator answered but did not hand over a shard it had signed for.</p>
+      <p>The only number counted against a validator. Unreachable, unproven and unregistered are not faults.</p>
+    </> },
 ];
 
 const rv = (r: Rate | null | undefined) => (r && r.den > 0 && r.value !== null ? r.value : null);

@@ -61,9 +61,11 @@ smallest lifted to the 148 floor:
 ```
 
 Spreading preserves the shape but not the shares: sampling 12 of 79 pulls the
-largest from 7.2% up to 39%. For mocha's actual shares, run all 79 — at the
-measured 445 MB per validator (315 MB for the node, 130 MB for its fibre
-server) that needs about 35 GB of RAM.
+largest from 7.2% up to 39%. For mocha's actual shares you would run all 79,
+and that does not fit an ordinary machine: after a day of blocks each
+`celestia-appd` sits at about 1.9 GB resident (the fibre server adds little),
+so 30 nodes filled a 62 GB host and pushed it into swap. Twelve nodes need
+about 25 GB and produce every class the taxonomy has.
 
 ### Producing each verdict class on purpose
 

@@ -2,8 +2,9 @@ import { type Rate, fmtPct, fmtCount, faultRateUpper, enoughToRank, MIN_RATED } 
 
 /**
  * A rate in a table cell: the percentage, the count under it, and a gauge.
- * Below MIN_RATED observations the percentage is dimmed and the gauge is not
- * drawn, so 3 of 3 does not read like 300 of 300. The tooltip carries the
+ * Below MIN_RATED observations the gauge is not drawn and the row is not
+ * ranked, so 3 of 3 does not read like 300 of 300; the figure itself keeps
+ * the normal text colour. The tooltip carries the
  * Wilson 95% upper bound on the fault rate, around one observation per
  * (validator, blob) when that is available.
  */
