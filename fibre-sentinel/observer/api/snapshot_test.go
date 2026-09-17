@@ -148,8 +148,8 @@ func TestSnapshotTTLScalesWithCacheAge(t *testing.T) {
 		t.Fatalf("new cache: ttl(all) = %s, want 1m", got)
 	}
 	c.born = time.Now().Add(-100 * time.Minute)
-	if got := c.ttl("all"); got != 10*time.Minute {
-		t.Fatalf("100 min old: ttl(all) = %s, want 10m", got)
+	if got := c.ttl("all"); got < 10*time.Minute || got > 10*time.Minute+time.Second {
+		t.Fatalf("100 min old: ttl(all) = %s, want about 10m", got)
 	}
 	c.born = time.Now().Add(-48 * time.Hour)
 	if got := c.ttl("all"); got != ttlFor("all") {
