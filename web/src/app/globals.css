@@ -280,6 +280,7 @@ tbody tr:hover .col-pin { background: color-mix(in srgb, var(--card) 96%, var(--
 .who .chip { margin-left: 6px; padding: 0 7px; font-size: 10px; }
 .rate { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .rate .v { font-family: var(--mono); color: var(--text); }
+.rate .v.dim { color: var(--text-3); }
 .rate .n { font-family: var(--mono); font-size: var(--t-label); color: var(--text-3); }
 .gauge-track { display: inline-flex; flex-direction: column; align-items: flex-end; min-width: 96px; }
 .gauge-rail { display: block; width: 96px; height: 3px; border-radius: 2px; background: var(--card-2); margin-top: 4px; overflow: hidden; }
@@ -326,9 +327,15 @@ dl.kv dd { margin: 0; word-break: break-all; }
 .legend .def { font-size: var(--t-small); color: var(--text-2); max-width: var(--measure); }
 
 /* ------------------------------------------------------------- graduation --- */
-.grad-scroll { overflow-x: auto; max-width: 100%; }
 .card { min-width: 0; overflow: hidden; }
-.grad-svg { display: block; width: 100%; min-width: 560px; max-width: 760px; height: auto; margin: var(--s2) 0 0; }
+.grad-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s3); margin-top: var(--s3); }
+.grad-cell { display: flex; flex-direction: column; gap: 2px; padding: var(--s3) var(--s4); border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--card-2); }
+.grad-cell .k { font-family: var(--mono); font-size: var(--t-small); color: var(--text-2); }
+.grad-cell .k .at { color: var(--text-3); }
+.grad-cell .v { font-family: var(--mono); font-size: var(--t-big); color: var(--text); line-height: 1.1; }
+.grad-cell .v.absent { color: var(--text-3); }
+.grad-cell .n { font-family: var(--mono); font-size: var(--t-label); color: var(--text-3); }
+.grad-cell .gauge-rail { width: 100%; }
 
 /* ------------------------------------------------------------------- info --- */
 .info {
@@ -366,6 +373,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
   .top .wrap { gap: var(--s3); }
   .tiles, .tiles.five { grid-template-columns: repeat(2, 1fr); }
   .tile.hero { grid-column: span 2; }
+  .grad-grid { grid-template-columns: repeat(2, 1fr); }
   dl.kv { grid-template-columns: 1fr; }
   .legend > div { grid-template-columns: 1fr; gap: var(--s1); }
   input[type=search] { min-width: 0; width: 100%; }

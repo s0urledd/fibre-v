@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type Validator, type Rate, shortBech, ago, enoughToRank, MIN_RATED } from "@/lib/api";
+import { type Validator, type Rate, shortBech, ago, MIN_RATED } from "@/lib/api";
 import RateCell from "./Rate";
 import { Count } from "./Verdict";
 import Info from "./Info";
@@ -13,7 +13,7 @@ import Info from "./Info";
  * validator's own page.
  */
 
-type SortKey = "worst" | "power" | "serve" | "faults" | "uptime" | "throughput";
+type SortKey = "power" | "serve" | "faults" | "uptime" | "throughput";
 
 const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode }[] = [
   { key: "uptime", label: "Uptime", dir: 1, info: <>
@@ -22,7 +22,7 @@ const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode }[
     </> },
   { key: "serve", label: "Serve rate", dir: 1, info: <>
       <p>Shards handed over, out of the shards this validator signed for. Counted inside the retention window only.</p>
-      <p>Under {MIN_RATED} rated probes the counts are shown instead of a rate and the validator is not ranked.</p>
+      <p>Under {MIN_RATED} rated probes the figure is dimmed: too few to lean on.</p>
     </> },
   { key: "faults", label: "Faults", dir: -1, info: <>
       <p>The validator answered but did not hand over a shard it had signed for.</p>
@@ -35,24 +35,11 @@ const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode }[
   { key: "power", label: "Voting power", dir: -1, info: <p>From the staking module.</p> },
 ];
 
-// Rank by how bad the evidence is. A validator with too few rated probes to
-// state a rate is listed with its counts, not ranked among the worst.
-function severity(v: Validator): number {
-  const faults = v.classes.FAULT ?? 0;
-  if (faults > 0 && enoughToRank(v.serve_rate)) return 0;
-  if (faults > 0) return 1;
-  if (v.reachable === false) return 2;
-  if (v.identity_status === "mismatch" || v.identity_status === "no_tls") return 2;
-  if (v.reachability_window?.den > 0 && (v.reachability_window.value ?? 1) < 1) return 3;
-  if (v.identity_rate_window?.den > 0 && (v.identity_rate_window.value ?? 1) < 1) return 3;
-  if (v.probe_count === 0) return 5;
-  return 4;
-}
 const rv = (r: Rate | null | undefined) => (r && r.den > 0 && r.value !== null ? r.value : null);
 function keyValue(v: Validator, k: SortKey): number | null {
   switch (k) {
     case "power": return v.voting_power;
-    case "serve": return enoughToRank(v.serve_rate) ? rv(v.serve_rate) : null;
+    case "serve": return rv(v.serve_rate);
     case "faults": return v.classes.FAULT ?? 0;
     case "uptime": return rv(v.reachability_window);
     case "throughput": return v.serve_rows_per_second ?? null;
@@ -77,15 +64,18 @@ function initials(v: Validator): string {
   const m = (v.moniker || "").trim();
   if (!m) return v.address.slice(0, 2);
   const parts = m.split(/[\s._-]+/).filter(Boolean);
-  return (parts.length > 1 ? parts[0][0] + parts[1][0] : m.slice(0, 2));
+  if (parts.length > 1) return parts[0][0] + parts[1][0];
+  // "node10" → N10, "Kiln" → KI
+  const tail = m.match(/\d+$/);
+  return tail ? (m[0] + tail[0]).slice(0, 3) : m.slice(0, 2);
 }
 
-export default function ValidatorTable({ rows, caption, notLive }: { rows: Validator[]; caption: string; notLive?: boolean }) {
+export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; notLive?: boolean }) {
   const [q, setQ] = useState("");
   const registered = useMemo(() => rows.filter((v) => !!v.host), [rows]);
   const [tab, setTab] = useState<"registered" | "all" | null>(null);
   const activeTab = tab ?? (registered.length > 0 ? "registered" : "all");
-  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "worst", dir: 1 });
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "power", dir: -1 });
 
   const needle = q.trim().toLowerCase();
   const pool = activeTab === "registered" ? registered : rows;
@@ -97,12 +87,6 @@ export default function ValidatorTable({ rows, caption, notLive }: { rows: Valid
     || v.host.toLowerCase().includes(needle));
 
   const ranked = [...matched].sort((a, b) => {
-    if (sort.key === "worst") {
-      const s = severity(a) - severity(b);
-      if (s) return s;
-      const av = keyValue(a, "serve") ?? 2, bv = keyValue(b, "serve") ?? 2;
-      return av - bv || b.serve_rate.den - a.serve_rate.den || b.voting_power - a.voting_power;
-    }
     const av = keyValue(a, sort.key), bv = keyValue(b, sort.key);
     if (av === null && bv === null) return b.voting_power - a.voting_power;
     if (av === null) return 1;
@@ -145,8 +129,6 @@ export default function ValidatorTable({ rows, caption, notLive }: { rows: Valid
           <button role="tab" aria-pressed={activeTab === "all"} onClick={() => setTab("all")}
             title="Every bonded validator, whether or not it registered a Fibre endpoint.">All bonded<span className="n">{rows.length}</span></button>
         </div>
-        <button className="btn" aria-pressed={sort.key === "worst"} onClick={() => setSort({ key: "worst", dir: 1 })}
-          title="Faults first, then unreachable, then partial outages.">worst first</button>
         <span className="spacer" />
         {moved && (
           <button className="btn" onClick={() => { setMoved(false); setFrozen(ranked.map((v) => v.address)); }}
@@ -156,7 +138,6 @@ export default function ValidatorTable({ rows, caption, notLive }: { rows: Valid
       </div>
       <div className="tablewrap">
         <table>
-          <caption>{caption}{needle && ` · ${list.length} of ${pool.length} match`}</caption>
           <thead>
             <tr>
               <th className="rank">#</th>
@@ -196,7 +177,7 @@ export default function ValidatorTable({ rows, caption, notLive }: { rows: Valid
                           {v.jailed && <span className="chip hold" title="Jailed by the chain. Shards it signed for are still owed.">jailed</span>}
                         </Link>
                         <span className="addr" title={v.cons_address || v.address}>
-                          {v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 12) + "…"}{v.host ? ` · ${v.host}` : ""}
+                          {v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 12) + "…"}
                         </span>
                       </span>
                     </span>

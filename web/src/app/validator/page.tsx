@@ -2,7 +2,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type Window, type Rate, type ClassCounts, fmtRate, fmtCount, enoughToRank, utc, ago, shortHex } from "@/lib/api";
+import { useApi, type Validator, type Probe, type Window, type Rate, type ClassCounts, fmtPct, fmtCount, utc, ago, shortHex } from "@/lib/api";
 import Verdict from "@/components/Verdict";
 import RateCell from "@/components/Rate";
 import Info from "@/components/Info";
@@ -28,9 +28,9 @@ function Layer({ label, r, what, sample }: { label: string; r: Rate | null | und
   const absent = !r || r.den === 0;
   return (
     <Tile label={label} info={what}
-      value={absent ? "—" : fmtRate(r)}
+      value={absent ? "—" : fmtPct(r)}
       tone={absent ? "absent" : undefined}
-      sub={absent ? "not observed in this window" : enoughToRank(r) ? (sample ?? fmtCount(r)) : `${fmtCount(r)} · under floor`} />
+      sub={absent ? "not observed in this window" : (sample ?? fmtCount(r))} />
   );
 }
 
@@ -77,7 +77,7 @@ function Page() {
           {v.attestation && v.attestation.blob_coverage.den > 0 && (
             <><dt>signed blobs</dt><dd className="mono" title="Assigned blobs in this window whose settled promise carries this validator's signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected.">
               {v.attestation.attested_blobs.toLocaleString("en-US")} of {v.attestation.blob_coverage.den.toLocaleString("en-US")}
-              <span className="muted"> · {fmtRate(v.attestation.blob_coverage)}</span>
+              <span className="muted"> · {fmtPct(v.attestation.blob_coverage)}</span>
             </dd></>
           )}
           {v.operator_address && <><dt>operator</dt><dd className="mono">{v.operator_address}</dd></>}
@@ -194,9 +194,9 @@ function Page() {
       <div className="tablewrap">
         <table>
           <caption>Newest 50. Full history: <code>/v1/probes?validator={v.address}</code></caption>
-          <thead><tr><th>started (UTC)</th><th>blob</th><th>point</th><th>phase</th><th>verdict</th><th>outcome</th><th className="right">rows</th><th className="right">ms</th><th>detail</th></tr></thead>
+          <thead><tr><th>started (UTC)</th><th>blob</th><th>point</th><th>phase</th><th>verdict</th><th>outcome</th><th className="right">rows</th><th className="right">ms</th></tr></thead>
           <tbody>
-            {data.recent_probes.length === 0 && <tr><td colSpan={9} className="muted">No probes for this validator yet.</td></tr>}
+            {data.recent_probes.length === 0 && <tr><td colSpan={8} className="muted">No probes for this validator yet.</td></tr>}
             {data.recent_probes.map((p) => (
               <tr key={p.promise_hash + p.scheduled_at}>
                 <td className="mono">{utc(p.started_at)}</td>
@@ -204,7 +204,7 @@ function Page() {
                 <td className="mono">{p.schedule_label}</td>
                 <td>{p.phase.replace("_", " ")}</td>
                 <td><Verdict cls={p.classification} title={p.classification_reason} /></td>
-                <td className="mono">
+                <td className="mono" title={p.raw_error || p.classification_reason}>
                   {p.outcome}
                   {p.attested === false && <span className="muted" title="No signature from this validator on this promise, so the probe is not in the serve rate."> (unproven)</span>}
                   {p.retry_first_outcome && (
@@ -215,7 +215,6 @@ function Page() {
                 </td>
                 <td className="right mono">{p.rows_expected ? `${p.rows_returned}/${p.rows_expected}` : "—"}</td>
                 <td className="right mono">{p.total_duration_ms}</td>
-                <td className="muted" style={{ whiteSpace: "normal", maxWidth: 360 }}>{p.raw_error || p.classification_reason}</td>
               </tr>
             ))}
           </tbody>
