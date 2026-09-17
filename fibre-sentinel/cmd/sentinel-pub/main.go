@@ -47,6 +47,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/crypto/hd"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -111,12 +112,16 @@ func main() {
 	kr, addr, fresh := openKey(ecfg, *keyFile)
 	fmt.Printf("PUB| key: %s (%s)\n", addr, map[bool]string{true: "new", false: "reused from " + *keyFile}[fresh])
 
-	if fresh {
-		// fund from the devnet 'uploader' account.
+	// Fund from the devnet 'uploader' account: always for a fresh key, and
+	// for a reused one whose account the chain does not know or that has
+	// run dry. A key file written by a run that died before funding used to
+	// come back as "reused" and skip this, then fail at the first tx.
+	if fresh || funded(ctx, conn, addr) < 1_000_000 {
 		sh(*appd, "tx", "bank", "send", "uploader", addr.String(), "9000000000utia",
 			"--from", "uploader", "--keyring-backend", "test", "--home", *home,
 			"--chain-id", *chainID, "--fees", "6000utia", "--node", tcp(*rpc), "--yes")
 		time.Sleep(5 * time.Second)
+		fmt.Printf("PUB| funded %s from uploader\n", addr)
 	}
 
 	txc, err := user.SetupTxClient(ctx, kr, conn, ecfg, user.WithDefaultAccount("pub"))
@@ -238,6 +243,16 @@ func main() {
 		}
 	}
 	fmt.Printf("PUB| done: %d blobs %s\n", *count, map[bool]string{true: "abandoned", false: "published"}[*abandon])
+}
+
+// funded is the account's spendable utia, or 0 when the chain has never
+// seen it.
+func funded(ctx context.Context, conn *grpc.ClientConn, addr sdk.AccAddress) int64 {
+	resp, err := banktypes.NewQueryClient(conn).Balance(ctx, &banktypes.QueryBalanceRequest{Address: addr.String(), Denom: "utia"})
+	if err != nil || resp.Balance == nil || !resp.Balance.Amount.IsInt64() {
+		return 0
+	}
+	return resp.Balance.Amount.Int64()
 }
 
 // openKey returns an in-memory keyring holding "pub": a fresh key, or the one
