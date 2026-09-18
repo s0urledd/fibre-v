@@ -27,3 +27,9 @@ sentinel-data/
 # python bytecode from the web fixture
 __pycache__/
 *.pyc
+
+# stray binaries from "go build ./cmd/<name>/" run at the module root
+fibre-sentinel/observer-api
+fibre-sentinel/observer-collector
+fibre-sentinel/observer-heartbeat
+fibre-sentinel/sentinel-*

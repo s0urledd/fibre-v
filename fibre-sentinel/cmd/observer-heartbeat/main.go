@@ -76,6 +76,7 @@ func main() {
 	// A round the chain side refuses writes nothing to reachability.jsonl:
 	// there is no validator to attribute a row to. The status file is where
 	// the failure goes, dated, so the gap in the file has an explanation.
+	inactiveLogged := false
 	round := func() {
 		chainID, tip, err := chain.Status(ctx)
 		if err != nil {
@@ -85,10 +86,24 @@ func main() {
 		}
 		provs, err := chain.BondedFibreProviders(ctx)
 		if err != nil {
-			log.Printf("providers: %v (x/valaddr not available before v10?)", err)
+			if scan.IsModuleInactive(err) {
+				// Before the chain runs app version 10 there is no
+				// registry to dial: a round with nothing to do, not a
+				// failure. The scanner treats the same answer the same
+				// way, and the site says Fibre is not live; a "degraded"
+				// banner over that would contradict it.
+				if !inactiveLogged {
+					log.Printf("x/valaddr is not active on this chain yet (%v); nothing to dial until the v10 upgrade, checking every round", err)
+					inactiveLogged = true
+				}
+				st.OK()
+				return
+			}
+			log.Printf("providers: %v", err)
 			st.Error(fmt.Sprintf("providers: %v", err))
 			return
 		}
+		inactiveLogged = false
 		members, err := chain.ValidatorSet(ctx, tip)
 		if err != nil {
 			log.Printf("validator set h=%d: %v", tip, err)
