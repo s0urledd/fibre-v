@@ -76,6 +76,34 @@ safety threshold is reached and keeps delivering to the rest in the
 background (`fibre/client_upload.go`), so a validator can hold a shard whose
 signature never reached the chain. Absence means *unproven*, never *absent*.
 
+### The selection bias this creates, stated plainly
+
+This is the single largest limit on every serve rate published here, and it
+does not average out.
+
+A publisher stops collecting signatures the moment it has two thirds of
+stake, so the validators that end up *proven* obliged for a blob are, by
+construction, the ones that answered the upload first. Speed of response to
+an upload and reliability of retention are not independent: the same disk,
+the same host, the same operator. The serve rate is therefore computed over a
+population selected for having been fast, which is not the population an
+operator or a delegator has in mind when they read it.
+
+The direction is knowable even though the size is not. A validator that is
+slow to accept uploads is under-represented in the denominator, so the
+published rate is, if anything, **better** than the network's true retention —
+it flatters the set rather than accusing it. That is the safer direction for a
+figure printed beside operators' names, and it is the reason this observer
+does not correct for it: any correction would have to model the missing
+population, and a model is not an observation.
+
+What is published instead is the size of the bias's input:
+`attestation.coverage` (the proven share of assigned probes),
+`serve_rate_held_out.UNATTESTED` (the rows this removes) and
+`attestation.blob_coverage` (the same per blob). A reader who wants the
+pessimistic bound can read the unproven count beside the rate; this observer
+will not turn it into a number of its own.
+
 That is why an assigned but unattested probe becomes `UNATTESTED` whatever
 the wire outcome was, and sits outside the serve rate in both directions: a
 failure the validator was never proven to owe cannot count against it, and a
@@ -190,8 +218,16 @@ One sentence each, and what a reader should conclude.
   that last reading can produce a verdict, so a validator that pruned inside
   those nineteen minutes served every probe it was given and bucketed as
   `served` — the one failure this observer exists to catch, passed silently.
-  The margin never moves a point later than its fraction already puts it, so a
-  short window keeps its tighter reading. It cannot usefully be smaller than
+  The margin never moves a point **earlier** than its fraction already puts
+  it, so a short window keeps its tighter reading.
+  The margin is on the *scheduled* time, and the prober may run a slot late —
+  up to a twentieth of the publication's own window, twelve minutes on mocha's
+  four hours — with the phase taken from the actual start. So an in-window
+  slot is additionally never run past its own deadline: its allowance is
+  whatever is left before `must_serve_until`, and a slot that cannot run in
+  time is recorded `NOT_PROBED`. An obligation nobody observed is unobserved,
+  which is published as such; it is not graded in a phase where a missing
+  shard is tolerated by construction, and it is not `served`. It cannot usefully be smaller than
   the chain's own prune granularity: the Fibre server's prune loop runs once a
   minute against a minute-resolution key, so a reading closer than that would
   be accusing an operator of the clock.
@@ -567,13 +603,38 @@ pieces needed to re-run that function are published:
   and the answer says so (`as_of_note`). Pinned answers bypass the
   snapshot cache and are rationed (a burst of four, then one every two
   seconds; `429` with `Retry-After` past that).
-- **The sampling draw.** Seven days after a UTC day ends the prober
-  publishes that day's secret (`sampling-secrets.jsonl`, served beside the
-  day's commitment at `/v1/sampling`), and from then on
-  `H(promise_hash || secret) < p · 2^64` can be recomputed by anyone for
-  every promise settled that day. The delay clears any retention window
-  this observer schedules, so the draw stays unpredictable while it
-  matters.
+- **The sampling draw.** Not every publication is probed. A vantage has a
+  finite budget — bytes per hour and per day, globally and per validator —
+  and when the projected load exceeds it the observer probes a random
+  subset rather than probing everything badly or probing the cheap
+  publications preferentially. Which subset is decided by a draw a reader
+  can check afterwards, because a sample nobody can verify is indistinguishable
+  from a sample chosen to flatter.
+
+  Each publication is admitted if `H(promise_hash || secret_of_its_day) <
+  p · 2^64`, where `p` is the admission probability at the moment it was
+  first seen. The decision is sticky for the life of the publication's
+  schedule: a publication is probed at every point or at none, never at some,
+  because a partial schedule would pull the serve rate toward whichever points
+  happened to run.
+
+  Every probe row carries the three things needed to check it — `sampling.p`
+  (that publication's own probability, not the process's current one),
+  `sampling.binding` (which cap set it) and `sampling.day_commitment`
+  (SHA-256 of the day's secret). Seven days after a UTC day ends the prober
+  publishes that day's secret (`sampling-secrets.jsonl`, served beside its
+  commitment at `/v1/sampling`), and from then on the inequality above can be
+  recomputed by anyone, for every promise settled that day, against the rows
+  in the export. `sentinel-recompute -sampling` does exactly that and exits 1
+  on a mismatch. The seven days clear any retention window this observer
+  schedules, so the draw stays unpredictable while it matters, and the master
+  secret the day secrets derive from is never published and never leaves the
+  vantage.
+
+  What this cannot prove: that the publication *list* was complete. The draw
+  is verifiable over the publications in the record; a publication the scanner
+  never saw is in neither. That is what the scan gaps are for, and they are
+  published beside it.
 - **The tool.** `sentinel-recompute -data-dir <record or untarred export>`
   re-derives every row's phase and classification from the row's own
   fields and the run's recorded tolerance (`Measurement.Recompute`), the
@@ -613,6 +674,38 @@ microseconds between the RPC's return and the row's finish time. An
 obligation figure that differs from the API's with the same rows and the
 same `as_of` is a bug in one of the two implementations, and is why there
 are two.
+
+## Disputing a verdict
+
+A FAULT is a statement about a named operator, and an observer that makes
+those without a correction path is asking to be trusted rather than checked.
+There is one, and it does not depend on this project's goodwill.
+
+**Check it yourself first.** Every FAULT row carries what produced it: the
+promise hash, the schedule point, the phase, the wire outcome, the row
+indices returned, a digest of the returned bytes, the gRPC status code, the
+observer build and the chain's app version at the time. `/v1/probes?blob=` and
+the day's export tarball both give the row in full, and `sentinel-recompute`
+re-derives the verdict from it. The three most common reasons a verdict is
+wrong are all visible in the row: the deadline was computed from params the
+server did not have (`must_serve_until_ambiguous`), the observer's path was
+the problem rather than the endpoint (the point is in
+`vantage_health.suspect`), or the shard was served from a different promise
+(`shadowed_by`).
+
+**Then say so, in public, on the record.** Open an issue on this repository
+with the promise hash and the schedule point. The record is append-only, so a
+verdict is never rewritten in place: a correction is an *amendment*, which
+carries its own timestamp, the classification at probe time and the reason —
+the same mechanism the deferred shadow verdicts use, visible on the row as
+`classification_at_probe` and `amended_at`. Anyone reading the row later sees
+both what was said and what it became.
+
+**What this observer will not do.** It will not remove a row because an
+operator asked. It will not amend a verdict without saying what changed and
+why. And it will not claim that this path makes the figures correct: it makes
+them *contestable*, which is the most a single-vantage observer can honestly
+offer.
 
 ## Adding a class
 

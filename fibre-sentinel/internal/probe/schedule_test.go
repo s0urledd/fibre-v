@@ -93,3 +93,51 @@ func max2(a, b time.Duration) time.Duration {
 	}
 	return b
 }
+
+// The margin is on the scheduled time. The prober may run a slot late — up to
+// a twentieth of the publication's own window, twelve minutes on mocha's four
+// hours — and the phase is taken from the actual start, so the reading that
+// exists to catch an early prune could have run nine minutes after the
+// obligation ended, where NOT_FOUND is TOLERATED by construction. The
+// schedule change would then have bought nothing whenever the prober was
+// busy. An in-window slot is never run past its deadline: it is recorded
+// unobserved, which is a figure this observer publishes, rather than judged
+// in a phase that cannot fault.
+func TestLatenessNeverCarriesAnInWindowSlotPastTheDeadline(t *testing.T) {
+	creation := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	msu := creation.Add(4 * time.Hour)
+	pub := scan.Publication{SettlementTime: creation.Add(30 * time.Second), MustServeUntil: msu}
+	pub.ParamsAtPublication.ShardRetentionSeconds = 4 * 3600
+	p := &Prober{cfg: Config{MaxLateness: 90 * time.Second, MaxLatenessFraction: 0.05}}
+
+	// Unbounded, the allowance is 5% of four hours.
+	if got := p.latenessFor(pub); got < 11*time.Minute {
+		t.Fatalf("the window-scaled allowance is %s; this test cannot show the bug", got)
+	}
+
+	var last SchedulePoint
+	for _, pt := range ScheduleFor(pub, DefaultScheduleConfig()) {
+		if pt.Phase == PhaseInWindow && pt.At.After(last.At) {
+			last = pt
+		}
+	}
+	room := msu.Sub(last.At)
+	got := p.latenessAt(pub, last)
+	if got > room {
+		t.Errorf("the last in-window slot may run %s late with only %s before the deadline", got, room)
+	}
+	if got <= 0 {
+		t.Errorf("the allowance for the last in-window slot is %s: it could never run", got)
+	}
+
+	// An early point keeps the full allowance: there is no deadline near it.
+	first := ScheduleFor(pub, DefaultScheduleConfig())[0]
+	if p.latenessAt(pub, first) != p.latenessFor(pub) {
+		t.Errorf("the first point's allowance was shortened to %s", p.latenessAt(pub, first))
+	}
+	// A grace point is not bounded by the deadline it sits after.
+	grace := SchedulePoint{Phase: PhaseGrace, At: msu.Add(30 * time.Second)}
+	if p.latenessAt(pub, grace) != p.latenessFor(pub) {
+		t.Errorf("the grace point's allowance was shortened to %s", p.latenessAt(pub, grace))
+	}
+}

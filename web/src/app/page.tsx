@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Network, type Validator, type Meta, type Market, fmtCount, fmtPct, bytes, utc, ago, tia } from "@/lib/api";
+import { useApi, type Network, type Validator, type Meta, type Market, fmtCount, fmtPct, bytes, utc, ago, tia, API_BASE } from "@/lib/api";
 import ValidatorTable from "@/components/ValidatorTable";
 import { Panel, Cell } from "@/components/Panel";
 import { Mark } from "@/components/Verdict";
@@ -179,13 +179,15 @@ export default function Overview() {
       )}
       {net && incidents.length > 0 && (
         <div className="note hold">
-          <span className="label">Network incident: {incidents.length} probe point{incidents.length === 1 ? "" : "s"} where half the set faulted at once</span>
+          <span className="label">Network incident: {incidents.length} probe point{incidents.length === 1 ? "" : "s"} where half the validators asked faulted at once</span>
           <p>
             {incidents.slice(0, 4).map((s, i) => (
-              <span key={s.at}>{i > 0 ? "; " : ""}{utc(s.at)} ({s.label}): {fmtCount(s.fault)} validators faulted <a href={`/api/v1/probes?at=${encodeURIComponent(s.at)}&limit=1000`}>rows</a></span>
+              <span key={s.at}>{i > 0 ? "; " : ""}{utc(s.at)} ({s.label}): {fmtCount(s.fault)} of the validators asked faulted <a href={`${API_BASE}/v1/probes?at=${encodeURIComponent(s.at)}&limit=1000`}>rows</a></span>
             ))}
             {incidents.length > 4 ? `; and ${incidents.length - 4} more` : ""}.
-            {" "}This observer&rsquo;s assignment pin matched the chain at the time, so these faults are not an observer error;
+            {" "}The share is over the validators this observer actually asked at that point, not over the whole set:
+            one it never reached says nothing about the point and is not in the denominator.
+            This observer&rsquo;s assignment pin matched the chain at the time, so these faults are not an observer error;
             operators losing data at the same minute points at the network, a release, or the observer&rsquo;s coder. No validator&rsquo;s rate counts these points; the rows are kept and linked.
           </p>
         </div>

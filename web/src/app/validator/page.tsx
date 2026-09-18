@@ -2,7 +2,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type Window, type Rate, fmtPct, fmtCount, utc, ago, shortHex, bytesPerSecond } from "@/lib/api";
+import { useApi, type Validator, type Probe, type Window, type Rate, fmtPct, fmtCount, utc, ago, shortHex, bytesPerSecond, API_BASE } from "@/lib/api";
 import { Avatar } from "@/components/ValidatorTable";
 import Verdict, { Mark } from "@/components/Verdict";
 import Info from "@/components/Info";
@@ -237,7 +237,7 @@ function Page() {
           </Info>
         </p>
       )}
-      <Panel title="Recent probes" right={<>newest 50 · <a href={`/api/v1/probes?validator=${v.address}&limit=1000`}>full history</a></>} className="probes">
+      <Panel title="Recent probes" right={<>newest 50 · <a href={`${API_BASE}/v1/probes?validator=${v.address}&limit=1000`}>full history</a></>} className="probes">
       <div className="tablewrap">
         <table>
           <thead><tr><th>started (UTC)</th><th>blob</th><th>point</th><th>phase</th><th>verdict</th><th>outcome</th><th className="right">rows</th><th className="right">ms</th></tr></thead>

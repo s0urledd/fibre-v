@@ -791,17 +791,36 @@ func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, miss
 // window when that is longer. The phase is decided from the actual start
 // (PhaseAt), so a late probe is judged in the phase it ran in, never the
 // one it was planned for.
+//
+// An in-window slot is additionally never allowed to run past
+// must_serve_until. The allowance is a fraction of the publication's own
+// window — twelve minutes on mocha's four hours — and the last in-window
+// point sits 2m30s before the deadline, so without this the reading that
+// exists to catch an early prune could run nine minutes after the obligation
+// ended, where NOT_FOUND is TOLERATED by construction. The whole schedule
+// change that moved that point to the deadline would then have bought
+// nothing whenever the prober was busy. A slot that cannot run in time is
+// recorded NOT_PROBED instead: an obligation nobody observed is unobserved,
+// which is a figure this observer publishes, and not `served`.
 func (p *Prober) latenessFor(pub scan.Publication) time.Duration {
+	return p.latenessAt(pub, SchedulePoint{})
+}
+
+func (p *Prober) latenessAt(pub scan.Publication, pt SchedulePoint) time.Duration {
 	late := p.cfg.MaxLateness
-	if p.cfg.MaxLatenessFraction <= 0 {
-		return late
+	if p.cfg.MaxLatenessFraction > 0 {
+		window := pub.MustServeUntil.Sub(pub.SettlementTime)
+		if window <= 0 {
+			window = fallbackSpan(pub)
+		}
+		if f := time.Duration(float64(window) * p.cfg.MaxLatenessFraction); f > late {
+			late = f
+		}
 	}
-	window := pub.MustServeUntil.Sub(pub.SettlementTime)
-	if window <= 0 {
-		window = fallbackSpan(pub)
-	}
-	if f := time.Duration(float64(window) * p.cfg.MaxLatenessFraction); f > late {
-		late = f
+	if pt.Phase == PhaseInWindow && !pt.At.IsZero() {
+		if room := pub.MustServeUntil.Sub(pt.At); room > 0 && room < late {
+			late = room
+		}
 	}
 	return late
 }
@@ -1001,8 +1020,13 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 	// The slot was due when planned; a long cycle must not silently probe it
 	// in a later phase. Past the lateness allowance it is a gap, not a
 	// verdict.
-	if late := time.Since(j.point.At); late > p.latenessFor(pub) {
-		p.recordNotProbedTarget(pub, j.point, t, fmt.Sprintf("elapsed while the cycle ran (%s late)", late.Round(time.Second)))
+	if allowed := p.latenessAt(pub, j.point); time.Since(j.point.At) > allowed {
+		late := time.Since(j.point.At)
+		reason := fmt.Sprintf("elapsed while the cycle ran (%s late)", late.Round(time.Second))
+		if j.point.Phase == PhaseInWindow && !time.Now().Before(pub.MustServeUntil) {
+			reason = fmt.Sprintf("elapsed while the cycle ran (%s late); the obligation ended before this reading could be taken, so it is unobserved rather than judged in a later phase", late.Round(time.Second))
+		}
+		p.recordNotProbedTarget(pub, j.point, t, reason)
 		return false
 	}
 	skipDL := false
