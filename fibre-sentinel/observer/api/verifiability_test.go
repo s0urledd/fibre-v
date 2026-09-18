@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/api"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
@@ -375,5 +376,76 @@ func TestProbesCarryTheSettlementHostEvidence(t *testing.T) {
 	if p.Classification != "FAULT" || p.HostAtSettlement != "old.example:9090" || !p.HostChanged ||
 		p.SettlementHostOutcome != "SERVED_OK" || p.SettlementHostServed == nil || !*p.SettlementHostServed {
 		t.Errorf("row = %+v", p)
+	}
+}
+
+// The scanner derives host_at_settlement from the chain's registration
+// events and records them in host_history.jsonl; the collector ingests
+// that record, and a blob's assignments carry the host with its source.
+func TestHostHistoryIsIngestedAndAssignmentsCarryTheHost(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	dir := t.TempDir()
+	lines := `{"from_height":100,"from_tx_index":-1,"cons_address":"aa","host":"a-seed:1","source":"seed","time":"2026-09-18T09:00:00Z"}` + "\n" +
+		`{"from_height":120,"from_tx_index":4,"cons_address":"aa","host":"a-new:1","source":"event","time":"2026-09-18T09:10:00Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "host_history.jsonl"), []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	res, err := ingest.HostEvents(st, filepath.Join(dir, "host_history.jsonl"), now)
+	if err != nil || res.Inserted != 2 {
+		t.Fatalf("ingest: %+v %v", res, err)
+	}
+	if res, err := ingest.HostEvents(st, filepath.Join(dir, "host_history.jsonl"), now); err != nil || res.Inserted != 0 {
+		t.Fatalf("replay: %+v %v", res, err)
+	}
+	var n int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM host_events WHERE cons_address = 'aa'`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("host_events rows = %d (%v)", n, err)
+	}
+	// a publication whose assignments carry the event-derived host, one
+	// unknown behind a scan gap, one never named
+	pub := scan.Publication{
+		SchemaVersion: scan.AttestationSchemaVersion, PromiseHash: "hh1", SettlementHeight: 130, SettlementTime: now,
+		MustServeUntil: now.Add(time.Hour), RecordedAt: now, SettlementTxHash: "txhh1", Signer: "celestia1pub",
+		Promise: scan.PromiseFields{ChainID: "t", Height: 129, Commitment: "cch", CreationTimestamp: now, BlobSize: 4096},
+		Assignment: scan.AssignmentTable{
+			ProtocolParams: scan.ProtocolParamsSnapshot{OriginalRows: 4, TotalRows: 16}, ValidatorSetHeight: 129,
+			Validators: []scan.ValidatorAssignment{
+				{Address: "aa", VotingPower: 10, RowCount: 2, Rows: []int{0, 1}, Attested: true, Host: "a-new:1", HostSource: scan.HostFromEvent},
+				{Address: "bb", VotingPower: 10, RowCount: 2, Rows: []int{2, 3}, Attested: true, HostSource: scan.HostUnknownGap},
+				{Address: "cc", VotingPower: 10, RowCount: 2, Rows: []int{4, 5}, Attested: true, HostSource: scan.HostNone},
+			},
+		},
+	}
+	raw, _ := json.Marshal(pub)
+	if _, err := st.UpsertPublication(pub, raw); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptestServer(t, st)
+	var out struct {
+		Assignments []struct {
+			Address string  `json:"validator_address"`
+			Host    *string `json:"host_at_settlement"`
+		} `json:"assignments"`
+	}
+	if code := get(t, ts, "/v1/blobs/hh1", &out); code != 200 {
+		t.Fatalf("blob: %d", code)
+	}
+	got := map[string]*string{}
+	for _, a := range out.Assignments {
+		got[a.Address] = a.Host
+	}
+	if got["aa"] == nil || *got["aa"] != "a-new:1" {
+		t.Errorf("aa host = %v, want the event host", got["aa"])
+	}
+	if got["bb"] != nil {
+		t.Errorf("bb (scan gap) host = %q, want null", *got["bb"])
+	}
+	if got["cc"] == nil || *got["cc"] != "" {
+		t.Errorf("cc (never named) host = %v, want empty, not null", got["cc"])
 	}
 }

@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 13
+const SchemaVersion = 14
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -373,6 +373,26 @@ var migrations = []migration{
 			`ALTER TABLE probes ADD COLUMN host_at_settlement TEXT`,
 			`ALTER TABLE probes ADD COLUMN settlement_host_outcome TEXT`,
 			`ALTER TABLE probes ADD COLUMN settlement_host_served INTEGER`,
+		},
+	},
+	{
+		version: 14,
+		note:    "host_events: every Fibre host registration the scanner read from the chain's events, plus its seed; the source of host_at_settlement",
+		stmts: []string{
+			// Distinct from endpoints, which is the collector's own poll of
+			// the bonded registry (the current registry, for the prober and
+			// the heartbeat). This is the chain's history, replayed from
+			// host_history.jsonl, and it is what a verifier derives
+			// host_at_settlement from.
+			`CREATE TABLE IF NOT EXISTS host_events (
+				from_height   INTEGER NOT NULL,
+				from_tx_index INTEGER NOT NULL,
+				cons_address  TEXT NOT NULL,
+				host          TEXT NOT NULL,
+				source        TEXT NOT NULL,
+				time          TEXT NOT NULL,
+				PRIMARY KEY (cons_address, from_height, from_tx_index)
+			)`,
 		},
 	},
 }
@@ -846,9 +866,14 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 		if p.HasAttestation() {
 			attested = b2i(v.Attested)
 		}
+		// NULL: unknown (a scan gap, or no seed); '' : no host on record;
+		// else the host the chain's events or the seed named.
 		var host any
-		if p.Assignment.HostsAtSettlementKnown {
+		switch v.HostSource {
+		case scan.HostFromEvent, scan.HostFromSeed, scan.HostFromSeedLazy, scan.HostFromSeedCurrent:
 			host = v.Host
+		case scan.HostNone:
+			host = ""
 		}
 		if _, err := tx.Exec(`INSERT INTO assignments (promise_hash, validator_address, voting_power, row_count, rows_json, attested, host_at_settlement)
 			VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(promise_hash, validator_address) DO NOTHING`,
@@ -1306,6 +1331,19 @@ func (s *Store) InsertReachability(m probe.Measurement, raw []byte) (inserted bo
 		b2i(m.Identity.OK), m.Identity.Reason, string(m.Outcome), m.RawError, m.TotalDurationMS, string(raw))
 	if err != nil {
 		return false, fmt.Errorf("reachability %s: %w", key, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ReplayHostEvent applies one host_history.jsonl record. Idempotent by
+// natural key.
+func (s *Store) ReplayHostEvent(e scan.HostEvent) (bool, error) {
+	res, err := s.db.Exec(`INSERT INTO host_events (from_height, from_tx_index, cons_address, host, source, time)
+		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+		e.FromHeight, e.FromTxIndex, strings.ToLower(e.ConsAddress), e.Host, e.Source, ts(e.Time))
+	if err != nil {
+		return false, err
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil

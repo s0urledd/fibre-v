@@ -29,6 +29,8 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -74,6 +76,7 @@ func main() {
 		chainID   = flag.String("chain-id", "fibre-devnet", "chain id")
 		count     = flag.Int("count", 3, "number of blobs to publish")
 		blobBytes = flag.Int("blob", 96*1024, "blob payload size")
+		seed      = flag.Int64("seed", 0, "deterministic payloads: blob i is derived from seed+i, so two runs with the same seed, size and namespace publish the same blobs (two promises over one commitment, the shadowing case); 0 = random")
 		gap       = flag.Duration("gap", 6*time.Second, "delay between publishes")
 		nsHex     = flag.String("ns", "", "namespace id suffix bytes (hex, <=10); default random-ish per run")
 		// Off by default, which is what the protocol does: the publisher stops
@@ -171,7 +174,11 @@ func main() {
 
 	for i := 0; i < *count; i++ {
 		data := make([]byte, *blobBytes)
-		_, _ = rand.Read(data)
+		if *seed != 0 {
+			fillDeterministic(data, *seed+int64(i))
+		} else {
+			_, _ = rand.Read(data)
+		}
 		blob, err := celfibre.NewBlob(data, celfibre.DefaultBlobConfigV0())
 		must(err, "new blob")
 		id := append(append([]byte(nil), nsSuffix...), byte(i))
@@ -342,4 +349,17 @@ func must(err error, ctx string) {
 func fatal(f string, a ...any) {
 	fmt.Fprintf(os.Stderr, "PUB-FATAL: "+f+"\n", a...)
 	os.Exit(1)
+}
+
+// fillDeterministic fills data from SHA-256 of the seed in counter mode: the
+// same seed and size give the same payload on any machine, which is what a
+// second promise over the same commitment needs.
+func fillDeterministic(data []byte, seed int64) {
+	var counter [16]byte
+	binary.BigEndian.PutUint64(counter[:8], uint64(seed))
+	for off := 0; off < len(data); off += sha256.Size {
+		binary.BigEndian.PutUint64(counter[8:], uint64(off))
+		sum := sha256.Sum256(counter[:])
+		copy(data[off:], sum[:])
+	}
 }
