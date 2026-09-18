@@ -455,6 +455,7 @@ func rollDay(ctx context.Context, db *sql.DB, d, now time.Time) (int64, error) {
 		probes, gaps, faults int64
 		classes              map[string]int64
 		beats, beatsUp       int64
+		identityUp           int64
 	}
 	byVal := map[string]*pd{}
 	get := func(a string) *pd {
@@ -515,20 +516,21 @@ func rollDay(ctx context.Context, db *sql.DB, d, now time.Time) (int64, error) {
 	}
 	rows.Close()
 	rows, err = tx.QueryContext(ctx, `SELECT validator_address, COUNT(*),
-			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 AND identity_ok = 1 THEN 1 ELSE 0 END), 0)
 		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR' GROUP BY validator_address`, lo, hi)
 	if err != nil {
 		return 0, err
 	}
 	for rows.Next() {
 		var a string
-		var n, up int64
-		if err := rows.Scan(&a, &n, &up); err != nil {
+		var n, up, ident int64
+		if err := rows.Scan(&a, &n, &up, &ident); err != nil {
 			rows.Close()
 			return 0, err
 		}
 		v := get(a)
-		v.beats, v.beatsUp = n, up
+		v.beats, v.beatsUp, v.identityUp = n, up, ident
 	}
 	rows.Close()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM probe_daily WHERE day = ?`, d.Format(dayLayout)); err != nil {
@@ -539,8 +541,8 @@ func rollDay(ctx context.Context, db *sql.DB, d, now time.Time) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO probe_daily (day, validator_address, probes, gaps, faults, classes_json, beats, beats_up, computed_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, d.Format(dayLayout), a, v.probes, v.gaps, v.faults, string(cj), v.beats, v.beatsUp, store.TS(now)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO probe_daily (day, validator_address, probes, gaps, faults, classes_json, beats, beats_up, identity_up, computed_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, d.Format(dayLayout), a, v.probes, v.gaps, v.faults, string(cj), v.beats, v.beatsUp, v.identityUp, store.TS(now)); err != nil {
 			return 0, err
 		}
 	}
@@ -558,6 +560,7 @@ type Rolled struct {
 	Classes              map[string]int64
 	ProbesByVal          map[string]*RolledProbes
 	Beats, BeatsUp       int64
+	IdentityUp           int64
 }
 
 // RolledProbes is one validator's rolled row counts.
@@ -565,6 +568,10 @@ type RolledProbes struct {
 	Probes, Gaps, Faults int64
 	Classes              map[string]int64
 	Beats, BeatsUp       int64
+	// IdentityUp is how many of BeatsUp presented a certificate endorsed by
+	// the validator's consensus key: the numerator of identity_rate_window,
+	// whose denominator is BeatsUp itself.
+	IdentityUp int64
 }
 
 // Load reads the rollups for days before `before` (a UTC day). only, when
@@ -600,15 +607,25 @@ func Load(ctx context.Context, db *sql.DB, before time.Time, only string) (*Roll
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = db.QueryContext(ctx, `SELECT validator_address, SUM(probes), SUM(gaps), SUM(faults), SUM(beats), SUM(beats_up), classes_json
-		FROM probe_daily WHERE day < ?`+filter+` GROUP BY validator_address, classes_json`, args...)
+	// One row per rolled day, not one per distinct class map. Grouping by
+	// classes_json would sum the numeric columns across every day in the
+	// group while taking the JSON of one of them, so two days on which a
+	// validator produced the same class distribution — the ordinary shape
+	// of a steady validator, {"HEALTHY":8} day after day — would contribute
+	// both days' probes and one day's classes. The class tally is what the
+	// serve rate and its coverage are drawn from, so that loss moves a
+	// published figure about a named validator in the accusing direction.
+	// The maps are added in Go instead; the row count is days x validators,
+	// which is small.
+	rows, err = db.QueryContext(ctx, `SELECT validator_address, probes, gaps, faults, beats, beats_up, identity_up, classes_json
+		FROM probe_daily WHERE day < ?`+filter, args...)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var a, cj string
 		var p RolledProbes
-		if err := rows.Scan(&a, &p.Probes, &p.Gaps, &p.Faults, &p.Beats, &p.BeatsUp, &cj); err != nil {
+		if err := rows.Scan(&a, &p.Probes, &p.Gaps, &p.Faults, &p.Beats, &p.BeatsUp, &p.IdentityUp, &cj); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -627,6 +644,7 @@ func Load(ctx context.Context, db *sql.DB, before time.Time, only string) (*Roll
 		v.Faults += p.Faults
 		v.Beats += p.Beats
 		v.BeatsUp += p.BeatsUp
+		v.IdentityUp += p.IdentityUp
 		for c, n := range classes {
 			v.Classes[c] += n
 			out.Classes[c] += n
@@ -636,6 +654,7 @@ func Load(ctx context.Context, db *sql.DB, before time.Time, only string) (*Roll
 		out.Faults += p.Faults
 		out.Beats += p.Beats
 		out.BeatsUp += p.BeatsUp
+		out.IdentityUp += p.IdentityUp
 	}
 	rows.Close()
 	return out, rows.Err()

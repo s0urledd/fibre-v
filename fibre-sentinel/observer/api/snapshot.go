@@ -72,7 +72,32 @@ var warmWindows = []string{"24h", "7d", "30d", "all"}
 // snapshotTimeout bounds a background refresh. One that cannot finish in this
 // time is abandoned rather than left to pile up behind the next; the previous
 // snapshot keeps being served and the next read tries again.
-const snapshotTimeout = 5 * time.Minute
+//
+// The "all" window gets longer, because its cost is the only one that grows
+// without bound: the windowed spans cover a fixed number of days, while "all"
+// covers every raw row the store still holds, which is every row written since
+// the observer started until retention begins to prune. Measured on a fixture
+// of 80 validators and three days of publications (691k probe rows), the whole
+// warm-up of twelve snapshots took 94 seconds; the same arithmetic at a month
+// of that rate puts the "all" window past five minutes. A refresh abandoned on
+// the timeout is not a wrong figure — the previous snapshot keeps being served
+// with its age shown — but it is a figure that silently stops moving, so the
+// bound is generous and slowness is logged before it becomes a freeze.
+const (
+	snapshotTimeout    = 5 * time.Minute
+	snapshotTimeoutAll = 20 * time.Minute
+	// slowRefresh is when a refresh is worth a log line: at this point the
+	// operator should be lowering -retain-raw (deploy/README.md, "Backups,
+	// retention, rebuild") rather than waiting for the timeout.
+	slowRefresh = 45 * time.Second
+)
+
+func timeoutFor(name string) time.Duration {
+	if name == "all" {
+		return snapshotTimeoutAll
+	}
+	return snapshotTimeout
+}
 
 // logf is the bit of a logger a cache needs, so it does not depend on the whole
 // Server and stays usable with nothing.
@@ -249,12 +274,26 @@ func (c *snapshotCache[T]) await(ctx context.Context, win Window) *snap[T] {
 // background recomputes away from any request: the reader that triggered it has
 // long since been served, so its context must not be the one that goes away.
 func (c *snapshotCache[T]) background(log logf, win Window) {
-	ctx, cancel := context.WithTimeout(context.Background(), snapshotTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutFor(win.Name))
 	defer cancel()
-	if _, err := c.fill(ctx, win); err != nil && log != nil {
+	started := time.Now()
+	_, err := c.fill(ctx, win)
+	took := time.Since(started)
+	if log == nil {
+		return
+	}
+	if err != nil {
 		// A failed refresh is not a failed request: the previous snapshot is
 		// still being served, so this is logged and left for the next read.
-		log("%s snapshot refresh (%s): %v", c.label, win.Name, err)
+		log("%s snapshot refresh (%s): after %s: %v", c.label, win.Name, took.Round(time.Second), err)
+		return
+	}
+	if took >= slowRefresh {
+		// Not an error: the figure is correct and was served the whole time.
+		// It is the trend that matters, because the cost of this window grows
+		// with the history behind it and the end of that growth is a window
+		// that stops refreshing at all.
+		log("%s snapshot refresh (%s) took %s (over %s); consider lowering -retain-raw", c.label, win.Name, took.Round(time.Second), slowRefresh)
 	}
 }
 

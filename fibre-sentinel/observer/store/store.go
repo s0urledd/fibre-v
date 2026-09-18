@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 15
+const SchemaVersion = 16
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -412,6 +412,19 @@ var migrations = []migration{
 				status       TEXT NOT NULL DEFAULT '',
 				checked_at   TEXT NOT NULL
 			)`,
+		},
+	},
+	{
+		version: 16,
+		note:    "probe_daily.identity_up: the endorsed share of a rolled day's completed handshakes, so identity_rate_window survives the prune the way reachability_window does",
+		stmts: []string{
+			// identity_rate_window is endorsed handshakes over completed
+			// ones, so its denominator is beats_up, already rolled. Only the
+			// numerator was missing, and without it the figure quietly
+			// narrowed to the unpruned days while the reachability figure
+			// printed beside it kept covering everything — two spans, one
+			// row, no way for a reader to tell.
+			`ALTER TABLE probe_daily ADD COLUMN identity_up INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
 }

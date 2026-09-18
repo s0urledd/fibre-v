@@ -207,7 +207,11 @@ One sentence each, and what a reader should conclude.
   because the probe made its own handshake at the moment that matters.
 - Below **20** rated observations the percentage is printed without a gauge
   and the validator is not ranked by it in either direction (it sorts with
-  the rows that have no rate at all). A single unlucky probe used to
+  the rows that have no rate at all). This holds for every ranked figure on
+  the validator table — serve rate, reachability and throughput — not only
+  for the serve rate: a validator that registered its endpoint an hour ago
+  has a handful of handshakes, and the reachability column sorts worst
+  first. A single unlucky probe used to
   render as "0.0%" beside a named validator and sort it above one with a
   hundred real faults.
 - **Suspect points** (`vantage_health.suspect`). At any in-window schedule
@@ -215,8 +219,12 @@ One sentence each, and what a reader should conclude.
   of the distinct validators probed were `UNREACHABLE`, or at least
   `fault_threshold` (50%) and three were `FAULT`, every probe row at that
   `scheduled_at` is left out of the per-probe rate, the coverage and
-  held-out counts, the obligation buckets, the per-point breakdown and the
-  fault count, network-wide and per validator alike. Validators fail
+  held-out counts, the obligation buckets, the per-point breakdown, the
+  attestation counts and the fault count, network-wide and per validator
+  alike. The attestation counts are in that list so a reader can reconcile
+  the response against itself: `serve_rate_coverage.den` equals
+  `attested_probes + unattested_probes + unknown_probes`, and
+  `serve_rate_held_out.UNATTESTED` equals `attestation.unattested_probes`. Validators fail
   independently; one observer's network does not. The two reasons are
   shown differently: an `unreachable` point is a problem on our side; a
   `fault` point is a **network incident**, because a stale assignment pin

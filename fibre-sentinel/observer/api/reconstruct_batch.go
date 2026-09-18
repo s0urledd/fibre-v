@@ -77,6 +77,64 @@ type pointAgg struct {
 	nullRows       int // how many of them have no recorded row list
 }
 
+// asOfPin bounds a reconstructability pass in time. The zero value is live.
+//
+// Everything else on a pinned /v1/network answer is bounded by
+// started_at <= as_of, and AsOfNote tells the reader so. The reconstructability
+// block was not: its publication selection was pinned but its two probe
+// queries had no time bound at all, so a blob that was still in flight at the
+// pinned moment — which, with a four-hour retention window, is every blob for
+// four hours after it settles — was judged with evidence that did not exist
+// yet. The honest answer at that moment is "pending"; the answer given was
+// today's, and it could say a blob was not fully served. A verdict about a
+// moment must be drawn from what was known at that moment.
+type asOfPin struct {
+	// at is store.TimeLayout of the pinned end, or "" when live.
+	at string
+	// now is the moment "has the retention window closed?" is asked at: the
+	// pinned end, or the real clock when live.
+	now time.Time
+}
+
+func pinFor(win Window) asOfPin {
+	if !win.AsOf {
+		return asOfPin{now: time.Now()}
+	}
+	return asOfPin{at: win.endArg(), now: win.End}
+}
+
+// bound appends the row bound this pin implies to a WHERE clause on the alias
+// given, and returns the argument list to use with it.
+func (p asOfPin) bound(alias string, args []any) (string, []any) {
+	if p.at == "" {
+		return "", args
+	}
+	return " AND " + alias + ".started_at <= ?", append(append([]any{}, args...), p.at)
+}
+
+// pinArgs is the pin's argument list for a clause built with bound(_, nil).
+func pinArgs(p asOfPin) []any {
+	if p.at == "" {
+		return nil
+	}
+	return []any{p.at}
+}
+
+// over reports whether the retention deadline had passed as of this pin.
+func (p asOfPin) over(msu string) bool {
+	at := p.now
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if t, err := time.Parse(store.TimeLayout, msu); err == nil {
+		return at.After(t)
+	}
+	if t, err := time.Parse(time.RFC3339Nano, msu); err == nil {
+		return at.After(t)
+	}
+	return false
+}
+
 // reconstructBatch returns the verdict for every publication in the selection,
 // keyed by promise hash. A publication with no in-window probe at all is absent
 // from the map, matching reconstructable's "unknown" for the same case.
@@ -85,7 +143,7 @@ type pointAgg struct {
 // nothing else, and leaving ServedRows at zero is what lets the bounds replace
 // the row lists. A list or detail page, which does publish served_distinct_rows,
 // uses the reference.
-func (s *Server) reconstructBatch(ctx context.Context, where string, limit int, args ...any) (map[string]*reconstruct, error) {
+func (s *Server) reconstructBatch(ctx context.Context, where string, limit int, pin asOfPin, args ...any) (map[string]*reconstruct, error) {
 	db := s.st.DB()
 	sel := blobSel(where, limit)
 
@@ -149,15 +207,16 @@ func (s *Server) reconstructBatch(ctx context.Context, where string, limit int, 
 	}
 
 	// 3. every in-window point with a real result, newest first per blob.
+	pb, pargs := pin.bound("p", args)
 	points := map[string][]pointAgg{}
 	rows, err = db.QueryContext(ctx, sel+`
 		SELECT p.promise_hash, p.scheduled_at, p.schedule_label, p.must_serve_until,
 		       COUNT(DISTINCT p.validator_address)
 		FROM probes p JOIN sel ON sel.promise_hash = p.promise_hash
 		WHERE p.phase = 'in_window' AND p.assigned = 1
-		  AND p.classification NOT IN ('NOT_PROBED','PROBE_ERROR')
+		  AND p.classification NOT IN ('NOT_PROBED','PROBE_ERROR')`+pb+`
 		GROUP BY p.promise_hash, p.scheduled_at
-		ORDER BY p.promise_hash, p.scheduled_at DESC`, args...)
+		ORDER BY p.promise_hash, p.scheduled_at DESC`, pargs...)
 	if err != nil {
 		return nil, err
 	}
@@ -193,9 +252,9 @@ func (s *Server) reconstructBatch(ctx context.Context, where string, limit int, 
 		  FROM probes p
 		  JOIN assignments a ON a.promise_hash = p.promise_hash AND a.validator_address = p.validator_address
 		  JOIN sel ON sel.promise_hash = p.promise_hash
-		  WHERE p.phase = 'in_window' AND p.assigned = 1 AND p.outcome = 'SERVED_OK'
+		  WHERE p.phase = 'in_window' AND p.assigned = 1 AND p.outcome = 'SERVED_OK'`+pb+`
 		)
-		GROUP BY promise_hash, scheduled_at`, args...)
+		GROUP BY promise_hash, scheduled_at`, pargs...)
 	if err != nil {
 		return nil, err
 	}
@@ -233,12 +292,7 @@ func (s *Server) reconstructBatch(ctx context.Context, where string, limit int, 
 		}
 		sv := served[servedKey{hash, chosen.at}]
 
-		windowOver := false
-		if t, err := time.Parse(store.TimeLayout, chosen.msu); err == nil {
-			windowOver = time.Now().After(t)
-		} else if t, err := time.Parse(time.RFC3339Nano, chosen.msu); err == nil {
-			windowOver = time.Now().After(t)
-		}
+		windowOver := pin.over(chosen.msu)
 
 		a := atts[hash]
 		rc := &reconstruct{
@@ -282,7 +336,7 @@ func (s *Server) reconstructBatch(ctx context.Context, where string, limit int, 
 			// Within `excess` rows of the threshold: the bounds straddle it, so
 			// only the exact union can answer. Rare enough to pay for one blob
 			// at a time.
-			ref, err := s.reconstructable(ctx, hash)
+			ref, err := s.reconstructable(ctx, hash, pin)
 			if err != nil {
 				return nil, fmt.Errorf("reconstructable %s: %w", hash, err)
 			}

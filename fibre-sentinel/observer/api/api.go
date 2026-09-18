@@ -93,7 +93,7 @@ type Server struct {
 	// are computed on a schedule rather than per request, so a reader never
 	// waits for one and never sees one without its age.
 	net  *snapshotCache[*networkResponse]
-	vals *snapshotCache[[]validatorRow]
+	vals *snapshotCache[validatorSnapshot]
 	// The publisher-side summary, same treatment: see market.go.
 	market *snapshotCache[*marketResponse]
 	// labels is the operator-maintained publisher name registry.
@@ -158,8 +158,12 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	}
 	s.net = newSnapshotCache("network", s.computeNetwork)
 	s.market = newSnapshotCache("market", s.computeMarket)
-	s.vals = newSnapshotCache("validators", func(ctx context.Context, win Window) ([]validatorRow, error) {
-		return s.validatorRows(ctx, win, "")
+	s.vals = newSnapshotCache("validators", func(ctx context.Context, win Window) (validatorSnapshot, error) {
+		rows, err := s.validatorRows(ctx, win, "")
+		if err != nil {
+			return validatorSnapshot{}, err
+		}
+		return validatorSnapshot{Window: win, Rows: rows}, nil
 	})
 	// Serve the previous process's snapshots at once, then warm every window
 	// so the first visitor is not the one who waits.
@@ -336,7 +340,7 @@ func (s *Server) rolledFor(ctx context.Context, win Window, only string) (*rollu
 		return nil, nil, err
 	}
 	label := &rolledUp{RawFrom: from.Format("2006-01-02"), Days: r.Days,
-		Note: "rolled up after " + rolledNote + ": obligations, classes, faults, probe counts, gaps and heartbeats for days before raw_from come from the daily rollup; latency, by-point, attestation and throughput figures cover the raw record from raw_from on"}
+		Note: "rolled up after " + rolledNote + ": obligations, classes, faults, probe counts, gaps, heartbeats and endorsement for days before raw_from come from the daily rollup; latency, by-point, attestation and throughput figures cover the raw record from raw_from on"}
 	return r, label, nil
 }
 
@@ -356,8 +360,13 @@ func addRolledObligations(o *obligationStats, r rollup.Obligations) {
 	o.finish()
 }
 
-// AsOfNote goes beside a pinned window's figures.
-const AsOfNote = "rows started after as_of are left out; chain state (jailed, bond_status, current host and endpoint counts) is as of now, not as_of"
+// AsOfNote goes beside a pinned window's figures. It names what is not
+// rewound, so it has to be exact: an over-broad disclaimer is as misleading
+// as a missing one. Probe rows, heartbeats, payments, reconstructability and
+// the endpoint census are all bounded by the pin. What is not is the chain
+// state the store keeps only currently: a validator's jailed flag, its bond
+// status and the host it advertises today.
+const AsOfNote = "rows started after as_of are left out, and so are the verdicts drawn from them; a validator's jailed flag, bond_status and current host are as of now, not as_of"
 
 var windows = map[string]time.Duration{"24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour, "30d": 30 * 24 * time.Hour, "all": 0}
 
@@ -414,11 +423,45 @@ type asOfLimiter struct {
 	mu     sync.Mutex
 	tokens float64
 	last   time.Time
+	// inFlight is the number of pinned windows being computed right now.
+	inFlight int
+}
+
+// enter reserves one of the asOfConcurrent computation slots. The caller must
+// call leave when it is done. ok is false when every slot is busy, which is a
+// 429 like the rate limit: the work, not the request, is what is scarce.
+func (l *asOfLimiter) enter() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.inFlight >= asOfConcurrent {
+		return false
+	}
+	l.inFlight++
+	return true
+}
+
+func (l *asOfLimiter) leave() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.inFlight > 0 {
+		l.inFlight--
+	}
 }
 
 const (
 	asOfBurst    = 4.0
 	asOfInterval = 2 * time.Second
+	// asOfConcurrent bounds how many pinned windows are computed at once. The
+	// rate limit above bounds arrivals; this bounds work, and the two are not
+	// the same thing: a pinned "all" window is every aggregate recomputed from
+	// the raw rows, which on a network-scale store is tens of seconds of CPU
+	// and hundreds of megabytes of heap. Measured on a fixture of 80
+	// validators and three days of publications (691k probe rows): 23s and
+	// ~900 MB for one /v1/network?window=all&as_of=..., so "one every two
+	// seconds" admits an order of magnitude more work than the process can
+	// carry. Two at a time keeps a pinned request answerable without letting
+	// the public endpoint decide how much of the box it gets.
+	asOfConcurrent = 2
 )
 
 func (l *asOfLimiter) allow(now time.Time) bool {
@@ -1244,12 +1287,19 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if win.AsOf {
-		// A pinned window is computed on demand, uncached and rationed.
+		// A pinned window is computed on demand, uncached and rationed: by
+		// arrivals (allow) and by work in flight (enter).
 		if !s.asOf.allow(time.Now()) {
 			w.Header().Set("Retry-After", "2")
 			writeErr(w, 429, "as_of requests are limited to one every two seconds")
 			return
 		}
+		if !s.asOf.enter() {
+			w.Header().Set("Retry-After", "5")
+			writeErr(w, 429, "as_of computations already in flight; try again shortly")
+			return
+		}
+		defer s.asOf.leave()
 		t0 := time.Now()
 		resp, err := s.computeNetwork(r.Context(), win)
 		if err != nil {
@@ -1367,8 +1417,15 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	}
 	resp.ByObligation = resp.Obligations.Rate
 	_ = total
+	// The same population the class tally above was drawn from, suspect
+	// points and all. Without the exclusion here the two were counts of
+	// different row sets, so serve_rate_coverage.den stopped equalling
+	// attested + unattested + unknown and serve_rate_held_out.UNATTESTED
+	// stopped equalling attestation.unattested_probes — an unexplained
+	// gap for anyone reconciling the response against itself, which is
+	// exactly what a reader checking this observer's arithmetic does.
 	if resp.Attestation, err = s.attestationWhere(ctx,
-		`started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg(), win.endArg()); err != nil {
+		`started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+ss.clause("scheduled_at"), popArgs...); err != nil {
 		return nil, err
 	}
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ?`, win.startArg(), win.endArg()).Scan(&resp.ProbeCount)
@@ -1399,13 +1456,30 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	if err != nil {
 		return nil, err
 	}
-	var reachable int64
-	for _, v := range reach {
+	// The census is over the validators that advertise a Fibre endpoint
+	// right now, not over every validator this observer has ever probed.
+	// Without the restriction the denominator only ever grew — an operator
+	// that left the bonded provider list months ago still counted, with its
+	// last handshake frozen — and the numerator was printed on the overview
+	// beside registered_endpoints, a count from a different population, so
+	// it could read "79 registered endpoints; 80 answering". Both figures
+	// are published here as one rate, num over den, so the page cannot pair
+	// them with anything else.
+	registered, err := s.registeredValidators(ctx, win)
+	if err != nil {
+		return nil, err
+	}
+	var reachable, census int64
+	for a, v := range reach {
+		if !registered[a] {
+			continue
+		}
+		census++
 		if v.reachable {
 			reachable++
 		}
 	}
-	resp.Reachability = rate(reachable, int64(len(reach)))
+	resp.Reachability = rate(reachable, census)
 
 	var beats, beatsUp int64
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*),
@@ -1481,6 +1555,31 @@ type reachState struct {
 // reachabilityNow returns the latest evidence per validator, or for just one
 // when only is set: a request about a single validator has no reason to walk
 // the whole set, and the detail page is the caller that asks for one.
+// registeredValidators is the set of validators with an open Fibre endpoint,
+// as of the window's end when it is pinned and as of now otherwise — the
+// same population registered_endpoints is counted over.
+func (s *Server) registeredValidators(ctx context.Context, win Window) (map[string]bool, error) {
+	q, args := `SELECT DISTINCT validator_cons_address FROM endpoints WHERE closed_at IS NULL`, []any{}
+	if win.AsOf {
+		q = `SELECT DISTINCT validator_cons_address FROM endpoints WHERE first_seen_at <= ? AND (closed_at IS NULL OR closed_at > ?)`
+		args = []any{win.endArg(), win.endArg()}
+	}
+	rows, err := s.st.DB().QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out[a] = true
+	}
+	return out, rows.Err()
+}
+
 func (s *Server) reachabilityNow(ctx context.Context, only, asOf string) (map[string]reachState, error) {
 	out := map[string]reachState{}
 	// The newest row per validator is the highest rowid: both files are
@@ -2002,8 +2101,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN attested = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested IS NULL THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
-		GROUP BY validator_address`, vargs(win.startArg(), win.endArg())...)
+		FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
+		GROUP BY validator_address`, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -2212,6 +2311,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			v.Faults += rp.Faults
 			v.ProbeCount += rp.Probes
 			v.Reachability = rate(v.Reachability.Num+rp.BeatsUp, v.Reachability.Den+rp.Beats)
+			// Endorsement is measured over the handshakes that completed, so
+			// its denominator is the rolled BeatsUp, not the rolled Beats.
+			v.IdentityValid = rate(v.IdentityValid.Num+rp.IdentityUp, v.IdentityValid.Den+rp.BeatsUp)
 		}
 		for addr, ro := range rolled.ObligationsByVal {
 			get(addr)
@@ -2280,6 +2382,18 @@ func parseAddr(s string) (string, error) {
 	return consHex(s)
 }
 
+// validatorSnapshot is the cached validator list with the window its SQL
+// actually used. A snapshot is served for as long as its TTL allows, so the
+// window the caller asked for at request time is minutes newer than the one
+// the rows were selected with — up to half an hour on "all". Echoing the
+// request's window would have published bounds no figure in the response was
+// computed over, and this API's whole claim is that a reader can recompute
+// what it prints. computed_at says when; this says over what.
+type validatorSnapshot struct {
+	Window Window         `json:"window"`
+	Rows   []validatorRow `json:"rows"`
+}
+
 func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 	win, err := parseWindow(r, time.Now())
 	if err != nil {
@@ -2292,6 +2406,12 @@ func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 429, "as_of requests are limited to one every two seconds")
 			return
 		}
+		if !s.asOf.enter() {
+			w.Header().Set("Retry-After", "5")
+			writeErr(w, 429, "as_of computations already in flight; try again shortly")
+			return
+		}
+		defer s.asOf.leave()
 		t0 := time.Now()
 		rows, err := s.validatorRows(r.Context(), win, "")
 		if err != nil {
@@ -2305,13 +2425,17 @@ func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	rows, at, ms, err := s.vals.get(r.Context(), s.logf(), win)
+	snap, at, ms, err := s.vals.get(r.Context(), s.logf(), win)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
+	rows := snap.Rows
+	if rows == nil {
+		rows = []validatorRow{}
+	}
 	out := map[string]any{
-		"window": win, "vantage": s.vantage, "validators": rows,
+		"window": snap.Window, "vantage": s.vantage, "validators": rows,
 		"computed_at": at.UTC().Format(time.RFC3339Nano), "compute_ms": ms,
 	}
 	if _, label, err := s.rolledFor(r.Context(), win, ""); err == nil && label != nil {
@@ -2554,7 +2678,7 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 			return nil, err
 		}
 		out[i].Classes, out[i].ProbeCount = classes, total
-		rc, err := s.reconstructable(ctx, hash)
+		rc, err := s.reconstructable(ctx, hash, asOfPin{now: time.Now()})
 		if err != nil {
 			return nil, err
 		}
@@ -2577,7 +2701,7 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 // compared to OriginalRows. If no point is complete yet, the newest point in
 // progress is reported with status "pending": a validator without a row is
 // a gap in observation, not a validator that failed to serve.
-func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct, error) {
+func (s *Server) reconstructable(ctx context.Context, hash string, pin asOfPin) (*reconstruct, error) {
 	db := s.st.DB()
 	var assigned int
 	var needed, total sql.NullInt64
@@ -2605,10 +2729,11 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 
 	// in-window points with real results, newest first, with how many
 	// distinct assigned validators answered at each.
+	pb, pargs := pin.bound("probes", []any{hash})
 	rows, err := db.QueryContext(ctx, `SELECT scheduled_at, schedule_label, must_serve_until, COUNT(DISTINCT validator_address) FROM probes
 		WHERE promise_hash = ? AND phase = 'in_window' AND assigned = 1
-		  AND classification NOT IN ('NOT_PROBED','PROBE_ERROR')
-		GROUP BY scheduled_at ORDER BY scheduled_at DESC`, hash)
+		  AND classification NOT IN ('NOT_PROBED','PROBE_ERROR')`+pb+`
+		GROUP BY scheduled_at ORDER BY scheduled_at DESC`, pargs...)
 	if err != nil {
 		return nil, err
 	}
@@ -2637,18 +2762,13 @@ func (s *Server) reconstructable(ctx context.Context, hash string) (*reconstruct
 	if first {
 		return &reconstruct{Status: "unknown"}, nil
 	}
-	windowOver := false
-	if t, err := time.Parse(store.TimeLayout, msu); err == nil {
-		windowOver = time.Now().After(t)
-	} else if t, err := time.Parse(time.RFC3339Nano, msu); err == nil {
-		windowOver = time.Now().After(t)
-	}
+	windowOver := pin.over(msu)
 
 	// distinct validators that served correctly at the point (any vantage
 	// counts once) and the union of their assigned rows.
 	srows, err := db.QueryContext(ctx, `SELECT DISTINCT p.validator_address, a.rows_json, a.attested FROM probes p
 		JOIN assignments a ON a.promise_hash = p.promise_hash AND a.validator_address = p.validator_address
-		WHERE p.promise_hash = ? AND p.scheduled_at = ? AND p.assigned = 1 AND p.phase = 'in_window' AND p.outcome = 'SERVED_OK'`, hash, pointAt)
+		WHERE p.promise_hash = ? AND p.scheduled_at = ? AND p.assigned = 1 AND p.phase = 'in_window' AND p.outcome = 'SERVED_OK'`+func() string { b, _ := pin.bound("p", nil); return b }(), append([]any{hash, pointAt}, pinArgs(pin)...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -2752,7 +2872,7 @@ func (s *Server) reconstructableCount(ctx context.Context, win Window) (reconstr
 	}
 	// Statuses only: the summary publishes no row count, so the bounds settle
 	// every verdict and not one row list is parsed.
-	verdicts, err := s.reconstructBatch(ctx, `settlement_time >= ? AND settlement_time <= ?`, reconstructSample, win.startArg(), win.endArg())
+	verdicts, err := s.reconstructBatch(ctx, `settlement_time >= ? AND settlement_time <= ?`, reconstructSample, pinFor(win), win.startArg(), win.endArg())
 	if err != nil {
 		return out, err
 	}

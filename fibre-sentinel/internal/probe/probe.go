@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/bits"
 	"net"
 	"runtime"
 	"strings"
@@ -95,6 +96,7 @@ func (t StepTimeouts) downloadDeadline(expectedBytes int64) time.Duration {
 type Coder struct {
 	c            *rsema1d.Coder
 	originalRows int
+	totalRows    int
 }
 
 // NewCoder builds a verifier for a blob-v0 K/N split.
@@ -107,7 +109,7 @@ func NewCoder(originalRows, totalRows int) (*Coder, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Coder{c: c, originalRows: originalRows}, nil
+	return &Coder{c: c, originalRows: originalRows, totalRows: totalRows}, nil
 }
 
 // Input is everything one probe needs about the publication + target.
@@ -566,7 +568,7 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Con
 		return r
 	}
 
-	proofs, rlcv, perr := parseShard(resp.Shard, coder.originalRows)
+	proofs, rlcv, perr := parseShard(resp.Shard, coder.originalRows, coder.totalRows)
 	if perr != nil {
 		// A response this observer cannot even parse is not evidence about
 		// the shard: the RLC length is checked against the observer's own
@@ -627,7 +629,7 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Con
 }
 
 // parseShard mirrors fibre.parseShard (unexported).
-func parseShard(shard *fibretypes.BlobShard, originalRows int) ([]*rsema1d.RowProof, rlc.Vector, error) {
+func parseShard(shard *fibretypes.BlobShard, originalRows, totalRows int) ([]*rsema1d.RowProof, rlc.Vector, error) {
 	if shard == nil {
 		return nil, nil, errors.New("nil shard")
 	}
@@ -635,10 +637,29 @@ func parseShard(shard *fibretypes.BlobShard, originalRows int) ([]*rsema1d.RowPr
 	if len(rows) == 0 {
 		return nil, nil, errors.New("no rows")
 	}
+	// Two of the verifier's shape checks are re-done here, before the rows
+	// reach it, because they are the two that depend on this observer's own
+	// idea of the code parameters rather than on the response: the row index
+	// is checked against K+N, and the proof depth against bits.Len(K+N)-1.
+	// The verifier returns both as ordinary errors, and downloadAndVerify
+	// reads any error from it as INVALID_ROWS, which is a fault in every
+	// phase. So if this observer's K or N ever drifted from the chain's —
+	// a governance change it scanned late, a blob version it mapped wrong —
+	// every honest validator on the network would be recorded as faulting
+	// at once. A disagreement about the parameters is the observer's gap,
+	// and it is named as one; the verifier is then left with the errors
+	// that a server alone can cause.
+	proofDepth := bits.Len(uint(totalRows)) - 1
 	proofs := make([]*rsema1d.RowProof, len(rows))
 	for i, rw := range rows {
 		if rw == nil {
 			return nil, nil, fmt.Errorf("nil row %d", i)
+		}
+		if idx := int(rw.Index); idx < 0 || idx >= totalRows {
+			return nil, nil, fmt.Errorf("row index %d outside this observer's code parameters [0, %d)", idx, totalRows)
+		}
+		if got := len(rw.Proof); got != proofDepth {
+			return nil, nil, fmt.Errorf("row %d proof depth %d, this observer expects %d for %d rows", rw.Index, got, proofDepth, totalRows)
 		}
 		proofs[i] = &rsema1d.RowProof{Index: int(rw.Index), Row: rw.Data, RowProof: rw.Proof}
 	}

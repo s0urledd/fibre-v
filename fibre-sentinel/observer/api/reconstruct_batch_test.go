@@ -236,14 +236,14 @@ func TestReconstructBatchMatchesReference(t *testing.T) {
 		hashes[i] = writeBlob(t, st, i, c)
 	}
 
-	got, err := s.reconstructBatch(ctx, "", len(cases))
+	got, err := s.reconstructBatch(ctx, "", len(cases), asOfPin{now: time.Now()})
 	if err != nil {
 		t.Fatalf("reconstructBatch: %v", err)
 	}
 
 	for i, c := range cases {
 		h := hashes[i]
-		ref, err := s.reconstructable(ctx, h)
+		ref, err := s.reconstructable(ctx, h, asOfPin{now: time.Now()})
 		if err != nil {
 			t.Fatalf("%s: reference: %v", c.name, err)
 		}
@@ -289,7 +289,7 @@ func TestReconstructBatchHonoursTheSelection(t *testing.T) {
 	}
 
 	// settlement_height is idx+2, so the newest two are the last two written.
-	got, err := s.reconstructBatch(ctx, "", 2)
+	got, err := s.reconstructBatch(ctx, "", 2, asOfPin{now: time.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,11 +307,74 @@ func TestReconstructBatchHonoursTheSelection(t *testing.T) {
 		}
 	}
 
-	one, err := s.reconstructBatch(ctx, "promise_hash = ?", 1, hashes[0])
+	one, err := s.reconstructBatch(ctx, "promise_hash = ?", 1, asOfPin{now: time.Now()}, hashes[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(one) != 1 || one[hashes[0]] == nil {
 		t.Fatalf("a where clause did not select its own publication: %v", one)
+	}
+}
+
+// A pinned window must be answered from what was known at the pin. The
+// publication selection was bounded by as_of but the probe queries behind the
+// reconstructability verdict were not, so a blob that was still in flight at
+// the pinned moment was judged with evidence that arrived afterwards. With a
+// four-hour retention window on mocha, every blob is in that state for four
+// hours after it settles, and the answer given was a statement about how it
+// was served, drawn from probes that had not happened yet.
+func TestReconstructBatchHonoursTheAsOfPin(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := &Server{st: st}
+	ctx := context.Background()
+	full := make([]int, 40)
+	for i := range full {
+		full[i] = i
+	}
+	// Two validators, two points, complete and fully served: live, this is
+	// "yes". The probes are written at now and now+1m.
+	c := blobCase{needed: 20, total: 160, points: 2, complete: true,
+		vals: []valRows{
+			{addr: "p1", rows: full[:20], attested: 1, served: true},
+			{addr: "p2", rows: full[20:], attested: 1, served: true},
+		}}
+	hash := writeBlob(t, st, 0, c)
+
+	live, err := s.reconstructBatch(ctx, "", 1, asOfPin{now: time.Now()})
+	if err != nil {
+		t.Fatalf("live: %v", err)
+	}
+	if live[hash] == nil || live[hash].Status != "yes" {
+		t.Fatalf("live status = %+v, want yes", live[hash])
+	}
+
+	// Pinned to a minute before the first probe: nothing had been observed,
+	// so there is nothing to say.
+	before := time.Now().UTC().Add(-time.Minute)
+	pinned, err := s.reconstructBatch(ctx, "", 1, asOfPin{at: store.TS(before), now: before})
+	if err != nil {
+		t.Fatalf("pinned: %v", err)
+	}
+	if pinned[hash] != nil && pinned[hash].Status != "unknown" {
+		t.Fatalf("pinned before any probe: status = %q, want unknown or absent — the verdict was drawn from rows that did not exist yet",
+			pinned[hash].Status)
+	}
+
+	// The reference must agree with the batch at the same pin.
+	ref, err := s.reconstructable(ctx, hash, asOfPin{at: store.TS(before), now: before})
+	if err != nil {
+		t.Fatalf("reference pinned: %v", err)
+	}
+	if ref.Status != "unknown" {
+		t.Fatalf("reference pinned status = %q, want unknown", ref.Status)
+	}
+	// And window_over is asked at the pin, not at the clock: the deadline is
+	// two hours out, so it had not passed then and has not passed now.
+	if ref.WindowOver {
+		t.Error("window_over is true at a pin two hours before the deadline")
 	}
 }

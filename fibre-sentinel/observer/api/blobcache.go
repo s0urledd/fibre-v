@@ -15,16 +15,24 @@ import (
 // the first screen, describe obligations that ended hours ago and can never be
 // rated differently again.
 //
-// The store is append-only where it matters. UpsertPublication and InsertProbe
-// both end in ON CONFLICT DO NOTHING, so a publication row, its assignments and
-// its probes are all immutable once written, and the ONLY thing that can move a
-// publication's verdict is a probe row arriving that was not there before — a
-// collector restarting with a backlog, say. That makes
+// The store is append-only in its inserts: UpsertPublication and InsertProbe
+// both end in ON CONFLICT DO NOTHING, so no row is ever replaced. It is not
+// append-only in its verdicts. ApplyAmendment UPDATEs a probe row's
+// classification in place once the scanner's frontier passes the promise
+// timeout, which is how a deferred shadow verdict is settled: a row filed
+// PROBE_ERROR with shadow_gap becomes SHADOWED_SHARD or UNMATCHED_GENUINE
+// without any new row arriving.
 //
-//	(how many probes this publication has, the highest rowid among them)
+// So two things can move a publication's verdict: a probe row that was not
+// there before, and an amendment to one that was. The fingerprint carries
+// both —
 //
-// an exact fingerprint: it cannot stay the same across a change, and it cannot
-// change without one. One query fetches it for a whole page.
+//	(how many probes, the highest rowid, how many are amended, the newest amended_at)
+//
+// — and it cannot stay the same across either change. An earlier version
+// counted only the first two and argued the store was immutable; it was not,
+// and a cached page kept publishing a pre-amendment class tally beside the
+// amended rows on the same page. One query fetches it for a whole page.
 //
 // The one thing that is not immutable is the clock. A verdict carries
 // window_over, which flips once when must_serve_until passes, so nothing is
@@ -87,7 +95,8 @@ func (c *blobCache) put(hash string, v blobVerdict) {
 // is still a fingerprint: it stops being the zero one the moment a probe lands.
 func (s *Server) probeFingerprints(ctx context.Context, where string, limit int, args ...any) (map[string]string, error) {
 	rows, err := s.st.DB().QueryContext(ctx, blobSel(where, limit)+`
-		SELECT p.promise_hash, COUNT(*), COALESCE(MAX(p.rowid), 0)
+		SELECT p.promise_hash, COUNT(*), COALESCE(MAX(p.rowid), 0),
+		       COUNT(p.amended_at), COALESCE(MAX(p.amended_at), '')
 		FROM probes p JOIN sel ON sel.promise_hash = p.promise_hash
 		GROUP BY p.promise_hash`, args...)
 	if err != nil {
@@ -96,12 +105,13 @@ func (s *Server) probeFingerprints(ctx context.Context, where string, limit int,
 	defer rows.Close()
 	out := map[string]string{}
 	for rows.Next() {
-		var hash string
-		var n, maxRowID int64
-		if err := rows.Scan(&hash, &n, &maxRowID); err != nil {
+		var hash, lastAmended string
+		var n, maxRowID, amended int64
+		if err := rows.Scan(&hash, &n, &maxRowID, &amended, &lastAmended); err != nil {
 			return nil, err
 		}
-		out[hash] = strconv.FormatInt(n, 10) + ":" + strconv.FormatInt(maxRowID, 10)
+		out[hash] = strconv.FormatInt(n, 10) + ":" + strconv.FormatInt(maxRowID, 10) +
+			":" + strconv.FormatInt(amended, 10) + ":" + lastAmended
 	}
 	return out, rows.Err()
 }
