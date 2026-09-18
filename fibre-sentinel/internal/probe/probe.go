@@ -561,6 +561,9 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint str
 		return r
 	}
 	r.RowsReturned = len(proofs)
+	for _, p := range proofs {
+		r.BytesReturned += int64(len(p.Row))
+	}
 
 	rec, rerr := coder.c.NewReconstructor(rsema1d.Commitment(in.Commitment))
 	if rerr != nil {

@@ -110,7 +110,9 @@ for i in range(N):
     vals.append({
         "i": i, "moniker": MONIKERS[i], "cons": cons_addr(i),
         "operator": bech32ish("celestiavaloper", i),
-        "consbech": bech32ish("celestiavalcons", i),
+        # The same twenty bytes as `cons`: endpoint rows are keyed by the
+        # bech32 form and probe rows by the hex form, and the API joins them.
+        "consbech": bech32("celestiavalcons", bytes.fromhex(cons_addr(i))),
         "power": power,
         "jailed": i in (37, 52),
         "identity": hashlib.sha256(f"kb{i}".encode()).hexdigest()[:16].upper(),
@@ -144,6 +146,8 @@ for v in vals:
     elif i == 41:               BEHAVIOUR[i] = "unattested"    # never signed
     elif i == 33:               BEHAVIOUR[i] = "prunes_early"  # drops late in window
     elif i == 19:               BEHAVIOUR[i] = "slow"          # serves everything, slowly
+    elif i == 31:               BEHAVIOUR[i] = "erroring"      # reachable, answers 500 to every download
+    elif i == 26:               BEHAVIOUR[i] = "throttling"    # reachable, rate-limits most downloads
     elif i in (37, 52):         BEHAVIOUR[i] = "jailed"
     else:                       BEHAVIOUR[i] = "healthy"
 
@@ -156,6 +160,7 @@ for t in ("publications","assignments","probes","reachability","endpoints",
     db.execute(f"DELETE FROM {t}")
 
 PAYMENT_TIMEOUT, RETENTION = 3600, 14400   # 1h / 4h, the spec's default shape
+JAILED_AT = NOW - timedelta(hours=6)       # when the jailed validators left the bonded list
 MSU = max(PAYMENT_TIMEOUT, RETENTION)
 
 db.execute("INSERT INTO params_history VALUES (?,?,?,?,?,?,?,?)",
@@ -170,7 +175,17 @@ for v in vals:
          f"https://{v['moniker'].split()[0].lower().strip('.')}.example",
          v["power"], 1 if v["jailed"] else 0,
          "BOND_STATUS_BONDED", ts(NOW - timedelta(days=30)), ts(NOW)))
-    if BEHAVIOUR[v["i"]] != "unregistered":
+    if BEHAVIOUR[v["i"]] == "jailed":
+        # Jailing drops the provider from the bonded list while the chain
+        # keeps the x/valaddr entry: the endpoint row closes with the reason
+        # the collector records, and heartbeats stop from that moment.
+        db.execute("""INSERT INTO endpoints
+            (validator_cons_address, host, first_seen_at, first_seen_height,
+             last_seen_at, last_seen_height, closed_at, closed_height, closed_reason)
+            VALUES (?,?,?,?,?,?,?,?,'left_bonded_provider_list')""",
+            (v["consbech"], v["host"], ts(NOW - timedelta(days=30)), 100,
+             ts(JAILED_AT), 899_000, ts(JAILED_AT), 899_000))
+    elif BEHAVIOUR[v["i"]] != "unregistered":
         db.execute("""INSERT INTO endpoints
             (validator_cons_address, host, first_seen_at, first_seen_height,
              last_seen_at, last_seen_height, closed_at, closed_height, closed_reason)
@@ -330,7 +345,11 @@ def add_probe(pub, v, rows, label, at, phase, outcome, cls, **kw):
         int(ms * 0.8) if ok else 0, rows if ok else kw.get("got", 0), rows,
         1 if ok or kw.get("cv") else 0, 1 if ok else 0,
         phase, outcome, cls, kw.get("reason", ""), kw.get("err", ""),
-        ms, "{}", kw.get("attested", 1))))
+        ms, "{}", kw.get("attested", 1),
+        # 512 B a row. One record in fifty predates the byte count, as every
+        # record on a store from before schema 8 does; it must fall out of the
+        # throughput sample and never read as zero bytes.
+        (rows * 512) if ok and rnd.random() >= 0.02 else None)))
 
 # What actually happened on the wire for validator v at time `at`, independent
 # of whether the chain proves it was obliged. Attestation decides the class, not
@@ -346,6 +365,10 @@ def wire(b, v, at, frac):
         return ("IDENTITY_FAIL", dict(idok=0, idreason="certificate validity window has lapsed"))
     if b == "prunes_early" and frac >= 0.72 and impaired(v["i"], at):
         return ("NOT_FOUND", {})
+    if b == "erroring":
+        return ("SERVER_ERROR", dict(err="rpc error: code = Internal desc = shard store: read failed"))
+    if b == "throttling" and rnd.random() < 0.8:
+        return ("RPC_THROTTLED", dict(err="rpc error: code = ResourceExhausted desc = too many requests"))
     if b == "faulty" and rnd.random() < 0.30:
         return ("NOT_FOUND", {})
     if b == "flaky" and rnd.random() < 0.05:
@@ -373,6 +396,8 @@ def classify(outcome, phase, attested):
     if phase == "in_window":
         if outcome == "SERVED_OK":     return "HEALTHY"
         if outcome == "NOT_FOUND":     return "FAULT"
+        if outcome == "SERVER_ERROR":  return "SERVER_ERROR"
+        if outcome == "RPC_THROTTLED": return "THROTTLED"
         if outcome in REACH_FAIL:      return "UNREACHABLE"
         return "PROBE_ERROR"
     if phase == "grace":
@@ -389,6 +414,8 @@ REASONS = {
     "TOLERATED": "not found just after must_serve_until, within the measured prune lag",
     "EXPECTED_GONE": "not found after the window plus tolerance; correct behaviour",
     "NOT_REGISTERED": "no Fibre host registered in x/valaddr when the probe ran",
+    "SERVER_ERROR": "the endpoint answered with an application error instead of the shard",
+    "THROTTLED": "the endpoint refused the download with a rate limit",
 }
 
 def emit(pub, v, rows, label, at, phase, outcome, kw, attested):
@@ -438,8 +465,8 @@ db.executemany("""INSERT INTO probes (
     identity_ok, identity_reason, download_ok, download_ms, rows_returned,
     rows_expected, commitment_verified, assignment_verified, phase,
     outcome, classification, classification_reason, raw_error,
-    total_duration_ms, raw_json, attested
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    total_duration_ms, raw_json, attested, bytes_returned
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
     [r[1] for r in PROBE_ROWS])
 
 # --- reachability heartbeats ---------------------------------------------
@@ -473,6 +500,8 @@ for v in vals:
     # down for thirty hours came out of the API as reachable: yes.
     for r in reversed(range(beats)):
         at = NOW - r * HEARTBEAT_EVERY
+        if b == "jailed" and at >= JAILED_AT:
+            continue
         dark = b == "unreachable" and impaired(i, at)
         up = not dark and not (i in FLAPPY and flap.random() < FLAPPY[i])
         # The certificate is endorsed unless this validator's endorsement has

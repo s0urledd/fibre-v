@@ -343,8 +343,11 @@ func latencyFixture(t *testing.T) *httptest.Server {
 	created, msu := now.Add(-time.Hour), now.Add(time.Hour)
 	const hash = "lat1"
 	rowsOf := map[string]int{"v1": 400, "v2": 100, "v3": 100}
-	// Durations chosen so v1 and v2 land on the same rows per second (1,000)
-	// and v3 on a quarter of it.
+	// Durations chosen so v1 and v2 land on the same transfer rate over the
+	// download step and v3 on a quarter of it. Half of every probe is the
+	// download; the other half is dial, handshake and identity check, the
+	// fixed cost that a whole-probe figure would amortise over the bigger
+	// shard and not the smaller.
 	msOf := map[string][]int64{
 		"v1": {400, 400, 400, 1200},
 		"v2": {100, 100, 100, 300},
@@ -396,6 +399,13 @@ func latencyFixture(t *testing.T) *httptest.Server {
 			}
 			m.Download.OK, m.Download.RowsReturned, m.Download.RowsExpected = true, rowsOf[addr], rowsOf[addr]
 			m.Download.CommitmentVerified, m.Download.AssignmentVerified = true, true
+			m.Download.DurationMS = ms / 2
+			// 512 bytes a row. One of v3's records predates the byte count,
+			// as every record on a store from before schema 8 does: it must
+			// fall out of the throughput sample and not read as zero bytes.
+			if !(addr == "v3" && i == 0) {
+				m.Download.BytesReturned = int64(rowsOf[addr]) * 512
+			}
 			raw, err := json.Marshal(m)
 			if err != nil {
 				t.Fatal(err)
@@ -439,11 +449,12 @@ func latencyFixture(t *testing.T) *httptest.Server {
 }
 
 type latencyValidator struct {
-	Address string `json:"address"`
-	P50     *int64 `json:"serve_latency_p50_ms"`
-	P95     *int64 `json:"serve_latency_p95_ms"`
-	Sample  int64  `json:"serve_latency_sample"`
-	RowsSec *int64 `json:"serve_rows_per_second"`
+	Address  string `json:"address"`
+	P50      *int64 `json:"serve_latency_p50_ms"`
+	P95      *int64 `json:"serve_latency_p95_ms"`
+	Sample   int64  `json:"serve_latency_sample"`
+	BytesSec *int64 `json:"serve_bytes_per_second"`
+	TSample  int64  `json:"serve_throughput_sample"`
 }
 
 func TestLatencyIsServiceTimeAndSizeNormalised(t *testing.T) {
@@ -478,21 +489,29 @@ func TestLatencyIsServiceTimeAndSizeNormalised(t *testing.T) {
 	// all — it would put both at the bottom and say nothing true about either.
 	v1, v2, v3 := by["v1"], by["v2"], by["v3"]
 	for _, v := range []latencyValidator{v1, v2, v3} {
-		if v.P50 == nil || v.RowsSec == nil {
+		if v.P50 == nil || v.BytesSec == nil {
 			t.Fatalf("%s has no latency figures: %+v", v.Address, v)
 		}
+	}
+	if v1.TSample != 4 || v3.TSample != 3 {
+		t.Errorf("throughput sample = v1 %d, v3 %d, want 4 and 3: a record without a byte count is outside the sample",
+			v1.TSample, v3.TSample)
 	}
 	if *v1.P50 != *v3.P50 {
 		t.Errorf("fixture is not exercising the point: v1 p50 %d and v3 p50 %d should be identical",
 			*v1.P50, *v3.P50)
 	}
-	if *v1.RowsSec != *v2.RowsSec {
-		t.Errorf("rows/s = v1 %d, v2 %d: the same service at different sizes must read the same",
-			*v1.RowsSec, *v2.RowsSec)
+	if *v1.BytesSec != *v2.BytesSec {
+		t.Errorf("bytes/s = v1 %d, v2 %d: the same service at different sizes must read the same",
+			*v1.BytesSec, *v2.BytesSec)
 	}
-	if *v3.RowsSec >= *v2.RowsSec {
-		t.Errorf("rows/s = v3 %d, v2 %d: at identical durations to v1, v3 carries a quarter of the rows and must read worse",
-			*v3.RowsSec, *v2.RowsSec)
+	if *v3.BytesSec >= *v2.BytesSec {
+		t.Errorf("bytes/s = v3 %d, v2 %d: at identical durations to v1, v3 carries a quarter of the bytes and must read worse",
+			*v3.BytesSec, *v2.BytesSec)
+	}
+	// Over the download step, not the whole probe: 400 rows × 512 B in 200 ms.
+	if want := int64(400*512) * 1000 / 200; *v1.BytesSec != want {
+		t.Errorf("v1 bytes/s = %d, want %d over the download step alone", *v1.BytesSec, want)
 	}
 
 	// The same figures network-wide.

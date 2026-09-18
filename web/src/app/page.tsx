@@ -30,6 +30,8 @@ export default function Overview() {
 
   const sr = net?.serve_rate;
   const rated = !!sr && sr.den > 0;
+  const ob = net?.obligations;
+  const decided = !!ob && ob.rate.den > 0;
   const recon = net?.reconstructable;
 
   return (
@@ -74,13 +76,16 @@ export default function Overview() {
 
       <div className="tiles">
         <Tile hero label="Serve rate" loading={busy}
-          value={!sr || !rated ? "—" : fmtPct(sr)}
-          tone={!rated ? "absent" : undefined}
-          sub={!net ? undefined : !rated ? "nothing rated in this window"
-            : <span title={boundTitle(sr!, net.serve_rate_by_obligation)}>{fmtCount(sr!)} probes · {net.serve_rate_by_obligation.den.toLocaleString("en-US")} obligations</span>}
+          value={!ob || !decided ? "—" : fmtPct(ob.rate)}
+          tone={!decided ? "absent" : undefined}
+          sub={!net ? undefined : !decided ? (ob && ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} obligations, none observed serving` : "nothing decided in this window")
+            : <span title={`${boundTitle(ob!.rate, ob!.rate) ?? ""} Per probe: ${fmtPct(sr)} over ${fmtCount(sr)}.`}>
+                {ob!.served.toLocaleString("en-US")} of {(ob!.served + ob!.broken).toLocaleString("en-US")} obligations kept
+                {ob!.unobserved > 0 && ` · ${ob!.unobserved.toLocaleString("en-US")} never observed serving`}
+              </span>}
           info={<>
-            <p>Shards handed over, out of the shards validators had signed for on chain. Only probes taken inside the retention window count.</p>
-            <p>Unreachable, unproven and unregistered cases are listed separately and are not in this number.</p>
+            <p>Obligations kept: a shard a validator signed for on chain, handed over at the last probe before its retention deadline. One observation per shard, not per probe.</p>
+            <p>An obligation we never saw served and never saw broken is counted beside the rate, not inside it. Unreachable, unproven and unregistered cases are never faults.</p>
             <p><Link href="/methodology/#verdicts">How a probe is judged</Link></p>
           </>} />
         <Tile label="Faults" loading={busy}
@@ -91,11 +96,14 @@ export default function Overview() {
             <p>The validator answered but did not hand over a shard it had signed for.</p>
             <p>This is the only number counted against a validator.</p>
           </>} />
-        <Tile label="Uptime" loading={busy}
+        <Tile label="Reachability" loading={busy}
           value={net?.reachability_window?.den ? fmtPct(net.reachability_window) : "—"}
           tone={net?.reachability_window?.den ? undefined : "absent"}
           sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} handshakes` : "no handshake yet"}
-          info={<p>TLS handshakes completed, over handshakes attempted. We open a connection to every registered Fibre endpoint every 5 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>} />
+          info={<>
+            <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes with every registered Fibre endpoint, from one location. Nothing is downloaded.</p>
+            <p>This is not signing uptime. A validator can sign every block with its Fibre endpoint down, and the reverse.</p>
+          </>} />
         <Tile label="Endpoints" loading={busy}
           value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
           sub={net ? `${net.reachability.num} answering now · ${net.validators_probed} probed` : undefined} />

@@ -1,33 +1,33 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type Validator, type Rate, shortBech, ago, MIN_RATED, enoughToRank } from "@/lib/api";
+import { type Validator, type Rate, shortBech, ago, held, utc, bytesPerSecond, MIN_RATED, enoughToRank } from "@/lib/api";
 import RateCell from "./Rate";
 import { Count } from "./Verdict";
 import Info from "./Info";
 
 /**
  * The validator table. Eight columns, in the order an operator looks: who,
- * what state is it in right now, is it up, did it serve, did it fault, how
- * fast, how much stake. Two percentages, not four: the rest is on the
- * validator's own page.
+ * what state is it in right now, is it reachable, did it keep its
+ * obligations, how fast, did it fault, how much stake. Two percentages, not
+ * four: the rest is on the validator's own page.
  */
 
-type SortKey = "power" | "serve" | "faults" | "uptime" | "throughput";
+type SortKey = "power" | "serve" | "faults" | "reach" | "throughput";
 
 const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode | null }[] = [
   { key: "power", label: "Voting power", dir: -1, info: null },
-  { key: "uptime", label: "Uptime", dir: 1, info: <>
-      <p>TLS handshakes completed, over handshakes attempted. We open a connection to the registered Fibre endpoint every 5 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>
-      <p>Handshakes run from one location, so a dip can be a network problem on our side.</p>
+  { key: "reach", label: "Reachability", dir: 1, info: <>
+      <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes with the registered Fibre endpoint, from one location. Nothing is downloaded. Whether the certificate is the right one is a separate figure, Endorsed, on the validator&rsquo;s page.</p>
+      <p>This is not signing uptime. A validator can sign every block with its Fibre endpoint down, and the reverse.</p>
     </> },
   { key: "serve", label: "Serve rate", dir: 1, info: <>
-      <p>When we reached it: shards handed over, out of the shards this validator signed for, inside the retention window. Probes that could not reach it are listed beside the rate as unreachable; being down shows in Uptime.</p>
-      <p>Under {MIN_RATED} rated probes the figure has no gauge and is not ranked: too few to lean on.</p>
+      <p>Obligations kept: shards this validator signed for and handed over at the last probe before the retention deadline, out of the obligations we saw kept or broken. One observation per shard, not per probe.</p>
+      <p>An obligation we never saw served and never saw broken is counted next to the rate, not inside it. Under {MIN_RATED} obligations the figure has no gauge and is not ranked: too few to lean on.</p>
     </> },
   { key: "throughput", label: "Throughput", dir: -1, info: <>
-      <p>Rows delivered per second, from connect to verified rows, over healthy probes.</p>
-      <p>Rows per second rather than milliseconds, because assignments run from 148 to 4,096 rows and a bigger shard takes longer.</p>
+      <p>Bytes handed over per second during the download itself, median over healthy probes. Connecting and checking the certificate are not in it.</p>
+      <p>Measured from one location, so part of every figure is our own path.</p>
     </> },
   { key: "faults", label: "Faults", dir: -1, info: <>
       <p>The validator answered but did not hand over a shard it had signed for.</p>
@@ -36,32 +36,39 @@ const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode | 
 ];
 
 const rv = (r: Rate | null | undefined) => (r && r.den > 0 && r.value !== null ? r.value : null);
+const bonded = (v: Validator) => !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED");
 function keyValue(v: Validator, k: SortKey): number | null {
   switch (k) {
     case "power": return v.voting_power;
     // Under the floor a rate is printed dimmed and not ranked: it sorts with
     // the rows that have no rate at all, in either direction.
-    case "serve": return enoughToRank(v.serve_rate) ? rv(v.serve_rate) : null;
+    case "serve": return enoughToRank(v.obligations?.rate) ? rv(v.obligations.rate) : null;
     case "faults": return v.faults ?? v.classes.FAULT ?? 0;
-    case "uptime": return rv(v.reachability_window);
-    case "throughput": return v.serve_rows_per_second ?? null;
+    case "reach": return bonded(v) ? rv(v.reachability_window) : null;
+    case "throughput": return v.serve_bytes_per_second ?? null;
     default: return null;
   }
 }
 
-// The state word: what an operator looks at first. Faults win over
-// everything, then the last check's result.
-function status(v: Validator): { tone: "ok" | "hold" | "fault" | ""; word: string; title: string } {
-  const faults = v.faults ?? v.classes.FAULT ?? 0;
-  if (faults > 0) return { tone: "fault", word: "faults", title: `${faults} probe${faults === 1 ? "" : "s"} where the validator answered but did not hand over a shard it had signed for.` };
-  if (!v.host) return { tone: "", word: "no host", title: "No Fibre endpoint registered in x/valaddr." };
+// The state word: is the endpoint there right now. Liveness only; a fault
+// has its own column and does not outrank a validator being down today.
+// The chain's own words come first: a jailed or unbonded validator is out of
+// the bonded provider list, so no handshake is attempted while it is out.
+function status(v: Validator): { tone: "ok" | "hold" | ""; word: string; title: string } {
+  if (v.jailed) return { tone: "", word: "jailed", title: "Jailed by the chain. Out of the bonded provider list, so no handshake is attempted; shards it signed for are still owed." };
+  if (!bonded(v)) return { tone: "", word: "not bonded", title: `${v.bond_status!.replace("BOND_STATUS_", "").toLowerCase()} by the chain. Out of the bonded provider list, so no handshake is attempted.` };
+  if (!v.host) return { tone: "", word: "no host", title: v.last_host ? `No open Fibre endpoint. Last registered ${v.last_host}, left the bonded list ${utc(v.endpoint_closed_at)}.` : "No Fibre endpoint registered in x/valaddr." };
   if (v.reachable === null) return { tone: "", word: "no handshake", title: "No handshake attempted yet." };
-  if (v.reachable === false) return { tone: "hold", word: "down", title: `Handshake with ${v.host} failed at the last attempt${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}.` };
+  if (v.reachable === false) {
+    const since = held(v.last_reachable_at);
+    return { tone: "hold", word: since ? `down · ${since}` : "down", title: `Handshake with ${v.host} failed at the last attempt${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}${since ? `; last completed ${ago(v.last_reachable_at)}` : ""}.` };
+  }
   if (v.identity_status === "mismatch") return { tone: "hold", word: "bad cert", title: v.identity_reason || "Certificate not signed by this validator's consensus key." };
   if (v.identity_status === "expired") return { tone: "hold", word: "cert expired", title: v.identity_reason || "Certificate endorsed by the right key, but its signed validity window has lapsed." };
   if (v.identity_status === "no_tls") return { tone: "hold", word: "no tls", title: v.identity_reason || "TLS handshake failed." };
   if (v.identity_status === "unverified") return { tone: "hold", word: "unverified", title: "Handshake completed, but the certificate was not checked on the last attempt." };
-  return { tone: "ok", word: "up", title: `Handshake completed at the last attempt${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}.` };
+  const since = held(v.last_unreachable_at);
+  return { tone: "ok", word: since ? `up · ${since}` : "up", title: `Handshake completed at the last attempt${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}${since ? `; last failed ${ago(v.last_unreachable_at)}` : "; no failed handshake in this window"}.` };
 }
 
 /** avatar text: "node10" → N10, "Kiln" → KI, "P-OPS Team" → PT; the same
@@ -79,9 +86,25 @@ export function initialsOf(moniker: string | undefined, address: string): string
   return tail ? (m[0] + tail[0]).slice(0, 3) : m.slice(0, 2);
 }
 
+/** the sample line under an obligation rate: kept of decided, then what the
+ *  rate does not speak for */
+export function obligationSample(v: Validator): string | undefined {
+  const o = v.obligations;
+  if (!o || o.total === 0) return undefined;
+  // Kept of decided, then the two things the rate does not speak for that a
+  // reader must not miss. End-unobserved is on the validator's page.
+  const parts = [`${o.served.toLocaleString("en-US")} / ${(o.served + o.broken).toLocaleString("en-US")}`];
+  if (o.unobserved > 0) parts.push(`${o.unobserved.toLocaleString("en-US")} unobserved`);
+  const throttled = v.classes?.THROTTLED ?? 0;
+  if (throttled > 0) parts.push(`${throttled.toLocaleString("en-US")} throttled`);
+  return parts.length > 1 ? parts.join(" · ") : undefined;
+}
+
 export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; notLive?: boolean }) {
   const [q, setQ] = useState("");
-  const registered = useMemo(() => rows.filter((v) => !!v.host), [rows]);
+  // An endpoint once registered stays on chain, so a validator whose host
+  // left the bonded list still belongs here, under the chain's word for it.
+  const registered = useMemo(() => rows.filter((v) => !!v.host || !!v.last_host), [rows]);
   const [tab, setTab] = useState<"registered" | "all" | null>(null);
   const activeTab = tab ?? (registered.length > 0 ? "registered" : "all");
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "power", dir: -1 });
@@ -93,7 +116,7 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
     || v.cons_address.includes(needle)
     || (v.moniker ?? "").toLowerCase().includes(needle)
     || (v.operator_address ?? "").toLowerCase().includes(needle)
-    || v.host.toLowerCase().includes(needle));
+    || (v.host || v.last_host || "").toLowerCase().includes(needle));
 
   const ranked = [...matched].sort((a, b) => {
     const av = keyValue(a, sort.key), bv = keyValue(b, sort.key);
@@ -172,6 +195,8 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
             )}
             {list.map((v, i) => {
               const st = status(v);
+              const o = v.obligations;
+              const rated = (v.serve_rate?.den ?? 0) > 0;
               return (
                 <tr key={v.address}>
                   <td className="rank">{i + 1}</td>
@@ -181,7 +206,6 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                       <span>
                         <Link className="name" href={`/validator/?addr=${v.address}`}>
                           {v.moniker || (v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 8) + "…" + v.address.slice(-6))}
-                          {v.jailed && <span className="chip hold" title="Jailed by the chain. Shards it signed for are still owed.">jailed</span>}
                         </Link>
                         <span className="addr" title={v.cons_address || v.address}>
                           {v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 12) + "…"}
@@ -190,21 +214,24 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                     </span>
                   </td>
                   <td title={st.title}>
-                    <span className="verdict"><i className={"dot " + st.tone} /><span className={"w " + (st.tone === "fault" ? "err" : "muted")}>{st.word}</span></span>
+                    <span className="verdict"><i className={"dot " + st.tone} /><span className="w muted">{st.word}</span></span>
                   </td>
                   <td className="right mono">{v.voting_power.toLocaleString("en-US")}</td>
                   <td className="right">
-                    <RateCell r={v.reachability_window} sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined} />
+                    {bonded(v)
+                      ? <RateCell r={v.reachability_window} sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined} />
+                      : <span className="nil" title="Out of the bonded provider list: no handshake is attempted while it is out.">·</span>}
                   </td>
-                  <td className="right"><RateCell r={v.serve_rate} obligations={v.serve_rate_by_obligation} unreachable={v.serve_rate_held_out?.UNREACHABLE ?? 0}
-                    sample={(v.serve_rate_held_out?.UNREACHABLE ?? 0) > 0 ? `${v.serve_rate.num} / ${v.serve_rate.den} · ${v.serve_rate_held_out.UNREACHABLE} unreachable` : undefined} /></td>
-                  <td className="right" title={v.serve_rows_per_second == null ? "No healthy probe of an assigned shard in this window." :
-                    `${v.serve_latency_p50_ms?.toLocaleString("en-US") ?? "—"} ms typical, ${v.serve_latency_p95_ms?.toLocaleString("en-US") ?? "—"} ms at p95, over ${v.serve_latency_sample.toLocaleString("en-US")} healthy probes.`}>
-                    {v.serve_rows_per_second == null
+                  <td className="right">
+                    <RateCell r={o?.rate} obligations={o?.rate} unreachable={o?.unobserved ?? 0} sample={obligationSample(v)} />
+                  </td>
+                  <td className="right" title={v.serve_bytes_per_second == null ? "No healthy probe with a byte count in this window." :
+                    `Median over ${v.serve_throughput_sample.toLocaleString("en-US")} healthy probes, download step only. Whole probe: ${v.serve_latency_p50_ms?.toLocaleString("en-US") ?? "—"} ms typical, ${v.serve_latency_p95_ms?.toLocaleString("en-US") ?? "—"} ms at p95.`}>
+                    {v.serve_bytes_per_second == null
                       ? <span className="nil">·</span>
-                      : <span className="rate"><span className="v">{v.serve_rows_per_second.toLocaleString("en-US")}</span><span className="n">rows/s</span></span>}
+                      : <span className="rate"><span className="v">{bytesPerSecond(v.serve_bytes_per_second)}</span></span>}
                   </td>
-                  <td className="right" title="Answered, but did not hand over a shard it had signed for."><Count n={v.faults ?? v.classes.FAULT} tier="fault" /></td>
+                  <td className="right" title="Answered, but did not hand over a shard it had signed for."><Count n={v.faults ?? v.classes.FAULT} tier="fault" rated={rated} /></td>
                 </tr>
               );
             })}

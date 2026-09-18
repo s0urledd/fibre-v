@@ -133,35 +133,87 @@ One sentence each, and what a reader should conclude.
   one that over-retains with identical in-window behaviour — the opposite of
   what the number claims to measure, on exactly the axis the "worst first"
   table sorts by.
-- **Serve rate** over that population = `HEALTHY / (HEALTHY + FAULT)`. Every
-  other class is published beside it under its own name, never folded in, and
-  the API carries both the counts (`serve_rate_held_out`) and the reason each
-  class is out (`serve_rate_excluded_classes`) so the dashboard cannot
-  describe the exclusions differently from the API.
+- **Serve rate per probe** over that population = `HEALTHY / (HEALTHY + FAULT)`
+  (`serve_rate`). Every other class is published beside it under its own
+  name, never folded in, and the API carries both the counts
+  (`serve_rate_held_out`) and the reason each class is out
+  (`serve_rate_excluded_classes`) so the dashboard cannot describe the
+  exclusions differently from the API. It is published, not headlined: see
+  the next two entries.
 - **Verdict coverage** (`serve_rate_coverage`) = `(HEALTHY + FAULT)` over every
   probe in that population. A high rate over low coverage is a statement about
   a handful of probes, and without this figure a reader cannot tell the two
   apart. The `probe_count` and `probe_gaps` fields are over *all* probes, a
   different population; they are not this.
-- **Serve rate by obligation** (`serve_rate_by_obligation`) counts one
-  observation per (validator, blob): kept when no probe of it faulted. The
-  schedule visits the same validator and blob four times in window, and the
-  minimum-rows floor assigns every bonded validator every blob, so the probes
-  inside one obligation are near-perfectly correlated — one lapsed certificate
-  produces four `FAULT` rows for one event. Any confidence interval is drawn
-  around this number, never around the probe count, and the dashboard states
-  it as an **upper bound on the fault rate**, because that is the direction an
+- **Obligations** (`obligations`, whose `rate` is repeated as
+  `serve_rate_by_obligation`) count one observation per (validator, blob)
+  the settled promise proves (`COALESCE(attested, 1) = 1`), and this is the
+  headline on every page. The schedule visits the same validator and blob
+  four times in window, and the minimum-rows floor assigns every bonded
+  validator every blob, so the probes inside one obligation are
+  near-perfectly correlated — one lapsed certificate produces four `FAULT`
+  rows for one event. Any confidence interval is drawn around the obligation
+  count, never around the probe count, and the dashboard states it as an
+  **upper bound on the fault rate**, because that is the direction an
   accusation is made in.
+- **An obligation is judged by its newest in-window probe**, the same rule
+  the per-blob reconstructability verdict uses; a `NOT_PROBED` or
+  `PROBE_ERROR` row is never the newest while a real probe exists. The
+  buckets:
+  - `served` — newest probe `HEALTHY`, no `FAULT` anywhere;
+  - `broken` — any probe `FAULT`;
+  - `end_unobserved` — a `HEALTHY` probe earlier, but the newest probe
+    produced no verdict;
+  - `unobserved` — no `HEALTHY` and no `FAULT` at all, split by what the
+    probes did see: `unobserved_reachable` (at least one download attempt
+    with `tls_ok = 1`: the endpoint completed a handshake and answered with
+    `SERVER_ERROR`, `THROTTLED`, an `RPC_*` failure or an unusable
+    certificate), `unobserved_unreachable` (attempts, none of which
+    completed TLS), `unobserved_not_probed` (no attempt: backoff, a load
+    cap, a slot that elapsed).
+
+  Only `served` and `broken` enter the rate. The old rule, "kept when no
+  probe of it faulted", let a validator that served at the first point and
+  answered 500 at the next three count as fully kept — the profile of a
+  server that pruned early, which is the finding this observer exists to
+  make. Under the new rule that obligation is `end_unobserved`, and a
+  validator that never hands anything over is `unobserved_reachable`: not a
+  fault, but not a clean record either, and counted on its own line beside
+  the rate. The split uses each probe row's own `tls_ok`, not the heartbeat,
+  because the probe made its own handshake at the moment that matters.
 - Below **20** rated observations the percentage is printed without a gauge
   and the validator is not ranked by it in either direction (it sorts with
   the rows that have no rate at all). A single unlucky probe used to
   render as "0.0%" beside a named validator and sort it above one with a
   hundred real faults.
-- **Reachability** on the overview and validator pages is the latest
-  evidence per endpoint: the newest heartbeat or probe (any phase, assigned
-  or not, gaps excluded) with TCP and TLS both successful. It is "reachable
-  now", not a rate: reachability is a property of the endpoint, not of one
-  blob.
+- **Reachability** (`reachability_window`) is heartbeats that completed TLS
+  over heartbeats sent, per validator and network-wide. The numerator is
+  `tcp_ok = 1 AND tls_ok = 1`; whether the certificate was the right one is
+  the separate `identity_rate_window` ("Endorsed"). Heartbeats exist only
+  while the validator is in `AllBondedFibreProviders`, so a jailed or
+  unbonded validator's denominator stops growing and the table prints no
+  percentage for it. The table's status word is liveness only: the chain's
+  own `jailed` and `bond_status` first, then `host`, then the latest
+  handshake; a fault never appears there, it has its own column. "Reachable
+  now" (`reachable`) is the newest heartbeat or probe (any phase, assigned or
+  not, gaps excluded) with TCP and TLS both successful. `last_reachable_at`
+  and `last_unreachable_at` say how long the current state has held.
+- **A closed endpoint row** (`closed_reason = left_bonded_provider_list`)
+  no longer lends its host to the validator row. `host` is empty, and
+  `last_host` / `endpoint_closed_at` say what was registered and when it left
+  the list. The host used to be back-filled from the newest probe row, which
+  made the word for a jailed validator depend on whether the prober had
+  restarted since it left: "down" while the prober's in-memory last-known
+  host kept being dialled, "no host" after a restart.
+- **Throughput** (`serve_bytes_per_second`) is the median of
+  `bytes_returned * 1000 / download_ms` over `HEALTHY` in-window probes that
+  carry a byte count (`serve_throughput_sample`); records from before schema
+  8 have no byte count and are outside the sample, never zero. It is over the
+  download step alone because the dial, handshake and identity check cost
+  the same for a 148-row shard as for a 4,096-row one, so a whole-probe
+  figure rises with stake by construction; and it is bytes rather than rows
+  because a row is as wide as its blob's square. `serve_latency_p50_ms` and
+  `_p95_ms` remain the whole probe, dial to verified rows.
 - **TLS identity status** = the latest identity result: verified; expired
   (`IDENTITY_FAIL` with a stale reason: the right key, a lapsed window);
   mismatch (any other `IDENTITY_FAIL`); unverified (TLS completed, no

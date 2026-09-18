@@ -129,7 +129,9 @@ export type Network = {
   serve_rate: Rate;
   /** how much of the rate's own population produced a verdict */
   serve_rate_coverage: Rate;
-  /** one observation per (validator, blob); the basis for any interval */
+  /** one observation per (validator, blob), judged by the newest probe; the headline */
+  obligations: Obligations;
+  /** obligations.rate, repeated */
   serve_rate_by_obligation: Rate;
   /** class -> probes the rate does not speak for */
   serve_rate_held_out: ClassCounts;
@@ -175,6 +177,31 @@ export type Reconstructable = {
   sample_limit: number;
 };
 
+/**
+ * One observation per (validator, blob) the settled promise proves, judged by
+ * the newest in-window probe of it. Only served and broken enter the rate;
+ * the rest says how many obligations the rate does not speak for.
+ */
+export type Obligations = {
+  total: number;
+  /** newest probe healthy, no fault anywhere */
+  served: number;
+  /** any probe a fault */
+  broken: number;
+  /** served earlier, newest probe produced no verdict */
+  end_unobserved: number;
+  /** never seen serving, never faulted */
+  unobserved: number;
+  /** ... and the endpoint completed TLS yet handed nothing over */
+  unobserved_reachable: number;
+  /** ... and it never completed TLS */
+  unobserved_unreachable: number;
+  /** ... and we never attempted the download (backoff, budget, a missed slot) */
+  unobserved_not_probed: number;
+  /** served / (served + broken) */
+  rate: Rate;
+};
+
 export type Validator = {
   address: string;
   cons_address: string;
@@ -188,6 +215,9 @@ export type Validator = {
   bond_status?: string;
   host: string;
   endpoint_since: string | null;
+  /** for a validator with no open endpoint: what was registered, and when it left the bonded list */
+  last_host?: string;
+  endpoint_closed_at?: string;
   voting_power: number;
   last_seen_at: string | null;
   reachable: boolean | null;
@@ -204,8 +234,12 @@ export type Validator = {
   /** of the heartbeats that saw a certificate, how many were endorsed */
   identity_rate_window: Rate;
   last_unreachable_at: string | null;
+  last_reachable_at: string | null;
   serve_rate: Rate;
   serve_rate_coverage: Rate;
+  /** one observation per (validator, blob), judged by the newest probe; the headline */
+  obligations: Obligations;
+  /** obligations.rate, repeated */
   serve_rate_by_obligation: Rate;
   serve_rate_held_out: ClassCounts;
   attestation: Attestation;
@@ -221,15 +255,18 @@ export type Validator = {
    * the whole probe — dial, TLS, DownloadShard, row verification — over the
    * HEALTHY probes of the window.
    *
-   * serve_rows_per_second is the one to compare between validators.
-   * Assignments run from 148 rows to 4,096, so a large validator legitimately
-   * takes longer for the same quality of service: sorting on raw duration puts
-   * the busiest validators at the top and calls them slow.
+   * serve_bytes_per_second is the one to compare between validators: the
+   * median transfer rate over the download step alone. Assignments run from
+   * 148 rows to 4,096, so a large validator legitimately takes longer for the
+   * same quality of service, and the fixed cost of dial, handshake and
+   * identity check would flatter it if the whole probe were the basis.
    */
   serve_latency_p50_ms: number | null;
   serve_latency_p95_ms: number | null;
   serve_latency_sample: number;
-  serve_rows_per_second: number | null;
+  serve_bytes_per_second: number | null;
+  /** healthy probes that carried a byte count; older records do not */
+  serve_throughput_sample: number;
   /** newest publication: true proven to have stored it, false unproven, null not recorded */
   attested_last: boolean | null;
   /**
@@ -508,6 +545,17 @@ export function utc(s: string | null | undefined): string {
   if (isNaN(d.getTime())) return s;
   return d.toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
 }
+/** how long since: "4 h", "12 min", "3 d"; for a state that has held since s */
+export function held(s: string | null | undefined): string {
+  if (!s) return "";
+  const ms = Date.now() - new Date(s).getTime();
+  if (isNaN(ms) || ms < 0) return "";
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${Math.max(m, 1)} min`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h} h`;
+  return `${Math.round(h / 24)} d`;
+}
 export function ago(s: string | null | undefined): string {
   if (!s) return "";
   const ms = Date.now() - new Date(s).getTime();
@@ -534,6 +582,10 @@ export function bytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MiB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
+}
+/** a transfer rate, in the unit the size fits */
+export function bytesPerSecond(n: number): string {
+  return `${bytes(n)}/s`;
 }
 export function nsDisplay(ns: string): string {
   const stripped = ns.replace(/^(00)+/, "");
