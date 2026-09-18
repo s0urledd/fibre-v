@@ -539,8 +539,18 @@ function subscribe(key: string, path: string, refreshMs: number, fn: (f: Fetch<u
       const next = await fetchOnce(path);
       const cur = streams.get(key);
       if (!cur) return;
-      cur.last = next;
-      cur.subs.forEach((s) => s(next));
+      // A refresh that fails does not erase the answer already on screen. It
+      // used to: fetchOnce returns {data: null, error} on any failure, so one
+      // 500 or one proxy hiccup replaced a rendered table with a loading
+      // message that never resolved, and the page said nothing about why.
+      // The error is carried beside the last good payload instead, for the
+      // page to show, and the figures keep their own computed_at so nobody
+      // reads stale numbers as fresh ones.
+      cur.last = next.error && cur.last.data !== null
+        ? { data: cur.last.data, error: next.error, loading: false }
+        : next;
+      const out = cur.last;
+      cur.subs.forEach((s) => s(out));
     };
     load();
     if (refreshMs > 0) st.timer = setInterval(load, refreshMs);

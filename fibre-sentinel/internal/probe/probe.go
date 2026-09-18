@@ -466,16 +466,42 @@ const downloadRPCUnary = "DownloadShard"
 // promise. The upstream bound is derived from the pinned MaxBlobSize; a
 // chain that raised it would otherwise turn its largest shards, the ones
 // most worth checking, into receive errors on this side.
+// recvLimitFor is what this probe may receive: what the shard should weigh,
+// with a tenth for framing and room for the promise, and never less than
+// grpc-go would need for the smallest real answer.
+//
+// It used to start from the protocol maximum and take the expected size only
+// as a floor, so every probe — of a 1 KiB blob as readily as a 128 MiB one —
+// would accept the protocol's whole 132 MiB from an endpoint whose address a
+// validator puts on chain. That also defeated the in-flight byte budget in
+// the prober, which reserves what the shard should weigh: the ceiling it
+// exists to impose was not the one being enforced. The bound is the
+// expectation now, and the protocol maximum only when there is no expectation
+// to work from.
+//
+// Tightening it cannot produce a false accusation. A refusal on this side is
+// already read as the observer's own gap, not the validator's: see
+// classifyDownloadError and TestRun_SizeBoundsAreToldApartFromAThrottle.
 func recvLimitFor(in Input) int {
-	limit := in.MaxMessageSize
-	if limit <= 0 {
-		limit = defaultMaxRecvMsgSize
+	if in.ExpectedShardBytes > 0 {
+		limit := int(in.ExpectedShardBytes+in.ExpectedShardBytes/10) + celfibre.MaxPaymentPromiseSize
+		if limit < minRecvMsgSize {
+			limit = minRecvMsgSize
+		}
+		return limit
 	}
-	if floor := int(in.ExpectedShardBytes+in.ExpectedShardBytes/10) + celfibre.MaxPaymentPromiseSize; floor > limit {
-		limit = floor
+	if in.MaxMessageSize > 0 {
+		return in.MaxMessageSize
 	}
-	return limit
+	return defaultMaxRecvMsgSize
 }
+
+// minRecvMsgSize keeps a tiny blob's bound above the fixed cost of an answer
+// so a correct server is never refused on arithmetic: the promise is already
+// counted in full, and a mebibyte of slack covers the RLC vector, the merkle
+// proofs and gRPC's framing many times over for any shard small enough to
+// reach this floor.
+const minRecvMsgSize = celfibre.MaxPaymentPromiseSize + (1 << 20)
 
 // defaultMaxRecvMsgSize matches the reference client's receive bound
 // (fibre/internal/grpc/fibre_client.go: MaxCallRecvMsgSize(maxMsgSize) with
@@ -672,6 +698,16 @@ func parseShard(shard *fibretypes.BlobShard, originalRows, totalRows int) ([]*rs
 	// at once. A disagreement about the parameters is the observer's gap,
 	// and it is named as one; the verifier is then left with the errors
 	// that a server alone can cause.
+	// No shard of this blob can carry more rows than the code has. Without
+	// this the count was unbounded: a server could answer with the same legal
+	// index millions of times, and every one of them was written to
+	// RowIndices — on the measurement, in measurements.jsonl, in the probes
+	// table, on /v1/probes and in the daily export — before any verification
+	// ran. A shape error like the two below, so it is this observer's gap and
+	// never a statement about the validator.
+	if len(rows) > totalRows {
+		return nil, nil, fmt.Errorf("%d rows returned, more than the %d this blob has", len(rows), totalRows)
+	}
 	proofDepth := bits.Len(uint(totalRows)) - 1
 	proofs := make([]*rsema1d.RowProof, len(rows))
 	for i, rw := range rows {

@@ -80,3 +80,44 @@ func TestParseShard_ReasonBlamesTheObserverNotTheValidator(t *testing.T) {
 		}
 	}
 }
+
+// Nothing bounded how many rows could come back. Every returned index was
+// written to the measurement before any verification ran, so a server could
+// answer with the same legal index millions of times and that list would
+// reach measurements.jsonl, the probes table, /v1/probes and the daily export
+// at whatever size it chose. No shard of a blob can carry more rows than the
+// code has, so that is the bound — and it is a shape error, this observer's
+// gap, never a statement about the validator.
+func TestParseShard_MoreRowsThanTheBlobHasIsRefused(t *testing.T) {
+	const k, total = 16, 64
+	depth := bits.Len(uint(total)) - 1
+	proof := make([][]byte, depth)
+	for i := range proof {
+		proof[i] = make([]byte, 32)
+	}
+	build := func(n int) *fibretypes.BlobShard {
+		rows := make([]*fibretypes.BlobRow, n)
+		for i := range rows {
+			rows[i] = &fibretypes.BlobRow{Index: uint32(i % total), Data: make([]byte, field.LeopardChunkSize), Proof: proof}
+		}
+		return &fibretypes.BlobShard{Rows: rows, Rlcs: make([]byte, k*field.GF128Size)}
+	}
+	if _, _, err := parseShard(build(total), k, total); err != nil {
+		t.Fatalf("a shard with exactly the blob's rows was refused: %v", err)
+	}
+	for _, n := range []int{total + 1, total * 100} {
+		_, _, err := parseShard(build(n), k, total)
+		if err == nil {
+			t.Errorf("%d rows accepted for a blob of %d", n, total)
+			continue
+		}
+		if !strings.Contains(err.Error(), "more than") {
+			t.Errorf("%d rows: %v, want a message naming the count", n, err)
+		}
+		for _, bad := range []string{"invalid", "fault", "misbehav"} {
+			if strings.Contains(strings.ToLower(err.Error()), bad) {
+				t.Errorf("%d rows: reason %q reads as an accusation", n, err)
+			}
+		}
+	}
+}

@@ -105,6 +105,14 @@ func main() {
 		// The byte side of the projection: every point but the post one,
 		// where NOT_FOUND is the expected answer and nothing is transferred.
 		cfg.DownloadsPerPublication = float64(len(fracs) + 1)
+		// The master secret lives in the data directory unless the policy
+		// names somewhere else. It is the only path the unit can write
+		// (fibre-probe@.service: ProtectSystem=strict with
+		// ReadWritePaths=<data dir>), and one per vantage rather than one
+		// shared by every network on the host.
+		if cfg.Sampling.MasterSecretFile == "" && *dataDir != "" {
+			cfg.Sampling.MasterSecretFile = filepath.Join(*dataDir, "sampling-master.key")
+		}
 		cfg.Sampling.AllowEphemeralSecret = *ephemeralSampling
 		p, err := policy.New(cfg)
 		if err != nil {

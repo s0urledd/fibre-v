@@ -24,7 +24,15 @@ sampling:
   # a file of at least 32 random bytes, mode 0600, and keep it out of backups
   # that anyone else can read: knowing it in advance would let a publisher
   # predict which of its blobs get probed.
-  master_secret_file: "/var/lib/fibre-observer/sampling-master.key"
+  # master_secret_file: left unset, so sentinel-probe puts it at
+  # <data-dir>/sampling-master.key. That is the only path the unit can write:
+  # fibre-probe@.service runs ProtectSystem=strict with
+  # ReadWritePaths=/var/lib/fibre-observer/%i, so the parent directory this
+  # used to name is read-only to the service and the prober died creating the
+  # file, on every restart, forever. Leaving it unset also stops two networks
+  # on one host from sharing a master secret. Set it only to move the file
+  # somewhere else the unit can write.
+  # master_secret_file: ""
   projection_lookback: 1h
   always_probe: []                  # promise hashes exempt from sampling, e.g. a blob under dispute
 

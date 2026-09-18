@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	celfibre "github.com/celestiaorg/celestia-app/v10/fibre"
@@ -196,6 +197,11 @@ type Prober struct {
 	// so a sweep that runs out of time does not drop the same validators each
 	// cycle.
 	sweep uint64
+	// cycleErrs counts the failures recorded in the cycle now running, so
+	// the end of the cycle can tell an OK cycle from one that merely
+	// finished. Reset at the top of each cycle; written from the probe
+	// goroutines, so atomic.
+	cycleErrs atomic.Int64
 	// skippedPubs are publications logged once as not probeable (wrong chain,
 	// failed settlement tx).
 	skippedPubs map[string]bool
@@ -307,6 +313,8 @@ func (p *Prober) Run(parent context.Context) error {
 
 	probed := 0
 	for {
+		// A fresh cycle starts with no failures against it.
+		p.cycleErrs.Store(0)
 		if err := ctx.Err(); err != nil {
 			if errors.Is(err, context.Canceled) {
 				p.log.Printf("stopped (signal): %d probes this run", probed)
@@ -354,9 +362,16 @@ func (p *Prober) Run(parent context.Context) error {
 		if len(due) > 0 {
 			probed += p.runDue(ctx, due)
 		}
-		// A cycle that got this far read the feed and planned; the chain
-		// side is reported by measureClock and the resolver as they fail.
-		st.OK()
+		// Only a cycle in which nothing failed is an OK cycle. Marking every
+		// cycle OK here overwrote the errors the cycle had just recorded —
+		// the chain being unreachable, targets that would not resolve — so
+		// /v1/health could never say the prober was failing, only that it was
+		// dead. The prober is the process whose output becomes a public
+		// statement about an operator; a silent degradation in it is the one
+		// this observer can least afford.
+		if p.cycleErrs.Load() == 0 {
+			st.OK()
+		}
 		st.Set("probes_this_run", probed)
 		st.Set("publications_live", len(p.feed.pubs))
 		st.Set("clock_offset_ms", p.clockOffsetMS())
@@ -407,7 +422,7 @@ func (p *Prober) measureClock(ctx context.Context) {
 	if err != nil {
 		p.log.Printf("clock check: %v (keeping previous offset)", err)
 		if p.status != nil {
-			p.status.Error(fmt.Sprintf("chain unreachable: %v", err))
+			p.fail(fmt.Sprintf("chain unreachable: %v", err))
 		}
 		return
 	}
@@ -819,9 +834,7 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 		targets, err := p.resolver.TargetsFor(ctx, pub, p.cfg.IncludeUnassigned)
 		if err != nil {
 			p.log.Printf("resolve targets for %s: %v (retry next cycle)", short(ph), err)
-			if p.status != nil {
-				p.status.Error(fmt.Sprintf("resolve targets: %v", err))
-			}
+			p.fail(fmt.Sprintf("resolve targets: %v", err))
 			continue
 		}
 		coder, cerr := p.coderFor(pub.Assignment.ProtocolParams.OriginalRows, pub.Assignment.ProtocolParams.TotalRows)
@@ -882,7 +895,13 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 			break
 		}
 		sem <- struct{}{}
-		want := ShardBytes(it.job.pub.Promise.BlobSize, it.job.pub.Assignment.ProtocolParams.OriginalRows, it.target.RowCount)
+		// Charged what the probe may actually receive, not what the shard
+		// should weigh: the two were different, and the budget was keeping
+		// the wrong one.
+		want := int64(recvLimitFor(Input{
+			ExpectedShardBytes: ShardBytes(it.job.pub.Promise.BlobSize, it.job.pub.Assignment.ProtocolParams.OriginalRows, it.target.RowCount),
+			MaxMessageSize:     maxMessageSizeFor(it.job.pub.Assignment.ProtocolParams),
+		}))
 		bytesSem.acquire(want)
 		wg.Add(1)
 		go func(it work, want int64) {
@@ -953,6 +972,16 @@ func (b *byteSem) release(nBytes int64) {
 	}
 	b.mu.Unlock()
 	b.cond.Broadcast()
+}
+
+// fail records a cycle error: on the status file, where /v1/health reads it,
+// and on the cycle's own counter, so the end of the cycle does not report OK
+// over it. Safe from any goroutine.
+func (p *Prober) fail(msg string) {
+	p.cycleErrs.Add(1)
+	if p.status != nil {
+		p.status.Error(msg)
+	}
 }
 
 // runOne runs a single probe end to end: lateness re-check, policy gate,

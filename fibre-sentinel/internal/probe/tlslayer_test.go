@@ -336,22 +336,37 @@ func TestRun_SizeBoundsAreToldApartFromAThrottle(t *testing.T) {
 	cert := fibreCert(t, consPriv, "test-chain", now.Add(-time.Hour), now.Add(24*time.Hour))
 
 	// a shard larger than the probe's receive bound
+	// Larger than the floor a tiny blob's bound cannot go below, so the
+	// refusal below is the bound doing its job and not arithmetic.
+	const shardBytes = 3 << 20
 	host, _ := startFibre(t, cert, &fakeFibre{download: func(context.Context, *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error) {
-		return bigShard(300_000), nil
+		return bigShard(shardBytes), nil
 	}})
 	in := probeInput(host, consPub)
-	in.MaxMessageSize, in.ExpectedShardBytes = 100_000, 50_000
+	// The bound is what this blob's shard should weigh, not the protocol's
+	// maximum: a probe of a small blob must not stand ready to accept a
+	// hundred-odd megabytes from an address a validator put on chain.
+	in.MaxMessageSize, in.ExpectedShardBytes = 100_000_000, shardBytes
 	m := Run(context.Background(), in, mustCoder(t), StepTimeouts{})
-	if m.Outcome != OutcomeProbeError || m.Download.RPCCode != "ResourceExhausted" || m.Download.RecvLimit != 100_000 {
+	if m.Download.RecvLimit >= in.MaxMessageSize {
+		t.Fatalf("the bound is the protocol maximum (%d), not this shard's size", m.Download.RecvLimit)
+	}
+	// A shard past that bound is refused here, and a refusal on this side is
+	// the observer's own gap, never the validator's.
+	in.ExpectedShardBytes = 50_000
+	m = Run(context.Background(), in, mustCoder(t), StepTimeouts{})
+	if m.Outcome != OutcomeProbeError || m.Download.RPCCode != "ResourceExhausted" {
 		t.Fatalf("receive bound: outcome=%s code=%s limit=%d (%s)", m.Outcome, m.Download.RPCCode, m.Download.RecvLimit, m.RawError)
 	}
-	// the expected shard size floors the bound, so the same shard is received
-	// (and then fails to parse, which is the observer's gap with the shape
-	// on the row, not the receive bound and not a fault)
-	in.ExpectedShardBytes = 300_000
+	if m.Classification == ClassFault {
+		t.Fatalf("this observer's own receive bound was recorded as a fault (%s)", m.RawError)
+	}
+	// With room for it, the same shard is received, and then fails to parse:
+	// still the observer's gap, with the shape on the row.
+	in.ExpectedShardBytes = shardBytes
 	m = Run(context.Background(), in, mustCoder(t), StepTimeouts{})
-	if m.Download.RPCCode == "ResourceExhausted" || m.Download.RecvLimit < 330_000 {
-		t.Fatalf("floored bound: outcome=%s code=%s limit=%d (%s)", m.Outcome, m.Download.RPCCode, m.Download.RecvLimit, m.RawError)
+	if m.Download.RPCCode == "ResourceExhausted" {
+		t.Fatalf("a shard well inside the bound was refused: limit=%d (%s)", m.Download.RecvLimit, m.RawError)
 	}
 	if m.Outcome != OutcomeProbeError || !strings.Contains(m.RawError, "shard shape") || m.Classification == ClassFault {
 		t.Fatalf("a shard this observer cannot parse: outcome=%s class=%s (%s), want PROBE_ERROR, never a fault", m.Outcome, m.Classification, m.RawError)

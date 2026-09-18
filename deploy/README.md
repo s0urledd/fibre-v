@@ -352,6 +352,8 @@ Two copies, both shipped:
   `runs.jsonl`, `sampling-secrets.jsonl`, `amendments.jsonl`), `state.json`, the status files
   and the daily exports to `BACKUP_REMOTE/<network>` nightly (`deploy/backup.sh`),
   with the rclone remote configured once in `/etc/fibre-observer/rclone.conf`.
+  It copies rather than mirrors, so moving old files off a full disk can
+  never delete them from the remote.
   It never copies `sampling-master.key`, which must not leave the host, nor
   the database, which litestream covers. With `BACKUP_REMOTE` empty the
   timer runs and does nothing, so enable it everywhere and arm it with one

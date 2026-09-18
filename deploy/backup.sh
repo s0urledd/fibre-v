@@ -33,7 +33,13 @@ command -v rclone >/dev/null || { echo "fibre-backup: rclone is not installed" >
 
 dest="$remote/$instance"
 echo "fibre-backup[$instance]: $data -> $dest"
-rclone sync "$data" "$dest" \
+# copy, not sync. The record is append-only, so copy is the correct verb, and
+# sync would mirror a deletion: deploy/README.md tells the operator that the
+# answer to a full disk is to move the oldest JSONL files off the box, and the
+# next nightly run would then delete exactly those files from the remote —
+# which is the only copy, since litestream replicates the derived database and
+# not the record. --max-delete 0 is belt and braces for the same reason.
+rclone copy "$data" "$dest" \
   --include '*.jsonl' --include 'state.json' --include 'registry.jsonl' --include 'status/**' --include 'exports/**' \
   --exclude 'sampling-master.key' --exclude 'observer.db*' --exclude 'snapshots/**' \
   --transfers 4 --checkers 8 --stats-one-line --stats 0 --log-level NOTICE

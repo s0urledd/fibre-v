@@ -33,7 +33,7 @@ const VERDICTS: Record<string, Def> = {
   },
   FAULT: {
     label: "fault", tier: "fault",
-    def: "An identity-verified endpoint, for a shard it signed for, said it has no such shard, returned bytes that do not verify against the commitment, or returned rows outside its assignment. The only class that counts against a validator.",
+    def: "An identity-verified endpoint, for a shard it signed for, said it has no such shard, or returned bytes that verify against neither the blob commitment nor any settled promise's assignment. The only class that counts against a validator. Rows that do verify but are not this promise's set are never a fault: the store serves by promise-hash order, so another promise's shard can answer in this one's place.",
   },
   UNREACHABLE: {
     label: "unreachable", tier: "hold",

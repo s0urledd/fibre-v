@@ -55,7 +55,12 @@ function Page() {
   const points = v.serve_rate_by_point ?? [];
   const o = v.obligations;
   const decided = !!o && o.rate.den > 0;
+  // Two different counts, kept apart. `faults` is every FAULT of an assigned
+  // shard in any phase; the serve rate's denominator is HEALTHY + FAULT over
+  // in-window probes only. Printing one over the other read "2 of 0" whenever
+  // a fault fell outside the window.
   const faults = v.faults ?? v.classes?.FAULT ?? 0;
+  const inWindowFaults = v.classes?.FAULT ?? 0;
   const rated = (v.serve_rate?.den ?? 0) > 0;
   const suspect = new Map((data.suspect_points ?? []).map((s) => [s.at, s.reason.replace(",", " and ")]));
   const heldOut = Object.entries(v.serve_rate_held_out ?? {}).filter(([, n]) => n > 0)
@@ -144,10 +149,15 @@ function Page() {
         <Cell label="Faults"
           value={faults > 0 ? <><Mark tier="fault" />{faults.toLocaleString("en-US")}</> : rated ? "0" : "—"}
           tone={faults > 0 ? "fault" : "absent"}
-          sub={faults > 0 ? `of ${v.serve_rate.den.toLocaleString("en-US")} rated probes` : rated ? `${v.serve_rate.den.toLocaleString("en-US")} rated probes` : "nothing rated"}
+          sub={faults > 0
+            ? (inWindowFaults === faults
+              ? `of ${v.serve_rate.den.toLocaleString("en-US")} rated probes`
+              : `${inWindowFaults.toLocaleString("en-US")} of ${v.serve_rate.den.toLocaleString("en-US")} rated probes, the rest past the deadline`)
+            : rated ? `${v.serve_rate.den.toLocaleString("en-US")} rated probes` : "nothing rated"}
           info={<>
             <p>The validator answered but did not hand over a shard it had signed for.</p>
             <p>The only number counted against a validator. Unreachable, unproven and unregistered are not faults.</p>
+            <p>The rated probes beside it are the in-window ones the serve rate is drawn from. A fault can also be recorded after the deadline, when a shard that is gone comes back wrong; those are in the count and not in that denominator.</p>
           </>} />
         <Cell label="Obligations"
           value={decided ? fmtPct(o!.rate) : "—"}

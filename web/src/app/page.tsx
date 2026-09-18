@@ -18,7 +18,7 @@ export default function Overview() {
   const [win, setWin] = useState("24h");
   const { data: meta } = useApi<Meta>("/v1/meta");
   const { data: net, error: netErr, loading } = useApi<Network>(`/v1/network?window=${win}`);
-  const { data: vals } = useApi<{ validators: Validator[] }>(`/v1/validators?window=${win}`);
+  const { data: vals, error: valsErr } = useApi<{ validators: Validator[] }>(`/v1/validators?window=${win}`);
   const { data: market } = useApi<Market>(`/v1/market?window=${win}`);
 
   const notLive = !!(meta?.app_version && !meta.fibre_active);
@@ -126,8 +126,8 @@ export default function Overview() {
             </>} />
           <Cell label="Endpoints" loading={busy}
             value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
-            sub={net ? `${net.reachability.num} answering now · ${net.validators_probed} probed` : undefined}
-            detail={net ? `${net.registered_endpoints.toLocaleString("en-US")} registered Fibre endpoints; ${net.reachability.num} answering the latest handshake; ${net.validators_probed} probed in this window.` : undefined} />
+            sub={net ? (net.reachability.den ? `${fmtCount(net.reachability)} answering now · ${net.validators_probed} probed` : `no handshake yet · ${net.validators_probed} probed`) : undefined}
+            detail={net ? `${net.registered_endpoints.toLocaleString("en-US")} registered Fibre endpoints; ${net.reachability.den ? `${fmtCount(net.reachability)} of them answering the latest handshake` : "none has answered a handshake yet"}; ${net.validators_probed} probed in this window.` : undefined} />
           <Cell label="Fees settled" loading={busy}
             value={market ? tia(market.fees_settled_utia, { unit: false }) : "—"} unit={market ? "TIA" : undefined}
             tone={market && market.settlements === 0 ? "absent" : undefined}
@@ -194,8 +194,15 @@ export default function Overview() {
       <Panel title={<span id="validators">Validator set</span>} className="validators"
         right={list.length > 0 ? <>{list.filter((v) => !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED")).length} bonded · {list.filter((v) => !!v.host).length} with a Fibre endpoint · <Link href="/blobs/">all publications →</Link></> : undefined}>
         {vals
-          ? <ValidatorTable rows={vals.validators} notLive={notLive} />
-          : <p className="muted" style={{ padding: "var(--s4)" }}>Loading validators…</p>}
+          ? <>
+              {valsErr && <p className="muted" style={{ padding: "var(--s4) var(--s4) 0" }}>
+                The last refresh of this table did not reach the API ({valsErr}). The rows below are the ones it last answered with.
+              </p>}
+              <ValidatorTable rows={vals.validators} notLive={notLive} />
+            </>
+          : valsErr
+            ? <p className="muted" style={{ padding: "var(--s4)" }}>The validator list could not be read from the API ({valsErr}).</p>
+            : <p className="muted" style={{ padding: "var(--s4)" }}>Loading validators…</p>}
       </Panel>
     </>
   );
