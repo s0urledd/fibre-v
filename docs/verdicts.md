@@ -403,6 +403,26 @@ what the measurement cannot separate.
   many validators were unreachable at once, because validators fail
   independently and one network does not.
 
+- **Retention and the rollup.** Raw probe and heartbeat rows are kept for
+  90 days and their `raw_json` (the bulk of a row) for 30; every typed
+  column stays, including the evidence columns. Fourteen days after a UTC
+  day ends, while its rows are all still present, the collector computes
+  the day's rollup with the same SQL the API runs live: the obligation
+  buckets per validator for the promises settled that day, and the row
+  counts (in-window classes, faults, gaps, heartbeats) for the rows
+  started that day, suspect points left out as they are live. A day is
+  pruned only after it is rolled, whole days at a time, oldest first, so
+  the record is never thinner than the rollup behind it. From the first
+  prune on, the "all" window is the rollup for every day before `raw_from`
+  plus the raw rows from `raw_from` on, and the answer carries
+  `rolled_up` (`raw_from`, the days folded in, and which figures rest on
+  the rollup); the 24h, 7d and 30d windows never touch it. Figures the
+  rollup does not hold, latency percentiles, the by-point breakdown,
+  attestation and throughput, cover the raw record only, and the label
+  says so. A pinned `as_of` before `raw_from` takes whole rolled days up
+  to its own. The JSONL record and the daily exports are untouched by any
+  of this: pruning is the database's, never the record's.
+
 ## Reproducing the figures
 
 Every figure on the site is a function of the record and the code, and the

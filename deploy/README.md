@@ -288,13 +288,21 @@ box (they are append-only; a copy is complete the moment it is taken) and
 rebuild the database from the rest if you want it smaller. Nothing here
 deletes a probe row yet: the "all" window is exactly that.
 
-**Retention decision (taken 2026-09-18, to be implemented before mainnet):**
-raw probe rows are kept for **90 days**; `raw_json` (the bulk of a row) is
-dropped after **30 days** while every typed column, including the evidence
-columns from schema 9, stays; beyond 90 days the "all" figures come from a
-**daily per-validator obligation rollup** (served, broken, end unobserved,
-unobserved by kind, pending, faults, reachability), and every figure that
-rests on the rollup says "rolled up after 90 days" beside its sample. The
+**Retention (decided 2026-09-18, implemented in the collector):** raw
+probe and heartbeat rows are kept for **90 days** (`-retain-raw`);
+`raw_json` (the bulk of a row) is dropped after **30 days**
+(`-retain-raw-json`) while every typed column, including the evidence
+columns from schema 9, stays; **14 days** after a UTC day ends
+(`-rollup-after`) the collector computes the day's per-validator rollup
+(obligation buckets by settlement day; classes, faults, gaps and
+heartbeats by start day) with the API's own SQL, and only a rolled day is
+ever pruned, whole days at a time. From the first prune on the "all"
+figures are the rollup plus the raw rows and carry a `rolled_up` label
+(`raw_from`, days folded in); the shorter windows never touch it. The
+retention pass runs hourly (`-retention-every`); the status file shows
+`rollup_through` and `raw_from`. A warning in the log that obligations
+were still pending at roll means `-rollup-after` is shorter than a
+retention window on this chain: raise it. The
 JSONL files are never rotated by the tools and remain the record; the
 daily export is what a verifier downloads. The collector builds it: one
 tarball per UTC day under `<DATA_DIR>/exports` (`-exports-dir`), once the

@@ -24,6 +24,7 @@ import (
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/rollup"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
 
@@ -51,6 +52,10 @@ func main() {
 		secPath   = flag.String("sampling-secrets", "", "path to sampling-secrets.jsonl, the prober's revealed day secrets (default <data-dir>/sampling-secrets.jsonl)")
 		expDir    = flag.String("exports-dir", "", "where the daily export tarballs are built (default <data-dir>/exports)")
 		expHour   = flag.Int("export-hour", 3, "UTC hour after which a day's export is built, the grace for late rows (-1 = never build exports)")
+		retainRaw = flag.Duration("retain-raw", rollup.Default().RetainRaw, "keep probe and heartbeat rows this long; older rolled days are pruned, whole days at a time (0 = keep forever)")
+		retainRJ  = flag.Duration("retain-raw-json", rollup.Default().RetainRawJSON, "keep a row's raw_json (the bulk of it) this long; every typed column stays (0 = keep forever)")
+		rollAfter = flag.Duration("rollup-after", rollup.Default().RollupAfter, "compute a day's obligation and probe rollups this long after the day ends; must clear every retention window (0 = never roll up, so never prune)")
+		retEvery  = flag.Duration("retention-every", time.Hour, "how often the retention pass runs")
 	)
 	flag.Parse()
 
@@ -142,6 +147,8 @@ func main() {
 	}
 	log.Printf("collector up: run=%d vantage=%s db=%s data=%s exports=%s", runID, *vantage, *dbPath, *dataDir, *expDir)
 
+	retention := rollup.Config{RetainRaw: *retainRaw, RetainRawJSON: *retainRJ, RollupAfter: *rollAfter}
+	var lastRetention time.Time
 	var lastEscrow time.Time
 	pass := func(pollEndpoints bool) {
 		now := time.Now()
@@ -202,6 +209,28 @@ func main() {
 			log.Printf("sampling secrets: %v", err)
 		} else if r.Inserted > 0 {
 			log.Printf("sampling secrets: +%d day(s) revealed (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		if *retEvery > 0 && time.Since(lastRetention) >= *retEvery {
+			lastRetention = now
+			if rep, err := rollup.Run(ctx, st, now, retention); err != nil {
+				log.Printf("retention: %v", err)
+				live.Error(fmt.Sprintf("retention: %v", err))
+			} else {
+				if len(rep.RolledDays) > 0 {
+					log.Printf("retention: rolled up %d day(s) through %s (%d obligations still pending at roll)", len(rep.RolledDays), rep.RolledDays[len(rep.RolledDays)-1], rep.PendingAtRoll)
+					live.Set("rollup_through", rep.RolledDays[len(rep.RolledDays)-1])
+				}
+				if rep.PendingAtRoll > 0 {
+					log.Printf("retention: WARNING %d obligation(s) were still pending when their day was rolled; -rollup-after is shorter than a retention window", rep.PendingAtRoll)
+				}
+				if rep.RawJSONDropped > 0 {
+					log.Printf("retention: dropped raw_json from %d row(s)", rep.RawJSONDropped)
+				}
+				if len(rep.PrunedDays) > 0 {
+					log.Printf("retention: pruned %d row(s) of %d day(s) through %s", rep.PrunedRows, len(rep.PrunedDays), rep.PrunedDays[len(rep.PrunedDays)-1])
+					live.Set("raw_from", rep.PrunedDays[len(rep.PrunedDays)-1])
+				}
+			}
 		}
 		if exporter != nil {
 			if built, err := exporter.Run(now); err != nil {

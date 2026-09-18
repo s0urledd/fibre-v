@@ -109,6 +109,8 @@ export type Health = {
   server_time: string;
 };
 
+export type RolledUp = { raw_from: string; days: number; note: string };
+
 export type Network = {
   /**
    * When this summary was computed and how long it took. It is a snapshot
@@ -146,6 +148,8 @@ export type Network = {
   probe_gaps: number;
   probe_gaps_by_outcome: ClassCounts;
   vantage_health: VantageHealth;
+  /** set when the window rests partly on the daily rollup: past the raw retention, "all" is the rollup for days before raw_from plus the raw rows */
+  rolled_up?: RolledUp;
   serve_rate_by_point: { key: string; serve_rate: Rate }[];
   /** whole-probe duration, dial to verified rows, over HEALTHY probes */
   serve_latency_p50_ms: number | null;

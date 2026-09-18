@@ -141,6 +141,11 @@ export default function Overview() {
           </>} />
       </div>
 
+      {net?.rolled_up && (
+        <p className="muted rolled">
+          Rolled up after 90 days: figures before {net.rolled_up.raw_from} come from the daily per-validator rollup ({net.rolled_up.days.toLocaleString("en-US")} days); latency, by-point, attestation and recoverability cover the raw rows from then on.
+        </p>
+      )}
       {noPubs && (
         <div className="note">
           <span className="label">{notLive ? "Fibre is not live on this chain yet" : "Nothing to measure yet"}</span>

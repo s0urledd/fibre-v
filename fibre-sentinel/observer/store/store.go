@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 10
+const SchemaVersion = 11
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -277,6 +277,62 @@ var migrations = []migration{
 				revealed_at TEXT NOT NULL
 			)`,
 			`CREATE INDEX IF NOT EXISTS sampling_secrets_commitment ON sampling_secrets (commitment)`,
+		},
+	},
+	{
+		version: 11,
+		note:    "retention: the last fields the API read out of raw_json become columns; daily rollups of obligations and probe counts; raw_json may be dropped",
+		stmts: []string{
+			// raw_json is the bulk of a probe row and is dropped after the
+			// raw-json retention (rollup.Prune); everything the API still
+			// reads from it becomes a typed column, back-filled here.
+			`ALTER TABLE probes ADD COLUMN sampling_p REAL`,
+			`ALTER TABLE probes ADD COLUMN sampling_binding TEXT`,
+			`ALTER TABLE probes ADD COLUMN sampling_commitment TEXT`,
+			`ALTER TABLE probes ADD COLUMN retry_first_outcome TEXT`,
+			`ALTER TABLE probes ADD COLUMN clock_offset_ms INTEGER`,
+			`UPDATE probes SET
+				sampling_p = json_extract(raw_json, '$.sampling.p'),
+				sampling_binding = json_extract(raw_json, '$.sampling.binding'),
+				sampling_commitment = json_extract(raw_json, '$.sampling.day_commitment'),
+				retry_first_outcome = json_extract(raw_json, '$.retry.first_outcome'),
+				clock_offset_ms = json_extract(raw_json, '$.clock_offset_ms')
+			 WHERE raw_json <> '' AND json_valid(raw_json)`,
+			`CREATE INDEX IF NOT EXISTS probes_sampling ON probes (sampling_commitment, started_at)`,
+			// obligation_daily: one row per (settlement day, validator) with
+			// the day's obligation buckets, computed once the day is final
+			// (rollup.Run) exactly as the API computes them live. Beyond the
+			// raw retention the "all" window rests on these.
+			`CREATE TABLE IF NOT EXISTS obligation_daily (
+				day                    TEXT NOT NULL,
+				validator_address      TEXT NOT NULL,
+				total                  INTEGER NOT NULL,
+				served                 INTEGER NOT NULL,
+				broken                 INTEGER NOT NULL,
+				end_unobserved         INTEGER NOT NULL,
+				unobserved_reachable   INTEGER NOT NULL,
+				unobserved_unreachable INTEGER NOT NULL,
+				unobserved_not_probed  INTEGER NOT NULL,
+				pending                INTEGER NOT NULL,
+				computed_at            TEXT NOT NULL,
+				PRIMARY KEY (day, validator_address)
+			)`,
+			// probe_daily: one row per (start day, validator) with the row
+			// counts the "all" window prints: every row, the in-window
+			// assigned population by class (JSON), faults, gaps, and the
+			// heartbeats. Suspect points are left out as they are live.
+			`CREATE TABLE IF NOT EXISTS probe_daily (
+				day               TEXT NOT NULL,
+				validator_address TEXT NOT NULL,
+				probes            INTEGER NOT NULL,
+				gaps              INTEGER NOT NULL,
+				faults            INTEGER NOT NULL,
+				classes_json      TEXT NOT NULL,
+				beats             INTEGER NOT NULL,
+				beats_up          INTEGER NOT NULL,
+				computed_at       TEXT NOT NULL,
+				PRIMARY KEY (day, validator_address)
+			)`,
 		},
 	},
 }
@@ -770,9 +826,10 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		 finished_at, lateness_ms, dns_ok, dns_ms, tcp_ok, tcp_ms, tls_ok, tls_ms, tls_version, peer_cert_sha256,
 		 identity_ok, identity_reason, download_ok, download_ms, rows_returned, rows_expected, commitment_verified,
 		 assignment_verified, phase, outcome, classification, classification_reason, raw_error, total_duration_ms, raw_json,
-		 attested, bytes_returned, row_indices, rows_sha256, rpc_code, shadowed_by, observer_build, app_version)
+		 attested, bytes_returned, row_indices, rows_sha256, rpc_code, shadowed_by, observer_build, app_version,
+		 sampling_p, sampling_binding, sampling_commitment, retry_first_outcome, clock_offset_ms)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		        ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(dedupe_key) DO NOTHING`,
 		m.DedupeKey(), m.Vantage, m.PromiseHash, m.Commitment, m.BlobVersion, ts(m.MustServeUntil), m.ValidatorSetHeight,
 		m.ValidatorAddress, m.ValidatorHost, b2i(m.Assigned), m.AssignedRowCount, m.ScheduleLabel, ts(m.ScheduledAt),
@@ -785,12 +842,35 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		m.TotalDurationMS, string(raw),
 		probeAttested(m), probeBytes(m),
 		nullIfEmpty(rowIndicesJSON(m)), nullIfEmpty(m.Download.RowsSHA256), nullIfEmpty(m.Download.RPCCode),
-		nullIfEmpty(m.Download.ShadowedBy), nullIfEmpty(observerBuild(m)), observerAppVersion(m))
+		nullIfEmpty(m.Download.ShadowedBy), nullIfEmpty(observerBuild(m)), observerAppVersion(m),
+		samplingP(m), samplingField(m, func(d *probe.SamplingDecision) string { return d.Binding }),
+		samplingField(m, func(d *probe.SamplingDecision) string { return d.DayCommitment }), retryFirstOutcome(m), m.ClockOffsetMS)
 	if err != nil {
 		return false, fmt.Errorf("probe %s: %w", m.DedupeKey(), err)
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+func samplingP(m probe.Measurement) any {
+	if m.Sampling == nil {
+		return nil
+	}
+	return m.Sampling.P
+}
+
+func samplingField(m probe.Measurement, f func(*probe.SamplingDecision) string) any {
+	if m.Sampling == nil {
+		return nil
+	}
+	return nullIfEmpty(f(m.Sampling))
+}
+
+func retryFirstOutcome(m probe.Measurement) any {
+	if m.Retry == nil {
+		return nil
+	}
+	return nullIfEmpty(string(m.Retry.FirstOutcome))
 }
 
 // nullIfEmpty stores "" as NULL: an absent fact, not an empty one.

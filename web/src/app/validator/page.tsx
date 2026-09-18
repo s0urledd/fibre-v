@@ -13,6 +13,8 @@ type Detail = {
   window: Window;
   validator: Validator;
   recent_probes: Probe[];
+  /** set when this window rests partly on the daily rollup (the "all" window past the raw retention) */
+  rolled_up?: { raw_from: string; days: number; note: string };
   /** schedule points, over all time, that no rate counts: the observer's own correlated failures */
   suspect_points: { at: string; label: string; reason: string }[];
 };
@@ -168,6 +170,11 @@ function Page() {
           </>} />
       </div>
 
+      {data.rolled_up && (
+        <p className="muted rolled">
+          Rolled up after 90 days: figures before {data.rolled_up.raw_from} come from the daily rollup ({data.rolled_up.days.toLocaleString("en-US")} days); latency, by-point, attestation and throughput cover the raw rows from then on.
+        </p>
+      )}
       {o && o.total > 0 && (
         <p className="coverage">
           {o.total.toLocaleString("en-US")} proven obligation{o.total === 1 ? "" : "s"} in this window:

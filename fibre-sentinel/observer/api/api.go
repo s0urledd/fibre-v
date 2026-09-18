@@ -26,7 +26,9 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/rollup"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/verdict"
 )
 
 // Version is reported in /v1/meta.
@@ -284,6 +286,55 @@ type Window struct {
 	// (jailed, bonded, the current registry) is not rewound; see
 	// AsOfNote.
 	AsOf bool `json:"as_of,omitempty"`
+}
+
+// rolledUp is the label beside figures that rest on the daily rollup: past
+// the raw retention the "all" window is the rollup for every day before
+// RawFrom plus the raw rows from RawFrom on. See observer/rollup.
+type rolledUp struct {
+	RawFrom string `json:"raw_from"`
+	Days    int64  `json:"days"`
+	Note    string `json:"note"`
+}
+
+// rolledFor returns the rollups the window folds in, and their label: only
+// the "all" window, only once a day has been pruned. A pinned end before
+// RawFrom takes whole rolled days up to and including its own.
+func (s *Server) rolledFor(ctx context.Context, win Window, only string) (*rollup.Rolled, *rolledUp, error) {
+	if win.Span != 0 {
+		return nil, nil, nil
+	}
+	from, ok := rollup.RawFrom(s.st)
+	if !ok {
+		return nil, nil, nil
+	}
+	before := from
+	if end := win.End.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour); end.Before(before) {
+		before = end
+	}
+	r, err := rollup.Load(ctx, s.st.DB(), before, only)
+	if err != nil {
+		return nil, nil, err
+	}
+	label := &rolledUp{RawFrom: from.Format("2006-01-02"), Days: r.Days,
+		Note: "rolled up after " + rolledNote + ": obligations, classes, faults, probe counts, gaps and heartbeats for days before raw_from come from the daily rollup; latency, by-point, attestation and throughput figures cover the raw record from raw_from on"}
+	return r, label, nil
+}
+
+// rolledNote names the raw retention in the label; the API does not read
+// the collector's flag, so it states the decision (deploy/README.md).
+const rolledNote = "90 days"
+
+func addRolledObligations(o *obligationStats, r rollup.Obligations) {
+	o.Total += r.Total
+	o.Served += r.Served
+	o.Broken += r.Broken
+	o.EndUnobserved += r.EndUnobserved
+	o.UnobservedReachable += r.UnobservedReachable
+	o.UnobservedUnreachable += r.UnobservedUnreachable
+	o.UnobservedNotProbed += r.UnobservedNotProbed
+	o.Pending += r.Pending
+	o.finish()
 }
 
 // AsOfNote goes beside a pinned window's figures.
@@ -616,8 +667,10 @@ type classCounts map[string]int64
 type networkResponse struct {
 	// AsOfNote is set on a pinned window (see Window.AsOf).
 	AsOfNote string `json:"as_of_note,omitempty"`
-	Window   Window `json:"window"`
-	Vantage  string `json:"vantage"`
+	// RolledUp is set when figures rest partly on the daily rollup.
+	RolledUp *rolledUp `json:"rolled_up,omitempty"`
+	Window   Window    `json:"window"`
+	Vantage  string    `json:"vantage"`
 	// ComputedAt and ComputeMs say when this summary was taken and how long it
 	// took. It is a snapshot refreshed on a schedule, not a live query, so its
 	// age is published rather than left for a reader to assume.
@@ -887,29 +940,12 @@ type obligationStats struct {
 //
 // Arguments, in order: as_of (pending cut), window start (settlement_time),
 // then whatever the caller appends (suspect points, a validator filter).
-const obligationBuckets = `SELECT validator_address, promise_hash,
-			SUM(classification = 'FAULT')   AS faults,
-			SUM(classification = 'HEALTHY') AS healthy,
-			SUM(classification NOT IN ('NOT_PROBED','PROBE_ERROR'))                AS attempted,
-			SUM(classification NOT IN ('NOT_PROBED','PROBE_ERROR') AND tls_ok = 1) AS reached,
-			COALESCE(MAX(CASE WHEN rn = 1 THEN classification END), '')          AS last_cls,
-			MAX(must_serve_until > ?)                                            AS pending
-		FROM (
-			SELECT pr.validator_address, pr.promise_hash, pr.classification, pr.tls_ok, pr.must_serve_until,
-			       ROW_NUMBER() OVER (PARTITION BY pr.validator_address, pr.promise_hash
-			                          ORDER BY (pr.classification IN ('NOT_PROBED','PROBE_ERROR')), pr.scheduled_at DESC, pr.started_at DESC) AS rn
-			FROM probes pr JOIN publications pb ON pb.promise_hash = pr.promise_hash
-			WHERE pb.settlement_time >= ? AND pb.settlement_time <= ? AND pr.started_at <= ?
-			  AND pr.assigned = 1 AND pr.phase = 'in_window' AND pr.attested = 1`
-
-const obligationSums = `COUNT(*),
-			COALESCE(SUM(NOT pending AND faults > 0), 0),
-			COALESCE(SUM(NOT pending AND faults = 0 AND last_cls = 'HEALTHY'), 0),
-			COALESCE(SUM(NOT pending AND faults = 0 AND last_cls <> 'HEALTHY' AND healthy > 0), 0),
-			COALESCE(SUM(NOT pending AND faults = 0 AND healthy = 0 AND reached > 0), 0),
-			COALESCE(SUM(NOT pending AND faults = 0 AND healthy = 0 AND reached = 0 AND attempted > 0), 0),
-			COALESCE(SUM(NOT pending AND faults = 0 AND healthy = 0 AND attempted = 0), 0),
-			COALESCE(SUM(pending), 0)`
+// The obligation SQL lives in observer/rollup, which computes the daily
+// rollups with the same statements; see rollup.ObligationBuckets.
+const (
+	obligationBuckets = rollup.ObligationBuckets
+	obligationSums    = rollup.ObligationSums
+)
 
 func (o *obligationStats) finish() {
 	o.Unobserved = o.UnobservedReachable + o.UnobservedUnreachable + o.UnobservedNotProbed
@@ -1026,9 +1062,9 @@ func (ss suspectSet) clause(col string) string {
 // correlatedMinValidators is the floor under which a share is not a signal:
 // one validator of two failing is half the set and an ordinary Tuesday.
 const (
-	correlatedUnreachableThreshold = 0.5
-	correlatedFaultThreshold       = 0.5
-	correlatedMinValidators        = 3
+	correlatedUnreachableThreshold = verdict.UnreachableThreshold
+	correlatedFaultThreshold       = verdict.FaultThreshold
+	correlatedMinValidators        = verdict.MinValidators
 )
 
 // suspectPoints finds every schedule point in the window at which the share
@@ -1040,55 +1076,33 @@ func (s *Server) suspectPoints(ctx context.Context, win Window) (vantageHealth, 
 	out := vantageHealth{Threshold: correlatedUnreachableThreshold, FaultThreshold: correlatedFaultThreshold,
 		MinValidators: correlatedMinValidators, Suspect: []suspectPoint{}}
 	var ss suspectSet
-	rows, err := s.st.DB().QueryContext(ctx, `SELECT scheduled_at, schedule_label,
-			COUNT(DISTINCT CASE WHEN classification = 'UNREACHABLE' THEN validator_address END),
-			COUNT(DISTINCT CASE WHEN classification = 'FAULT' THEN validator_address END),
-			COUNT(DISTINCT validator_address), COUNT(*)
-		FROM probes
-		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'
-		GROUP BY scheduled_at HAVING COUNT(DISTINCT validator_address) > 1
-		ORDER BY scheduled_at`, win.startArg(), win.endArg())
+	pts, err := rollup.SuspectPoints(ctx, s.st.DB(), `started_at >= ? AND started_at <= ?`, win.startArg(), win.endArg())
 	if err != nil {
 		return out, ss, err
 	}
-	defer rows.Close()
 	var best float64
-	for rows.Next() {
-		var at, label string
-		var bad, faulted, all, n int64
-		if err := rows.Scan(&at, &label, &bad, &faulted, &all, &n); err != nil {
-			return out, ss, err
-		}
-		if all == 0 {
+	for _, p := range pts {
+		if p.Validators == 0 {
 			continue
 		}
-		fu, ff := float64(bad)/float64(all), float64(faulted)/float64(all)
+		fu := float64(p.Unreachable) / float64(p.Validators)
 		if fu > best || out.At == "" {
 			best = fu
-			out.WorstPoint = rate(bad, all)
-			out.At, out.Label = at, label
+			out.WorstPoint = rate(p.Unreachable, p.Validators)
+			out.At, out.Label = p.At, p.Label
 		}
-		reason := ""
-		if fu >= correlatedUnreachableThreshold && bad >= correlatedMinValidators {
-			reason = "unreachable"
-		}
-		if ff >= correlatedFaultThreshold && faulted >= correlatedMinValidators {
-			if reason != "" {
-				reason += ","
-			}
-			reason += "fault"
-		}
+		reason := p.Reason()
 		if reason == "" {
 			continue
 		}
-		out.Suspect = append(out.Suspect, suspectPoint{At: at, Label: label, Validators: all,
-			Unreachable: rate(bad, all), Fault: rate(faulted, all), Reason: reason})
-		out.SuspectRows += n
-		ss.args = append(ss.args, at)
+		out.Suspect = append(out.Suspect, suspectPoint{At: p.At, Label: p.Label, Validators: p.Validators,
+			Unreachable: rate(p.Unreachable, p.Validators), Fault: rate(p.Faulted, p.Validators), Reason: reason})
+		out.SuspectRows += p.Rows
+		ss.args = append(ss.args, p.At)
 	}
 	out.Correlated = out.WorstPoint.Den > 0 && best >= correlatedUnreachableThreshold && out.WorstPoint.Num >= correlatedMinValidators
 	ss.points = out.Suspect
-	return out, ss, rows.Err()
+	return out, ss, nil
 }
 
 // byPoint breaks a rate down by schedule point. The four in-window points are
@@ -1328,6 +1342,43 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		return nil, err
 	}
 	resp.Reconstructable = recon
+
+	// Past the raw retention the "all" window rests on the daily rollup
+	// for the pruned days: fold it in and say so.
+	rolled, label, err := s.rolledFor(ctx, win, "")
+	if err != nil {
+		return nil, err
+	}
+	if rolled != nil {
+		resp.RolledUp = label
+		for c, n := range rolled.Classes {
+			resp.Classes[c] += n
+		}
+		resp.ServeRate = serveRate(resp.Classes)
+		resp.Coverage = coverage(resp.Classes)
+		resp.HeldOut = heldOut(resp.Classes)
+		resp.Faults += rolled.Faults
+		resp.ProbeCount += rolled.Probes
+		resp.Gaps += rolled.Gaps
+		addRolledObligations(&resp.Obligations, rolled.Obligations)
+		resp.ByObligation = resp.Obligations.Rate
+		resp.ReachabilityWindow = rate(beatsUp+rolled.BeatsUp, beats+rolled.Beats)
+		// validators probed: the raw set and the rolled set together
+		seen := map[string]bool{}
+		for a := range rolled.ProbesByVal {
+			seen[a] = true
+		}
+		if vrows, err := db.QueryContext(ctx, `SELECT DISTINCT validator_address FROM probes WHERE started_at >= ? AND started_at <= ?`, win.startArg(), win.endArg()); err == nil {
+			for vrows.Next() {
+				var a string
+				if vrows.Scan(&a) == nil {
+					seen[a] = true
+				}
+			}
+			vrows.Close()
+		}
+		resp.ValidatorsProbed = int64(len(seen))
+	}
 	return &resp, nil
 }
 
@@ -2054,6 +2105,29 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	if err != nil {
 		return nil, err
 	}
+	// Past the raw retention the "all" window folds the daily rollup in
+	// for the pruned days (see rolledFor).
+	rolled, _, err := s.rolledFor(ctx, win, only)
+	if err != nil {
+		return nil, err
+	}
+	if rolled != nil {
+		for addr, rp := range rolled.ProbesByVal {
+			v := get(addr)
+			for c, n := range rp.Classes {
+				v.Classes[c] += n
+			}
+			v.Faults += rp.Faults
+			v.ProbeCount += rp.Probes
+			v.Reachability = rate(v.Reachability.Num+rp.BeatsUp, v.Reachability.Den+rp.Beats)
+		}
+		for addr, ro := range rolled.ObligationsByVal {
+			get(addr)
+			o := byObligation[addr]
+			addRolledObligations(&o, ro)
+			byObligation[addr] = o
+		}
+	}
 	out := make([]validatorRow, 0, len(byAddr))
 	for addr, v := range byAddr {
 		if only != "" && addr != only {
@@ -2144,10 +2218,14 @@ func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{
+	out := map[string]any{
 		"window": win, "vantage": s.vantage, "validators": rows,
 		"computed_at": at.UTC().Format(time.RFC3339Nano), "compute_ms": ms,
-	})
+	}
+	if _, label, err := s.rolledFor(r.Context(), win, ""); err == nil && label != nil {
+		out["rolled_up"] = label
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
@@ -2178,6 +2256,7 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		ByObligation Rate             `json:"serve_rate_by_obligation"`
 		HeldOut      map[string]int64 `json:"serve_rate_held_out"`
 		Classes      classCounts      `json:"classes"`
+		RolledUp     *rolledUp        `json:"rolled_up,omitempty"`
 	}
 	var spans []span
 	// The suspect points over all time, so the recent-probes list can mark
@@ -2207,9 +2286,24 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 			s.writeInternal(w, r.URL.Path, err)
 			return
 		}
+		rolled, label, err := s.rolledFor(ctx, sw, addr)
+		if err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		if rolled != nil {
+			if rp, ok := rolled.ProbesByVal[addr]; ok {
+				for c, n := range rp.Classes {
+					classes[c] += n
+					total += n
+				}
+			}
+			addRolledObligations(&obl, rolled.ObligationsByVal[addr])
+		}
 		spans = append(spans, span{
 			Window: sw, Rate: serveRate(classes), Count: total,
 			Coverage: coverage(classes), Obligations: obl, ByObligation: obl.Rate, HeldOut: heldOut(classes), Classes: classes,
+			RolledUp: label,
 		})
 	}
 	rows, err := s.validatorRows(ctx, win, addr)
@@ -2226,7 +2320,7 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{
+	out := map[string]any{
 		"window":                      win,
 		"validator":                   rows[0],
 		"windows":                     spans,
@@ -2234,7 +2328,11 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		"suspect_points":              suspectAll,
 		"serve_rate_excluded_classes": excludedFromRate,
 		"vantage":                     s.vantage,
-	})
+	}
+	if _, label, err := s.rolledFor(ctx, win, addr); err == nil && label != nil {
+		out["rolled_up"] = label
+	}
+	writeJSON(w, 200, out)
 }
 
 // ---- blobs ----
@@ -2748,9 +2846,9 @@ func (s *Server) handleSampling(w http.ResponseWriter, r *http.Request) {
 		srows.Close()
 	}
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT
-			COALESCE(json_extract(raw_json, '$.sampling.day_commitment'), '') AS c,
-			COALESCE(json_extract(raw_json, '$.sampling.binding'), '') AS b,
-			COALESCE(json_extract(raw_json, '$.sampling.p'), 1.0) AS p,
+			COALESCE(sampling_commitment, '') AS c,
+			COALESCE(sampling_binding, '') AS b,
+			COALESCE(sampling_p, 1.0) AS p,
 			COUNT(DISTINCT promise_hash),
 			COUNT(DISTINCT CASE WHEN classification != 'NOT_PROBED' THEN promise_hash END),
 			COUNT(DISTINCT CASE WHEN classification = 'NOT_PROBED' AND classification_reason LIKE 'budget:%' THEN promise_hash END)
@@ -2847,7 +2945,7 @@ type probeRow struct {
 func (s *Server) probeRows(ctx context.Context, where string, limit int, args ...any) ([]probeRow, error) {
 	q := `SELECT vantage, promise_hash, validator_address, validator_host, assigned, attested, assigned_row_count, schedule_label, scheduled_at,
 		started_at, phase, outcome, classification, classification_reason, rows_returned, rows_expected, total_duration_ms, tls_ok, identity_ok, raw_error,
-		COALESCE(json_extract(raw_json, '$.retry.first_outcome'), ''), COALESCE(json_extract(raw_json, '$.clock_offset_ms'), 0),
+		COALESCE(retry_first_outcome, ''), COALESCE(clock_offset_ms, 0),
 		COALESCE(row_indices, ''), COALESCE(rows_sha256, ''), COALESCE(rpc_code, ''), COALESCE(shadowed_by, ''), COALESCE(observer_build, ''), COALESCE(app_version, 0)
 		FROM probes`
 	if where != "" {
