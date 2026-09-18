@@ -215,6 +215,11 @@ type Evidence struct {
 	// this promise's assignment are a fault, and the row carries the
 	// indices so anyone can check.
 	Shadowed bool
+	// ShadowUncertain: no known promise assigns the returned rows, but a
+	// scan gap overlaps the interval in which a promise whose shard could
+	// still be on disk would have settled. The observer knows its own
+	// blindness; accusing across it is what the methodology forbids.
+	ShadowUncertain bool
 	// IdentityStale: the certificate is endorsed by the right consensus key
 	// but its signed validity window has lapsed or not yet started. Only
 	// meaningful when Outcome is IDENTITY_FAIL.
@@ -306,6 +311,13 @@ func Classify(in Evidence) (Classification, string) {
 	// phase arms below.
 	if (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified && in.Shadowed {
 		return ClassShadowedShard, "returned rows of this blob that verify against the commitment and are exactly another settled promise's assignment for this validator; DownloadShard is addressed by commitment alone, so that promise answers in this one's place"
+	}
+	// The same wire result while the observer knows it has not seen every
+	// promise that could own a shard over this commitment: a scan gap
+	// overlaps the lifetime such a shard would have. Not a fault, not a
+	// shadow: a gap in observation, re-classifiable once the gap is scanned.
+	if (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified && in.ShadowUncertain {
+		return ClassProbeError, "returned genuine rows of this blob that no known promise assigns, and a scan gap overlaps the lifetime a shard over this commitment could have: a promise this observer never scanned may own them; no verdict until the gap is scanned"
 	}
 
 	// assigned and attested validator.

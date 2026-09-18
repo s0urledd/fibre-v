@@ -2741,6 +2741,11 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 	if c := q.Get("class"); c != "" {
 		conds, args = append(conds, `classification = ?`), append(args, strings.ToUpper(c))
 	}
+	// at: one schedule point, exactly as vantage_health.suspect lists it, so
+	// the rows behind an incident are one link away.
+	if at := q.Get("at"); at != "" {
+		conds, args = append(conds, `scheduled_at = ?`), append(args, at)
+	}
 	rows, err := s.probeRows(r.Context(), strings.Join(conds, " AND "), limit, args...)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)

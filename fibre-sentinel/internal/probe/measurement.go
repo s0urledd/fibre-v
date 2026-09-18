@@ -232,6 +232,11 @@ type DownloadResult struct {
 	// "another promise answered in this one's place" is shown rather than
 	// assumed. Empty means no such promise is known to this prober.
 	ShadowedBy string `json:"shadowed_by,omitempty"`
+	// ShadowGap names a scan gap that overlaps the lifetime a shard over
+	// this commitment could have had at probe time, set when the rows are
+	// genuine but no known promise assigns them. A promise settled in that
+	// gap may own them; the observer knows it did not look, so no verdict.
+	ShadowGap string `json:"shadow_gap,omitempty"`
 	// BytesReturned is the row payload the server handed over: the sum of
 	// the row data bytes, proofs and the RLC vector excluded. Rows are not a
 	// unit of size — a row is as wide as the blob's square — so this is what

@@ -98,7 +98,7 @@ export type Component = {
 };
 
 /** a height range the scanner could not read from its node */
-export type ScanGap = { from: number; to: number; reason: string; last_error?: string; at: string };
+export type ScanGap = { from: number; to: number; reason: string; last_error?: string; at: string; from_time?: string; to_time?: string };
 
 export type Health = {
   status: "ok" | "degraded" | "down";

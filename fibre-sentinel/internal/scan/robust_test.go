@@ -104,10 +104,10 @@ func TestRetryRPC(t *testing.T) {
 	if !errors.As(err, &ue) || ue.Height != 9 || calls != 1 {
 		t.Fatalf("not persisted: err=%v calls=%d", err, calls)
 	}
-	if !s.recordGap(9, err) || !s.recordGap(10, err) || len(s.gaps) != 1 || s.gaps[0].From != 9 || s.gaps[0].To != 10 {
+	if !s.recordGap(9, err, time.Time{}) || !s.recordGap(10, err, time.Time{}) || len(s.gaps) != 1 || s.gaps[0].From != 9 || s.gaps[0].To != 10 {
 		t.Fatalf("gaps not merged: %+v", s.gaps)
 	}
-	if s.recordGap(11, errors.New("boom")) {
+	if s.recordGap(11, errors.New("boom"), time.Time{}) {
 		t.Fatal("a transient error must never become a gap")
 	}
 	err = s.retryRPCAt(context.Background(), "test", 12, func() error {

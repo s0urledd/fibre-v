@@ -202,11 +202,16 @@ One sentence each, and what a reader should conclude.
   `scheduled_at` is left out of the per-probe rate, the coverage and
   held-out counts, the obligation buckets, the per-point breakdown and the
   fault count, network-wide and per validator alike. Validators fail
-  independently; one observer's network, or one observer's stale
-  assignment, does not. The points, the shares and the number of rows
-  removed are published so the exclusion is visible, and the rows keep
-  their classification in the store: a verifier sees what was excluded and
-  why.
+  independently; one observer's network does not. The two reasons are
+  shown differently: an `unreachable` point is a problem on our side; a
+  `fault` point is a **network incident**, because a stale assignment pin
+  is caught separately (every probe under a stale pin is `PROBE_ERROR`
+  before it can be a `FAULT`), so half the set faulting at one minute is
+  the network, a release, or the observer's coder, and is shown as such
+  with a link to its rows (`/v1/probes?at=<scheduled_at>`). The points, the
+  shares and the number of rows removed are published so the exclusion is
+  visible, and the rows keep their classification in the store: a
+  verifier sees what was excluded and why.
 - **Stale assignment pin.** The prober polls `abci_info` and stamps the
   chain's `app_version` on every row. When it is above the celestia-app
   major the assignment constants are pinned to
@@ -315,6 +320,7 @@ column:
 | no answer from the endpoint at all | `UNREACHABLE` | from one vantage, indistinguishable from the observer's own path failing |
 | no Fibre host in the registry | `NOT_REGISTERED` | jailing and unbonding remove the provider from the bonded list; the chain keeps the entry |
 | exactly another settled promise's rows for the same blob | `SHADOWED_SHARD` | `DownloadShard` takes a commitment, not a promise hash; the validator cannot tell them apart. Genuine rows matching no promise's assignment are a `FAULT`: an incomplete delivery |
+| genuine rows matching no known promise, while a scan gap overlaps the shard's possible lifetime | `PROBE_ERROR` | the observer knows it did not read every block in which the owning promise could have settled; `download.shadow_gap` names the gap, and the row is re-classifiable once it is scanned |
 | a lapsed but correctly signed certificate | `IDENTITY_EXPIRED` | a late renewal, not someone else answering |
 | a certificate signed by the wrong consensus key | `IDENTITY_MISMATCH` | an unusable endpoint, which is a statement about the endpoint (its status says so), not about a shard |
 | an application error instead of the shard | `SERVER_ERROR` | the server did not say it lacks the shard; from one probe a hiccup and a loss look the same |
@@ -345,12 +351,20 @@ what the measurement cannot separate.
   occupies two slots where the reference client occupies one, and a busy
   server is correspondingly more likely to look unreachable to it.
 - **Shadowing needs the other promise.** `SHADOWED_SHARD` requires the
-  prober to know the other promise over the same commitment. It knows every
-  live publication in `publications.jsonl`; a promise settled in a block the
-  scanner could not read (a scan gap) is unknown to it, and rows answered
-  from that promise's shard would be filed as a `FAULT`. The gap is listed
-  on the overview and the row carries the returned indices, so the verdict
-  is contestable with the missing publication in hand.
+  prober to know the other promise over the same commitment. The candidate
+  set is every publication the prober still holds, and it holds one until
+  its post-deadline probe is done, which is after the store's prune: a
+  promise in its last minutes, or in grace, is a candidate. A promise settled
+  in a block the scanner could not read (a scan gap) is unknown to it, so
+  the prober re-reads the scanner's gap list every cycle and, when a gap
+  overlaps `(probe time - (max(shard_retention, payment_promise_timeout) +
+  prune tolerance), probe time]`, files unmatched genuine rows as
+  `PROBE_ERROR` with `download.shadow_gap` naming the gap, never as a
+  `FAULT`. The scanner records block times on gaps (`from_time`, `to_time`)
+  when the header could still be read; without them the gap is placed at
+  the scanner's own clock, which errs toward "not scanned" rather than
+  toward an accusation. Re-scanning a gap and re-classifying its rows is
+  the recompute tool's job.
 - **One vantage.** Every reachability observation comes from a single network
   path. `/v1/network` publishes the worst schedule point in the window by how
   many validators were unreachable at once, because validators fail

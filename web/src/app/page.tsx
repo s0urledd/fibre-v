@@ -30,6 +30,9 @@ export default function Overview() {
 
   const sr = net?.serve_rate;
   const rated = !!sr && sr.den > 0;
+  const suspect = net?.vantage_health?.suspect ?? [];
+  const incidents = suspect.filter((s) => s.reason.includes("fault"));
+  const ourSide = suspect.filter((s) => !s.reason.includes("fault"));
   const ob = net?.obligations;
   const decided = !!ob && ob.rate.den > 0;
   const recon = net?.reconstructable;
@@ -160,14 +163,27 @@ export default function Overview() {
         </div>
       )}
 
-      {net && net.vantage_health?.suspect?.length > 0 && (
+      {net && ourSide.length > 0 && (
         <div className="note hold">
-          <span className="label">Problem on our side at {net.vantage_health.suspect.length} probe point{net.vantage_health.suspect.length === 1 ? "" : "s"}</span>
+          <span className="label">Problem on our side at {ourSide.length} probe point{ourSide.length === 1 ? "" : "s"}</span>
           <p>
-            {net.vantage_health.suspect.slice(0, 3).map((s) => `${utc(s.at)} (${s.label}): ${s.reason.includes("fault") ? `${fmtCount(s.fault)} validators faulted` : `${fmtCount(s.unreachable)} validators unreachable`} at once`).join("; ")}
-            {net.vantage_health.suspect.length > 3 ? `; and ${net.vantage_health.suspect.length - 3} more` : ""}.
-            {" "}Validators fail independently; half the set at the same minute is a network problem at the observer, or an observer that assigns rows wrongly.
-            The {net.vantage_health.suspect_rows.toLocaleString("en-US")} probes at these points are left out of every rate, bucket and fault count on this site.
+            {ourSide.slice(0, 3).map((s) => `${utc(s.at)} (${s.label}): ${fmtCount(s.unreachable)} validators unreachable at once`).join("; ")}
+            {ourSide.length > 3 ? `; and ${ourSide.length - 3} more` : ""}.
+            {" "}Validators fail independently; half the set unreachable at the same minute is a network problem at the observer.
+            The probes at these points are left out of every rate, bucket and fault count on this site.
+          </p>
+        </div>
+      )}
+      {net && incidents.length > 0 && (
+        <div className="note hold">
+          <span className="label">Network incident: {incidents.length} probe point{incidents.length === 1 ? "" : "s"} where half the set faulted at once</span>
+          <p>
+            {incidents.slice(0, 4).map((s, i) => (
+              <span key={s.at}>{i > 0 ? "; " : ""}{utc(s.at)} ({s.label}): {fmtCount(s.fault)} validators faulted <a href={`/api/v1/probes?at=${encodeURIComponent(s.at)}&limit=1000`}>rows</a></span>
+            ))}
+            {incidents.length > 4 ? `; and ${incidents.length - 4} more` : ""}.
+            {" "}This observer&rsquo;s assignment pin matched the chain at the time, so these faults are not an observer error;
+            operators losing data at the same minute points at the network, a release, or the observer&rsquo;s coder. No validator&rsquo;s rate counts these points; the rows are kept and linked.
           </p>
         </div>
       )}

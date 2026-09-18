@@ -349,6 +349,55 @@ func TestClassify_StalePinIsAnObserverGapNotAFault(t *testing.T) {
 	}
 }
 
+// Genuine rows that no known promise assigns, while a scan gap overlaps the
+// lifetime a shard over the commitment could have: the observer knows it did
+// not look, so it says so instead of accusing.
+func TestClassify_ScanGapMakesAnUnmatchedShadowAGapNotAFault(t *testing.T) {
+	for _, phase := range []Phase{PhaseInWindow, PhaseGrace} {
+		for _, o := range []Outcome{OutcomeWrongRows, OutcomePartial} {
+			got, reason := Classify(Evidence{Assigned: true, Attested: true, Phase: phase, Outcome: o, CommitmentVerified: true, ShadowUncertain: true})
+			if got != ClassProbeError {
+				t.Errorf("%s %s verified, unmatched, gap = %s (%q), want PROBE_ERROR", phase, o, got, reason)
+			}
+		}
+	}
+	// a matched shadow wins over the gap
+	if got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomePartial, CommitmentVerified: true, Shadowed: true, ShadowUncertain: true}); got != ClassShadowedShard {
+		t.Errorf("matched shadow with a gap = %s, want SHADOWED_SHARD", got)
+	}
+	// unverifiable rows are corrupt data whatever the scanner missed
+	if got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeWrongRows, ShadowUncertain: true}); got != ClassFault {
+		t.Errorf("unverifiable rows with a gap = %s, want FAULT", got)
+	}
+}
+
+func TestShadowGapFor(t *testing.T) {
+	at := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	life := 4*time.Hour + 150*time.Second
+	tm := func(h, m int) *time.Time { t := time.Date(2026, 9, 18, h, m, 0, 0, time.UTC); return &t }
+	gaps := []scan.ScanGap{
+		{From: 10, To: 12, FromTime: tm(5, 0), ToTime: tm(5, 1), At: at},   // long before: no shard could survive
+		{From: 20, To: 21, FromTime: tm(9, 30), ToTime: tm(9, 31), At: at}, // inside the lifetime
+	}
+	if got := shadowGapFor(gaps, at, life); got == "" || !strings.Contains(got, "#20-#21") {
+		t.Errorf("gap inside the lifetime not named: %q", got)
+	}
+	if got := shadowGapFor(gaps[:1], at, life); got != "" {
+		t.Errorf("gap outside the lifetime named: %q", got)
+	}
+	// no block time: the scanner's clock stands in, conservatively
+	noTime := []scan.ScanGap{{From: 30, To: 30, At: at.Add(-time.Hour)}}
+	if got := shadowGapFor(noTime, at, life); got == "" {
+		t.Error("a gap with only a scanner timestamp inside the lifetime must count")
+	}
+	if got := shadowGapFor(noTime, at.Add(6*time.Hour), life); got != "" {
+		t.Errorf("a gap with only a scanner timestamp outside the lifetime named: %q", got)
+	}
+	if got := shadowGapFor(gaps, at, 0); got != "" {
+		t.Errorf("zero lifetime named a gap: %q", got)
+	}
+}
+
 func TestShadowedBy(t *testing.T) {
 	cands := []ShadowCandidate{{PromiseHash: "a", Rows: []int{1, 2, 3}}, {PromiseHash: "b", Rows: []int{4, 5}}}
 	if got := shadowedBy([]uint32{3, 1, 2}, cands); got != "a" {
