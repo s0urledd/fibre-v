@@ -124,7 +124,12 @@ type Prober struct {
 	// gaps is the scanner's own record of blocks it could not read, from
 	// state.json, re-read every cycle. A probe whose verdict would rest on
 	// "no other promise owns these rows" consults it first.
-	gaps     []scan.ScanGap
+	gaps []scan.ScanGap
+	// scanned is how far the scanner has read, as the chain's clock: the
+	// block time of last_scanned_height. Promises settled after it are not
+	// in the feed, so until it passes a publication's settlement plus the
+	// payment-promise timeout the shadow candidate set is incomplete.
+	scanned  scannedMark
 	resolver *Resolver
 	store    *MeasurementStore
 	feed     *pubFeed
@@ -262,6 +267,7 @@ func (p *Prober) Run(parent context.Context) error {
 		p.measureClock(ctx)
 		p.pollAppVersion(ctx)
 		p.loadGaps()
+		p.pollScanned(ctx)
 
 		if added, err := p.feed.refresh(); err != nil {
 			p.log.Fatalf("load publications: %v", err)
@@ -396,13 +402,80 @@ func (p *Prober) loadGaps() {
 		return
 	}
 	var st struct {
-		Gaps []scan.ScanGap `json:"gaps"`
+		Gaps              []scan.ScanGap `json:"gaps"`
+		LastScannedHeight int64          `json:"last_scanned_height"`
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
 		p.log.Printf("state.json: %v (keeping previous gap list)", err)
 		return
 	}
 	p.gaps = st.Gaps
+	p.scanned.height = st.LastScannedHeight
+}
+
+// scannedMark is the scanner's frontier on the chain's clock.
+type scannedMark struct {
+	height   int64
+	timedFor int64     // the height `at` was read for
+	at       time.Time // block time of timedFor; zero when never read
+}
+
+// known reports whether the frontier has a block time for its current height.
+func (m scannedMark) known() bool { return m.height > 0 && m.timedFor == m.height && !m.at.IsZero() }
+
+// pollScanned reads the block time of the scanner's frontier when the
+// frontier moved. A failed read keeps the previous mark, which then reads
+// as stale: the conservative direction.
+func (p *Prober) pollScanned(ctx context.Context) {
+	if p.scanned.height <= 0 || p.scanned.timedFor == p.scanned.height {
+		return
+	}
+	blk, err := p.chain.Block(ctx, p.scanned.height)
+	if err != nil {
+		p.log.Printf("scanner frontier #%d: %v (keeping previous mark)", p.scanned.height, err)
+		return
+	}
+	p.scanned.timedFor, p.scanned.at = p.scanned.height, blk.Time.UTC()
+	if p.status != nil {
+		p.status.Set("scanned_until", p.scanned.at.Format(time.RFC3339))
+	}
+}
+
+// shadowLagFor names the scanner's lag when it makes the shadow candidate
+// set for pub incomplete. A promise whose shard preceded this one on disk
+// was created no later than this publication settled, and must settle within
+// the payment-promise timeout of its creation; so every candidate has
+// settled by settlement + timeout, and until the scanner has read that far
+// a promise the feed does not hold may still own the returned rows.
+func shadowLagFor(m scannedMark, pub scan.Publication) string {
+	timeout := time.Duration(pub.ParamsAtPublication.PaymentPromiseTimeoutSeconds) * time.Second
+	base := pub.SettlementTime
+	if base.IsZero() {
+		base = pub.Promise.CreationTimestamp
+	}
+	if base.IsZero() || timeout <= 0 {
+		return ""
+	}
+	until := base.Add(timeout)
+	if !m.known() {
+		return fmt.Sprintf("scanner_lag: scanner frontier unknown; promises settling until %s may own these rows", until.UTC().Format(time.RFC3339))
+	}
+	if m.at.Before(until) {
+		return fmt.Sprintf("scanner_lag: scanned to #%d (%s); promises settling until %s not all seen", m.height,
+			m.at.UTC().Format(time.RFC3339), until.UTC().Format(time.RFC3339))
+	}
+	return ""
+}
+
+// shadowBlindness names the first reason the shadow candidate set for pub
+// may be incomplete: a scan gap inside the interval a shadowing promise
+// would have settled in, or a scanner frontier that has not yet passed that
+// interval. "" when the observer has seen every promise that could answer.
+func (p *Prober) shadowBlindness(pub scan.Publication) string {
+	if g := shadowGapFor(p.gaps, time.Now().UTC(), shardLifetime(pub, p.schedCfg().PruneTolerance)); g != "" {
+		return g
+	}
+	return shadowLagFor(p.scanned, pub)
 }
 
 // shardLifetime is the longest a shard over a commitment can outlive the
@@ -747,7 +820,7 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 		MaxMessageSize:     maxMessageSizeFor(pub.Assignment.ProtocolParams),
 		ClockOffsetMS:      p.clockOffsetMS(),
 		Shadowers:          p.feed.shadowersFor(ph, pub.Promise.Commitment, t.AddressHex),
-		ShadowGap:          shadowGapFor(p.gaps, time.Now().UTC(), shardLifetime(pub, p.schedCfg().PruneTolerance)),
+		ShadowGap:          p.shadowBlindness(pub),
 		Observer:           p.observerInfo(),
 	}
 

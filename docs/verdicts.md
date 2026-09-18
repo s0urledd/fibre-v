@@ -365,6 +365,28 @@ what the measurement cannot separate.
   the scanner's own clock, which errs toward "not scanned" rather than
   toward an accusation. Re-scanning a gap and re-classifying its rows is
   the recompute tool's job.
+- **The scanner's frontier is an open-ended gap.** A promise settled after
+  `last_scanned_height` is not in the feed either. A shadowing promise's
+  shard preceded this publication's on disk, so it was created no later
+  than this publication settled, and a promise must settle within
+  `payment_promise_timeout` of its creation: every candidate has settled by
+  `settlement_time + payment_promise_timeout`. The prober reads the block
+  time of the scanner's frontier each cycle and, until that time passes
+  `settlement_time + payment_promise_timeout`, files unmatched genuine rows
+  as `PROBE_ERROR` with `download.shadow_gap` = `scanner_lag: ...`. This
+  holds even for a scanner that is caught up: in the first
+  `payment_promise_timeout` after a settlement the candidate set is
+  genuinely incomplete. A frontier whose block time cannot be read counts
+  as unknown, which is blind. The health check's 200-block lag threshold
+  is an alert; this is the verdict, and it does not consult the health
+  check.
+- **What remains.** A shard uploaded for a promise that never settles
+  (abandoned before `MsgPayForFibre`) is on disk until its prune and never
+  on chain, so it can never be a candidate. Unmatched genuine rows after
+  the scanner has passed `settlement_time + payment_promise_timeout`, with
+  no gap, are a `FAULT` with that residual: the row carries the returned
+  indices, so the verdict is contestable with the abandoned upload's
+  assignment in hand.
 - **One vantage.** Every reachability observation comes from a single network
   path. `/v1/network` publishes the worst schedule point in the window by how
   many validators were unreachable at once, because validators fail

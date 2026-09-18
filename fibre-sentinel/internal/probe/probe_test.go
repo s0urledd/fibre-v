@@ -398,6 +398,35 @@ func TestShadowGapFor(t *testing.T) {
 	}
 }
 
+// The scanner's frontier is an open-ended gap: a promise that settled after
+// it is not in the feed. A candidate must settle within the payment-promise
+// timeout of a creation that preceded this publication's settlement, so the
+// set is complete once the scanner has read past settlement + timeout, and
+// incomplete before that, however small the lag.
+func TestShadowLagFor(t *testing.T) {
+	settled := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	pub := scan.Publication{SettlementTime: settled}
+	pub.ParamsAtPublication.PaymentPromiseTimeoutSeconds = 3600
+	at := func(t time.Time) scannedMark { return scannedMark{height: 100, timedFor: 100, at: t} }
+	if got := shadowLagFor(at(settled.Add(61*time.Minute)), pub); got != "" {
+		t.Errorf("frontier past settlement+timeout named a lag: %q", got)
+	}
+	if got := shadowLagFor(at(settled.Add(30*time.Minute)), pub); got == "" || !strings.Contains(got, "scanner_lag") {
+		t.Errorf("frontier inside settlement+timeout not named: %q", got)
+	}
+	if got := shadowLagFor(scannedMark{height: 100}, pub); got == "" || !strings.Contains(got, "unknown") {
+		t.Errorf("unknown frontier must read as blind: %q", got)
+	}
+	// a stale time (frontier moved, time not yet read) is unknown, not the old time
+	if got := shadowLagFor(scannedMark{height: 101, timedFor: 100, at: settled.Add(2 * time.Hour)}, pub); got == "" {
+		t.Error("a mark whose time is for an older height must read as unknown")
+	}
+	// no timeout on the record: nothing to bound, so no claim
+	if got := shadowLagFor(at(settled), scan.Publication{SettlementTime: settled}); got != "" {
+		t.Errorf("a record without a timeout named a lag: %q", got)
+	}
+}
+
 func TestShadowedBy(t *testing.T) {
 	cands := []ShadowCandidate{{PromiseHash: "a", Rows: []int{1, 2, 3}}, {PromiseHash: "b", Rows: []int{4, 5}}}
 	if got := shadowedBy([]uint32{3, 1, 2}, cands); got != "a" {
