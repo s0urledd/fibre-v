@@ -36,7 +36,7 @@ function Layer({ label, r, what, sample }: { label: string; r: Rate | null | und
     <Tile label={label} info={what}
       value={absent ? "—" : fmtPct(r)}
       tone={absent ? "absent" : undefined}
-      sub={absent ? "not observed in this window" : (sample ?? fmtCount(r))} />
+      sub={absent ? "not observed" : (sample ?? fmtCount(r))} />
   );
 }
 
@@ -143,7 +143,7 @@ function Page() {
         <Tile label="Faults"
           value={faults > 0 ? <><Mark tier="fault" />{faults.toLocaleString("en-US")}</> : rated ? "0" : "—"}
           tone={faults > 0 ? "fault" : "absent"}
-          sub={faults > 0 ? `over ${fmtCount(v.serve_rate)} rated probes` : rated ? `none over ${v.serve_rate.den.toLocaleString("en-US")} rated probes` : "nothing rated in this window"}
+          sub={faults > 0 ? `of ${v.serve_rate.den.toLocaleString("en-US")} rated probes` : rated ? `${v.serve_rate.den.toLocaleString("en-US")} rated probes` : "nothing rated"}
           info={<>
             <p>The validator answered but did not hand over a shard it had signed for.</p>
             <p>The only number counted against a validator. Unreachable, unproven and unregistered are not faults.</p>
@@ -151,9 +151,12 @@ function Page() {
         <Tile label="Obligations"
           value={decided ? fmtPct(o!.rate) : "—"}
           tone={decided ? undefined : "absent"}
-          sub={!o || o.total === 0 ? "none proven in this window"
-            : decided ? `${o.served.toLocaleString("en-US")} of ${(o.served + o.broken).toLocaleString("en-US")} kept`
-            : `${o.total.toLocaleString("en-US")} proven, none observed serving`}
+          sub={!o || o.total === 0 ? "none proven"
+            : decided ? `${o.served.toLocaleString("en-US")} / ${(o.served + o.broken).toLocaleString("en-US")} kept`
+            : `${o.total.toLocaleString("en-US")} proven, none observed`}
+          detail={!o || o.total === 0 ? "No obligation proven in this window."
+            : decided ? `${o.served.toLocaleString("en-US")} of ${(o.served + o.broken).toLocaleString("en-US")} obligations kept${o.unobserved > 0 ? `; ${o.unobserved.toLocaleString("en-US")} never observed serving, listed below` : ""}.`
+            : `${o.total.toLocaleString("en-US")} obligations proven, none observed serving.`}
           info={<>
             <p>Shards this validator signed for, one observation each, judged by the last probe before the retention deadline: kept if it was handed over then, broken if any probe was a fault.</p>
             <p>Obligations never seen served and never seen broken are listed below, not in the rate.</p>
@@ -162,8 +165,11 @@ function Page() {
           value={v.serve_bytes_per_second == null ? "—" : bytesPerSecond(v.serve_bytes_per_second)}
           tone={v.serve_bytes_per_second == null ? "absent" : undefined}
           sub={v.serve_latency_p50_ms != null
-            ? `${v.serve_latency_p50_ms.toLocaleString("en-US")} ms typical · ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms p95, whole probe`
-            : "not observed in this window"}
+            ? `p50 ${v.serve_latency_p50_ms.toLocaleString("en-US")} ms · p95 ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms`
+            : "not observed"}
+          detail={v.serve_latency_p50_ms != null
+            ? `Whole probe, dial to verified rows: ${v.serve_latency_p50_ms.toLocaleString("en-US")} ms typical, ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at the 95th percentile.`
+            : undefined}
           info={<>
             <p>Bytes handed over per second during the download itself, median over {v.serve_throughput_sample.toLocaleString("en-US")} healthy probes. Connecting and checking the certificate are not in it.</p>
             <p>The milliseconds underneath are the whole probe, dial to verified rows: what a client waits for.</p>

@@ -55,7 +55,7 @@ export default function PublishersPage() {
           </>} />
         <Tile label="Publishers" loading={busy}
           value={m ? m.publishers_active.toLocaleString("en-US") : "—"}
-          sub={m ? `${m.escrow_accounts} escrow account${m.escrow_accounts === 1 ? "" : "s"} known` : undefined}
+          sub={m ? `${m.escrow_accounts} escrow account${m.escrow_accounts === 1 ? "" : "s"}` : undefined}
           info={<p>Accounts that settled at least one blob in the window. The account charged is the one whose key signed the promise, whoever broadcast the transaction.</p>} />
         <Tile label="Paid per MiB" loading={busy}
           value={m?.paid_per_mib_utia != null ? tia(m.paid_per_mib_utia, { unit: false }) : "—"} unit={m?.paid_per_mib_utia != null ? "TIA" : undefined}
@@ -68,7 +68,8 @@ export default function PublishersPage() {
         <Tile label="Timed out" loading={busy}
           value={m ? (m.timeouts > 0 ? m.timeouts.toLocaleString("en-US") : "none") : "—"}
           tone={m && m.timeouts > 0 ? "fault" : "absent"}
-          sub={m ? (m.timeouts > 0 ? `${tia(m.timed_out_utia)} charged · reported by ${m.timeout_processors} account${m.timeout_processors === 1 ? "" : "s"}` : "no timeout reported") : undefined}
+          sub={m ? (m.timeouts > 0 ? `${tia(m.timed_out_utia)} charged` : "none reported") : undefined}
+          detail={m && m.timeouts > 0 ? `${tia(m.timed_out_utia)} charged on abandoned promises, reported by ${m.timeout_processors} account${m.timeout_processors === 1 ? "" : "s"}.` : undefined}
           info={<>
             <p>Promises a publisher obtained signatures for and never settled, charged anyway once someone submitted the timeout. Usually that is a validator that stored the shards for nothing.</p>
             <p>This is a floor. A promise nobody reports leaves no trace on chain at all.</p>

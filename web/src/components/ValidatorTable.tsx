@@ -105,12 +105,17 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
   // An endpoint once registered stays on chain, so a validator whose host
   // left the bonded list still belongs here, under the chain's word for it.
   const registered = useMemo(() => rows.filter((v) => !!v.host || !!v.last_host), [rows]);
-  const [tab, setTab] = useState<"registered" | "all" | null>(null);
-  const activeTab = tab ?? (registered.length > 0 ? "registered" : "all");
+  // The three states an operator scans for, as filters beside the two sets.
+  const faulting = useMemo(() => rows.filter((v) => (v.faults ?? v.classes.FAULT ?? 0) > 0), [rows]);
+  const down = useMemo(() => rows.filter((v) => bonded(v) && !!v.host && v.reachable === false), [rows]);
+  const noHost = useMemo(() => rows.filter((v) => bonded(v) && !v.host), [rows]);
+  type Tab = "registered" | "all" | "faulting" | "down" | "nohost";
+  const [tab, setTab] = useState<Tab | null>(null);
+  const activeTab: Tab = tab ?? (registered.length > 0 ? "registered" : "all");
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "power", dir: -1 });
 
   const needle = q.trim().toLowerCase();
-  const pool = activeTab === "registered" ? registered : rows;
+  const pool = activeTab === "registered" ? registered : activeTab === "faulting" ? faulting : activeTab === "down" ? down : activeTab === "nohost" ? noHost : rows;
   const matched = pool.filter((v) => !needle
     || v.address.includes(needle)
     || v.cons_address.includes(needle)
@@ -160,6 +165,12 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
             title="Validators with a Fibre endpoint in x/valaddr.">Fibre endpoints<span className="n">{registered.length}</span></button>
           <button role="tab" aria-pressed={activeTab === "all"} onClick={() => setTab("all")}
             title="Every bonded validator, whether or not it registered a Fibre endpoint.">All bonded<span className="n">{rows.length}</span></button>
+          <button role="tab" aria-pressed={activeTab === "faulting"} onClick={() => setTab("faulting")}
+            title="Validators with at least one fault in this window: answered, but did not hand over a shard they had signed for.">Faulting<span className="n">{faulting.length}</span></button>
+          <button role="tab" aria-pressed={activeTab === "down"} onClick={() => setTab("down")}
+            title="Bonded validators whose registered endpoint failed the latest handshake.">Unreachable<span className="n">{down.length}</span></button>
+          <button role="tab" aria-pressed={activeTab === "nohost"} onClick={() => setTab("nohost")}
+            title="Bonded validators with no Fibre endpoint registered in x/valaddr.">No endpoint<span className="n">{noHost.length}</span></button>
         </div>
         <span className="spacer" />
         {moved && (
@@ -187,10 +198,14 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr><td colSpan={8} className="muted">
+              <tr><td colSpan={8} className="muted" style={{ padding: "var(--s4)" }}>
                 {rows.length === 0
                   ? "No validators yet."
-                  : needle ? `Nothing matches “${q}”.` : "No validator has registered a Fibre endpoint yet."}
+                  : needle ? `Nothing matches “${q}”.`
+                  : activeTab === "faulting" ? "No validator faulted in this window."
+                  : activeTab === "down" ? "Every registered endpoint answered the latest handshake."
+                  : activeTab === "nohost" ? "Every bonded validator has registered a Fibre endpoint."
+                  : "No validator has registered a Fibre endpoint yet."}
               </td></tr>
             )}
             {list.map((v, i) => {
@@ -219,11 +234,11 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                   <td className="right mono">{v.voting_power.toLocaleString("en-US")}</td>
                   <td className="right">
                     {bonded(v)
-                      ? <RateCell r={v.reachability_window} sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined} />
+                      ? <RateCell r={v.reachability_window} kind="reach" sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined} />
                       : <span className="nil" title="Out of the bonded provider list: no handshake is attempted while it is out.">·</span>}
                   </td>
                   <td className="right">
-                    <RateCell r={o?.rate} obligations={o?.rate} unreachable={o?.unobserved ?? 0} sample={obligationSample(v)} />
+                    <RateCell r={o?.rate} obligations={o?.rate} kind="serve" unreachable={o?.unobserved ?? 0} sample={obligationSample(v)} />
                   </td>
                   <td className="right" title={v.serve_bytes_per_second == null ? "No healthy probe with a byte count in this window." :
                     `Median over ${v.serve_throughput_sample.toLocaleString("en-US")} healthy probes, download step only. Whole probe: ${v.serve_latency_p50_ms?.toLocaleString("en-US") ?? "—"} ms typical, ${v.serve_latency_p95_ms?.toLocaleString("en-US") ?? "—"} ms at p95.`}>

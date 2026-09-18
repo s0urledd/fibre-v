@@ -63,7 +63,8 @@ function Page() {
           tone={p.paid_per_mib_utia == null ? "absent" : undefined}
           sub={p.avg_blob_bytes != null ? `avg blob ${bytes(p.avg_blob_bytes)} · largest ${bytes(p.largest_blob_bytes)}` : "nothing settled"} />
         <Tile label="Timed out" value={p.timeouts > 0 ? p.timeouts : "none"} tone={p.timeouts > 0 ? "fault" : "absent"}
-          sub={p.timeouts > 0 ? `${tia(p.timed_out_utia)} charged on abandoned promises` : "no timeout reported; a floor, not a total"} />
+          sub={p.timeouts > 0 ? `${tia(p.timed_out_utia)} charged` : "none reported"}
+          detail={p.timeouts > 0 ? `${tia(p.timed_out_utia)} charged on promises this publisher abandoned.` : "No timeout reported. A floor, not a total: a promise nobody reports leaves no trace on chain."} />
       </div>
 
       <div className="tablewrap" style={{ marginTop: "var(--s4)" }}>
