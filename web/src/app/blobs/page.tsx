@@ -1,6 +1,7 @@
 "use client";
 import { Suspense, useState } from "react";
 import Link from "next/link";
+import { Panel } from "@/components/Panel";
 import { useSearchParams } from "next/navigation";
 import { useApi, type Blob, utc, ago, shortHex, nsDisplay, bytes } from "@/lib/api";
 import { Mark, type Tier } from "@/components/Verdict";
@@ -43,12 +44,10 @@ function Page() {
       {error && <p className="notice err">{error}</p>}
       {loading && !data && <p className="muted">Loading…</p>}
       {data && (
+        <Panel title="Publications" right={<>{data.blobs.length} newest{ns.trim() && ` in namespace ${ns.trim()}`}
+              {data.blobs.length >= limit && limit < 500 && <> · <button className="btn" onClick={() => setLimit(Math.min(500, limit * 4))}>show more</button></>}</>}>
         <div className="tablewrap">
           <table>
-            <caption>
-              {data.blobs.length} publications{ns.trim() && ` in namespace ${ns.trim()}`}
-              {data.blobs.length >= limit && limit < 500 && <> · <button className="btn" onClick={() => setLimit(Math.min(500, limit * 4))}>show more</button></>}
-            </caption>
             <thead><tr><th>promise</th><th>settled (UTC)</th><th className="right">height</th><th>namespace</th><th className="right">size</th><th className="right">validators</th><th className="right">probes</th><th>serve until</th><th>reconstructable</th></tr></thead>
             <tbody>
               {data.blobs.length === 0 && <tr><td colSpan={9} className="muted">No publications recorded{ns.trim() ? " in this namespace" : ""}.</td></tr>}
@@ -71,6 +70,7 @@ function Page() {
             </tbody>
           </table>
         </div>
+        </Panel>
       )}
     </>
   );

@@ -49,7 +49,7 @@
   --mono: var(--font-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
   --t-hero:   2.25rem;   /* 36px — the serve rate */
-  --t-big:    1.625rem;  /* 26px — every other tile */
+  --t-big:    1.625rem;  /* 26px — a panel figure */
   --t-h1:     1.5rem;
   --t-h2:     1rem;
   --t-body:   .875rem;
@@ -183,7 +183,7 @@ main { min-height: 60vh; padding-top: var(--s5); }
 
 /* ----------------------------------------------------------------- cards --- */
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: var(--s4) var(--s5); }
-.card + .card, .card + .tiles, .tiles + .card { margin-top: var(--s4); }
+.card + .card { margin-top: var(--s4); }
 .card-head { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s3); }
 .card-head h2, .card-head h1 { margin: 0; }
 .card-head .sample { margin-left: var(--s1); }
@@ -212,36 +212,6 @@ main { min-height: 60vh; padding-top: var(--s5); }
 .tabs button[aria-pressed="true"] { color: var(--text); background: var(--card); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / .18); }
 .tabs .n { font-family: var(--mono); color: var(--text-3); margin-left: 6px; font-weight: 500; }
 
-/* ------------------------------------------------------------------ tiles --- */
-/* One strip of equal cells, not a hero and seven boxes. The figures are read
-   together, like the dials of one instrument, so they share one frame; the
-   1px grid gap over the line colour draws every hairline, across and down,
-   so a strip that wraps to a second row needs no per-cell border arithmetic.
-   Every cell holds exactly three lines: label, figure, one line of sample.
-   The sample never wraps; what does not fit is behind its tooltip and the
-   definition behind the mark. */
-.tiles {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
-  background: var(--line); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden;
-}
-.tiles.five { grid-template-columns: repeat(5, 1fr); }
-.tiles.six { grid-template-columns: repeat(3, 1fr); }
-.tiles.four { grid-template-columns: repeat(4, 1fr); }
-.tile { background: var(--card); border: 0; padding: var(--s3) var(--s4); min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.tile.hero { background: linear-gradient(180deg, var(--accent-2), var(--card) 80%); }
-.tile.hero .label { color: var(--accent); }
-.tile .label { display: flex; align-items: center; gap: var(--s1); white-space: nowrap; min-width: 0; }
-.tile .value .mark { width: 14px; height: 14px; align-self: center; }
-.tile .value { font-family: var(--mono); font-size: var(--t-big); font-weight: 500; letter-spacing: -.02em; line-height: 1.15; color: var(--text); margin-top: 2px; display: flex; align-items: baseline; gap: 6px; white-space: nowrap; overflow: hidden; }
-.tile.hero .value { font-size: var(--t-hero); line-height: 1.05; }
-.tile .value .unit { font-size: var(--t-small); color: var(--text-3); font-weight: 400; }
-.tile .value.absent { color: var(--text-3); font-weight: 400; }
-.tile .value.fault { color: var(--fault); }
-.tile .sub { font-family: var(--mono); font-size: var(--t-small); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.tile .sub > span { display: block; overflow: hidden; text-overflow: ellipsis; }
-.tile .badge { margin-left: auto; }
-.tile.loading .value { color: transparent; background: var(--card-2); border-radius: 4px; width: 5ch; }
-
 /* ----------------------------------------------------------------- panels --- */
 /* The overview is built from framed panels with a header bar: what the panel
    holds and where it comes from, then a row of cells parted by hairlines or
@@ -257,8 +227,9 @@ main { min-height: 60vh; padding-top: var(--s5); }
 .cells { display: grid; grid-template-columns: repeat(4, 1fr); }
 .cells.five { grid-template-columns: repeat(5, 1fr); }
 .cell { background: var(--card); padding: 13px var(--s4) 12px; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
-.cells.five .cell:nth-child(5n+1), .cells.four .cell:nth-child(4n+1) { border-left: 0; }
-.cells.five .cell:nth-child(-n+5), .cells.four .cell:nth-child(-n+4) { border-top: 0; }
+.cells.three { grid-template-columns: repeat(3, 1fr); }
+.cells.five .cell:nth-child(5n+1), .cells.four .cell:nth-child(4n+1), .cells.three .cell:nth-child(3n+1) { border-left: 0; }
+.cells.five .cell:nth-child(-n+5), .cells.four .cell:nth-child(-n+4), .cells.three .cell:nth-child(-n+3) { border-top: 0; }
 .cell .label { display: flex; align-items: center; gap: var(--s1); white-space: nowrap; }
 .cell .value { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; white-space: nowrap; overflow: hidden; font-weight: 600; font-size: var(--t-big); line-height: 1.1; letter-spacing: -.015em; color: var(--text); }
 .cell .value .figure { min-width: 0; }
@@ -390,7 +361,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
 /* ------------------------------------------------------------ reconstruct --- */
 .recon-body { display: flex; gap: var(--s5); align-items: flex-start; flex-wrap: wrap; margin-top: var(--s2); }
 .recon-figs { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); flex: 1 1 300px; min-width: 0; }
-.recon-figs .tile { background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-sm); }
+.recon-figs .cell { background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-sm); }
 
 /* --------------------------------------------------------------- timeline --- */
 .tl-key { display: flex; flex-wrap: wrap; gap: var(--s4); list-style: none; margin: var(--s2) 0 0; padding: 0; font-size: var(--t-small); color: var(--text-2); }
@@ -450,8 +421,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
 .prose li { margin-bottom: var(--s2); }
 
 @media (max-width: 1000px) {
-  .tile { padding: var(--s3); }
-  .cells, .cells.four { grid-template-columns: repeat(3, 1fr); }
+  .cells, .cells.four, .cells.five { grid-template-columns: repeat(3, 1fr); }
   .cells.five .cell, .cells.four .cell { border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
   .cells.five .cell:nth-child(3n+1), .cells.four .cell:nth-child(3n+1) { border-left: 0; }
   .cells.five .cell:nth-child(-n+3), .cells.four .cell:nth-child(-n+3) { border-top: 0; }
@@ -460,12 +430,11 @@ dl.kv dd { margin: 0; word-break: break-all; }
   :root { --page: 100%; }
   .wrap { padding: 0 var(--s4); }
   .top .wrap { gap: var(--s3); }
-  .tiles, .tiles.five, .tiles.six, .tiles.four { grid-template-columns: repeat(2, 1fr); }
-  .tiles.five > .tile:last-child { grid-column: span 2; }
-  .cells, .cells.four { grid-template-columns: repeat(2, 1fr); }
+  .cells, .cells.four, .cells.five, .cells.three { grid-template-columns: repeat(2, 1fr); }
   .cells.five .cell, .cells.four .cell { border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
-  .cells.five .cell:nth-child(2n+1), .cells.four .cell:nth-child(2n+1) { border-left: 0; }
-  .cells.five .cell:nth-child(-n+2), .cells.four .cell:nth-child(-n+2) { border-top: 0; }
+  .cells.three .cell { border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
+  .cells.five .cell:nth-child(2n+1), .cells.four .cell:nth-child(2n+1), .cells.three .cell:nth-child(2n+1) { border-left: 0; }
+  .cells.five .cell:nth-child(-n+2), .cells.four .cell:nth-child(-n+2), .cells.three .cell:nth-child(-n+2) { border-top: 0; }
   .cells > .cell:last-child:nth-child(odd) { grid-column: span 2; }
   .panel-head { gap: var(--s2); }
   .panel-title { white-space: nowrap; }
@@ -473,8 +442,6 @@ dl.kv dd { margin: 0; word-break: break-all; }
   .toolbar .tabs { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
   .toolbar .tabs button { white-space: nowrap; }
   .cell .sub { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  /* narrow cells: the sample may take a second line rather than be cut */
-  .tile .sub { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .grad-grid { grid-template-columns: repeat(2, 1fr); }
   dl.kv { grid-template-columns: 1fr; }
   .legend > div { grid-template-columns: 1fr; gap: var(--s1); }

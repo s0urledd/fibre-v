@@ -3,7 +3,7 @@ import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useApi, type Publisher, type Payment, type Blob, type Window, type PriceFormula, utc, ago, bytes, tia, shortHex, shortBech, nsDisplay, fmtShare } from "@/lib/api";
-import Tile from "@/components/Tile";
+import { Panel, Cell } from "@/components/Panel";
 
 const WINDOWS = ["24h", "7d", "30d", "all"];
 
@@ -54,22 +54,24 @@ function Page() {
         </dl>
       </section>
 
-      <div className="tiles four">
-        <Tile hero label="Fees settled" value={tia(p.fees_utia, { unit: false })} unit="TIA"
+      <Panel title="Activity" right={`${win} window`}>
+      <div className="cells four">
+        <Cell label="Fees settled" value={tia(p.fees_utia, { unit: false })} unit="TIA"
           tone={p.settlements === 0 ? "absent" : undefined}
           sub={`${p.settlements.toLocaleString("en-US")} blob${p.settlements === 1 ? "" : "s"} · ${fmtShare(p.fees_share)} of the window`} />
-        <Tile label="Bytes" value={bytes(p.bytes)} sub={`${fmtShare(p.bytes_share)} of the window`} />
-        <Tile label="Paid per MiB" value={p.paid_per_mib_utia != null ? tia(p.paid_per_mib_utia, { unit: false }) : "—"} unit={p.paid_per_mib_utia != null ? "TIA" : undefined}
+        <Cell label="Bytes" value={bytes(p.bytes)} sub={`${fmtShare(p.bytes_share)} of the window`} />
+        <Cell label="Paid per MiB" value={p.paid_per_mib_utia != null ? tia(p.paid_per_mib_utia, { unit: false }) : "—"} unit={p.paid_per_mib_utia != null ? "TIA" : undefined}
           tone={p.paid_per_mib_utia == null ? "absent" : undefined}
           sub={p.avg_blob_bytes != null ? `avg blob ${bytes(p.avg_blob_bytes)} · largest ${bytes(p.largest_blob_bytes)}` : "nothing settled"} />
-        <Tile label="Timed out" value={p.timeouts > 0 ? p.timeouts : "none"} tone={p.timeouts > 0 ? "fault" : "absent"}
+        <Cell label="Timed out" value={p.timeouts > 0 ? p.timeouts : "none"} tone={p.timeouts > 0 ? "fault" : "absent"}
           sub={p.timeouts > 0 ? `${tia(p.timed_out_utia)} charged` : "none reported"}
           detail={p.timeouts > 0 ? `${tia(p.timed_out_utia)} charged on promises this publisher abandoned.` : "No timeout reported. A floor, not a total: a promise nobody reports leaves no trace on chain."} />
       </div>
+      </Panel>
 
-      <div className="tablewrap" style={{ marginTop: "var(--s4)" }}>
+      <Panel title="By window" right={"every window, this publisher"}>
+      <div className="tablewrap">
         <table>
-          <caption>every window, this publisher</caption>
           <thead><tr><th>window</th><th className="right">blobs</th><th className="right">bytes</th><th className="right">fees</th><th className="right">per MiB</th><th className="right">timed out</th></tr></thead>
           <tbody>
             {data.windows.map((w) => (
@@ -85,10 +87,11 @@ function Page() {
           </tbody>
         </table>
       </div>
+      </Panel>
 
-      <div className="tablewrap" style={{ marginTop: "var(--s4)" }}>
+      <Panel title="Escrow movements" right={`${data.recent_payments.length} most recent`}>
+      <div className="tablewrap">
         <table>
-          <caption>{data.recent_payments.length} most recent escrow movements</caption>
           <thead><tr><th>kind</th><th>time (UTC)</th><th className="right">height</th><th className="right">amount</th><th>promise</th><th className="right">size</th><th>by</th></tr></thead>
           <tbody>
             {data.recent_payments.length === 0 && <tr><td colSpan={7} className="muted">No escrow movement recorded.</td></tr>}
@@ -106,11 +109,12 @@ function Page() {
           </tbody>
         </table>
       </div>
+      </Panel>
 
       {data.recent_blobs.length > 0 && (
-        <div className="tablewrap" style={{ marginTop: "var(--s4)" }}>
+        <Panel title="Recent blobs" right={<>{data.recent_blobs.length} most recent · <Link href={`/blobs/`}>all blobs →</Link></>}>
+        <div className="tablewrap">
           <table>
-            <caption>{data.recent_blobs.length} most recent blobs · <Link href={`/blobs/`}>all blobs</Link></caption>
             <thead><tr><th>promise</th><th>settled (UTC)</th><th>namespace</th><th className="right">size</th><th className="right">fee</th><th className="right">validators</th><th className="right">probes</th></tr></thead>
             <tbody>
               {data.recent_blobs.map((b) => (
@@ -127,6 +131,7 @@ function Page() {
             </tbody>
           </table>
         </div>
+        </Panel>
       )}
 
       <div className="note" style={{ marginTop: "var(--s5)" }}>
