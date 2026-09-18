@@ -82,7 +82,8 @@ binaries and the site.
 ## Pinned upstream
 
 celestia-app `v10.1.0-corto` (commit `fa5b523b7e3b2b83bd16bc072a45cbd3819fa369`,
-15 September 2026; the tag Corto runs), celestia-core `v0.42.0`, cosmos-sdk
+15 September 2026; `v10.1.0-mocha`, released 17 September, is the same commit
+under a second tag, so this is also the build Mocha runs), celestia-core `v0.42.0`, cosmos-sdk
 fork `v0.52.11`. TLS golden vectors from celestia-app commit
 `dba155084505a8f6c5d37260a94f70f939fb96de`. `fibre-assign/reftest/go.mod` and
 `fibre-sentinel/go.mod` each carry a verbatim copy of celestia-app's `replace`
@@ -106,6 +107,7 @@ on top of the modules above. The research that precedes it lives in `docs/`:
 | `docs/research/R9-presentation-and-celestia-design.md` | Celestia's visual identity, Celenium conventions, trusted-dashboard patterns, and the dashboard design spec |
 | `docs/research/R7-devnet-reproduction.md` | reproducing the tests and the devnet fault-injection run on a fresh Linux machine |
 | `docs/research/R10-explorer-shaped-dashboard.md` | why the dashboard is shaped like an explorer: what the field does, what Celestia users recognise, and the design direction the site follows |
+| `docs/research/R11-ecosystem-delta-2026-09-18.md` | what changed upstream and in the ecosystem since R3: Mocha release, `DownloadShardStream`, connection caps, object storage, the official metrics, and the changes they force here |
 | `docs/research/R0-open-decisions.md` | decisions only the owners can make |
 | `docs/adr/0001-observer-architecture.md` | the architecture decision for collector, prober, store, API and web |
 | `docs/verdicts.md` | the verdict taxonomy the dashboard is allowed to use |
