@@ -2752,6 +2752,10 @@ type assignmentRow struct {
 	// shard. false means unproven, null means the record predates
 	// verification. Never "did not store".
 	Attested *bool `json:"attested"`
+	// HostAtSettlement is the host registered when the promise settled:
+	// where the upload went. Null when the scanner could not read the
+	// registry at that height; empty when none was registered.
+	HostAtSettlement *string `json:"host_at_settlement"`
 }
 
 func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
@@ -2767,7 +2771,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT a.validator_address, a.voting_power, a.row_count, a.attested,
-			COALESCE(i.moniker, '')
+			COALESCE(i.moniker, ''), a.host_at_settlement
 		FROM assignments a
 		LEFT JOIN validator_identities i ON i.cons_address = a.validator_address
 		WHERE a.promise_hash = ? ORDER BY a.voting_power DESC, a.validator_address`, hash)
@@ -2779,7 +2783,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a assignmentRow
 		var att sql.NullInt64
-		if err := rows.Scan(&a.ValidatorAddress, &a.VotingPower, &a.RowCount, &att, &a.Moniker); err != nil {
+		if err := rows.Scan(&a.ValidatorAddress, &a.VotingPower, &a.RowCount, &att, &a.Moniker, &a.HostAtSettlement); err != nil {
 			rows.Close()
 			s.writeInternal(w, r.URL.Path, err)
 			return
@@ -2949,6 +2953,15 @@ type probeRow struct {
 	ShadowGap             string `json:"shadow_gap,omitempty"`
 	ClassificationAtProbe string `json:"classification_at_probe,omitempty"`
 	AmendedAt             string `json:"amended_at,omitempty"`
+	// HostAtSettlement is where the upload went; HostChanged when the host
+	// probed differs from it (the validator re-registered during the
+	// window). SettlementHostOutcome and SettlementHostServed are the
+	// evidence probe of the old host, run when the new one did not serve;
+	// they never change the verdict.
+	HostAtSettlement      string `json:"host_at_settlement,omitempty"`
+	HostChanged           bool   `json:"host_changed,omitempty"`
+	SettlementHostOutcome string `json:"settlement_host_outcome,omitempty"`
+	SettlementHostServed  *bool  `json:"settlement_host_served,omitempty"`
 }
 
 func (s *Server) probeRows(ctx context.Context, where string, limit int, args ...any) ([]probeRow, error) {
@@ -2956,7 +2969,8 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 		started_at, phase, outcome, classification, classification_reason, rows_returned, rows_expected, total_duration_ms, tls_ok, identity_ok, raw_error,
 		COALESCE(retry_first_outcome, ''), COALESCE(clock_offset_ms, 0),
 		COALESCE(row_indices, ''), COALESCE(rows_sha256, ''), COALESCE(rpc_code, ''), COALESCE(shadowed_by, ''), COALESCE(observer_build, ''), COALESCE(app_version, 0),
-		COALESCE(shadow_gap, ''), COALESCE(classification_at_probe, ''), COALESCE(amended_at, '')
+		COALESCE(shadow_gap, ''), COALESCE(classification_at_probe, ''), COALESCE(amended_at, ''),
+		COALESCE(host_at_settlement, ''), COALESCE(settlement_host_outcome, ''), settlement_host_served
 		FROM probes`
 	if where != "" {
 		q += " WHERE " + where
@@ -2973,12 +2987,18 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 		var assigned, tls, id int
 		var att sql.NullInt64
 		var idxJSON string
+		var served sql.NullInt64
 		if err := rows.Scan(&p.Vantage, &p.PromiseHash, &p.ValidatorAddress, &p.ValidatorHost, &assigned, &att, &p.AssignedRowCount, &p.ScheduleLabel,
 			&p.ScheduledAt, &p.StartedAt, &p.Phase, &p.Outcome, &p.Classification, &p.Reason, &p.RowsReturned, &p.RowsExpected,
 			&p.TotalDurationMS, &tls, &id, &p.RawError, &p.RetryFirstOutcome, &p.ClockOffsetMS,
 			&idxJSON, &p.RowsSHA256, &p.RPCCode, &p.ShadowedBy, &p.ObserverBuild, &p.AppVersion,
-			&p.ShadowGap, &p.ClassificationAtProbe, &p.AmendedAt); err != nil {
+			&p.ShadowGap, &p.ClassificationAtProbe, &p.AmendedAt, &p.HostAtSettlement, &p.SettlementHostOutcome, &served); err != nil {
 			return nil, err
+		}
+		p.HostChanged = p.HostAtSettlement != "" && p.ValidatorHost != "" && p.ValidatorHost != p.HostAtSettlement
+		if served.Valid {
+			b := served.Int64 == 1
+			p.SettlementHostServed = &b
 		}
 		if idxJSON != "" {
 			_ = json.Unmarshal([]byte(idxJSON), &p.RowIndices)

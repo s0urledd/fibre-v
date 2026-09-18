@@ -897,6 +897,15 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 			m = retryOnce(ctx, in, it.coder, p.cfg.Timeouts, m, p.cfg.RetryDelay)
 		}
 	}
+	m.HostAtSettlement = t.HostAtSettlement
+	if hostChanged(t) && !skipDL && m.Outcome != OutcomeServedOK && m.Classification != ClassProbeError {
+		// The validator re-registered since the promise settled and its
+		// current host did not serve: ask the host the upload went to, as
+		// evidence, on the same lock so the validator still sees one
+		// connection at a time. The verdict stays the current host's.
+		m.SettlementHost = settlementProbe(ctx, in, it.coder, p.cfg.Timeouts)
+		m.ClassificationReason += "; " + hostChangeNote(t, m.SettlementHost)
+	}
 	lock.Unlock()
 
 	p.stampSampling(&m, pub)
@@ -908,6 +917,33 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 	}
 	p.logMeasurement(m)
 	return true
+}
+
+// hostChanged reports whether the validator's current host differs from the
+// one registered when the promise settled, both being known.
+func hostChanged(t Target) bool {
+	return t.HostAtSettlement != "" && t.Host != "" && t.Host != t.HostAtSettlement && t.HostSource != "settlement"
+}
+
+// settlementProbe runs the evidence probe of the settlement host.
+func settlementProbe(ctx context.Context, in Input, coder *Coder, to StepTimeouts) *HostProbe {
+	in.Target.Host, in.Target.HostSource = in.Target.HostAtSettlement, "settlement"
+	e := Run(ctx, in, coder, to)
+	return &HostProbe{Host: in.Target.Host, Outcome: e.Outcome, RowsReturned: e.Download.RowsReturned,
+		CommitmentVerified: e.Download.CommitmentVerified, AssignmentVerified: e.Download.AssignmentVerified,
+		DurationMS: e.TotalDurationMS, RawError: e.RawError}
+}
+
+// hostChangeNote is appended to the reason of a row whose validator moved.
+func hostChangeNote(t Target, hp *HostProbe) string {
+	note := fmt.Sprintf("host changed since settlement (%s -> %s)", t.HostAtSettlement, t.Host)
+	if hp == nil {
+		return note
+	}
+	if hp.Outcome == OutcomeServedOK {
+		return note + "; the host registered at settlement still serves the exact rows, so the data was left behind, not lost"
+	}
+	return note + "; the host registered at settlement answered " + string(hp.Outcome)
 }
 
 // recordNotProbed marks one (publication, point) slot NOT_PROBED for every

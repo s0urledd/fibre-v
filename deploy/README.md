@@ -125,6 +125,11 @@ sample is unpredictable: a publisher who learned the master in advance could
 work out which of its blobs would be probed, so do not put it anywhere the
 publishers can read, and do not include it in a backup that leaves the host.
 
+The scanner reads the Fibre host registry at each settlement height
+(`host_at_settlement` on every assignment), which needs a node that keeps
+state at that height; against a pruning node the field is recorded as
+unknown, never as "no host", and the log says so once.
+
 Leave `-probe-unassigned` off on a public vantage. The read-path rate
 limiting Celestia is designing (forum topic 2295) treats requests for
 shards a validator was never assigned as illegitimate; probing only real,

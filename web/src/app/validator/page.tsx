@@ -244,6 +244,16 @@ function Page() {
                       {" "}(retried after {p.retry_first_outcome})
                     </span>
                   )}
+                  {p.host_changed && (
+                    <span className="faint" title={`The validator re-registered during the window: the upload went to ${p.host_at_settlement}, this probe went to the host registered now.${p.settlement_host_outcome ? ` Asked as evidence, the old host answered ${p.settlement_host_outcome}${p.settlement_host_served ? " with the exact rows: the data was left behind, not lost" : ""}.` : ""}`}>
+                      {" "}(host changed{p.settlement_host_served ? "; old host still serves" : p.settlement_host_outcome ? `; old host ${p.settlement_host_outcome}` : ""})
+                    </span>
+                  )}
+                  {p.amended_at && p.classification_at_probe && (
+                    <span className="faint" title={`Filed as ${p.classification_at_probe} at the probe and judged ${p.classification} once every promise that could have answered was on record (${p.amended_at}).`}>
+                      {" "}(judged late)
+                    </span>
+                  )}
                 </td>
                 <td className="right mono">{p.rows_expected ? `${p.rows_returned}/${p.rows_expected}` : "—"}</td>
                 <td className="right mono" title={[p.rpc_code && `gRPC ${p.rpc_code}`, p.shadowed_by && `answered from promise ${shortHex(p.shadowed_by, 6)}`, p.row_indices && `rows ${p.row_indices.length <= 6 ? p.row_indices.join(",") : p.row_indices.slice(0, 6).join(",") + "…"}`, p.rows_sha256 && `sha256 ${p.rows_sha256.slice(0, 12)}…`, p.observer_build && `build ${p.observer_build}`].filter(Boolean).join(" · ") || undefined}>{p.total_duration_ms}</td>

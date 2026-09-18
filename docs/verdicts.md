@@ -229,7 +229,10 @@ One sentence each, and what a reader should conclude.
   answered, and `Unimplemented` on either is an observer error, never a
   verdict),
   `download.shadowed_by` (the promise whose assignment the returned rows
-  match), `observer.build` (the observer's VCS revision), and
+  match), `host_at_settlement` (the host registered when the promise
+  settled, where the upload went; the assignment carries it too) with
+  `settlement_host_probe` (what that host answered when the current one
+  did not serve and differs from it), `observer.build` (the observer's VCS revision), and
   `observer.assign_pin` / `observer.app_version`. The store keeps them as
   columns (`row_indices`, `rows_sha256`, `rpc_code`, `shadowed_by`,
   `observer_build`, `app_version`) and `/v1/probes` publishes them. A
@@ -396,6 +399,19 @@ what the measurement cannot separate.
   export, and `sentinel-recompute` draws the same verdict from the record
   and compares. Every rate reads the amended classification; the rollup
   of a day waits until none of its rows is still deferred.
+- **A validator that moves.** The obligation is served at the endpoint
+  clients are sent to, which is the registry now, so the probe goes to
+  the current host and the verdict is that host's. The scanner records
+  the host registered at the settlement height on every assignment
+  (`host_at_settlement`, read from the chain at that height; null when
+  the node had pruned it, which is not "no host"), the prober carries it
+  on the row, and when the current host differs and did not serve, the
+  prober asks the old host as evidence in the same slot
+  (`settlement_host_probe`): a `FAULT` whose old host still serves the
+  exact rows is data left behind on a move, not data lost, and the row
+  says so. With no host in the live registry and none this observer ever
+  saw (a fresh vantage), the settlement host is the last fallback
+  (`host_source = settlement`).
 - **What remains.** A shard uploaded for a promise that never settles
   (abandoned before `MsgPayForFibre`) is on disk until its prune and never
   on chain, so it can never be a candidate. A late `FAULT` carries that

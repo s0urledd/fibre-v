@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 12
+const SchemaVersion = 13
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -360,6 +360,19 @@ var migrations = []migration{
 				judged_at           TEXT NOT NULL,
 				scanner_frontier    TEXT NOT NULL
 			)`,
+		},
+	},
+	{
+		version: 13,
+		note:    "the host registered at settlement on the obligation and on the row, and what it answered when the current host did not serve",
+		stmts: []string{
+			// NULL: the scanner could not read the registry at the settlement
+			// height (or the record predates the field); '' : no host was
+			// registered. The two are different facts.
+			`ALTER TABLE assignments ADD COLUMN host_at_settlement TEXT`,
+			`ALTER TABLE probes ADD COLUMN host_at_settlement TEXT`,
+			`ALTER TABLE probes ADD COLUMN settlement_host_outcome TEXT`,
+			`ALTER TABLE probes ADD COLUMN settlement_host_served INTEGER`,
 		},
 	},
 }
@@ -833,9 +846,13 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 		if p.HasAttestation() {
 			attested = b2i(v.Attested)
 		}
-		if _, err := tx.Exec(`INSERT INTO assignments (promise_hash, validator_address, voting_power, row_count, rows_json, attested)
-			VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(promise_hash, validator_address) DO NOTHING`,
-			p.PromiseHash, v.Address, v.VotingPower, v.RowCount, rowsJSON, attested); err != nil {
+		var host any
+		if p.Assignment.HostsAtSettlementKnown {
+			host = v.Host
+		}
+		if _, err := tx.Exec(`INSERT INTO assignments (promise_hash, validator_address, voting_power, row_count, rows_json, attested, host_at_settlement)
+			VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(promise_hash, validator_address) DO NOTHING`,
+			p.PromiseHash, v.Address, v.VotingPower, v.RowCount, rowsJSON, attested, host); err != nil {
 			return false, fmt.Errorf("assignment %s/%s: %w", p.PromiseHash, v.Address, err)
 		}
 	}
@@ -854,9 +871,10 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		 identity_ok, identity_reason, download_ok, download_ms, rows_returned, rows_expected, commitment_verified,
 		 assignment_verified, phase, outcome, classification, classification_reason, raw_error, total_duration_ms, raw_json,
 		 attested, bytes_returned, row_indices, rows_sha256, rpc_code, shadowed_by, observer_build, app_version,
-		 sampling_p, sampling_binding, sampling_commitment, retry_first_outcome, clock_offset_ms, shadow_gap)
+		 sampling_p, sampling_binding, sampling_commitment, retry_first_outcome, clock_offset_ms, shadow_gap,
+		 host_at_settlement, settlement_host_outcome, settlement_host_served)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(dedupe_key) DO NOTHING`,
 		m.DedupeKey(), m.Vantage, m.PromiseHash, m.Commitment, m.BlobVersion, ts(m.MustServeUntil), m.ValidatorSetHeight,
 		m.ValidatorAddress, m.ValidatorHost, b2i(m.Assigned), m.AssignedRowCount, m.ScheduleLabel, ts(m.ScheduledAt),
@@ -872,12 +890,26 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		nullIfEmpty(m.Download.ShadowedBy), nullIfEmpty(observerBuild(m)), observerAppVersion(m),
 		samplingP(m), samplingField(m, func(d *probe.SamplingDecision) string { return d.Binding }),
 		samplingField(m, func(d *probe.SamplingDecision) string { return d.DayCommitment }), retryFirstOutcome(m), m.ClockOffsetMS,
-		nullIfEmpty(m.Download.ShadowGap))
+		nullIfEmpty(m.Download.ShadowGap), nullIfEmpty(m.HostAtSettlement), settlementOutcome(m), settlementServed(m))
 	if err != nil {
 		return false, fmt.Errorf("probe %s: %w", m.DedupeKey(), err)
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+func settlementOutcome(m probe.Measurement) any {
+	if m.SettlementHost == nil {
+		return nil
+	}
+	return string(m.SettlementHost.Outcome)
+}
+
+func settlementServed(m probe.Measurement) any {
+	if m.SettlementHost == nil {
+		return nil
+	}
+	return b2i(m.SettlementHost.Outcome == probe.OutcomeServedOK && m.SettlementHost.AssignmentVerified)
 }
 
 func samplingP(m probe.Measurement) any {

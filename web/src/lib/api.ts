@@ -338,6 +338,16 @@ export type Probe = {
   shadowed_by?: string;
   observer_build?: string;
   app_version?: number;
+  /** the verdict the row was stamped with, when the collector's late shadow judgement replaced it */
+  classification_at_probe?: string;
+  amended_at?: string;
+  shadow_gap?: string;
+  /** where the upload went; host_changed when the host probed differs (the validator re-registered during the window) */
+  host_at_settlement?: string;
+  host_changed?: boolean;
+  /** the evidence probe of the settlement host, run when the current host did not serve; never the verdict */
+  settlement_host_outcome?: string;
+  settlement_host_served?: boolean;
 };
 
 // Below this many rated probes a percentage is noise dressed as a

@@ -334,3 +334,46 @@ func httptestServerWith(t *testing.T, st *store.Store, opts ...api.Option) *http
 	t.Cleanup(ts.Close)
 	return ts
 }
+
+// A row whose validator re-registered during the window carries the host
+// the upload went to and what that host answered when the new one did not
+// serve; the verdict is the new host's.
+func TestProbesCarryTheSettlementHostEvidence(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	now := time.Now().UTC().Truncate(time.Second)
+	m := probe.Measurement{
+		SchemaVersion: probe.AttestationSchemaVersion, Vantage: "test", PromiseHash: "mv1", Commitment: "cc",
+		MustServeUntil: now.Add(time.Hour), ValidatorAddress: "v1", ValidatorHost: "new.example:9090", HostSource: "bonded",
+		HostAtSettlement: "old.example:9090", Assigned: true, Attested: true, AssignedRowCount: 2,
+		ScheduleLabel: "w1", ScheduledAt: now, StartedAt: now, FinishedAt: now, Phase: probe.PhaseInWindow,
+		Outcome: probe.OutcomeNotFound, Classification: probe.ClassFault, ClassificationReason: "not found; host changed since settlement",
+		SettlementHost: &probe.HostProbe{Host: "old.example:9090", Outcome: probe.OutcomeServedOK, RowsReturned: 2, CommitmentVerified: true, AssignmentVerified: true},
+	}
+	m.TCP.OK, m.TLS.OK, m.Identity.OK = true, true, true
+	raw, _ := json.Marshal(m)
+	if _, err := st.InsertProbe(m, raw); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptestServer(t, st)
+	var out struct {
+		Probes []struct {
+			Classification        string `json:"classification"`
+			HostAtSettlement      string `json:"host_at_settlement"`
+			HostChanged           bool   `json:"host_changed"`
+			SettlementHostOutcome string `json:"settlement_host_outcome"`
+			SettlementHostServed  *bool  `json:"settlement_host_served"`
+		} `json:"probes"`
+	}
+	if code := get(t, ts, "/v1/probes?limit=5", &out); code != 200 || len(out.Probes) != 1 {
+		t.Fatalf("probes: %d, %d rows", code, len(out.Probes))
+	}
+	p := out.Probes[0]
+	if p.Classification != "FAULT" || p.HostAtSettlement != "old.example:9090" || !p.HostChanged ||
+		p.SettlementHostOutcome != "SERVED_OK" || p.SettlementHostServed == nil || !*p.SettlementHostServed {
+		t.Errorf("row = %+v", p)
+	}
+}

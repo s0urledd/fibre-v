@@ -126,6 +126,10 @@ func (s ParamsSnapshot) toParams() fibretypes.Params {
 // AssignmentTable is the fibre-assign shard assignment for the promise's
 // commitment over the validator set at the promise height.
 type AssignmentTable struct {
+	// HostsAtSettlementKnown is whether the registry at the settlement
+	// height could be read, so that an empty Host on a validator means "no
+	// host registered" and not "not looked up".
+	HostsAtSettlementKnown bool `json:"hosts_at_settlement_known,omitempty"`
 	// Error is set (and the rest left zero) when the assignment could not be
 	// computed — e.g. an unknown blob version with no pinned ProtocolParams.
 	Error string `json:"error,omitempty"`
@@ -182,6 +186,11 @@ type ValidatorAssignment struct {
 	// (the server writes before it signs). False means unproven, not absent:
 	// the publisher stops collecting signatures at the safety threshold.
 	Attested bool `json:"attested"`
+	// Host is the Fibre host this validator had registered (x/valaddr) at
+	// the settlement height: where the upload went and where the shard was
+	// stored. Empty with AssignmentTable.HostsAtSettlementKnown true means
+	// no host was registered; empty with it false means the lookup failed.
+	Host string `json:"host_at_settlement,omitempty"`
 }
 
 func protoParamsSnapshot(p assign.ProtocolParams) ProtocolParamsSnapshot {
