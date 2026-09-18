@@ -62,6 +62,15 @@ func TestRollupAndPruneKeepTheAllWindow(t *testing.T) {
 	insertProbeSet(t, st, "old2", old.Add(2*time.Hour), old.Add(3*time.Hour), map[string][]wire{
 		"served": {refused, ok}, "endun": {refused, ok}, "broken": {refused, ok}, "unreach": {ok, ok},
 	}, false)
+	// a publication settled two minutes before the end of the last day the
+	// prune will take, probed into the first retained day: its obligations
+	// belong to the rolled day (settlement day) while three of its rows
+	// start on a raw day. The rollup counts it once; the raw part must not
+	// count it again.
+	seam := now.Add(-31 * 24 * time.Hour).Truncate(24 * time.Hour).Add(23*time.Hour + 58*time.Minute)
+	insertProbeSet(t, st, "seam", seam, seam.Add(30*time.Minute), map[string][]wire{
+		"served": {ok, ok, ok, ok}, "broken": {ok, gone, ok, ok}, hexAddr: {ok, ok, ok, ok},
+	}, false)
 	// a recent publication, inside every retention
 	recent := now.Add(-2 * time.Hour)
 	insertProbeSet(t, st, "new1", recent, now.Add(-30*time.Minute), map[string][]wire{
@@ -74,7 +83,7 @@ func TestRollupAndPruneKeepTheAllWindow(t *testing.T) {
 	if before.RolledUp != nil {
 		t.Fatalf("nothing pruned yet, but labelled: %+v", before.RolledUp)
 	}
-	if before.Obligations.Total != 13 || len(before.VantageHealth.Suspect) != 1 {
+	if before.Obligations.Total != 16 || len(before.VantageHealth.Suspect) != 1 {
 		t.Fatalf("fixture: %+v", before)
 	}
 	var beforeVals struct {
@@ -109,6 +118,13 @@ func TestRollupAndPruneKeepTheAllWindow(t *testing.T) {
 	_ = st.DB().QueryRow(`SELECT COUNT(*) FROM probes WHERE promise_hash IN ('old1','old2')`).Scan(&left)
 	if left != 0 {
 		t.Fatalf("%d old rows survived the prune", left)
+	}
+	// the seam publication's rows that started on the first retained day
+	// survive (rows are pruned by the day they started), its earlier row
+	// is gone
+	_ = st.DB().QueryRow(`SELECT COUNT(*) FROM probes WHERE promise_hash = 'seam'`).Scan(&left)
+	if left != 9 {
+		t.Fatalf("%d seam rows survived the prune, want the 9 that started on the retained day", left)
 	}
 	var withJSON int64
 	_ = st.DB().QueryRow(`SELECT COUNT(*) FROM probes WHERE raw_json = ''`).Scan(&withJSON)
@@ -186,7 +202,7 @@ func TestRollupAndPruneKeepTheAllWindow(t *testing.T) {
 	for _, w := range detail.Windows {
 		if w.Window.Name == "all" {
 			found = true
-			if w.RolledUp == nil || w.Obligations != byAddr[hexAddr].Obligations || w.Obligations.Broken != 1 || w.Obligations.Served != 1 {
+			if w.RolledUp == nil || w.Obligations != byAddr[hexAddr].Obligations || w.Obligations.Broken != 1 || w.Obligations.Served != 2 {
 				t.Errorf("detail all span: %+v vs %+v", w, byAddr[hexAddr].Obligations)
 			}
 		}

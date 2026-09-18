@@ -956,8 +956,21 @@ func (o *obligationStats) finish() {
 // obligationArgs is the argument list obligationBuckets expects: as_of (the
 // pending cut), the window's settlement bounds, the row bound, the suspect
 // points, then the caller's own.
-func obligationArgs(win Window, ss suspectSet, extra ...any) []any {
-	args := []any{store.TS(win.End), win.startArg(), win.endArg(), win.endArg()}
+//
+// Past the first prune the "all" window's raw part starts at raw_from:
+// the rollup holds every obligation of a promise settled before it (the
+// rollup attributes obligations by settlement day, rows by start day), and
+// a promise settled late on a rolled day can still have rows that started
+// on a retained day. Without the bound those rows would count the
+// obligation a second time, beside the rollup's.
+func (s *Server) obligationArgs(win Window, ss suspectSet, extra ...any) []any {
+	start := win.startArg()
+	if win.Span == 0 {
+		if from, ok := rollup.RawFrom(s.st); ok {
+			start = store.TS(from)
+		}
+	}
+	args := []any{store.TS(win.End), start, win.endArg(), win.endArg()}
 	args = append(args, ss.args...)
 	return append(args, extra...)
 }
@@ -967,7 +980,7 @@ func obligationArgs(win Window, ss suspectSet, extra ...any) []any {
 func (s *Server) obligationsWhere(ctx context.Context, win Window, ss suspectSet, extra string, extraArgs ...any) (obligationStats, error) {
 	var o obligationStats
 	err := s.st.DB().QueryRowContext(ctx, `SELECT `+obligationSums+` FROM (`+obligationBuckets+ss.clause("pr.scheduled_at")+extra+`)
-			GROUP BY validator_address, promise_hash)`, obligationArgs(win, ss, extraArgs...)...).
+			GROUP BY validator_address, promise_hash)`, s.obligationArgs(win, ss, extraArgs...)...).
 		Scan(&o.Total, &o.Broken, &o.Served, &o.EndUnobserved, &o.UnobservedReachable, &o.UnobservedUnreachable, &o.UnobservedNotProbed, &o.Pending)
 	if err != nil {
 		return obligationStats{}, err
@@ -979,7 +992,7 @@ func (s *Server) obligationsWhere(ctx context.Context, win Window, ss suspectSet
 // obligationsByValidator is obligationsWhere grouped by validator.
 func (s *Server) obligationsByValidator(ctx context.Context, win Window, ss suspectSet, extra string, extraArgs ...any) (map[string]obligationStats, error) {
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT validator_address, `+obligationSums+` FROM (`+obligationBuckets+ss.clause("pr.scheduled_at")+extra+`)
-			GROUP BY validator_address, promise_hash) GROUP BY validator_address`, obligationArgs(win, ss, extraArgs...)...)
+			GROUP BY validator_address, promise_hash) GROUP BY validator_address`, s.obligationArgs(win, ss, extraArgs...)...)
 	if err != nil {
 		return nil, err
 	}
