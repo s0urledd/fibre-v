@@ -9,10 +9,11 @@ import { type Rate, fmtPct, fmtCount, faultRateUpper, enoughToRank, MIN_RATED } 
  * (validator, blob) when that is available.
  */
 export function boundTitle(r: Rate, obligations?: Rate | null): string | undefined {
-  const basis = obligations && obligations.den > 0 ? obligations : r;
+  const perObligation = !!obligations && obligations.den > 0;
+  const basis = perObligation ? obligations! : r;
   const ub = faultRateUpper(basis);
   if (ub === null) return undefined;
-  const unit = basis === r ? "probes" : "obligations";
+  const unit = perObligation ? "obligations" : "probes";
   return `At most ${(ub * 100).toFixed(1)}% of ${basis.den.toLocaleString("en-US")} ${unit} went unserved (95% confidence).`;
 }
 
@@ -21,12 +22,16 @@ export default function RateCell({ r, obligations, gauge = "ok", sample, unreach
   obligations?: Rate | null;
   gauge?: "ok" | "hold";
   sample?: string;
-  /** probes held out because the validator could not be reached; drawn as an
-   *  amber share of the gauge so a rate over few reached probes does not look
+  /** observations the rate does not speak for (obligations never seen
+   *  served, probes that could not reach the validator); drawn as an amber
+   *  share of the gauge so a rate over few decided observations does not look
    *  like a clean record */
   unreachable?: number;
 }) {
-  if (!r || r.den === 0) return <span className="nil" title="no observation in this window">·</span>;
+  if (!r || r.den === 0) {
+    if (unreachable > 0) return <span className="nil" title={`Nothing decided in this window: ${unreachable.toLocaleString("en-US")} observation${unreachable === 1 ? "" : "s"} the rate cannot speak for.`}>·</span>;
+    return <span className="nil" title="no observation in this window">·</span>;
+  }
   const rankable = enoughToRank(r);
   const total = r.den + unreachable;
   const pct = (n: number) => `${Math.max(n > 0 ? 1 : 0, (n / total) * 100)}%`;

@@ -182,11 +182,18 @@ type IdentityResult struct {
 // DownloadResult is the L4 retrievability step: DownloadShard + verify rows
 // against the commitment and against the assignment.
 type DownloadResult struct {
-	Attempted          bool   `json:"attempted"`
-	OK                 bool   `json:"ok"`
-	DurationMS         int64  `json:"duration_ms"`
-	RowsReturned       int    `json:"rows_returned"`
-	RowsExpected       int    `json:"rows_expected"`
+	Attempted    bool  `json:"attempted"`
+	OK           bool  `json:"ok"`
+	DurationMS   int64 `json:"duration_ms"`
+	RowsReturned int   `json:"rows_returned"`
+	RowsExpected int   `json:"rows_expected"`
+	// BytesReturned is the row payload the server handed over: the sum of
+	// the row data bytes, proofs and the RLC vector excluded. Rows are not a
+	// unit of size — a row is as wide as the blob's square — so this is what
+	// makes a transfer rate comparable across blobs. Zero on a record written
+	// before the field existed, which the store keeps as unknown, not as
+	// zero bytes.
+	BytesReturned      int64  `json:"bytes_returned,omitempty"`
 	CommitmentVerified bool   `json:"commitment_verified"` // rsema1d reconstructor accepted the proofs
 	AssignmentVerified bool   `json:"assignment_verified"` // returned indices == assigned set
 	Error              string `json:"error,omitempty"`

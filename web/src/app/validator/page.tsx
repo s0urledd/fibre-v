@@ -2,9 +2,9 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type Window, type Rate, fmtPct, fmtCount, utc, ago, shortHex } from "@/lib/api";
+import { useApi, type Validator, type Probe, type Window, type Rate, fmtPct, fmtCount, utc, ago, shortHex, bytesPerSecond } from "@/lib/api";
 import { initialsOf } from "@/components/ValidatorTable";
-import Verdict from "@/components/Verdict";
+import Verdict, { Mark } from "@/components/Verdict";
 import Info from "@/components/Info";
 import Graduation from "@/components/Graduation";
 import Tile from "@/components/Tile";
@@ -47,10 +47,12 @@ function Page() {
   const unattested = v.attestation?.unattested_blobs ?? 0;
   const unknown = v.attestation?.unknown_blobs ?? 0;
   const points = v.serve_rate_by_point ?? [];
-  // The last point that produced a verdict, not the last point in the list: a
-  // schedule point with no rated probe is a gap, and reading a gap as "held to
-  // the end: none" would accuse a validator of the observer's own silence.
-  const last = [...points].reverse().find((p) => p.serve_rate.den > 0);
+  const o = v.obligations;
+  const decided = !!o && o.rate.den > 0;
+  const faults = v.faults ?? v.classes?.FAULT ?? 0;
+  const rated = (v.serve_rate?.den ?? 0) > 0;
+  const heldOut = Object.entries(v.serve_rate_held_out ?? {}).filter(([, n]) => n > 0)
+    .sort((a, b) => b[1] - a[1]).map(([c, n]) => `${n.toLocaleString("en-US")} ${c.toLowerCase().replace(/_/g, " ")}`);
   return (
     <>
       <section className="card">
@@ -67,13 +69,16 @@ function Page() {
             {v.reachable === true && v.identity_status === "verified" && <span className="chip ok"><i className="dot ok" />up</span>}
             {v.reachable === false && <span className="chip hold" title={`Could not reach ${v.host} at the last attempt.`}><i className="dot hold" />down</span>}
             {v.reachable === true && v.identity_status !== "verified" && <span className="chip hold" title={v.identity_reason}><i className="dot hold" />{identityWord(v.identity_status)}</span>}
-            {!v.host && <span className="chip">no Fibre endpoint</span>}
-            {v.jailed && <span className="chip hold" title="Jailed by the chain. Shards it signed for are still owed.">jailed</span>}
-            {v.bond_status && <span className="chip">{v.bond_status.replace("BOND_STATUS_", "").toLowerCase()}</span>}
+            {!v.host && !v.last_host && <span className="chip">no Fibre endpoint</span>}
+            {v.jailed && <span className="chip" title="Jailed by the chain. Out of the bonded provider list, so no handshake is attempted; shards it signed for are still owed.">jailed</span>}
+            {v.bond_status && v.bond_status !== "BOND_STATUS_BONDED" && <span className="chip">{v.bond_status.replace("BOND_STATUS_", "").toLowerCase()}</span>}
           </span>
         </div>
         <dl className="kv">
-          <dt>Fibre endpoint</dt><dd className="mono">{v.host || "— not registered"}{v.endpoint_since && <span className="muted"> · since {utc(v.endpoint_since)}</span>}</dd>
+          <dt>Fibre endpoint</dt><dd className="mono">
+            {v.host || (v.last_host ? <>{v.last_host}<span className="muted"> · left the bonded list {utc(v.endpoint_closed_at)}; the registration stays on chain</span></> : "— not registered")}
+            {v.host && v.endpoint_since && <span className="muted"> · since {utc(v.endpoint_since)}</span>}
+          </dd>
           <dt>last handshake</dt><dd>{v.reachable == null ? "none yet" : v.reachable ? "completed" : <span className="err">failed</span>}{v.last_seen_at && <span className="muted"> · {utc(v.last_seen_at)} ({ago(v.last_seen_at)})</span>}{v.last_unreachable_at && <span className="muted"> · last failed {ago(v.last_unreachable_at)}</span>}</dd>
           <dt>TLS identity</dt><dd>{v.identity_status}{v.identity_reason && <span className="muted"> ({v.identity_reason})</span>}</dd>
           <dt>voting power</dt><dd className="mono">{v.voting_power.toLocaleString("en-US")}{v.assigned_rows_last ? <span className="muted"> · {v.assigned_rows_last} rows per blob ({v.expected_load_band})</span> : null}</dd>
@@ -110,7 +115,7 @@ function Page() {
         <span className="sample" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name} window</span>
         <Info label="These five figures">
           <p>Five figures, in the order you would debug them.</p>
-          <p>Uptime and Endorsed come from a TLS handshake with the endpoint every 5 minutes. Served, Held to the end and Throughput only cover blobs this validator signed for.</p>
+          <p>Reachability and Endorsed come from a TLS handshake with the endpoint every 5 minutes. Faults, Obligations and Throughput only cover blobs this validator signed for.</p>
           <p>No figure has a threshold. Checks run from one location.</p>
         </Info>
         <span className="spacer" />
@@ -119,50 +124,75 @@ function Page() {
         </div>
       </div>
       <div className="tiles five">
-        <Layer label="Uptime" r={v.reachability_window}
+        <Layer label="Reachability" r={v.reachability_window}
           sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined}
           what={<>
-            <p>TLS handshakes completed, over handshakes attempted. We open a connection to the endpoint every 5 minutes and verify the certificate its consensus key endorsed; nothing is downloaded.</p>
+            <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes, from one location. Nothing is downloaded.</p>
+            <p>This is not signing uptime. A validator can sign every block with its Fibre endpoint down, and the reverse.</p>
           </>} />
         <Layer label="Endorsed" r={v.identity_rate_window}
           what={<>
             <p>Of the handshakes that reached a certificate, how many were signed by this validator&rsquo;s consensus key. Clients refuse the rest.</p>
             <p>Handshakes that never reached a certificate are not counted here, so an outage is not reported twice.</p>
           </>} />
-        <Layer label="Served" r={v.serve_rate}
-          sample={(v.serve_rate_held_out?.UNREACHABLE ?? 0) > 0 ? `${fmtCount(v.serve_rate)} · ${v.serve_rate_held_out.UNREACHABLE} unreachable` : undefined}
-          what={<>
-            <p>When we reached it: shards handed over, out of the shards this validator signed for, inside the retention window.</p>
-            <p>Probes that could not reach it are counted beside the rate as unreachable, not inside it; Uptime is where being down shows. Blobs without this validator&rsquo;s signature on chain are not counted either way.</p>
+        <Tile label="Faults"
+          value={faults > 0 ? <><Mark tier="fault" />{faults.toLocaleString("en-US")}</> : rated ? "0" : "—"}
+          tone={faults > 0 ? "fault" : "absent"}
+          sub={faults > 0 ? `over ${fmtCount(v.serve_rate)} rated probes` : rated ? `none over ${v.serve_rate.den.toLocaleString("en-US")} rated probes` : "nothing rated in this window"}
+          info={<>
+            <p>The validator answered but did not hand over a shard it had signed for.</p>
+            <p>The only number counted against a validator. Unreachable, unproven and unregistered are not faults.</p>
           </>} />
-        <Layer label="Held to the end" r={last?.serve_rate}
-          sample={last ? `${fmtCount(last.serve_rate)} at ${last.key}` : undefined}
-          what={<>
-            <p>The serve rate at the last probe point inside the retention window.</p>
-            <p>If this is lower than the earlier points, shards were pruned before the deadline.</p>
+        <Tile label="Obligations"
+          value={decided ? fmtPct(o!.rate) : "—"}
+          tone={decided ? undefined : "absent"}
+          sub={!o || o.total === 0 ? "none proven in this window"
+            : decided ? `${o.served.toLocaleString("en-US")} of ${(o.served + o.broken).toLocaleString("en-US")} kept`
+            : `${o.total.toLocaleString("en-US")} proven, none observed serving`}
+          info={<>
+            <p>Shards this validator signed for, one observation each, judged by the last probe before the retention deadline: kept if it was handed over then, broken if any probe was a fault.</p>
+            <p>Obligations never seen served and never seen broken are listed below, not in the rate.</p>
           </>} />
-        {/*
-          Throughput, not duration. Assignments run from 148 rows to 4,096, so
-          a validator carrying eight times the rows takes longer for the same
-          quality of service — sorting the set on raw milliseconds puts the
-          busiest validators at the top and calls them slow. Rows per second is
-          what makes two validators comparable; the percentiles are printed
-          underneath because they are what an operator recognises from their
-          own logs.
-        */}
-        <Tile label="Throughput" unit="rows/s"
-          value={v.serve_rows_per_second == null ? "—" : v.serve_rows_per_second.toLocaleString("en-US")}
-          tone={v.serve_rows_per_second == null ? "absent" : undefined}
+        <Tile label="Throughput"
+          value={v.serve_bytes_per_second == null ? "—" : bytesPerSecond(v.serve_bytes_per_second)}
+          tone={v.serve_bytes_per_second == null ? "absent" : undefined}
           sub={v.serve_latency_p50_ms != null
-            ? `${v.serve_latency_p50_ms.toLocaleString("en-US")} ms typical · ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms p95`
+            ? `${v.serve_latency_p50_ms.toLocaleString("en-US")} ms typical · ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms p95, whole probe`
             : "not observed in this window"}
           info={<>
-            <p>Rows delivered per second, from connect to verified rows, over healthy probes.</p>
-            <p>Rows per second rather than milliseconds, because a bigger shard takes longer. Failed probes are not included.</p>
+            <p>Bytes handed over per second during the download itself, median over {v.serve_throughput_sample.toLocaleString("en-US")} healthy probes. Connecting and checking the certificate are not in it.</p>
+            <p>The milliseconds underneath are the whole probe, dial to verified rows: what a client waits for.</p>
           </>} />
       </div>
 
+      {o && o.total > 0 && (
+        <p className="coverage">
+          {o.total.toLocaleString("en-US")} proven obligation{o.total === 1 ? "" : "s"} in this window:
+          {" "}{o.served.toLocaleString("en-US")} kept, {o.broken.toLocaleString("en-US")} broken
+          {o.end_unobserved > 0 && <>, {o.end_unobserved.toLocaleString("en-US")} served early with no verdict at the end</>}
+          {o.unobserved > 0 && <>, <strong>{o.unobserved.toLocaleString("en-US")} never observed serving</strong>
+            {" "}({[o.unobserved_reachable > 0 && `${o.unobserved_reachable} reachable, nothing handed over`,
+                   o.unobserved_unreachable > 0 && `${o.unobserved_unreachable} unreachable`,
+                   o.unobserved_not_probed > 0 && `${o.unobserved_not_probed} not probed by us`].filter(Boolean).join(" · ")})</>}.
+          <Info label="Never observed serving">
+            <p>An obligation we could never see kept: no probe of it came back with the shard, and none came back with a fault either.</p>
+            <p><em>Reachable, nothing handed over</em> means the endpoint completed a TLS handshake and then answered with an error, a rate limit, or a certificate no client would accept. <em>Unreachable</em> means it never completed one. <em>Not probed</em> means we skipped the download ourselves: backoff after repeated failures, a load cap, or a slot that elapsed.</p>
+            <p>None of these is a fault. All of them are why the rate above may say less than it seems to.</p>
+          </Info>
+        </p>
+      )}
+
       {points.some((p) => p.serve_rate.den > 0) && <section className="card" style={{ marginTop: "var(--s4)" }}><Graduation points={points} /></section>}
+
+      {rated && (
+        <p className="coverage">
+          Per probe: <strong>{fmtPct(v.serve_rate)}</strong> ({fmtCount(v.serve_rate)}){heldOut.length > 0 && ` · ${heldOut.join(" · ")}`}.
+          <Info label="Per probe">
+            <p>The same shards counted one probe at a time: healthy over healthy plus fault, inside the retention window. Four probes of one shard are near copies of each other, so this number looks more certain than it is; the obligation figure above is the one to lean on.</p>
+            <p>Beside it, the probes the rate does not speak for, by class.</p>
+          </Info>
+        </p>
+      )}
 
       {(unattested > 0 || unknown > 0) && (
         <p className="coverage">

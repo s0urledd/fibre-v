@@ -157,8 +157,16 @@ export default function Verdict({ cls, title }: { cls: string; title?: string })
  * blank except where there is something to report. On the fault column that
  * means a single accusation in fifty rows is the only ink in its column.
  */
-export function Count({ n, tier }: { n: number | undefined; tier: Tier }) {
-  if (!n) return <span className="nil" title="none">·</span>;
+/**
+ * A count of one tier. Zero and "nothing was rated" used to print the same
+ * dot: `rated` says which it is, so a validator with a thousand rated probes
+ * and no fault reads 0, and one nobody ever reached reads a dot.
+ */
+export function Count({ n, tier, rated }: { n: number | undefined; tier: Tier; rated?: boolean }) {
+  if (!n) {
+    if (rated) return <span className="nil zero" title="none in this window">0</span>;
+    return <span className="nil" title="nothing rated in this window">·</span>;
+  }
   return (
     <span className={`verdict verdict--${tier}`}>
       <Mark tier={tier} />

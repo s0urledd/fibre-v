@@ -259,7 +259,7 @@ validator when all the observer knew was that it could not reach the host.
 | serve rate | 26 / 26 | every probe that produced a verdict was a shard served |
 | verdict coverage | 26 / 32 | six in-window probes produced no verdict, and the page says so |
 | held out | `UNREACHABLE` 6 | named, not hidden |
-| by obligation | 8 / 8 | one observation per (validator, blob), the basis for any interval |
+| by obligation | 8 / 8 | one observation per (validator, blob), judged by its newest probe; the headline and the basis for any interval |
 | by schedule point | w1 8/8, w2 6/6, w3 6/6, w4 6/6 | the drop from 8 to 6 is the moment the server was killed |
 | attestation | 32 / 32 | every probe was of an obligation the chain proves |
 | worst correlated point | 1 of 4 unreachable, below the 0.5 threshold | one validator down is not the observer's own network |

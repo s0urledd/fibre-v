@@ -26,12 +26,16 @@ publications and about 84,000 probes. The draw is seeded, so the same fixture
 comes out every run and two screenshots are comparable.
 
 The population is deliberately mostly healthy, because a fixture that is half
-broken teaches you to design for a network that does not exist. Nine of the
+broken teaches you to design for a network that does not exist. Eleven of the
 sixty are impaired, each in a different way, so every class the taxonomy can
 produce is present and findable: a repeated fault, two occasional ones, two
 outages that begin at a known hour, a validator with no registered host, one
-whose certificate has lapsed, one that never signed, and one that prunes before
-the deadline.
+whose certificate has lapsed, one that never signed, one that prunes before
+the deadline, one that is reachable and answers every download with a server
+error, and one that rate-limits most downloads. Two more are jailed: their
+endpoint rows are closed with the reason the collector records and their
+heartbeats stop at that moment, which is how the table's "jailed" word and
+the validator page's "left the bonded list" line get exercised.
 
 The reachability heartbeat is generated at its real cadence — every five
 minutes for seven days, so 2,016 samples per registered validator — because
