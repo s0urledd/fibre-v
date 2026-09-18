@@ -4,8 +4,8 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useApi, type Blob, type Probe, utc, ago, bytes, nsDisplay, tia, shortBech } from "@/lib/api";
 import Verdict from "@/components/Verdict";
-import Timeline from "@/components/Timeline";
-import Square from "@/components/Square";
+import ProbeMatrix from "@/components/ProbeMatrix";
+import Meter from "@/components/Meter";
 import Info from "@/components/Info";
 
 type Detail = {
@@ -42,7 +42,6 @@ function Recon({ b }: { b: Blob }) {
         </Info>
       </div>
       <div className="recon-body">
-        <Square served={r.served_distinct_rows} needed={r.needed_rows} total={total} />
         <div className="recon-figs">
           <div className="tile">
             <span className="label">Rows served</span>
@@ -55,6 +54,7 @@ function Recon({ b }: { b: Blob }) {
             <span className="sub">{r.attestation_known ? `${r.served_by_attested} of ${r.attested_validators} that signed` : "signatures not recorded"}</span>
           </div>
         </div>
+        <Meter value={r.served_distinct_rows} threshold={r.needed_rows} total={total} unit="rows" />
       </div>
     </div>
   );
@@ -67,7 +67,6 @@ function Page() {
   if (error) return <p className="notice err">{error}</p>;
   if (loading || !data) return <p className="muted">Loading…</p>;
   const b = data.blob;
-  const graceEnd = new Date(new Date(b.must_serve_until).getTime() + 150 * 1000).toISOString();
   const byPower = [...data.assignments].sort((a, c) => c.voting_power - a.voting_power || a.validator_address.localeCompare(c.validator_address));
   const lastByVal = new Map<string, Probe>();
   for (const p of data.probes) {
@@ -82,21 +81,24 @@ function Page() {
         <dt>promise hash</dt><dd className="mono">{b.promise_hash}</dd>
         <dt>commitment</dt><dd className="mono">{b.commitment}</dd>
         <dt>namespace</dt><dd className="mono">{nsDisplay(b.namespace)} <span className="faint">{b.namespace}</span></dd>
-        <dt>size</dt><dd className="mono">{bytes(b.blob_size)} <span className="muted">padded upload size</span></dd>
+        <dt>size</dt><dd className="mono" title="The padded upload size the module charges for, not the payload.">{bytes(b.blob_size)}</dd>
         <dt>publisher</dt><dd className="mono"><Link href={`/publisher/?addr=${b.signer}`}>{b.signer}</Link></dd>
         <dt>fee</dt><dd className="mono">{b.charge
-          ? <>{tia(b.charge.fee_utia)} <span className="muted">· {b.charge.gas_units.toLocaleString("en-US")} gas at 1 utia/gas, from the padded size · {b.charge.settled ? "settled from escrow" : "not settled"}{b.charge.timed_out && <span className="err"> · timed out{b.charge.processor && b.charge.processor !== b.signer ? `, reported by ${shortBech(b.charge.processor)}` : ""}</span>}</span></>
-          : <span className="muted">not recorded (publication ingested before payments were)</span>}</dd>
+          ? <span title={`${b.charge.gas_units.toLocaleString("en-US")} gas at 1 utia per gas, from the padded size`}>{tia(b.charge.fee_utia)}
+              {b.charge.timed_out
+                ? <span className="chip fault" title={b.charge.processor && b.charge.processor !== b.signer ? `Timeout reported by ${shortBech(b.charge.processor)}` : "The promise was never settled; its timeout charged the escrow"}>timed out</span>
+                : <span className="chip ok">settled</span>}</span>
+          : <span className="muted" title="Recorded before this observer kept payments.">—</span>}</dd>
         <dt>settled</dt><dd className="mono">height {b.settlement_height.toLocaleString("en-US")} · {utc(b.settlement_time)} ({ago(b.settlement_time)})</dd>
         <dt>created</dt><dd className="mono">{utc(b.creation_timestamp)}</dd>
-        <dt>must serve until</dt><dd className="mono">{utc(b.must_serve_until)} <span className="muted">= creation + max(payment_promise_timeout {data.params.payment_promise_timeout_s}s, shard_retention {data.params.shard_retention_s}s)</span></dd>
+        <dt>must serve until</dt><dd className="mono" title={`creation + max(payment_promise_timeout ${data.params.payment_promise_timeout_s}s, shard_retention ${data.params.shard_retention_s}s)`}>{utc(b.must_serve_until)} <span className="faint">({ago(b.must_serve_until)})</span></dd>
         <dt>assignment</dt><dd className="mono">{b.validators_with_rows} validators · {b.sigma_rows} rows assigned · {b.distinct_rows} distinct{b.assignment_error && <span className="err"> · {b.assignment_error}</span>}</dd>
       </dl>
       </section>
       <section className="card"><Recon b={b} /></section>
-      <h2>Probes</h2>
+      <h2>Probes <span className="sample">latest verdict per validator and probe point</span></h2>
       {data.probes.length === 0 ? <p className="muted">No probes yet.</p> : (
-        <Timeline probes={data.probes} validators={byPower.map((a) => ({ address: a.validator_address, row_count: a.row_count, moniker: a.moniker }))} settled={b.settlement_time} mustServeUntil={b.must_serve_until} graceEnd={graceEnd} />
+        <ProbeMatrix probes={data.probes} validators={byPower.map((a) => ({ address: a.validator_address, row_count: a.row_count, moniker: a.moniker }))} />
       )}
       
       <h2>Assigned validators</h2>

@@ -1,9 +1,9 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Market, type Publisher, type PublisherShare, fmtPct, fmtCount, fmtShare, bytes, utc, ago, tia, shortBech, publisherName } from "@/lib/api";
+import { useApi, type Market, type Publisher, fmtPct, fmtCount, fmtShare, bytes, utc, ago, tia, shortBech, publisherName } from "@/lib/api";
 import Tile from "@/components/Tile";
-import Bars from "@/components/Bars";
+import Chart, { calendar, CATEGORICAL, OTHER_COLOR, type Row, type Series } from "@/components/Chart";
 import Info from "@/components/Info";
 
 const WINDOWS = ["24h", "7d", "30d", "all"];
@@ -20,12 +20,18 @@ export default function PublishersPage() {
   const { data: list } = useApi<{ publishers: Publisher[] }>(`/v1/publishers?window=${win}`);
   const busy = loading && !m;
   const pubs = list?.publishers ?? [];
-  const any = !!m && m.settlements + m.timeouts + m.deposits.count > 0;
 
   return (
     <>
       <div className="section-head">
         <h1>Publishers</h1>
+        {m && (
+          <Info label="About these figures">
+            <p>Everything on this page is a count of something the chain recorded; none of it was measured by this observer.</p>
+            <ul>{m.notes.map((n) => <li key={n}>{n}</li>)}</ul>
+            <p className="mono">fee = ({m.price_formula.base_gas.toLocaleString("en-US")} + {m.price_formula.gas_per_chunk.toLocaleString("en-US")} × ⌈size / {bytes(m.price_formula.chunk_bytes)}⌉) gas × {m.price_formula.utia_per_gas} utia</p>
+          </Info>
+        )}
         {m?.computed_at && (
           <span className="sample" title={`Snapshot taken ${utc(m.computed_at)}, computed in ${m.compute_ms} ms.`}>updated {ago(m.computed_at)}</span>
         )}
@@ -82,29 +88,40 @@ export default function PublishersPage() {
           </>} />
       </div>
 
-      {m && any && (
-        <div className="card">
-          <div className="card-head">
-            <h2>By day</h2>
-            <span className="sample">UTC days · {m.window.name === "all" ? "whole history" : `last ${m.window.name}`}</span>
+      {m && (() => {
+        const days = calendar(m.window.start.startsWith("0001-") || m.window.name === "all"
+          ? new Date((m.daily[0]?.day ?? m.window.end.slice(0, 10)) + "T00:00:00Z") : new Date(m.window.start), new Date(m.window.end));
+        const byDay = new Map(m.daily.map((d) => [d.day, d]));
+        const feeRows: Row[] = days.map((d) => {
+          const b = byDay.get(d);
+          return { x: d, label: d.slice(5), values: { fees: b?.fees_utia ?? 0 },
+            note: b ? `${b.settlements} settlement${b.settlements === 1 ? "" : "s"} · ${bytes(b.bytes)}${b.timeouts ? ` · ${b.timeouts} timed out` : ""}` : "nothing settled" };
+        });
+        const pubs = m.top_publishers.map((p) => p.publisher);
+        const series: Series[] = pubs.map((p, i) => ({ key: p, label: publisherName(m.top_publishers[i]), color: CATEGORICAL[i] }));
+        if (m.other_publishers) series.push({ key: "", label: `${m.other_publishers.publishers} other`, color: OTHER_COLOR });
+        const byteRows: Row[] = days.map((d) => {
+          const values: Record<string, number> = {};
+          for (const r of m.daily_by_publisher) if (r.day === d) values[r.publisher] = (values[r.publisher] ?? 0) + r.bytes;
+          const b = byDay.get(d);
+          for (const k of Object.keys(values)) values[k] = values[k] / (1 << 20); // MiB, so the axis steps are round
+          return { x: d, label: d.slice(5), values, note: b ? `${b.settlements} settlement${b.settlements === 1 ? "" : "s"}` : "nothing settled" };
+        });
+        const mib = (v: number) => v >= 1024 ? `${(v / 1024).toFixed(2)} GiB` : v >= 100 ? `${Math.round(v)} MiB` : v >= 10 ? `${v.toFixed(1)} MiB` : `${v.toFixed(2)} MiB`;
+        const axisTia = (v: number) => v === 0 ? "0" : v >= 100e6 ? Math.round(v / 1e6).toLocaleString("en-US") : v >= 1e6 ? (v / 1e6).toFixed(v % 1e6 ? 1 : 0) : (v / 1e6).toFixed(2);
+        const axisMib = (v: number) => v >= 1024 ? `${(v / 1024).toFixed(v % 1024 ? 1 : 0)} GiB` : `${Number.isInteger(v) ? v : v.toFixed(1)} MiB`;
+        return (
+          <div className="charts">
+            <div className="card">
+              <Chart title="Fees settled per day (TIA)" series={[{ key: "fees", label: "fees", color: "var(--accent)" }]} rows={feeRows}
+                fmt={(v) => tia(v)} fmtAxis={axisTia} />
+            </div>
+            <div className="card">
+              <Chart title="Bytes settled per day, by publisher" series={series} rows={byteRows} fmt={mib} fmtAxis={axisMib} />
+            </div>
           </div>
-          <div className="bars-row">
-            <Bars days={m.daily} value={(d) => d.fees_utia} fmt={(v) => tia(v)} label="Fees settled" />
-            <Bars days={m.daily} value={(d) => d.bytes} fmt={bytes} label="Bytes settled" />
-          </div>
-        </div>
-      )}
-
-      {m && m.top_publishers.length > 0 && (
-        <div className="card">
-          <div className="card-head">
-            <h2>Share of fees</h2>
-            <span className="sample">top {m.top_publishers.length}{m.other_publishers ? ` + ${m.other_publishers.publishers} other` : ""}</span>
-            {m.largest_poster && <span className="sample">· largest poster {publisherName(m.largest_poster)} ({bytes(m.largest_poster.bytes)})</span>}
-          </div>
-          <Shares parts={m.top_publishers} other={m.other_publishers} />
-        </div>
-      )}
+        );
+      })()}
 
       <div className="tablewrap" style={{ marginTop: "var(--s4)" }}>
         <table>
@@ -148,38 +165,6 @@ export default function PublishersPage() {
         </table>
       </div>
 
-      {m && (
-        <div className="note" style={{ marginTop: "var(--s5)" }}>
-          <span className="label">What these numbers are <Info label="Price formula"><p>{m.price_formula.note}</p><p className="mono">base {m.price_formula.base_gas.toLocaleString("en-US")} gas · {m.price_formula.gas_per_chunk.toLocaleString("en-US")} gas per {bytes(m.price_formula.chunk_bytes)} · {m.price_formula.utia_per_gas} utia per gas</p></Info></span>
-          <ul className="notes">
-            {m.notes.map((n) => <li key={n}>{n}</li>)}
-          </ul>
-        </div>
-      )}
     </>
-  );
-}
-
-/** A single stacked bar of fee shares, top publishers then the rest. */
-function Shares({ parts, other }: { parts: PublisherShare[]; other: PublisherShare | null }) {
-  const all = other ? [...parts, { ...other, publisher: "", label: `${other.publishers} other` }] : parts;
-  return (
-    <div className="shares">
-      <div className="shares-bar" role="img" aria-label="share of fees by publisher">
-        {all.map((p, i) => (
-          <span key={p.publisher || "other"} className={"seg" + (p.publisher ? "" : " other")} style={{ flexBasis: `${Math.max(0.5, (p.fees_share ?? 0) * 100)}%`, opacity: p.publisher ? 1 - i * 0.14 : undefined }}
-            title={`${publisherName(p)} · ${tia(p.fees_utia)} · ${fmtShare(p.fees_share)} of fees · ${bytes(p.bytes)}`} />
-        ))}
-      </div>
-      <ul className="shares-legend">
-        {all.map((p, i) => (
-          <li key={p.publisher || "other"}>
-            <span className={"swatch" + (p.publisher ? "" : " other")} style={{ opacity: p.publisher ? 1 - i * 0.14 : undefined }} />
-            <span className="who">{p.publisher ? <Link href={`/publisher/?addr=${p.publisher}`} className="mono" title={p.publisher}>{publisherName(p)}</Link> : <span className="muted">{p.label}</span>}</span>
-            <span className="figs mono faint">{fmtShare(p.fees_share)} · {tia(p.fees_utia)} · {bytes(p.bytes)}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }
