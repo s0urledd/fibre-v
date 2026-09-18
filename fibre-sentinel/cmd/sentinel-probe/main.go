@@ -75,6 +75,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("policy: %v", err)
 		}
+		// in-window points, the grace point and the post point: one request
+		// each per validator per publication
+		cfg.PointsPerPublication = float64(len(fracs) + 2)
 		p, err := policy.New(cfg)
 		if err != nil {
 			log.Fatalf("policy: %v", err)

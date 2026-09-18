@@ -462,3 +462,6 @@ td .sans { font-family: var(--sans); }
 @media (max-width: 720px) {
   .charts { grid-template-columns: 1fr; }
 }
+
+/* a probe at a point the observer does not trust itself at: kept, shown, counted nowhere */
+tr.suspect td { color: var(--text-3); }

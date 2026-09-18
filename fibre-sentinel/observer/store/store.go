@@ -34,7 +34,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 8
+const SchemaVersion = 9
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -229,6 +229,26 @@ var migrations = []migration{
 			// download step alone answer both. Nullable: a record written
 			// before the field existed says nothing about size.
 			`ALTER TABLE probes ADD COLUMN bytes_returned INTEGER`,
+		},
+	},
+	{
+		version: 9,
+		note:    "the evidence behind a verdict, on the row: returned row indices and digest, the gRPC code, the shadowing promise, and the code that judged it",
+		stmts: []string{
+			// A classification is a function of the wire result and the
+			// code. Without the returned indices nobody can re-run the
+			// assignment check behind a WRONG_ROWS or PARTIAL verdict;
+			// without the digest an INVALID_ROWS claim is "we saw it";
+			// without the gRPC code SERVER_ERROR and THROTTLED are a
+			// substring match on free text; without the build and pin the
+			// verdict cannot be traced to the code that made it. All
+			// nullable: rows from before the fields existed say nothing.
+			`ALTER TABLE probes ADD COLUMN row_indices TEXT`,
+			`ALTER TABLE probes ADD COLUMN rows_sha256 TEXT`,
+			`ALTER TABLE probes ADD COLUMN rpc_code TEXT`,
+			`ALTER TABLE probes ADD COLUMN shadowed_by TEXT`,
+			`ALTER TABLE probes ADD COLUMN observer_build TEXT`,
+			`ALTER TABLE probes ADD COLUMN app_version INTEGER`,
 		},
 	},
 }
@@ -663,9 +683,9 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		 finished_at, lateness_ms, dns_ok, dns_ms, tcp_ok, tcp_ms, tls_ok, tls_ms, tls_version, peer_cert_sha256,
 		 identity_ok, identity_reason, download_ok, download_ms, rows_returned, rows_expected, commitment_verified,
 		 assignment_verified, phase, outcome, classification, classification_reason, raw_error, total_duration_ms, raw_json,
-		 attested, bytes_returned)
+		 attested, bytes_returned, row_indices, rows_sha256, rpc_code, shadowed_by, observer_build, app_version)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		        ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(dedupe_key) DO NOTHING`,
 		m.DedupeKey(), m.Vantage, m.PromiseHash, m.Commitment, m.BlobVersion, ts(m.MustServeUntil), m.ValidatorSetHeight,
 		m.ValidatorAddress, m.ValidatorHost, b2i(m.Assigned), m.AssignedRowCount, m.ScheduleLabel, ts(m.ScheduledAt),
@@ -676,12 +696,48 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		b2i(m.Download.CommitmentVerified), b2i(m.Download.AssignmentVerified),
 		string(m.Phase), string(m.Outcome), string(m.Classification), m.ClassificationReason, m.RawError,
 		m.TotalDurationMS, string(raw),
-		probeAttested(m), probeBytes(m))
+		probeAttested(m), probeBytes(m),
+		nullIfEmpty(rowIndicesJSON(m)), nullIfEmpty(m.Download.RowsSHA256), nullIfEmpty(m.Download.RPCCode),
+		nullIfEmpty(m.Download.ShadowedBy), nullIfEmpty(observerBuild(m)), observerAppVersion(m))
 	if err != nil {
 		return false, fmt.Errorf("probe %s: %w", m.DedupeKey(), err)
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// nullIfEmpty stores "" as NULL: an absent fact, not an empty one.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// rowIndicesJSON is the returned row indices as a JSON array, "" when none.
+func rowIndicesJSON(m probe.Measurement) string {
+	if len(m.Download.RowIndices) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(m.Download.RowIndices)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func observerBuild(m probe.Measurement) string {
+	if m.Observer == nil {
+		return ""
+	}
+	return m.Observer.Build
+}
+
+func observerAppVersion(m probe.Measurement) any {
+	if m.Observer == nil || m.Observer.AppVersion == 0 {
+		return nil
+	}
+	return m.Observer.AppVersion
 }
 
 // probeBytes maps the bytes handed over to a nullable column. A record from

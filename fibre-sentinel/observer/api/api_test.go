@@ -191,8 +191,14 @@ func TestValidatorsAndBlobs(t *testing.T) {
 		t.Fatalf("the spans must offer the same 'all' the overview does, got %q", one.Windows[3].Window.Name)
 	}
 	// the fixture is older than 30 days, so only "all" carries its probes
-	if one.Windows[3].Count == 0 || one.Windows[3].Oblig.Den == 0 {
-		t.Fatalf("the 'all' span has no rated probes or obligations: %+v", one.Windows[3])
+	if one.Windows[3].Count == 0 {
+		t.Fatalf("the 'all' span has no probes: %+v", one.Windows[3])
+	}
+	// The sample predates signature verification (attested NULL), which is
+	// not evidence either way: no obligation in it is proven, so the
+	// obligation figures are empty rather than counted under older rules.
+	if one.Windows[3].Oblig.Den != 0 {
+		t.Fatalf("obligations counted over records with unknown attestation: %+v", one.Windows[3])
 	}
 	if len(one.Excluded) == 0 {
 		t.Fatal("the detail response must say which classes the rate leaves out")

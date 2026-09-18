@@ -108,7 +108,7 @@ One sentence each, and what a reader should conclude.
 | `FAULT` | an identity-verified endpoint, for a shard the chain proves it stored, **said it has no such shard** (`NOT_FOUND` in window), **returned bytes that do not verify against the commitment** (`INVALID_ROWS`, any phase), or **returned rows outside this promise's assignment** that verify against nothing (`WRONG_ROWS`/`PARTIAL` in window or grace) | the validator broke its retention promise; this is the only class that counts against a validator. Three conditions, each reproducible by anyone who repeats the probe. One margin: a `NOT_FOUND` whose answer arrives within 30 s of `must_serve_until` is graded as grace (`TOLERATED`) and the row says `phase_note: not_found_at_deadline`, because the server prunes on a minute tick against its own clock and the RPC reaches it tens of seconds after the probe's phase was fixed. The fault count on the overview and per validator counts every phase; the serve rate's population is in-window only |
 | `UNREACHABLE` | assigned and attested, in window, and the observer could not complete a conversation at all: `DNS_FAIL`, `TCP_REFUSED`, `TCP_TIMEOUT`, `TCP_UNREACHABLE`, `TLS_HANDSHAKE_FAIL`, `RPC_UNAVAILABLE`, `RPC_ERROR` | we could not get to it. From one vantage that is not distinguishable from a route, firewall or peering problem on the observer's own path, so it is published in full beside the serve rate and kept out of it |
 | `NOT_REGISTERED` | assigned validator with no Fibre host in `x/valaddr` at the time of the probe (`NO_REGISTERED_HOST`) | a registry state, not a refusal. Jailing and unbonding remove a provider from `AllBondedFibreProviders` while the chain keeps the entry: it is garbage-collected only once the validator is gone from staking state, or jailed and unbonded for longer than the unbonding time plus seven days |
-| `SHADOWED_SHARD` | assigned validator returned rows that **verify against the blob commitment** but whose indices are not this promise's assignment (`WRONG_ROWS` or `PARTIAL` with `commitment_verified`) | another promise over the same blob answered in this one's place. `DownloadShard` is addressed by the commitment alone and a store keeps one shard per commitment, so the validator has no way to tell the two apart. Never a fault |
+| `SHADOWED_SHARD` | assigned validator returned rows that **verify against the blob commitment**, are not this promise's assignment (`WRONG_ROWS` or `PARTIAL` with `commitment_verified`), and are **exactly the row set another settled promise over the same commitment assigns to this validator** (`shadowed_by` names it) | that promise answered in this one's place. `DownloadShard` is addressed by the commitment alone and a store keeps one shard per commitment, so the validator has no way to tell the two apart. Never a fault. Without a matching promise the same wire result is an incomplete or wrong delivery of this shard and is a `FAULT` in window and in grace: "shadowed" is shown, not assumed, and the row carries the returned indices so anyone can check |
 | `IDENTITY_EXPIRED` | certificate endorsed by the right consensus key, but its signed validity window has lapsed or has not started | a renewal running late. Endpoint hygiene, not impersonation and not a retention failure |
 | `IDENTITY_MISMATCH` | certificate not endorsed by this validator's consensus key, any validator, any phase (judged before attestation: a certificate is a property of the endpoint) | no client will download from this endpoint, so it is as unusable as one that does not answer. Shown as the endpoint's status and in the endorsement rate, held out of the serve rate: a wrong certificate proves nothing about any shard |
 | `SERVER_ERROR` | assigned and attested, in window, and the endpoint answered with an application error instead of the shard (`SERVER_ERROR` outcome) | the server was reached and did not say it lacks the shard. From one probe this is not distinguishable from a transient fault (an overloaded process, a disk hiccup), so it is shown beside the rate and never inside it; a server that errors at every point is visible as such on its own page. In grace it is `TOLERATED`, after the window `UNREACHABLE_POST_WINDOW` |
@@ -156,6 +156,15 @@ One sentence each, and what a reader should conclude.
   count, never around the probe count, and the dashboard states it as an
   **upper bound on the fault rate**, because that is the direction an
   accusation is made in.
+- **Which obligations.** `attested = 1` only: an obligation the settled
+  promise proves. `attested = 0` is nothing to keep or break; `attested`
+  NULL (a record from before signatures were verified) is not evidence
+  either way and is outside the count, reported as
+  `attestation.unknown_probes`. An obligation belongs to a window by its
+  publication's `settlement_time`, not by each probe's `started_at`, so it
+  is judged whole or not at all. The window's end is the moment the verdict
+  is drawn; an obligation whose `must_serve_until` is later is `pending` and
+  in no rate.
 - **An obligation is judged by its newest in-window probe**, the same rule
   the per-blob reconstructability verdict uses; a `NOT_PROBED` or
   `PROBE_ERROR` row is never the newest while a real probe exists. The
@@ -186,6 +195,37 @@ One sentence each, and what a reader should conclude.
   the rows that have no rate at all). A single unlucky probe used to
   render as "0.0%" beside a named validator and sort it above one with a
   hundred real faults.
+- **Suspect points** (`vantage_health.suspect`). At any in-window schedule
+  point where at least `min_validators` (3) and at least `threshold` (50%)
+  of the distinct validators probed were `UNREACHABLE`, or at least
+  `fault_threshold` (50%) and three were `FAULT`, every probe row at that
+  `scheduled_at` is left out of the per-probe rate, the coverage and
+  held-out counts, the obligation buckets, the per-point breakdown and the
+  fault count, network-wide and per validator alike. Validators fail
+  independently; one observer's network, or one observer's stale
+  assignment, does not. The points, the shares and the number of rows
+  removed are published so the exclusion is visible, and the rows keep
+  their classification in the store: a verifier sees what was excluded and
+  why.
+- **Stale assignment pin.** The prober polls `abci_info` and stamps the
+  chain's `app_version` on every row. When it is above the celestia-app
+  major the assignment constants are pinned to
+  (`fibre-assign.PinnedCelestiaAppMajor`), every probe that depends on
+  assignment is `PROBE_ERROR` ("assignment pin stale"), never `HEALTHY` or
+  `FAULT`; identity and registry verdicts, which do not depend on
+  assignment, are still drawn. The row says `observer.pin_stale`, so the
+  gap is attributable after the fact.
+- **Evidence on the row.** Every measurement records, beside the verdict:
+  `download.row_indices` (the indices returned, in returned order),
+  `download.rows_sha256` (SHA-256 over the returned row payloads in that
+  order), `download.rpc_code` (the gRPC status code of a failed download),
+  `download.shadowed_by` (the promise whose assignment the returned rows
+  match), `observer.build` (the observer's VCS revision), and
+  `observer.assign_pin` / `observer.app_version`. The store keeps them as
+  columns (`row_indices`, `rows_sha256`, `rpc_code`, `shadowed_by`,
+  `observer_build`, `app_version`) and `/v1/probes` publishes them. A
+  classification is a function of the wire result and the code; with these
+  fields both halves are on the row.
 - **Reachability** (`reachability_window`) is heartbeats that completed TLS
   over heartbeats sent, per validator and network-wide. The numerator is
   `tcp_ok = 1 AND tls_ok = 1`; whether the certificate was the right one is
@@ -274,7 +314,7 @@ column:
 | no signature from this validator on the settled promise | `UNATTESTED` | nothing proves it was ever sent the shard |
 | no answer from the endpoint at all | `UNREACHABLE` | from one vantage, indistinguishable from the observer's own path failing |
 | no Fibre host in the registry | `NOT_REGISTERED` | jailing and unbonding remove the provider from the bonded list; the chain keeps the entry |
-| another promise's rows for the same blob | `SHADOWED_SHARD` | `DownloadShard` takes a commitment, not a promise hash; the validator cannot tell them apart |
+| exactly another settled promise's rows for the same blob | `SHADOWED_SHARD` | `DownloadShard` takes a commitment, not a promise hash; the validator cannot tell them apart. Genuine rows matching no promise's assignment are a `FAULT`: an incomplete delivery |
 | a lapsed but correctly signed certificate | `IDENTITY_EXPIRED` | a late renewal, not someone else answering |
 | a certificate signed by the wrong consensus key | `IDENTITY_MISMATCH` | an unusable endpoint, which is a statement about the endpoint (its status says so), not about a shard |
 | an application error instead of the shard | `SERVER_ERROR` | the server did not say it lacks the shard; from one probe a hiccup and a loss look the same |
@@ -304,6 +344,13 @@ what the measurement cannot separate.
   A Fibre server admits a bounded number of connections, so this observer
   occupies two slots where the reference client occupies one, and a busy
   server is correspondingly more likely to look unreachable to it.
+- **Shadowing needs the other promise.** `SHADOWED_SHARD` requires the
+  prober to know the other promise over the same commitment. It knows every
+  live publication in `publications.jsonl`; a promise settled in a block the
+  scanner could not read (a scan gap) is unknown to it, and rows answered
+  from that promise's shard would be filed as a `FAULT`. The gap is listed
+  on the overview and the row carries the returned indices, so the verdict
+  is contestable with the missing publication in hand.
 - **One vantage.** Every reachability observation comes from a single network
   path. `/v1/network` publishes the worst schedule point in the window by how
   many validators were unreachable at once, because validators fail

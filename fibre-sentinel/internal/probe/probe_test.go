@@ -135,11 +135,13 @@ func TestClassify_Taxonomy(t *testing.T) {
 		phase    Phase
 		outcome  Outcome
 		want     Classification
-		// commitmentVerified matters only for WRONG_ROWS and PARTIAL, where
-		// it is the whole question: rows that verify against the commitment
-		// but carry the wrong indices mean another promise answered in this
-		// one's place, which no validator can prevent.
+		// commitmentVerified and shadowed matter only for WRONG_ROWS and
+		// PARTIAL: rows that verify against the commitment and are exactly
+		// another settled promise's assignment mean that promise answered
+		// in this one's place, which no validator can prevent. Verified
+		// rows with no such promise are an incomplete delivery: a fault.
 		commitmentVerified bool
+		shadowed           bool
 	}
 	// Every existing row describes an ATTESTED validator: one the settled
 	// promise proves stored the shard. The unattested rows are a separate
@@ -164,10 +166,15 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassFault},
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassFault},
 		// rows that DO verify are another promise's shard for the same blob
-		{assigned: true, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true},
-		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassShadowedShard, commitmentVerified: true},
-		{assigned: true, phase: PhaseGrace, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true},
-		{assigned: true, phase: PhasePost, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true, shadowed: true},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassShadowedShard, commitmentVerified: true, shadowed: true},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true, shadowed: true},
+		{assigned: true, phase: PhasePost, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true, shadowed: true},
+		// verified rows, no promise that assigns them: an incomplete delivery
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassFault, commitmentVerified: true},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassFault, commitmentVerified: true},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomePartial, want: ClassFault, commitmentVerified: true},
+		{assigned: true, phase: PhasePost, outcome: OutcomePartial, want: ClassServedPastWindow, commitmentVerified: true},
 		// no registered host is a registry state, not a refusal to serve
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeNoHost, want: ClassNotRegistered},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeNoHost, want: ClassNotRegistered},
@@ -214,7 +221,7 @@ func TestClassify_Taxonomy(t *testing.T) {
 	for _, r := range rows {
 		got, reason := Classify(Evidence{
 			Assigned: r.assigned, Attested: true, Phase: r.phase,
-			Outcome: r.outcome, CommitmentVerified: r.commitmentVerified,
+			Outcome: r.outcome, CommitmentVerified: r.commitmentVerified, Shadowed: r.shadowed,
 		})
 		if got != r.want {
 			t.Errorf("Classify(assigned=%v, attested, %s, %s, commitmentVerified=%v) = %s (%q), want %s",
@@ -288,7 +295,7 @@ func TestClassify_ShadowedShardIsNeverAFault(t *testing.T) {
 	for _, phase := range []Phase{PhaseInWindow, PhaseGrace, PhasePost} {
 		for _, o := range []Outcome{OutcomeWrongRows, OutcomePartial} {
 			got, reason := Classify(Evidence{
-				Assigned: true, Attested: true, Phase: phase, Outcome: o, CommitmentVerified: true,
+				Assigned: true, Attested: true, Phase: phase, Outcome: o, CommitmentVerified: true, Shadowed: true,
 			})
 			if got != ClassShadowedShard {
 				t.Errorf("%s %s with verified rows = %s (%q), want %s", phase, o, got, reason, ClassShadowedShard)
@@ -301,6 +308,60 @@ func TestClassify_ShadowedShardIsNeverAFault(t *testing.T) {
 	// rows that do not verify against the commitment are still corrupt data
 	if got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeWrongRows}); !got.CountsAgainst() {
 		t.Errorf("unverifiable rows in window = %s, want a fault", got)
+	}
+}
+
+// Verified rows that are not this promise's assignment, with no other
+// settled promise over the commitment assigning them, are an incomplete or
+// wrong delivery of this shard. Calling that "shadowed" made a validator
+// that lost half its shard and served the rest un-faultable, for as long as
+// the half it served verified.
+func TestClassify_PartialDeliveryWithoutAShadowIsAFault(t *testing.T) {
+	for _, phase := range []Phase{PhaseInWindow, PhaseGrace} {
+		for _, o := range []Outcome{OutcomeWrongRows, OutcomePartial} {
+			got, reason := Classify(Evidence{Assigned: true, Attested: true, Phase: phase, Outcome: o, CommitmentVerified: true})
+			if got != ClassFault {
+				t.Errorf("%s %s verified but unshadowed = %s (%q), want FAULT", phase, o, got, reason)
+			}
+			if !strings.Contains(reason, "no other settled promise") {
+				t.Errorf("%s %s: reason must say why it is not shadowed: %q", phase, o, reason)
+			}
+		}
+	}
+}
+
+// After a chain upgrade past the pinned major this build may assign rows the
+// chain does not. Every verdict that rests on assignment is then the
+// observer's problem, and must not become the whole set's fault at once.
+func TestClassify_StalePinIsAnObserverGapNotAFault(t *testing.T) {
+	for _, o := range []Outcome{OutcomeNotFound, OutcomeWrongRows, OutcomePartial, OutcomeInvalidRows, OutcomeServedOK} {
+		got, reason := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: o, PinStale: true})
+		if got != ClassProbeError {
+			t.Errorf("%s with a stale pin = %s (%q), want PROBE_ERROR", o, got, reason)
+		}
+	}
+	// identity and registry do not depend on assignment and are still judged
+	if got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeIdentityFail, PinStale: true}); got != ClassIdentityMismatch {
+		t.Errorf("identity failure with a stale pin = %s, want IDENTITY_MISMATCH", got)
+	}
+	if got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: OutcomeNoHost, PinStale: true}); got != ClassNotRegistered {
+		t.Errorf("no host with a stale pin = %s, want NOT_REGISTERED", got)
+	}
+}
+
+func TestShadowedBy(t *testing.T) {
+	cands := []ShadowCandidate{{PromiseHash: "a", Rows: []int{1, 2, 3}}, {PromiseHash: "b", Rows: []int{4, 5}}}
+	if got := shadowedBy([]uint32{3, 1, 2}, cands); got != "a" {
+		t.Errorf("exact set in another order = %q, want a", got)
+	}
+	if got := shadowedBy([]uint32{1, 2}, cands); got != "" {
+		t.Errorf("strict subset = %q, want none: a subset is an incomplete delivery, not another promise's shard", got)
+	}
+	if got := shadowedBy([]uint32{4, 5}, cands); got != "b" {
+		t.Errorf("second candidate = %q, want b", got)
+	}
+	if got := shadowedBy(nil, cands); got != "" {
+		t.Errorf("no rows = %q, want none", got)
 	}
 }
 

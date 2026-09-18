@@ -160,12 +160,14 @@ export default function Overview() {
         </div>
       )}
 
-      {net?.vantage_health?.correlated && (
+      {net && net.vantage_health?.suspect?.length > 0 && (
         <div className="note hold">
-          <span className="label">Possible problem on our side</span>
+          <span className="label">Problem on our side at {net.vantage_health.suspect.length} probe point{net.vantage_health.suspect.length === 1 ? "" : "s"}</span>
           <p>
-            At {utc(net.vantage_health.at)} ({net.vantage_health.label}), {fmtCount(net.vantage_health.worst_point)} validators were unreachable at the same time.
-            That pattern usually means a network problem at the observer. It is not counted against anyone.
+            {net.vantage_health.suspect.slice(0, 3).map((s) => `${utc(s.at)} (${s.label}): ${s.reason.includes("fault") ? `${fmtCount(s.fault)} validators faulted` : `${fmtCount(s.unreachable)} validators unreachable`} at once`).join("; ")}
+            {net.vantage_health.suspect.length > 3 ? `; and ${net.vantage_health.suspect.length - 3} more` : ""}.
+            {" "}Validators fail independently; half the set at the same minute is a network problem at the observer, or an observer that assigns rows wrongly.
+            The {net.vantage_health.suspect_rows.toLocaleString("en-US")} probes at these points are left out of every rate, bucket and fault count on this site.
           </p>
         </div>
       )}

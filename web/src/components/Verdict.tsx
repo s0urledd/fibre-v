@@ -65,7 +65,7 @@ const VERDICTS: Record<string, Def> = {
   },
   SHADOWED_SHARD: {
     label: "shadowed shard", tier: "held",
-    def: "The rows returned are genuine rows of this blob but not the indices this promise assigns. DownloadShard is addressed by the commitment alone and a store keeps one shard per commitment, so a second promise over the same blob answers in its place. The validator has no way to tell them apart.",
+    def: "The rows returned are genuine rows of this blob and are exactly the set another settled promise over the same blob assigns to this validator. DownloadShard is addressed by the commitment alone and a store keeps one shard per commitment, so that promise answers in this one's place; the validator has no way to tell them apart. Genuine rows that match no promise's assignment are an incomplete delivery and a fault.",
   },
   TOLERATED: {
     label: "tolerated", tier: "held",

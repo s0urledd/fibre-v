@@ -281,8 +281,20 @@ month. The JSONL files are the record and are never rotated by the tools;
 before a write does. When a disk fills, move the oldest JSONL files off the
 box (they are append-only; a copy is complete the moment it is taken) and
 rebuild the database from the rest if you want it smaller. Nothing here
-deletes a probe row: the "all" window is exactly that, and a rollup that
-prunes raw rows would have to say so on every figure it feeds.
+deletes a probe row yet: the "all" window is exactly that.
+
+**Retention decision (taken 2026-09-18, to be implemented before mainnet):**
+raw probe rows are kept for **90 days**; `raw_json` (the bulk of a row) is
+dropped after **30 days** while every typed column, including the evidence
+columns from schema 9, stays; beyond 90 days the "all" figures come from a
+**daily per-validator obligation rollup** (served, broken, end unobserved,
+unobserved by kind, pending, faults, reachability), and every figure that
+rests on the rollup says "rolled up after 90 days" beside its sample. The
+JSONL files are never rotated by the tools and remain the record; the
+daily export is what a verifier downloads. At mainnet's 148 MB/s the
+publication rate is many times mocha's, which is why the decision is
+written down now: a rollup added later could not reconstruct the "all"
+window it replaced.
 
 Two copies, both shipped:
 

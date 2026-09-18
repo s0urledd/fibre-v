@@ -23,3 +23,7 @@ sentinel-data/
 # observer test fixture (one consistent devnet run); the sentinel data-dir patterns above must not hide it
 !fibre-sentinel/observer/testdata/*.jsonl
 !fibre-sentinel/observer/testdata/state.json
+
+# python bytecode from the web fixture
+__pycache__/
+*.pyc

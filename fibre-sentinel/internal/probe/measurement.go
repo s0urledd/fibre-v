@@ -113,6 +113,29 @@ type Measurement struct {
 	// transport timeout (see Config.RetryTransportTimeout). Absent on
 	// single-attempt measurements; additive, so the schema version is unchanged.
 	Retry *RetryInfo `json:"retry,omitempty"`
+
+	// Observer identifies the code that produced and classified this row.
+	// A classification is a function of the code; a row that does not say
+	// which code cannot be re-derived. Additive, omitempty.
+	Observer *ObserverInfo `json:"observer,omitempty"`
+}
+
+// ObserverInfo is the build that wrote a measurement and the chain it
+// believed it was measuring against.
+type ObserverInfo struct {
+	// Build is the observer's VCS revision (suffixed "-dirty" when built
+	// from a modified tree), or "unknown" when the binary carries none.
+	Build string `json:"build"`
+	// AssignPin is the celestia-app commit the assignment constants were
+	// read from (fibre-assign PinnedCelestiaAppCommit).
+	AssignPin string `json:"assign_pin"`
+	// AppVersion is the chain's app version at the last poll before this
+	// probe, 0 when never read.
+	AppVersion uint64 `json:"app_version,omitempty"`
+	// PinStale is true when AppVersion is above the pinned major: the row
+	// assignment this build computes may not be the one the chain uses, so
+	// no retention verdict is drawn (see Classify).
+	PinStale bool `json:"pin_stale,omitempty"`
 }
 
 // RetryInfo records the first attempt of a probe that was retried once after
@@ -187,6 +210,28 @@ type DownloadResult struct {
 	DurationMS   int64 `json:"duration_ms"`
 	RowsReturned int   `json:"rows_returned"`
 	RowsExpected int   `json:"rows_expected"`
+	// RowIndices are the row indices the server returned, in the order it
+	// returned them. With RowsSHA256 this is the evidence behind every
+	// WRONG_ROWS, PARTIAL and SHADOWED_SHARD verdict: without the indices
+	// nobody can re-run the assignment check, and without the digest an
+	// INVALID_ROWS claim is only "we saw it". Empty when nothing came back.
+	RowIndices []uint32 `json:"row_indices,omitempty"`
+	// RowsSHA256 is the hex SHA-256 over the returned row payloads
+	// concatenated in returned order (proofs and the RLC vector excluded).
+	// Anyone holding the blob can recompute it from RowIndices.
+	RowsSHA256 string `json:"rows_sha256,omitempty"`
+	// RPCCode is the canonical gRPC status code of a failed DownloadShard
+	// ("NotFound", "Internal", "ResourceExhausted", ...), separate from the
+	// free-text error so the SERVER_ERROR / THROTTLED / NOT_FOUND split is
+	// machine-readable. Empty on success and on non-status errors.
+	RPCCode string `json:"rpc_code,omitempty"`
+	// ShadowedBy is the promise hash of another settled promise over the
+	// same commitment whose assignment for this validator is exactly the row
+	// set returned. Set only when the rows verify against the commitment
+	// but are not this promise's assignment: that is the one case where
+	// "another promise answered in this one's place" is shown rather than
+	// assumed. Empty means no such promise is known to this prober.
+	ShadowedBy string `json:"shadowed_by,omitempty"`
 	// BytesReturned is the row payload the server handed over: the sum of
 	// the row data bytes, proofs and the RLC vector excluded. Rows are not a
 	// unit of size — a row is as wide as the blob's square — so this is what

@@ -13,6 +13,8 @@ type Detail = {
   window: Window;
   validator: Validator;
   recent_probes: Probe[];
+  /** schedule points, over all time, that no rate counts: the observer's own correlated failures */
+  suspect_points: { at: string; label: string; reason: string }[];
 };
 
 // the same words the overview table uses for the same states
@@ -51,6 +53,7 @@ function Page() {
   const decided = !!o && o.rate.den > 0;
   const faults = v.faults ?? v.classes?.FAULT ?? 0;
   const rated = (v.serve_rate?.den ?? 0) > 0;
+  const suspect = new Map((data.suspect_points ?? []).map((s) => [s.at, s.reason.replace(",", " and ")]));
   const heldOut = Object.entries(v.serve_rate_held_out ?? {}).filter(([, n]) => n > 0)
     .sort((a, b) => b[1] - a[1]).map(([c, n]) => `${n.toLocaleString("en-US")} ${c.toLowerCase().replace(/_/g, " ")}`);
   return (
@@ -170,6 +173,7 @@ function Page() {
           {o.total.toLocaleString("en-US")} proven obligation{o.total === 1 ? "" : "s"} in this window:
           {" "}{o.served.toLocaleString("en-US")} kept, {o.broken.toLocaleString("en-US")} broken
           {o.end_unobserved > 0 && <>, {o.end_unobserved.toLocaleString("en-US")} served early with no verdict at the end</>}
+          {o.pending > 0 && <>, {o.pending.toLocaleString("en-US")} still inside the retention window</>}
           {o.unobserved > 0 && <>, <strong>{o.unobserved.toLocaleString("en-US")} never observed serving</strong>
             {" "}({[o.unobserved_reachable > 0 && `${o.unobserved_reachable} reachable, nothing handed over`,
                    o.unobserved_unreachable > 0 && `${o.unobserved_unreachable} unreachable`,
@@ -177,7 +181,8 @@ function Page() {
           <Info label="Never observed serving">
             <p>An obligation we could never see kept: no probe of it came back with the shard, and none came back with a fault either.</p>
             <p><em>Reachable, nothing handed over</em> means the endpoint completed a TLS handshake and then answered with an error, a rate limit, or a certificate no client would accept. <em>Unreachable</em> means it never completed one. <em>Not probed</em> means we skipped the download ourselves: backoff after repeated failures, a load cap, or a slot that elapsed.</p>
-            <p>None of these is a fault. All of them are why the rate above may say less than it seems to.</p>
+            <p>None of these is a fault. All of them are why the rate above may say less than it seems to. An obligation still inside its retention window has no verdict yet and is not in the rate either.</p>
+            <p>Only obligations the settled promise proves are counted: a blob without this validator&rsquo;s verified signature is nothing to keep or break.</p>
           </Info>
         </p>
       )}
@@ -214,13 +219,16 @@ function Page() {
           <thead><tr><th>started (UTC)</th><th>blob</th><th>point</th><th>phase</th><th>verdict</th><th>outcome</th><th className="right">rows</th><th className="right">ms</th></tr></thead>
           <tbody>
             {data.recent_probes.length === 0 && <tr><td colSpan={8} className="muted">No probes for this validator yet.</td></tr>}
-            {data.recent_probes.map((p) => (
-              <tr key={`${p.vantage}|${p.promise_hash}|${p.scheduled_at}`}>
+            {data.recent_probes.map((p) => {
+              const sus = suspect.get(p.scheduled_at);
+              return (
+              <tr key={`${p.vantage}|${p.promise_hash}|${p.scheduled_at}`} className={sus ? "suspect" : undefined}
+                title={sus ? `At this point ${sus} of the validators probed failed at once. That is the observer's problem, not theirs: nothing at this point counts in any rate.` : undefined}>
                 <td className="mono">{utc(p.started_at)}</td>
                 <td className="mono"><Link href={`/blob/?hash=${p.promise_hash}`}>{shortHex(p.promise_hash, 6)}</Link></td>
                 <td className="mono">{p.schedule_label}</td>
                 <td>{p.phase.replace("_", " ")}</td>
-                <td><Verdict cls={p.classification} title={p.classification_reason} /></td>
+                <td><Verdict cls={p.classification} title={p.classification_reason} />{sus && <span className="faint" title="excluded from every rate: correlated failure at this point"> (not counted)</span>}</td>
                 <td className="mono" title={p.raw_error || p.classification_reason}>
                   {p.outcome}
                   {p.attested === false && <span className="muted" title="No signature from this validator on this promise, so the probe is not in the serve rate."> (unproven)</span>}
@@ -231,9 +239,10 @@ function Page() {
                   )}
                 </td>
                 <td className="right mono">{p.rows_expected ? `${p.rows_returned}/${p.rows_expected}` : "—"}</td>
-                <td className="right mono">{p.total_duration_ms}</td>
+                <td className="right mono" title={[p.rpc_code && `gRPC ${p.rpc_code}`, p.shadowed_by && `answered from promise ${shortHex(p.shadowed_by, 6)}`, p.row_indices && `rows ${p.row_indices.length <= 6 ? p.row_indices.join(",") : p.row_indices.slice(0, 6).join(",") + "…"}`, p.rows_sha256 && `sha256 ${p.rows_sha256.slice(0, 12)}…`, p.observer_build && `build ${p.observer_build}`].filter(Boolean).join(" · ") || undefined}>{p.total_duration_ms}</td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
