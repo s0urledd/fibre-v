@@ -2,8 +2,10 @@ package scan
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/cosmos/cosmos-sdk/types/bech32"
 	"math"
 	"strings"
 	"time"
@@ -784,7 +786,11 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 	// never from a state query. A validator that re-registers later is
 	// probed at its new host, and the row can say the host changed.
 	for i := range table.Validators {
-		table.Validators[i].Host, table.Validators[i].HostSource = s.hosts.HostAt(table.Validators[i].Address, blk.Height, txIndex, s.gaps)
+		v := &table.Validators[i]
+		if v.RowCount > 0 && !s.hosts.Known(v.Address) {
+			s.lazySeed(ctx, v.Address, blk.Height)
+		}
+		v.Host, v.HostSource = s.hosts.HostAt(v.Address, blk.Height, txIndex, s.gaps)
 	}
 
 	return Publication{
@@ -869,20 +875,82 @@ func (s *Scanner) validatorSet(ctx context.Context, height int64) (valSetEntry, 
 // which is what a registration older than the scan looks like either way.
 func (s *Scanner) seedHosts(ctx context.Context, startHeight int64) {
 	s.hosts = NewHostHistory()
+	at, source := startHeight, HostFromSeed
 	provs, err := s.chain.BondedFibreProvidersAt(ctx, startHeight)
 	if err != nil {
-		provs, err = s.chain.BondedFibreProvidersAt(ctx, 0)
+		// The start's state is pruned: read the registry at the tip and
+		// record it at the tip's height. Settlements between the start and
+		// the tip with no event of their own are unknown, never this value.
+		_, tip, terr := s.chain.Status(ctx)
+		if terr == nil {
+			provs, err = s.chain.BondedFibreProvidersAt(ctx, tip)
+			at, source = tip, HostFromSeedCurrent
+		}
 	}
 	if err != nil {
 		s.log.Printf("WARNING: bonded registry could not be read to seed the host history (%v); host_at_settlement is unknown until a validator registers again", err)
 		return
 	}
-	s.hosts.Seed(startHeight, provs)
+	s.hosts.Seed(at, provs, source)
 	for _, e := range s.hosts.Entries() {
 		if err := s.store.AppendHostEvent(HostEvent{HostEntry: e, Time: time.Now().UTC()}); err != nil {
 			s.log.Printf("host_history: %v", err)
 			break
 		}
 	}
-	s.log.Printf("host history seeded at h=%d with %d registrations", startHeight, len(provs))
+	s.log.Printf("host history seeded at h=%d (%s) with %d registrations", at, source, len(provs))
+}
+
+// lazySeed reads one validator's registration the first time it appears in
+// an assignment with nothing on record: the bonded seed misses a validator
+// that was jailed or unbonding when the scan started, and its registration
+// (which outlives bonding) needs no new event to stay in force. The state
+// at the settlement height is asked for; every change since the seed
+// height would be an event on record, so the answer holds from the seed
+// height on. When that state is pruned the current one is read and
+// recorded at the tip, which covers this settlement only if the scan is at
+// the tip. A query error leaves the validator unknown this time.
+func (s *Scanner) lazySeed(ctx context.Context, consAddrHex string, h int64) {
+	seeded, seedAt := s.hosts.Seeded()
+	if !seeded {
+		return
+	}
+	bech, err := bech32.ConvertAndEncode("celestiavalcons", mustHexBytes(consAddrHex))
+	if err != nil {
+		return
+	}
+	host, _, err := s.chain.FibreProviderInfoAt(ctx, bech, h)
+	if err == nil {
+		e := s.hosts.SeedOne(consAddrHex, host, HostFromSeedLazy, seedAt)
+		s.appendHost(e)
+		s.log.Printf("host registration read for %s at h=%d: %q (in force since the seed at h=%d)", consAddrHex, h, host, seedAt)
+		return
+	}
+	_, tip, terr := s.chain.Status(ctx)
+	if terr != nil {
+		s.log.Printf("WARNING: registration of %s could not be read (%v; %v); host_at_settlement unknown for now", consAddrHex, err, terr)
+		return
+	}
+	host, _, err = s.chain.FibreProviderInfoAt(ctx, bech, tip)
+	if err != nil {
+		s.log.Printf("WARNING: registration of %s could not be read (%v); host_at_settlement unknown for now", consAddrHex, err)
+		return
+	}
+	e := s.hosts.SeedOne(consAddrHex, host, HostFromSeedCurrent, tip)
+	s.appendHost(e)
+	s.log.Printf("host registration of %s read at the tip h=%d (state at h=%d pruned): %q, in force from h=%d", consAddrHex, tip, h, host, tip)
+}
+
+func (s *Scanner) appendHost(e HostEntry) {
+	if err := s.store.AppendHostEvent(HostEvent{HostEntry: e, Time: time.Now().UTC()}); err != nil {
+		s.log.Fatalf("host_history: %v", err)
+	}
+}
+
+func mustHexBytes(h string) []byte {
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return nil
+	}
+	return b
 }

@@ -128,7 +128,9 @@ publishers can read, and do not include it in a backup that leaves the host.
 `host_at_settlement` on every assignment comes from the chain's
 `set_fibre_provider_info` events, read in the same `block_results` pass
 as the promises, seeded once from the bonded registry when the scan
-starts (`host_history.jsonl`). No state query at past heights is made, so
+starts and, per validator the bonded seed missed, by one
+`FibreProviderInfo` query the first time it appears in an assignment
+(`host_history.jsonl`). No state query at past heights is made, so
 the node's state pruning does not matter to the observer; what must be
 available is `block` and `block_results` over the scanner's lag behind
 the tip, which the scan needs anyway (a block the node cannot serve is a

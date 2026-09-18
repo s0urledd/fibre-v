@@ -44,7 +44,7 @@ func TestHostHistory(t *testing.T) {
 	va, vb, vc := bech(t, "a"), bech(t, "b"), bech(t, "c")
 	ha, hb := hexOf(t, va), hexOf(t, vb)
 	h := NewHostHistory()
-	h.Seed(100, []FibreProvider{{ConsAddressBech32: va, Host: "a-seed:1"}, {ConsAddressBech32: vb, Host: "b-seed:1"}})
+	h.Seed(100, []FibreProvider{{ConsAddressBech32: va, Host: "a-seed:1"}, {ConsAddressBech32: vb, Host: "b-seed:1"}}, HostFromSeed)
 
 	// a parsed event lands as an entry effective after its tx
 	addr, host, ok, err := parseSetFibreProviderInfo(regEvent(va, "a-new:1"))
@@ -80,7 +80,7 @@ func TestHostHistory(t *testing.T) {
 		{vb, 130, 2, "b-first:1", HostFromEvent}, // between the two
 		{vb, 130, 9, "b-second:1", HostFromEvent},
 		{vb, 131, 0, "b-second:1", HostFromEvent},
-		{vc, 200, 0, "", HostNone}, // seeded, never named
+		{vc, 200, 0, "", HostUnknownNoSeed}, // seeded, but nobody asked about vc: unknown, not "none"
 	}
 	for _, c := range cases {
 		addr := c.addr
@@ -118,6 +118,37 @@ func TestHostHistory(t *testing.T) {
 		t.Errorf("settlement before the gap = %s", from)
 	}
 
+	// a lazy seed: the chain asked once, at the seed height on; an explicit
+	// empty answer is "none", and neither is re-asked (Known)
+	vd := hexOf(t, bech(t, "d"))
+	if h.Known(vd) {
+		t.Fatal("unasked validator reported known")
+	}
+	h.SeedOne(vd, "d-lazy:1", HostFromSeedLazy, 100)
+	if got, from := h.HostAt(vd, 200, 0, nil); got != "d-lazy:1" || from != HostFromSeedLazy || !h.Known(vd) {
+		t.Errorf("lazy seed = %q (%s) known=%v", got, from, h.Known(vd))
+	}
+	ve := hexOf(t, bech(t, "e"))
+	h.SeedOne(ve, "", HostFromSeedLazy, 100)
+	if got, from := h.HostAt(ve, 200, 0, nil); got != "" || from != HostNone || !h.Known(ve) {
+		t.Errorf("explicit none = %q (%s) known=%v", got, from, h.Known(ve))
+	}
+	// a seed read at the tip (state at the start pruned) holds from the
+	// tip on; a settlement before it with no event is unknown, never the
+	// tip's value
+	c := NewHostHistory()
+	c.Seed(5000, []FibreProvider{{ConsAddressBech32: va, Host: "a-now:1"}}, HostFromSeedCurrent)
+	if got, from := c.HostAt(ha, 4000, 0, nil); got != "" || from != HostUnknownNoSeed {
+		t.Errorf("before a current seed = %q (%s)", got, from)
+	}
+	if got, from := c.HostAt(ha, 5000, 0, nil); got != "a-now:1" || from != HostFromSeedCurrent {
+		t.Errorf("at the current seed = %q (%s)", got, from)
+	}
+	c.SeedOne(hb, "b-now:1", HostFromSeedCurrent, 5200)
+	if _, from := c.HostAt(hb, 5100, 0, nil); from != HostUnknownNoSeed {
+		t.Errorf("before a lazy current seed = %s", from)
+	}
+
 	// no seed: nothing on record is unknown, not "no host"
 	u := NewHostHistory()
 	if _, from := u.HostAt(ha, 100, 0, nil); from != HostUnknownNoSeed {
@@ -134,7 +165,7 @@ func TestHostHistory(t *testing.T) {
 	if got, from := r.HostAt(hb, 130, 9, nil); got != "b-second:1" || from != HostFromEvent {
 		t.Errorf("reloaded = %q (%s)", got, from)
 	}
-	if got, from := r.HostAt(hexOf(t, vc), 200, 0, nil); got != "" || from != HostNone {
-		t.Errorf("reloaded seed marker lost: %q (%s)", got, from)
+	if got, from := r.HostAt(ve, 200, 0, nil); got != "" || from != HostNone {
+		t.Errorf("reloaded explicit none lost: %q (%s)", got, from)
 	}
 }

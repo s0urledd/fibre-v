@@ -233,9 +233,15 @@ One sentence each, and what a reader should conclude.
   settled, where the upload went, derived from the chain's own
   `set_fibre_provider_info` events as the scanner reads them in the same
   `block_results` pass as everything else, seeded once from the bonded
-  registry at the scan's start; `host_at_settlement_source` says event,
-  seed, none, or unknown because a scan gap or a missing seed leaves the
-  question open; `host_history.jsonl` is the record and the export carries
+  registry at the scan's start, and read once per validator the bonded
+  seed missed (jailed or unbonding then; `seed_lazy`, a single
+  `FibreProviderInfo` query at the settlement height, in force from the
+  seed height since every later change is an event on record) or, when
+  that state is pruned, at the tip (`seed_current`, in force from the tip
+  only); `host_at_settlement_source` says event, seed, seed_lazy,
+  seed_current, none (the chain's explicit answer that nothing is
+  registered, never inferred from absence), or unknown because a scan gap
+  or a missing seed leaves the question open; `host_history.jsonl` is the record and the export carries
   it) with
   `settlement_host_probe` (what that host answered when the current one
   did not serve and differs from it), `observer.build` (the observer's VCS revision), and

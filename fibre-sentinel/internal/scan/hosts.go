@@ -27,20 +27,32 @@ const (
 	// settlement tx, the newest one for the validator.
 	HostFromEvent = "event"
 	// HostFromSeed: no event on record; the host is the one the bonded
-	// registry showed when the scanner started (a registration older than
+	// registry showed at the scan's start height (a registration older than
 	// the scan).
 	HostFromSeed = "seed"
-	// HostNone: the seed was read, the validator was not in it and no event
-	// has named it: no host was registered at settlement as far as the
-	// chain's events say. Not "unknown": the seed is complete for bonded
-	// validators, and a validator in an assignment was bonded.
+	// HostFromSeedLazy: no event on record and the validator was not in the
+	// bonded seed (jailed or unbonding when the scan started; registration
+	// outlives bonding), so its registration was read once, the first time
+	// it appeared in an assignment, with a single FibreProviderInfo query at
+	// that settlement height. Every change since the scan's start would have
+	// been an event on record, so the value holds from the seed height on.
+	HostFromSeedLazy = "seed_lazy"
+	// HostFromSeedCurrent: the state at the wanted height was pruned, so
+	// the registry was read at the current height instead; the entry holds
+	// from that height on, and earlier settlements without an event are
+	// unknown (HostUnknownNoSeed), never this value.
+	HostFromSeedCurrent = "seed_current"
+	// HostNone: the chain was asked for this validator's registration and
+	// answered that there is none (an explicit empty seed entry). A registry
+	// state, as NOT_REGISTERED is; never inferred from absence.
 	HostNone = "none"
 	// HostUnknownGap: a scan gap lies between the validator's newest entry
 	// (or the start of the scan) and the settlement, so an event in it may
 	// have changed the host. Never the seed value.
 	HostUnknownGap = "unknown_gap"
-	// HostUnknownNoSeed: the registry could not be read when the scanner
-	// started and no event has named the validator since.
+	// HostUnknownNoSeed: nothing on record covers the settlement: the seed
+	// could not be read, the validator was never asked about, or the only
+	// entry was read at a later height (HostFromSeedCurrent).
 	HostUnknownNoSeed = "unknown_no_seed"
 )
 
@@ -78,18 +90,37 @@ func NewHostHistory() *HostHistory {
 	return &HostHistory{byAddr: map[string][]HostEntry{}}
 }
 
-// Seed records the bonded registry as it stood when the scan started, as
-// entries at startHeight with source "seed". A registration older than the
-// scan is known only from here.
-func (h *HostHistory) Seed(startHeight int64, providers []FibreProvider) {
-	h.seeded, h.seedAt = true, startHeight
+// Seed records the bonded registry as read at height, as entries with the
+// given source (HostFromSeed at the scan's start height, HostFromSeedCurrent
+// when the start was pruned and the registry was read at the tip). A
+// registration older than the scan is known only from here, or from a lazy
+// seed (SeedOne).
+func (h *HostHistory) Seed(height int64, providers []FibreProvider, source string) {
+	h.seeded, h.seedAt = true, height
 	for _, p := range providers {
 		addr, err := consHexOf(p.ConsAddressBech32)
 		if err != nil {
 			continue
 		}
-		h.add(HostEntry{FromHeight: startHeight, FromTxIndex: -1, ConsAddress: addr, Host: p.Host, Source: HostFromSeed})
+		h.add(HostEntry{FromHeight: height, FromTxIndex: -1, ConsAddress: addr, Host: p.Host, Source: source})
 	}
+}
+
+// SeedOne records one validator's registration read from the chain, as an
+// entry from fromHeight on: HostFromSeedLazy at the seed height when it was
+// read at (or before) the settlement it was needed for, HostFromSeedCurrent
+// at the tip when only the current state could be read. An empty host is
+// the chain's explicit "none" and is recorded as such.
+func (h *HostHistory) SeedOne(consAddrHex, host, source string, fromHeight int64) HostEntry {
+	e := HostEntry{FromHeight: fromHeight, FromTxIndex: -1, ConsAddress: strings.ToLower(consAddrHex), Host: host, Source: source}
+	h.add(e)
+	return e
+}
+
+// Known reports whether anything at all is on record for the validator: an
+// event, or a seed entry including an explicit "none".
+func (h *HostHistory) Known(consAddrHex string) bool {
+	return len(h.byAddr[strings.ToLower(consAddrHex)]) > 0
 }
 
 // LoadHostHistory rebuilds a history from persisted entries.
@@ -165,13 +196,15 @@ func (h *HostHistory) HostAt(consAddrHex string, height int64, txIndex int, gaps
 	if gapBetween(gaps, after, height) {
 		return "", HostUnknownGap
 	}
-	if found != nil {
-		return found.Host, found.Source
+	if found == nil {
+		// nothing covers this settlement: no seed, a seed read later than
+		// it (seed_current), or a validator nobody has asked about yet
+		return "", HostUnknownNoSeed
 	}
-	if h.seeded {
-		return "", HostNone
+	if found.Host == "" {
+		return "", HostNone // the chain's explicit answer: not registered
 	}
-	return "", HostUnknownNoSeed
+	return found.Host, found.Source
 }
 
 // gapBetween reports whether any gap touches (after, upTo]: heights the

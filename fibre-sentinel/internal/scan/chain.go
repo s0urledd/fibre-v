@@ -306,6 +306,36 @@ func (c *Chain) BondedFibreProvidersAt(parent context.Context, height int64) ([]
 	return out, nil
 }
 
+// FibreProviderInfoAt is one validator's Fibre host registration as the
+// chain state stood at height (0 = latest), and whether one exists.
+// Registration is independent of bonding, so this answers for a jailed or
+// unbonding validator too, which AllBondedFibreProviders does not.
+func (c *Chain) FibreProviderInfoAt(parent context.Context, consAddrBech32 string, height int64) (host string, found bool, err error) {
+	ctx, cancel := c.ctx(parent)
+	defer cancel()
+
+	req := valaddrtypes.QueryFibreProviderInfoRequest{ValidatorConsensusAddress: consAddrBech32}
+	data, err := req.Marshal()
+	if err != nil {
+		return "", false, fmt.Errorf("marshal provider info request: %w", err)
+	}
+	res, err := c.rpc.ABCIQueryWithOptions(ctx, "/celestia.valaddr.v1.Query/FibreProviderInfo", cmtbytes.HexBytes(data), rpcclient.ABCIQueryOptions{Height: height})
+	if err != nil {
+		return "", false, fmt.Errorf("abci query fibre provider info: %w", err)
+	}
+	if res.Response.Code != 0 {
+		return "", false, fmt.Errorf("abci query fibre provider info: code=%d log=%s", res.Response.Code, res.Response.Log)
+	}
+	var resp valaddrtypes.QueryFibreProviderInfoResponse
+	if err := resp.Unmarshal(res.Response.Value); err != nil {
+		return "", false, fmt.Errorf("unmarshal provider info response: %w", err)
+	}
+	if !resp.Found || resp.Info == nil {
+		return "", false, nil
+	}
+	return resp.Info.Host, true, nil
+}
+
 // ValidatorIdentity is what the staking module says about one validator:
 // the name its operator chose and the facts a reader needs to recognise it.
 //
