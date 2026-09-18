@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 16
+const SchemaVersion = 17
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -425,6 +425,22 @@ var migrations = []migration{
 			// printed beside it kept covering everything — two spans, one
 			// row, no way for a reader to tell.
 			`ALTER TABLE probe_daily ADD COLUMN identity_up INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		version: 17,
+		note:    "probe_daily attestation split: the proven / unproven / unrecorded counts of a rolled day, so the response's own reconciliation identity still holds once the rollup is folded in",
+		stmts: []string{
+			// docs/verdicts.md tells a reader to check the answer against
+			// itself: serve_rate_coverage.den equals attested + unattested +
+			// unknown, and serve_rate_held_out.UNATTESTED equals
+			// attestation.unattested_probes. The classes are folded in from
+			// the rollup on the "all" window and the attestation counts were
+			// not, so after the first prune both identities failed — on the
+			// one window a reader is most likely to check.
+			`ALTER TABLE probe_daily ADD COLUMN attested INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE probe_daily ADD COLUMN unattested INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE probe_daily ADD COLUMN unknown_att INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
 }

@@ -1517,6 +1517,15 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		resp.ServeRate = serveRate(resp.Classes)
 		resp.Coverage = coverage(resp.Classes)
 		resp.HeldOut = heldOut(resp.Classes)
+		// The attestation counts move with the classes, over the same rows.
+		// Folding the classes in and leaving these behind broke the identity
+		// docs/verdicts.md tells a reader to check the answer against —
+		// coverage.den equals attested + unattested + unknown — on exactly
+		// the window they would check it on.
+		resp.Attestation.Attested += rolled.Attested
+		resp.Attestation.Unattested += rolled.Unattested
+		resp.Attestation.Unknown += rolled.UnknownAtt
+		resp.Attestation.Coverage = rate(resp.Attestation.Attested, resp.Attestation.Attested+resp.Attestation.Unattested)
 		resp.Faults += rolled.Faults
 		resp.ProbeCount += rolled.Probes
 		resp.Gaps += rolled.Gaps
@@ -2320,6 +2329,13 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			// Endorsement is measured over the handshakes that completed, so
 			// its denominator is the rolled BeatsUp, not the rolled Beats.
 			v.IdentityValid = rate(v.IdentityValid.Num+rp.IdentityUp, v.IdentityValid.Den+rp.BeatsUp)
+			// And the attestation split beside the classes, over the same
+			// rows, so this row reconciles against itself the way the
+			// network row does.
+			v.Attestation.Attested += rp.Attested
+			v.Attestation.Unattested += rp.Unattested
+			v.Attestation.Unknown += rp.UnknownAtt
+			v.Attestation.Coverage = rate(v.Attestation.Attested, v.Attestation.Attested+v.Attestation.Unattested)
 		}
 		for addr, ro := range rolled.ObligationsByVal {
 			get(addr)

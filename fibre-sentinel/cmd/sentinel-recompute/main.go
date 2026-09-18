@@ -106,6 +106,27 @@ func main() {
 	for _, p := range pubs {
 		byCommit[p.Promise.Commitment] = append(byCommit[p.Promise.Commitment], p)
 	}
+	// The assignment the chain's own record gives, per (promise, validator).
+	// Measurement.Recompute re-derives the phase and re-runs Classify, but it
+	// feeds Classify the row's own Assigned and Attested — the two flags that
+	// turn an in-window NOT_FOUND into a FAULT rather than an UNATTESTED —
+	// so those two are the prober's conclusion replayed, not a check of it.
+	// publications.jsonl carries the independent answer, so it is checked
+	// here, under its own counter: a drift in the assignment or the signature
+	// verification is a different failure from a drift in the taxonomy, and a
+	// verifier has to be able to tell them apart.
+	type assigned struct {
+		rows     int
+		attested bool
+		known    bool
+	}
+	byPubVal := map[string]assigned{}
+	for _, p := range pubs {
+		for _, v := range p.Assignment.Validators {
+			byPubVal[p.PromiseHash+"|"+v.Address] = assigned{rows: v.RowCount, attested: v.Attested, known: p.HasAttestation()}
+		}
+	}
+	var attestDiffs int
 	frontier := loadFrontier(*dataDir, pubs)
 	amendments := loadAmendments(filepath.Join(*dataDir, "amendments.jsonl"))
 	var deferred, judged, amendDiffs int
@@ -171,6 +192,29 @@ func main() {
 				}
 			}
 		}
+		// The two flags Classify is handed rather than deriving.
+		if a, ok := byPubVal[m.PromiseHash+"|"+m.ValidatorAddress]; ok {
+			wantAssigned := a.rows > 0
+			if m.Assigned != wantAssigned || (a.known && !m.AttestationUnknown && m.Attested != a.attested) {
+				attestDiffs++
+				if printed < *maxDiff {
+					printed++
+					fmt.Printf("assign| %s %s %s: row says assigned=%v attested=%v, the publication record says assigned=%v attested=%v\n",
+						short(m.PromiseHash), m.ValidatorAddress, m.ScheduledAt.UTC().Format(time.RFC3339),
+						m.Assigned, m.Attested, wantAssigned, a.attested)
+				}
+			}
+		} else if m.Assigned {
+			// A row claiming an assignment for a promise the record does not
+			// carry cannot be checked at all, and its verdict rests on that
+			// claim. Counted, never passed over.
+			attestDiffs++
+			if printed < *maxDiff {
+				printed++
+				fmt.Printf("assign| %s %s: the row claims an assignment but the promise is not in publications.jsonl\n",
+					short(m.PromiseHash), m.ValidatorAddress)
+			}
+		}
 		if rc.Phase != m.Phase || rc.Classification != stored {
 			rowDiffs++
 			if printed < *maxDiff {
@@ -181,11 +225,12 @@ func main() {
 			}
 		}
 	}
-	if rowDiffs > 0 || amendDiffs > 0 {
+	if rowDiffs > 0 || amendDiffs > 0 || attestDiffs > 0 {
 		differs = true
 	}
 	fmt.Printf("rows| %d rows, %d differ from their stored phase or classification (tolerance from runs.jsonl for %d, fallback for %d)\n",
 		len(ms), rowDiffs, tolFromRuns, tolFallback)
+	fmt.Printf("assign| %d rows whose assigned/attested flags do not match publications.jsonl\n", attestDiffs)
 	fmt.Printf("late| %d verdicts deferred at the probe, %d drawable at scanner frontier %s, %d differ from amendments.jsonl (%d amendments on record)\n",
 		deferred, judged, frontier.Format(time.RFC3339), amendDiffs, len(amendments))
 

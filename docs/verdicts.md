@@ -583,6 +583,24 @@ pieces needed to re-run that function are published:
   same rows), and with `-api <base>` compares them to
   `/v1/validators?window=&as_of=`; `-sampling` checks the draws of every
   revealed day. Exit status 1 when anything differs.
+- **What the row is not trusted for.** `Measurement.Recompute` re-derives
+  the phase and re-runs the taxonomy, but two of the inputs it hands
+  `Classify` are the prober's own conclusions: `assigned` and `attested`,
+  the pair that turns an in-window NOT_FOUND into a FAULT rather than an
+  UNATTESTED. Replaying those would check the taxonomy against itself, so
+  the tool checks them against `publications.jsonl` instead — the chain's
+  own assignment table and the signature verification recorded beside it —
+  and reports any drift under its own `assign|` line. A row claiming an
+  assignment for a promise the record does not carry is counted there too:
+  its verdict rests on a claim nothing in the export can check.
+- **What an export has to contain.** Every tarball carries `state.json`
+  beside the day's lines, with its own digest in the manifest. It is not a
+  record file but a snapshot, and the tool needs all four things in it: the
+  param history, the scan gaps, the host seed and the scan frontier. Without
+  the gaps a late shadow verdict the record deliberately defers is redrawn
+  as a decided one, and the tool reports a difference where the observer was
+  honestly blind. Feed it the union of the exports covering the window you
+  are checking, or the live record directory.
 
 What a difference means. A row whose recomputed class differs from its
 stored one was classified by a different build: the class is stamped at
