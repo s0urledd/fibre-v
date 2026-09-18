@@ -6,11 +6,14 @@ import Info from "./Info";
  * across the top of the overview and the five service layers on a validator's
  * page are the same component, so a number reads the same everywhere.
  */
-export default function Tile({ label, value, unit, sub, info, hero, tone, loading, badge, className }: {
+export default function Tile({ label, value, unit, sub, detail, info, hero, tone, loading, badge, className }: {
   label: string;
   value: ReactNode;
   unit?: string;
+  /** One short line under the figure: the sample it rests on. It never wraps. */
   sub?: ReactNode;
+  /** The longer form of sub, shown as the line's tooltip. */
+  detail?: string;
   info?: ReactNode;
   hero?: boolean;
   tone?: "fault" | "absent";
@@ -20,6 +23,7 @@ export default function Tile({ label, value, unit, sub, info, hero, tone, loadin
 }) {
   const cls = ["tile", hero ? "hero" : "", loading ? "loading" : "", className ?? ""].filter(Boolean).join(" ");
   const vcls = ["value", tone ?? ""].filter(Boolean).join(" ");
+  const title = detail ?? (typeof sub === "string" ? sub : undefined);
   return (
     <div className={cls} aria-busy={loading || undefined}>
       <span className="label">
@@ -31,7 +35,7 @@ export default function Tile({ label, value, unit, sub, info, hero, tone, loadin
         {loading ? "0000" : value}
         {unit && !loading && <span className="unit">{unit}</span>}
       </span>
-      {sub !== undefined && <span className="sub">{loading ? " " : sub}</span>}
+      {sub !== undefined && <span className="sub" title={loading ? undefined : title}>{loading ? "\u00a0" : sub}</span>}
     </div>
   );
 }

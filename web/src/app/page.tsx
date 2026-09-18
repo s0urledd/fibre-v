@@ -81,11 +81,10 @@ export default function Overview() {
         <Tile hero label="Serve rate" loading={busy}
           value={!ob || !decided ? "—" : fmtPct(ob.rate)}
           tone={!decided ? "absent" : undefined}
-          sub={!net ? undefined : !decided ? (ob && ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} obligations, none observed serving` : "nothing decided in this window")
-            : <span title={`${boundTitle(ob!.rate, ob!.rate) ?? ""} Per probe: ${fmtPct(sr)} over ${fmtCount(sr)}.`}>
-                {ob!.served.toLocaleString("en-US")} of {(ob!.served + ob!.broken).toLocaleString("en-US")} obligations kept
-                {ob!.unobserved > 0 && ` · ${ob!.unobserved.toLocaleString("en-US")} never observed serving`}
-              </span>}
+          sub={!net ? undefined : !decided ? (ob && ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} unobserved` : "nothing decided")
+            : `${ob!.served.toLocaleString("en-US")} / ${(ob!.served + ob!.broken).toLocaleString("en-US")} kept`}
+          detail={!net || !ob ? undefined : !decided ? (ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} obligations in the window, none observed serving.` : "No obligation decided in this window.")
+            : `${ob.served.toLocaleString("en-US")} of ${(ob.served + ob.broken).toLocaleString("en-US")} obligations kept${ob.unobserved > 0 ? `; ${ob.unobserved.toLocaleString("en-US")} never observed serving, counted beside the rate` : ""}. ${boundTitle(ob.rate, ob.rate) ?? ""} Per probe: ${fmtPct(sr)} over ${fmtCount(sr)}.`}
           info={<>
             <p>Obligations kept: a shard a validator signed for on chain, handed over at the last probe before its retention deadline. One observation per shard, not per probe.</p>
             <p>An obligation we never saw served and never saw broken is counted beside the rate, not inside it. Unreachable, unproven and unregistered cases are never faults.</p>
@@ -94,7 +93,8 @@ export default function Overview() {
         <Tile label="Faults" loading={busy}
           value={!net ? "—" : faults > 0 ? <><Mark tier="fault" />{faults.toLocaleString("en-US")}</> : rated ? "none" : "—"}
           tone={faults > 0 ? "fault" : "absent"}
-          sub={!net ? undefined : faults > 0 ? `across ${faulted} validator${faulted === 1 ? "" : "s"}` : rated ? "no signed shard went unserved" : "nothing rated"}
+          sub={!net ? undefined : faults > 0 ? `${faulted} validator${faulted === 1 ? "" : "s"}` : rated ? "no unserved shard" : "nothing rated"}
+          detail={!net ? undefined : faults > 0 ? `${faults.toLocaleString("en-US")} probe${faults === 1 ? "" : "s"} where a validator answered but did not hand over a shard it had signed for, across ${faulted} validator${faulted === 1 ? "" : "s"}.` : rated ? "No signed shard went unserved in this window." : "Nothing rated in this window."}
           info={<>
             <p>The validator answered but did not hand over a shard it had signed for.</p>
             <p>This is the only number counted against a validator.</p>
@@ -109,14 +109,15 @@ export default function Overview() {
           </>} />
         <Tile label="Endpoints" loading={busy}
           value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
-          sub={net ? `${net.reachability.num} answering now · ${net.validators_probed} probed` : undefined} />
+          sub={net ? `${net.reachability.num} up · ${net.validators_probed} probed` : undefined}
+          detail={net ? `${net.registered_endpoints.toLocaleString("en-US")} registered Fibre endpoints; ${net.reachability.num} answering the latest handshake; ${net.validators_probed} probed in this window.` : undefined} />
         <Tile label="Publications" loading={busy}
           value={net ? net.publications.toLocaleString("en-US") : "—"}
           sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined} />
         <Tile label="Fees settled" loading={busy}
           value={market ? tia(market.fees_settled_utia, { unit: false }) : "—"} unit={market ? "TIA" : undefined}
           tone={market && market.settlements === 0 ? "absent" : undefined}
-          sub={market ? (market.timeouts > 0 ? `${market.publishers_active} publisher${market.publishers_active === 1 ? "" : "s"} · ${market.timeouts} timed out` : `${market.publishers_active} publisher${market.publishers_active === 1 ? "" : "s"}`) : undefined}
+          sub={market ? `${market.publishers_active} publisher${market.publishers_active === 1 ? "" : "s"}${market.timeouts > 0 ? ` · ${market.timeouts} timed out` : ""}` : undefined}
           info={<>
             <p>What publishers paid for the blobs settled in this window, from the chain&rsquo;s own records. Not a measurement of ours.</p>
             <p><Link href="/publishers/">Publishers</Link></p>
@@ -124,7 +125,8 @@ export default function Overview() {
         <Tile label="Signed" loading={busy}
           value={net?.attestation?.blob_coverage?.den ? fmtPct(net.attestation.blob_coverage) : "—"}
           tone={net?.attestation?.blob_coverage?.den ? undefined : "absent"}
-          sub={net?.attestation?.blob_coverage?.den ? `${net.attestation.attested_blobs.toLocaleString("en-US")} of ${net.attestation.blob_coverage.den.toLocaleString("en-US")} assigned shards` : "no assignment yet"}
+          sub={net?.attestation?.blob_coverage?.den ? `${net.attestation.attested_blobs.toLocaleString("en-US")} / ${net.attestation.blob_coverage.den.toLocaleString("en-US")} shards` : "no assignment yet"}
+          detail={net?.attestation?.blob_coverage?.den ? `${net.attestation.attested_blobs.toLocaleString("en-US")} of ${net.attestation.blob_coverage.den.toLocaleString("en-US")} assigned shards carry their validator's signature on chain.` : undefined}
           info={<>
             <p>Assigned shards whose validator&rsquo;s signature reached the chain. Only these are proven stored and count in the serve rate.</p>
             <p>Publishers stop collecting signatures at two thirds of stake, so this is the size of the quorum in practice, not a duty anyone missed.</p>
@@ -132,9 +134,10 @@ export default function Overview() {
         <Tile label="Recoverable" loading={busy}
           value={recon && recon.recoverable.den > 0 ? fmtPct(recon.recoverable) : "—"}
           tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}
-          sub={recon && recon.recoverable.den > 0
-            ? `${recon.recoverable.num} of ${recon.recoverable.den} blobs · ${recon.rate.num} fully served${recon.publications_in_window > recon.publications_examined ? ` · newest ${recon.publications_examined.toLocaleString("en-US")} of ${recon.publications_in_window.toLocaleString("en-US")}` : ""}`
-            : "no blob judged yet"}
+          sub={recon && recon.recoverable.den > 0 ? `${recon.recoverable.num.toLocaleString("en-US")} / ${recon.recoverable.den.toLocaleString("en-US")} blobs` : "no blob judged yet"}
+          detail={recon && recon.recoverable.den > 0
+            ? `${recon.recoverable.num.toLocaleString("en-US")} of ${recon.recoverable.den.toLocaleString("en-US")} blobs could be rebuilt from the rows fetched at the last probe; ${recon.rate.num.toLocaleString("en-US")} fully served (every signer answered).${recon.publications_in_window > recon.publications_examined ? ` Judged over the newest ${recon.publications_examined.toLocaleString("en-US")} of ${recon.publications_in_window.toLocaleString("en-US")} publications.` : ""}`
+            : undefined}
           info={<>
             <p>Blobs that could be rebuilt from the rows we fetched at the last probe inside the window.</p>
             <p>Fully served: every validator that signed for the blob answered. Recoverable: enough rows came back, whoever answered.</p>
