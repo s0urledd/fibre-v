@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 
 	"context"
 	"encoding/hex"
@@ -26,7 +25,11 @@ type Config struct {
 	RPCURL           string
 	PublicationsPath string // publications.jsonl written by the scanner
 	DataDir          string // where measurements.jsonl lives
-	Vantage          string // this prober's vantage-point name
+	// RegistryPath is the collector's registry.jsonl, the durable record of
+	// every host this observer saw a validator register. Default
+	// <DataDir>/registry.jsonl; the file is optional.
+	RegistryPath string
+	Vantage      string // this prober's vantage-point name
 
 	Schedule ScheduleConfig
 	Timeouts StepTimeouts
@@ -49,6 +52,12 @@ type Config struct {
 	MaxLateness  time.Duration // a slot older than this is recorded MISSED, not probed
 	RPCTimeout   time.Duration
 	HostCacheTTL time.Duration
+
+	// RunConfig is what this run was configured with, as the operator's
+	// flags and derived settings, recorded in runs.jsonl on start (see
+	// status.RunEvent) so a row's verdict can be traced to the settings
+	// that produced it. nil records the run without a configuration.
+	RunConfig map[string]any
 
 	// Concurrency is how many probes run at once across all validators (R4
 	// section 3.5: global 8). A single validator never sees more than one
@@ -76,6 +85,9 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
+	if c.RegistryPath == "" {
+		c.RegistryPath = filepath.Join(c.DataDir, "registry.jsonl")
+	}
 	if c.MaxSleep <= 0 {
 		c.MaxSleep = 30 * time.Second
 	}
@@ -124,10 +136,16 @@ type Prober struct {
 	// gaps is the scanner's own record of blocks it could not read, from
 	// state.json, re-read every cycle. A probe whose verdict would rest on
 	// "no other promise owns these rows" consults it first.
-	gaps     []scan.ScanGap
+	gaps []scan.ScanGap
+	// scanned is how far the scanner has read, as the chain's clock: the
+	// block time of last_scanned_height. Promises settled after it are not
+	// in the feed, so until it passes a publication's settlement plus the
+	// payment-promise timeout the shadow candidate set is incomplete.
+	scanned  scannedMark
 	resolver *Resolver
 	store    *MeasurementStore
 	feed     *pubFeed
+	registry *hostRegistry
 	chainID  string
 
 	clockMu     sync.Mutex
@@ -162,13 +180,14 @@ func New(cfg Config, log *scan.Logger) (*Prober, error) {
 		return nil, err
 	}
 	return &Prober{
-		observer:    ObserverInfo{Build: buildRevision(), AssignPin: assign.PinnedCelestiaAppCommit},
+		observer:    ObserverInfo{Build: status.BuildRevision(), AssignPin: assign.PinnedCelestiaAppCommit},
 		cfg:         cfg,
 		log:         log,
 		chain:       ch,
 		resolver:    NewResolver(ch, cfg.HostCacheTTL),
 		store:       st,
 		feed:        newPubFeed(cfg.PublicationsPath),
+		registry:    newHostRegistry(cfg.RegistryPath),
 		coders:      map[[2]int]*Coder{},
 		complete:    map[string]bool{},
 		skippedPubs: map[string]bool{},
@@ -212,7 +231,8 @@ func (p *Prober) Run(parent context.Context) error {
 	}
 	defer p.store.Close()
 
-	st := status.New(p.cfg.DataDir, "prober", p.cfg.Vantage, "")
+	st := status.New(p.cfg.DataDir, "prober", p.cfg.Vantage, status.BuildRevision())
+	st.RecordRuns(p.cfg.RunConfig)
 	st.Start()
 	defer st.Stop("exit")
 	p.status = st
@@ -262,6 +282,9 @@ func (p *Prober) Run(parent context.Context) error {
 		p.measureClock(ctx)
 		p.pollAppVersion(ctx)
 		p.loadGaps()
+		p.pollScanned(ctx)
+		p.refreshRegistry()
+		p.publishProjection()
 
 		if added, err := p.feed.refresh(); err != nil {
 			p.log.Fatalf("load publications: %v", err)
@@ -387,6 +410,39 @@ func (p *Prober) pollAppVersion(ctx context.Context) {
 	}
 }
 
+// publishProjection puts the load policy's last projection, the inputs
+// behind the admission probability, in the status file. The policy is
+// asked through an interface so this package need not import it.
+func (p *Prober) publishProjection() {
+	if p.status == nil || p.cfg.Policy == nil {
+		return
+	}
+	pj, ok := p.cfg.Policy.(interface{ ProjectionDetail() map[string]any })
+	if !ok {
+		return
+	}
+	if d := pj.ProjectionDetail(); d != nil {
+		p.status.Set("sampling", d)
+	}
+}
+
+// refreshRegistry seeds the resolver's last-known hosts from registry.jsonl
+// (see hostRegistry). Errors are logged, never fatal: the file is the
+// collector's and optional.
+func (p *Prober) refreshRegistry() {
+	applied, skipped, err := p.registry.refresh(p.resolver)
+	if err != nil {
+		p.log.Printf("registry: %v", err)
+		return
+	}
+	if applied > 0 || skipped > 0 {
+		p.log.Printf("registry: +%d host records (%d skipped), %d validators with a known host", applied, skipped, p.resolver.knownHosts())
+	}
+	if p.status != nil && (applied > 0 || skipped > 0) {
+		p.status.Set("known_hosts", p.resolver.knownHosts())
+	}
+}
+
 // loadGaps re-reads the scanner's gap list from state.json. A missing or
 // unreadable file keeps the previous list: the prober must not start
 // accusing because the scanner's state was mid-write.
@@ -396,13 +452,94 @@ func (p *Prober) loadGaps() {
 		return
 	}
 	var st struct {
-		Gaps []scan.ScanGap `json:"gaps"`
+		Gaps              []scan.ScanGap `json:"gaps"`
+		LastScannedHeight int64          `json:"last_scanned_height"`
+		LastScannedTime   time.Time      `json:"last_scanned_time"`
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
 		p.log.Printf("state.json: %v (keeping previous gap list)", err)
 		return
 	}
 	p.gaps = st.Gaps
+	p.scanned.height = st.LastScannedHeight
+	if !st.LastScannedTime.IsZero() {
+		// The scanner records the frontier's block time itself; no RPC
+		// round trip is needed to place it on the chain's clock.
+		p.scanned.timedFor, p.scanned.at = st.LastScannedHeight, st.LastScannedTime.UTC()
+		if p.status != nil {
+			p.status.Set("scanned_until", p.scanned.at.Format(time.RFC3339))
+		}
+	}
+}
+
+// scannedMark is the scanner's frontier on the chain's clock.
+type scannedMark struct {
+	height   int64
+	timedFor int64     // the height `at` was read for
+	at       time.Time // block time of timedFor; zero when never read
+}
+
+// known reports whether the frontier has a block time for its current height.
+func (m scannedMark) known() bool { return m.height > 0 && m.timedFor == m.height && !m.at.IsZero() }
+
+// pollScanned reads the block time of the scanner's frontier when the
+// frontier moved. A failed read keeps the previous mark, which then reads
+// as stale: the conservative direction.
+func (p *Prober) pollScanned(ctx context.Context) {
+	if p.scanned.height <= 0 || p.scanned.timedFor == p.scanned.height {
+		return
+	}
+	blk, err := p.chain.Block(ctx, p.scanned.height)
+	if err != nil {
+		p.log.Printf("scanner frontier #%d: %v (keeping previous mark)", p.scanned.height, err)
+		return
+	}
+	p.scanned.timedFor, p.scanned.at = p.scanned.height, blk.Time.UTC()
+	if p.status != nil {
+		p.status.Set("scanned_until", p.scanned.at.Format(time.RFC3339))
+	}
+}
+
+// shadowLagFor names the scanner's lag when it makes the shadow candidate
+// set for pub incomplete. A promise whose shard preceded this one on disk
+// was created no later than this publication settled, and must settle within
+// the payment-promise timeout of its creation; so every candidate has
+// settled by settlement + timeout, and until the scanner has read that far
+// a promise the feed does not hold may still own the returned rows.
+// shadowPending says why an unmatched genuine-rows answer cannot be judged
+// at the probe. The Fibre store keeps every (commitment, promise) shard
+// side by side and Get(commitment) returns the first readable one in
+// promise-hash order (celestia-app fibre/store.go), so which promise
+// answers is decided by hash order, not by time: a promise uploaded before
+// this probe and settled after it, up to payment_promise_timeout after its
+// creation, can own the returned rows and is not in the feed yet. The
+// candidate set is complete only once the scanner has read past
+// probe time + payment_promise_timeout, which is never at probe time; the
+// verdict is deferred to the collector's late judgement (probe_amendments).
+func shadowPending(now time.Time, pub scan.Publication, m scannedMark) string {
+	frontier := "scanner frontier unknown"
+	if m.known() {
+		frontier = fmt.Sprintf("scanned to #%d (%s)", m.height, m.at.UTC().Format(time.RFC3339))
+	}
+	timeout := time.Duration(pub.ParamsAtPublication.PaymentPromiseTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		return "shadow_pending: a promise uploaded before this probe may settle after it (payment promise timeout not on record); " + frontier
+	}
+	return fmt.Sprintf("shadow_pending: a promise uploaded before this probe may settle until %s and own these rows; %s",
+		now.Add(timeout).UTC().Format(time.RFC3339), frontier)
+}
+
+// shadowBlindness names why the shadow candidate set for pub is incomplete
+// at this probe. It always is (see shadowPending); a scan gap inside the
+// interval a shadowing promise could have settled in is named first
+// because it is permanent, where the pending case resolves once the
+// scanner passes probe time + payment_promise_timeout.
+func (p *Prober) shadowBlindness(pub scan.Publication) string {
+	now := time.Now().UTC()
+	if g := shadowGapFor(p.gaps, now, shardLifetime(pub, p.schedCfg().PruneTolerance)); g != "" {
+		return g
+	}
+	return shadowPending(now, pub, p.scanned)
 }
 
 // shardLifetime is the longest a shard over a commitment can outlive the
@@ -747,7 +884,7 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 		MaxMessageSize:     maxMessageSizeFor(pub.Assignment.ProtocolParams),
 		ClockOffsetMS:      p.clockOffsetMS(),
 		Shadowers:          p.feed.shadowersFor(ph, pub.Promise.Commitment, t.AddressHex),
-		ShadowGap:          shadowGapFor(p.gaps, time.Now().UTC(), shardLifetime(pub, p.schedCfg().PruneTolerance)),
+		ShadowGap:          p.shadowBlindness(pub),
 		Observer:           p.observerInfo(),
 	}
 
@@ -760,6 +897,15 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 			m = retryOnce(ctx, in, it.coder, p.cfg.Timeouts, m, p.cfg.RetryDelay)
 		}
 	}
+	m.HostAtSettlement = t.HostAtSettlement
+	if hostChanged(t) && !skipDL && m.Outcome != OutcomeServedOK && m.Classification != ClassProbeError {
+		// The validator re-registered since the promise settled and its
+		// current host did not serve: ask the host the upload went to, as
+		// evidence, on the same lock so the validator still sees one
+		// connection at a time. The verdict stays the current host's.
+		m.SettlementHost = settlementProbe(ctx, in, it.coder, p.cfg.Timeouts)
+		m.ClassificationReason += "; " + hostChangeNote(t, m.SettlementHost)
+	}
 	lock.Unlock()
 
 	p.stampSampling(&m, pub)
@@ -771,6 +917,33 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 	}
 	p.logMeasurement(m)
 	return true
+}
+
+// hostChanged reports whether the validator's current host differs from the
+// one registered when the promise settled, both being known.
+func hostChanged(t Target) bool {
+	return t.HostAtSettlement != "" && t.Host != "" && t.Host != t.HostAtSettlement && t.HostSource != "settlement"
+}
+
+// settlementProbe runs the evidence probe of the settlement host.
+func settlementProbe(ctx context.Context, in Input, coder *Coder, to StepTimeouts) *HostProbe {
+	in.Target.Host, in.Target.HostSource = in.Target.HostAtSettlement, "settlement"
+	e := Run(ctx, in, coder, to)
+	return &HostProbe{Host: in.Target.Host, Outcome: e.Outcome, RowsReturned: e.Download.RowsReturned,
+		CommitmentVerified: e.Download.CommitmentVerified, AssignmentVerified: e.Download.AssignmentVerified,
+		DurationMS: e.TotalDurationMS, RawError: e.RawError}
+}
+
+// hostChangeNote is appended to the reason of a row whose validator moved.
+func hostChangeNote(t Target, hp *HostProbe) string {
+	note := fmt.Sprintf("host changed since settlement (%s -> %s)", t.HostAtSettlement, t.Host)
+	if hp == nil {
+		return note
+	}
+	if hp.Outcome == OutcomeServedOK {
+		return note + "; the host registered at settlement still serves the exact rows, so the data was left behind, not lost"
+	}
+	return note + "; the host registered at settlement answered " + string(hp.Outcome)
 }
 
 // recordNotProbed marks one (publication, point) slot NOT_PROBED for every
@@ -989,33 +1162,4 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
-}
-
-// buildRevision is the VCS revision the binary was built from, "-dirty" when
-// the tree had local changes, or "unknown". It is stamped on every row so a
-// classification can be traced to the code that made it.
-func buildRevision() string {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-	rev, dirty := "", false
-	for _, kv := range bi.Settings {
-		switch kv.Key {
-		case "vcs.revision":
-			rev = kv.Value
-		case "vcs.modified":
-			dirty = kv.Value == "true"
-		}
-	}
-	if rev == "" {
-		return "unknown"
-	}
-	if len(rev) > 12 {
-		rev = rev[:12]
-	}
-	if dirty {
-		rev += "-dirty"
-	}
-	return rev
 }

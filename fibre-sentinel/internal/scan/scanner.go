@@ -2,8 +2,10 @@ package scan
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/cosmos/cosmos-sdk/types/bech32"
 	"math"
 	"strings"
 	"time"
@@ -17,8 +19,11 @@ import (
 
 // Config controls a scan run. Zero values fall back to the defaults in Run.
 type Config struct {
-	RPCURL  string
-	DataDir string
+	// RunConfig is what this run was configured with, recorded in
+	// runs.jsonl on start (status.RunEvent). nil records the run alone.
+	RunConfig map[string]any
+	RPCURL    string
+	DataDir   string
 
 	// StartHeight is where a FRESH scan begins (ignored on resume). 0 or
 	// negative means "latest height at startup".
@@ -42,12 +47,22 @@ type Config struct {
 
 // Scanner is the chain scanner: discovery + recording only, no probing.
 type Scanner struct {
-	cfg    Config
-	log    *Logger
-	chain  *Chain
-	store  *Store
-	status *status.Writer
-	gaps   []ScanGap
+	// lastBlockTime is the block time of the newest header read, saved in
+	// state.json as last_scanned_time.
+	lastBlockTime time.Time
+	// hostsCache is the registry at one height (consHex -> host), the
+	// height it was read for, and whether the read succeeded; a block
+	// carries several promises and the registry is read once for it.
+	hostsCache       map[string]string
+	hostsCacheHeight int64
+	hostsCacheOK     bool
+	hostsWarned      bool
+	cfg              Config
+	log              *Logger
+	chain            *Chain
+	store            *Store
+	status           *status.Writer
+	gaps             []ScanGap
 
 	params      *ParamHistory
 	chainID     string
@@ -89,7 +104,7 @@ func New(cfg Config, log *Logger) (*Scanner, error) {
 		return nil, err
 	}
 	return &Scanner{
-		status:  status.New(cfg.DataDir, "scanner", "", ""),
+		status:  status.New(cfg.DataDir, "scanner", "", status.BuildRevision()),
 		cfg:     cfg,
 		log:     log,
 		chain:   ch,
@@ -109,6 +124,7 @@ func (s *Scanner) Run(parent context.Context) error {
 		defer cancel()
 	}
 	defer s.store.Close()
+	s.status.RecordRuns(s.cfg.RunConfig)
 	s.status.Start()
 	defer s.status.Stop("exit")
 
@@ -260,6 +276,7 @@ func (s *Scanner) checkpoint(lastScanned int64) {
 		ChainID:           s.chainID,
 		StartHeight:       s.startHeight,
 		LastScannedHeight: lastScanned,
+		LastScannedTime:   s.lastBlockTime,
 		ParamFingerprint:  assign.ParamsV10BlobV0.Fingerprint(),
 		ParamHistory:      s.params.Entries(),
 		Gaps:              s.gaps,
@@ -542,6 +559,9 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 		}
 		s.log.Fatalf("fetch block %d: %v", h, err)
 	}
+	// The frontier on the chain's clock, persisted with the next checkpoint:
+	// the deferred shadow verdict is drawn against it.
+	s.lastBlockTime = blk.Time.UTC()
 	if err := s.retryRPCAt(ctx, fmt.Sprintf("fetch block_results %d", h), h, func() error {
 		var err error
 		res, err = s.chain.BlockResults(ctx, h)
@@ -723,6 +743,15 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 		copy(commitment[:], pp.Commitment)
 		table = buildAssignmentTable(commitment, pp.BlobVersion, pp.Height, vals, s.cfg.StoreRows, att)
 	}
+	// The host each validator had registered when the promise settled: the
+	// endpoint the upload went to. A validator that re-registers later is
+	// probed at its new host, and the row can say the host changed.
+	if hosts, ok := s.hostsAt(ctx, blk.Height); ok {
+		table.HostsAtSettlementKnown = true
+		for i := range table.Validators {
+			table.Validators[i].Host = hosts[table.Validators[i].Address]
+		}
+	}
 
 	return Publication{
 		SchemaVersion:           SchemaVersion,
@@ -797,4 +826,30 @@ func (s *Scanner) validatorSet(ctx context.Context, height int64) (valSetEntry, 
 		s.valSetOrder = s.valSetOrder[1:]
 	}
 	return e, nil
+}
+
+// hostsAt returns the Fibre host registry as it stood at height, keyed by
+// consensus address hex, and whether it could be read. Read once per block.
+func (s *Scanner) hostsAt(ctx context.Context, height int64) (map[string]string, bool) {
+	if s.hostsCacheHeight == height && s.hostsCache != nil {
+		return s.hostsCache, s.hostsCacheOK
+	}
+	s.hostsCacheHeight, s.hostsCache, s.hostsCacheOK = height, map[string]string{}, false
+	provs, err := s.chain.BondedFibreProvidersAt(ctx, height)
+	if err != nil {
+		if !s.hostsWarned {
+			s.log.Printf("WARNING: h=%d: registry at the settlement height could not be read (%v); host_at_settlement is left unknown on this and any later failing block", height, err)
+			s.hostsWarned = true
+		}
+		return s.hostsCache, false
+	}
+	for _, p := range provs {
+		_, raw, err := bech32.DecodeAndConvert(p.ConsAddressBech32)
+		if err != nil || len(raw) != 20 {
+			continue
+		}
+		s.hostsCache[strings.ToLower(hex.EncodeToString(raw))] = p.Host
+	}
+	s.hostsCacheOK = true
+	return s.hostsCache, true
 }

@@ -90,6 +90,18 @@ const (
 	// the other promise's rows. Never a fault: the validator cannot tell the
 	// two promises apart, because the protocol gives it no way to.
 	ClassShadowedShard Classification = "SHADOWED_SHARD"
+	// ClassUnmatchedGenuine: the rows that came back are genuine rows of
+	// this blob, are not this promise's assignment, and no settled promise
+	// over the commitment assigns them either. Under hash-order serving
+	// that is not an accusation the evidence supports: a shard uploaded
+	// for a promise that never settled sits on disk until its prune,
+	// never appears on chain, and answers when its hash sorts first, and
+	// a validator serving it honestly is serving a genuine piece of the
+	// blob. Held out of the rate and counted beside it; the row carries
+	// the indices. FAULT stays reserved for what hash order cannot excuse:
+	// nothing served (NOT_FOUND in window), bytes that do not verify
+	// (INVALID_ROWS), or rows that fail the commitment.
+	ClassUnmatchedGenuine Classification = "UNMATCHED_GENUINE"
 	// ClassIdentityExpired: the TLS certificate is endorsed by the right
 	// consensus key, but the signed validity window has lapsed or has not
 	// started. That is endpoint hygiene, not impersonation and not a
@@ -317,7 +329,7 @@ func Classify(in Evidence) (Classification, string) {
 	// overlaps the lifetime such a shard would have. Not a fault, not a
 	// shadow: a gap in observation, re-classifiable once the gap is scanned.
 	if (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified && in.ShadowUncertain {
-		return ClassProbeError, "returned genuine rows of this blob that no known promise assigns, and a scan gap overlaps the lifetime a shard over this commitment could have: a promise this observer never scanned may own them; no verdict until the gap is scanned"
+		return ClassProbeError, "returned genuine rows of this blob that no promise this observer has scanned assigns; the store serves the first shard by promise-hash order, so a promise settling after this probe may own them: verdict deferred until the scanner passes probe time + payment_promise_timeout (probe_amendments), permanent when a scan gap covers the interval"
 	}
 
 	// assigned and attested validator.
@@ -331,7 +343,7 @@ func Classify(in Evidence) (Classification, string) {
 		case o == OutcomeInvalidRows:
 			return ClassFault, "returned bytes that do not verify against the blob commitment"
 		case (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified:
-			return ClassFault, "returned genuine rows of this blob, but not the set this promise assigns, and no other settled promise over this commitment assigns them: an incomplete or wrong delivery of the shard while under obligation"
+			return ClassUnmatchedGenuine, "returned genuine rows of this blob, but not the set this promise assigns, and no settled promise over this commitment assigns them; the store serves the first shard by promise-hash order and a shard uploaded for a promise that never settled is never on chain, so this is not an accusation the evidence supports: held out of the rate, counted beside it, indices on the row"
 		case o == OutcomeWrongRows || o == OutcomePartial:
 			return ClassFault, "returned rows that verify against neither the commitment nor this promise's assignment"
 		case o == OutcomeServerError:
@@ -354,7 +366,7 @@ func Classify(in Evidence) (Classification, string) {
 		case o == OutcomeInvalidRows:
 			return ClassFault, "returned bytes that do not verify against the blob commitment"
 		case (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified:
-			return ClassFault, "returned genuine rows of this blob, but not the set this promise assigns, and no other settled promise over this commitment assigns them: an incomplete or wrong delivery of the shard"
+			return ClassUnmatchedGenuine, "returned genuine rows of this blob, but not the set this promise assigns, and no settled promise over this commitment assigns them; not an accusation the evidence supports under hash-order serving: held out of the rate, indices on the row"
 		case o == OutcomeWrongRows || o == OutcomePartial:
 			return ClassFault, "returned rows that verify against neither the commitment nor this promise's assignment"
 		case o == OutcomeServerError:

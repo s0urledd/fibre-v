@@ -10,8 +10,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	tlsverify "github.com/plsgiveup/fibre/fibre-tlsverify"
-
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 )
 
@@ -170,10 +168,12 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassShadowedShard, commitmentVerified: true, shadowed: true},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true, shadowed: true},
 		{assigned: true, phase: PhasePost, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true, shadowed: true},
-		// verified rows, no promise that assigns them: an incomplete delivery
-		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassFault, commitmentVerified: true},
-		{assigned: true, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassFault, commitmentVerified: true},
-		{assigned: true, phase: PhaseGrace, outcome: OutcomePartial, want: ClassFault, commitmentVerified: true},
+		// verified rows, no settled promise that assigns them: held out, not
+		// a fault (an upload whose promise never settled can answer under
+		// hash-order serving)
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassUnmatchedGenuine, commitmentVerified: true},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassUnmatchedGenuine, commitmentVerified: true},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomePartial, want: ClassUnmatchedGenuine, commitmentVerified: true},
 		{assigned: true, phase: PhasePost, outcome: OutcomePartial, want: ClassServedPastWindow, commitmentVerified: true},
 		// no registered host is a registry state, not a refusal to serve
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeNoHost, want: ClassNotRegistered},
@@ -316,15 +316,24 @@ func TestClassify_ShadowedShardIsNeverAFault(t *testing.T) {
 // wrong delivery of this shard. Calling that "shadowed" made a validator
 // that lost half its shard and served the rest un-faultable, for as long as
 // the half it served verified.
-func TestClassify_PartialDeliveryWithoutAShadowIsAFault(t *testing.T) {
+func TestClassify_PartialDeliveryWithoutAShadowIsHeldOut(t *testing.T) {
+	// Genuine rows that no settled promise assigns are not a fault the
+	// evidence supports: the store serves the first shard by promise-hash
+	// order and an upload whose promise never settled can answer. Their
+	// own class, held out of the rate; FAULT stays for no shard at all and
+	// for bytes that do not verify.
 	for _, phase := range []Phase{PhaseInWindow, PhaseGrace} {
 		for _, o := range []Outcome{OutcomeWrongRows, OutcomePartial} {
 			got, reason := Classify(Evidence{Assigned: true, Attested: true, Phase: phase, Outcome: o, CommitmentVerified: true})
-			if got != ClassFault {
-				t.Errorf("%s %s verified but unshadowed = %s (%q), want FAULT", phase, o, got, reason)
+			if got != ClassUnmatchedGenuine {
+				t.Errorf("%s %s verified but unshadowed = %s (%q), want UNMATCHED_GENUINE", phase, o, got, reason)
 			}
-			if !strings.Contains(reason, "no other settled promise") {
+			if !strings.Contains(reason, "no settled promise") {
 				t.Errorf("%s %s: reason must say why it is not shadowed: %q", phase, o, reason)
+			}
+			// rows that do not verify are still corrupt data, and a fault
+			if got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: phase, Outcome: o}); got != ClassFault {
+				t.Errorf("%s %s unverified = %s, want FAULT", phase, o, got)
 			}
 		}
 	}
@@ -395,6 +404,31 @@ func TestShadowGapFor(t *testing.T) {
 	}
 	if got := shadowGapFor(gaps, at, 0); got != "" {
 		t.Errorf("zero lifetime named a gap: %q", got)
+	}
+}
+
+// The scanner's frontier is an open-ended gap: a promise that settled after
+// it is not in the feed. A candidate must settle within the payment-promise
+// timeout of a creation that preceded this publication's settlement, so the
+// set is complete once the scanner has read past settlement + timeout, and
+// incomplete before that, however small the lag.
+func TestShadowPending(t *testing.T) {
+	settled := time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
+	now := settled.Add(20 * time.Minute)
+	pub := scan.Publication{SettlementTime: settled}
+	pub.ParamsAtPublication.PaymentPromiseTimeoutSeconds = 3600
+	mark := scannedMark{height: 100, timedFor: 100, at: now}
+	// always pending at the probe, and the bound is the probe time plus the
+	// timeout, not the settlement: the store serves by promise-hash order
+	got := shadowPending(now, pub, mark)
+	if !strings.Contains(got, "shadow_pending") || !strings.Contains(got, now.Add(time.Hour).Format(time.RFC3339)) || !strings.Contains(got, "#100") {
+		t.Errorf("got %q", got)
+	}
+	if got := shadowPending(now, pub, scannedMark{}); !strings.Contains(got, "frontier unknown") {
+		t.Errorf("unknown frontier: %q", got)
+	}
+	if got := shadowPending(now, scan.Publication{SettlementTime: settled}, mark); !strings.Contains(got, "not on record") {
+		t.Errorf("no timeout on record: %q", got)
 	}
 }
 
@@ -567,7 +601,15 @@ func TestClassifyDownloadError_StatusCodes(t *testing.T) {
 		{status.Error(codes.Unavailable, "connection error"), OutcomeRPCUnavailable},
 		{status.Error(codes.DeadlineExceeded, "context deadline exceeded"), OutcomeRPCDeadline},
 		{status.Error(codes.ResourceExhausted, "grpc: received message larger than max (5000000 vs. 4194304)"), OutcomeProbeError},
+		{status.Error(codes.ResourceExhausted, "grpc: received message after decompression larger than max 4194304"), OutcomeProbeError},
+		// the server's own send bound refusing to deliver a shard it holds
+		// is the validator's, reached and answered: never our gap, never a
+		// throttle
+		{status.Error(codes.ResourceExhausted, "grpc: trying to send message larger than max (5000000 vs. 4194304)"), OutcomeServerError},
 		{status.Error(codes.InvalidArgument, "bad blob id"), OutcomeProbeError},
+		// a server that no longer serves the unary read (a streaming-only
+		// build) is the observer's client being behind, never a verdict
+		{status.Error(codes.Unimplemented, "unknown method DownloadShard"), OutcomeProbeError},
 		// the endpoint was reached, proved its identity and answered; calling
 		// that "unreachable" would be false about a server we just talked to
 		{status.Error(codes.Internal, "store: i/o error"), OutcomeServerError},
@@ -722,18 +764,5 @@ func TestNotFoundPhaseGuard(t *testing.T) {
 	}
 	if p, re := notFoundPhase(msu.Add(time.Hour), PhaseGrace, msu, tol); re || p != PhaseGrace {
 		t.Errorf("started in grace: regraded=%v phase=%s", re, p)
-	}
-}
-
-// The verifying dial's refusal carries the tlsverify reason in its text; the
-// row must keep it, and a lapsed certificate on that path is stale, not a
-// mismatch.
-func TestReasonInText(t *testing.T) {
-	r, ok := reasonInText("rpc error: code = Unavailable desc = connection error: fibre tls identity [cert_expired]: peer certificate expired")
-	if !ok || r != tlsverify.ReasonCertExpired || !identityStale(r) {
-		t.Errorf("got %q ok=%v stale=%v", r, ok, identityStale(r))
-	}
-	if _, ok := reasonInText("rpc error: code = Unavailable desc = connection refused"); ok {
-		t.Errorf("found a reason in an error that has none")
 	}
 }

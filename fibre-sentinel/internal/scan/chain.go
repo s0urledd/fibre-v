@@ -271,6 +271,15 @@ type FibreProvider struct {
 // ABCI query — no gRPC). Providers whose validator left the active set are
 // already excluded by the chain.
 func (c *Chain) BondedFibreProviders(parent context.Context) ([]FibreProvider, error) {
+	return c.BondedFibreProvidersAt(parent, 0)
+}
+
+// BondedFibreProvidersAt is BondedFibreProviders as the chain state stood at
+// height (0 = latest). It is how the scanner records the host each
+// validator had registered when a promise settled, the host the upload
+// went to; a node that has pruned that state answers with an error, which
+// the record shows as "unknown", never as "no host".
+func (c *Chain) BondedFibreProvidersAt(parent context.Context, height int64) ([]FibreProvider, error) {
 	ctx, cancel := c.ctx(parent)
 	defer cancel()
 
@@ -279,7 +288,7 @@ func (c *Chain) BondedFibreProviders(parent context.Context) ([]FibreProvider, e
 	if err != nil {
 		return nil, fmt.Errorf("marshal providers request: %w", err)
 	}
-	res, err := c.rpc.ABCIQueryWithOptions(ctx, "/celestia.valaddr.v1.Query/AllBondedFibreProviders", cmtbytes.HexBytes(data), rpcclient.ABCIQueryOptions{})
+	res, err := c.rpc.ABCIQueryWithOptions(ctx, "/celestia.valaddr.v1.Query/AllBondedFibreProviders", cmtbytes.HexBytes(data), rpcclient.ABCIQueryOptions{Height: height})
 	if err != nil {
 		return nil, fmt.Errorf("abci query bonded fibre providers: %w", err)
 	}

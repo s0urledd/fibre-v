@@ -55,6 +55,13 @@ type Measurement struct {
 	// the promise it signed, not from its bonding status, so leaving the
 	// bonded set must not stop the evidence.
 	HostSource string `json:"host_source,omitempty"`
+	// HostAtSettlement is the host the validator had registered when the
+	// promise settled (from the publication record), where the shard was
+	// stored. When it differs from ValidatorHost the validator re-registered
+	// during the window, and SettlementHost carries what the old endpoint
+	// answered when the new one did not serve.
+	HostAtSettlement string     `json:"host_at_settlement,omitempty"`
+	SettlementHost   *HostProbe `json:"settlement_host_probe,omitempty"`
 	// Attested: the settled promise carries a signature from this validator
 	// that the observer verified against its consensus key. That is the only
 	// on-chain proof the validator ever stored this shard, because a Fibre
@@ -122,6 +129,21 @@ type Measurement struct {
 
 // ObserverInfo is the build that wrote a measurement and the chain it
 // believed it was measuring against.
+// HostProbe is the second, evidence-only probe of the host registered at
+// settlement, run when the validator's current host did not serve the
+// shard and differs from it. It never changes the row's verdict: the
+// obligation is served at the endpoint clients are sent to, which is the
+// registry now; it records whether the data is still there.
+type HostProbe struct {
+	Host               string  `json:"host"`
+	Outcome            Outcome `json:"outcome"`
+	RowsReturned       int     `json:"rows_returned"`
+	CommitmentVerified bool    `json:"commitment_verified"`
+	AssignmentVerified bool    `json:"assignment_verified"`
+	DurationMS         int64   `json:"duration_ms"`
+	RawError           string  `json:"raw_error,omitempty"`
+}
+
 type ObserverInfo struct {
 	// Build is the observer's VCS revision (suffixed "-dirty" when built
 	// from a modified tree), or "unknown" when the binary carries none.
@@ -168,7 +190,11 @@ type TLSResult struct {
 	CipherSuite      string `json:"cipher_suite,omitempty"`
 	PeerCertSHA256   string `json:"peer_cert_sha256,omitempty"`
 	PeerCertNotAfter string `json:"peer_cert_not_after,omitempty"`
-	Error            string `json:"error,omitempty"`
+	// SharedWithDownload: the download in this row rode this same TLS
+	// session, so the certificate above is the one that served the rows.
+	// Absent on rows from builds that opened a second connection for L4.
+	SharedWithDownload bool   `json:"shared_with_download,omitempty"`
+	Error              string `json:"error,omitempty"`
 }
 
 // SamplingDecision is the load-policy decision a row was produced under.
@@ -225,6 +251,13 @@ type DownloadResult struct {
 	// free-text error so the SERVER_ERROR / THROTTLED / NOT_FOUND split is
 	// machine-readable. Empty on success and on non-status errors.
 	RPCCode string `json:"rpc_code,omitempty"`
+	// RecvLimit is the receive bound this probe ran with, so a
+	// PROBE_ERROR from "received message larger than max" is checkable
+	// against the shard's size.
+	RecvLimit int `json:"recv_limit,omitempty"`
+	// RPC is the read method the probe called: DownloadShard today; the
+	// streaming read once upstream ships it and the prober tries both.
+	RPC string `json:"rpc,omitempty"`
 	// ShadowedBy is the promise hash of another settled promise over the
 	// same commitment whose assignment for this validator is exactly the row
 	// set returned. Set only when the rows verify against the commitment

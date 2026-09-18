@@ -66,7 +66,10 @@ func main() {
 
 	timeouts := probe.StepTimeouts{DNS: *dnsTO, TCP: *tcpTO, TLS: *tlsTO}
 
-	st := status.New(*dataDir, "heartbeat", *vantage, "")
+	st := status.New(*dataDir, "heartbeat", *vantage, status.BuildRevision())
+	cfg := map[string]any{}
+	flag.VisitAll(func(f *flag.Flag) { cfg[f.Name] = f.Value.String() })
+	st.RecordRuns(cfg)
 	st.Start()
 	defer st.Stop("exit")
 

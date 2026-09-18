@@ -22,7 +22,9 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/rollup"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
 
@@ -46,6 +48,16 @@ func main() {
 		reachPath = flag.String("reachability", "", "path to reachability.jsonl (default <data-dir>/reachability.jsonl)")
 		payPath   = flag.String("payments", "", "path to payments.jsonl (default <data-dir>/payments.jsonl)")
 		regPath   = flag.String("registry", "", "path to registry.jsonl, this collector's own endpoint-history log (default <data-dir>/registry.jsonl)")
+		runsPath  = flag.String("runs", "", "path to runs.jsonl, every component's record of its starts, stops and configuration (default <data-dir>/runs.jsonl)")
+		secPath   = flag.String("sampling-secrets", "", "path to sampling-secrets.jsonl, the prober's revealed day secrets (default <data-dir>/sampling-secrets.jsonl)")
+		amendPath = flag.String("amendments", "", "path to amendments.jsonl, this collector's own log of late shadow verdicts (default <data-dir>/amendments.jsonl)")
+		pruneTol  = flag.Duration("prune-tolerance", 5*time.Minute, "how long past must_serve_until a promise's shard is still taken to be on disk when judging a deferred shadow verdict")
+		expDir    = flag.String("exports-dir", "", "where the daily export tarballs are built (default <data-dir>/exports)")
+		expHour   = flag.Int("export-hour", 3, "UTC hour after which a day's export is built, the grace for late rows (-1 = never build exports)")
+		retainRaw = flag.Duration("retain-raw", rollup.Default().RetainRaw, "keep probe and heartbeat rows this long; older rolled days are pruned, whole days at a time (0 = keep forever)")
+		retainRJ  = flag.Duration("retain-raw-json", rollup.Default().RetainRawJSON, "keep a row's raw_json (the bulk of it) this long; every typed column stays (0 = keep forever)")
+		rollAfter = flag.Duration("rollup-after", rollup.Default().RollupAfter, "compute a day's obligation and probe rollups this long after the day ends; must clear every retention window (0 = never roll up, so never prune)")
+		retEvery  = flag.Duration("retention-every", time.Hour, "how often the retention pass runs")
 	)
 	flag.Parse()
 
@@ -69,6 +81,18 @@ func main() {
 	}
 	if *regPath == "" {
 		*regPath = filepath.Join(*dataDir, "registry.jsonl")
+	}
+	if *runsPath == "" {
+		*runsPath = filepath.Join(*dataDir, status.RunsFile)
+	}
+	if *secPath == "" {
+		*secPath = filepath.Join(*dataDir, "sampling-secrets.jsonl")
+	}
+	if *expDir == "" {
+		*expDir = filepath.Join(*dataDir, "exports")
+	}
+	if *amendPath == "" {
+		*amendPath = filepath.Join(*dataDir, "amendments.jsonl")
 	}
 
 	log := scan.NewLogger(*logLines)
@@ -122,8 +146,68 @@ func main() {
 			_ = regFile.Sync()
 		}
 	}
-	log.Printf("collector up: run=%d vantage=%s db=%s data=%s", runID, *vantage, *dbPath, *dataDir)
+	var exporter *export.Builder
+	if *expHour >= 0 {
+		exporter = &export.Builder{DataDir: *dataDir, Dir: *expDir, Vantage: *vantage, Build: status.BuildRevision(), Hour: *expHour, Logf: log.Printf}
+	}
+	// Late shadow verdicts are this collector's own judgement and, like the
+	// endpoint history, have no source but this process: every one is
+	// appended here as well as written to the database, and replayed on a
+	// rebuild before anything is re-judged.
+	amendFile, err := os.OpenFile(*amendPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Fatalf("open %s: %v", *amendPath, err)
+	}
+	defer amendFile.Close()
+	frontierMissing := false
+	judgeLate := func(now time.Time) {
+		v, err := st.Meta("last_scanned_time")
+		if err != nil || v == "" {
+			if !frontierMissing {
+				log.Printf("late verdicts: the scanner's frontier time is not on record yet (state.json last_scanned_time); deferred shadow verdicts wait")
+				frontierMissing = true
+			}
+			return
+		}
+		frontier, err := time.Parse(store.TimeLayout, v)
+		if err != nil {
+			log.Printf("late verdicts: bad last_scanned_time %q", v)
+			return
+		}
+		ams, err := st.LateShadowVerdicts(ctx, frontier, now, *pruneTol)
+		if err != nil {
+			log.Printf("late verdicts: %v", err)
+			live.Error(fmt.Sprintf("late verdicts: %v", err))
+			return
+		}
+		applied := 0
+		for _, a := range ams {
+			ok, err := st.ApplyAmendment(a)
+			if err != nil {
+				log.Printf("late verdicts: apply %s: %v", a.DedupeKey, err)
+				continue
+			}
+			if !ok {
+				continue
+			}
+			applied++
+			if b, err := json.Marshal(a); err == nil {
+				if _, err := amendFile.Write(append(b, '\n')); err != nil {
+					log.Printf("amendments: write: %v", err)
+					live.Error(fmt.Sprintf("amendments write: %v", err))
+				}
+			}
+			log.Printf("late verdict: %s %s %s: %s -> %s", a.PromiseHash[:min(12, len(a.PromiseHash))], a.ValidatorAddress, a.ScheduledAt.UTC().Format(time.RFC3339), a.From, a.To)
+		}
+		if applied > 0 {
+			_ = amendFile.Sync()
+			live.Set("late_verdicts", applied)
+		}
+	}
+	log.Printf("collector up: run=%d vantage=%s db=%s data=%s exports=%s", runID, *vantage, *dbPath, *dataDir, *expDir)
 
+	retention := rollup.Config{RetainRaw: *retainRaw, RetainRawJSON: *retainRJ, RollupAfter: *rollAfter}
+	var lastRetention time.Time
 	var lastEscrow time.Time
 	pass := func(pollEndpoints bool) {
 		now := time.Now()
@@ -173,6 +257,52 @@ func main() {
 			}
 			if r.Skipped > 0 {
 				log.Printf("payments: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
+			}
+		}
+		if r, err := ingest.Runs(st, *runsPath, now); err != nil {
+			log.Printf("runs: %v", err)
+		} else if r.Inserted > 0 {
+			log.Printf("runs: +%d run event(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		if r, err := ingest.SamplingSecrets(st, *secPath, now); err != nil {
+			log.Printf("sampling secrets: %v", err)
+		} else if r.Inserted > 0 {
+			log.Printf("sampling secrets: +%d day(s) revealed (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		if r, err := ingest.Amendments(st, *amendPath, now); err != nil {
+			log.Printf("amendments: %v", err)
+		} else if r.Inserted > 0 {
+			log.Printf("amendments: +%d late verdict(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		judgeLate(now)
+		if *retEvery > 0 && time.Since(lastRetention) >= *retEvery {
+			lastRetention = now
+			if rep, err := rollup.Run(ctx, st, now, retention); err != nil {
+				log.Printf("retention: %v", err)
+				live.Error(fmt.Sprintf("retention: %v", err))
+			} else {
+				if len(rep.RolledDays) > 0 {
+					log.Printf("retention: rolled up %d day(s) through %s (%d obligations still pending at roll)", len(rep.RolledDays), rep.RolledDays[len(rep.RolledDays)-1], rep.PendingAtRoll)
+					live.Set("rollup_through", rep.RolledDays[len(rep.RolledDays)-1])
+				}
+				if rep.PendingAtRoll > 0 {
+					log.Printf("retention: WARNING %d obligation(s) were still pending when their day was rolled; -rollup-after is shorter than a retention window", rep.PendingAtRoll)
+				}
+				if rep.RawJSONDropped > 0 {
+					log.Printf("retention: dropped raw_json from %d row(s)", rep.RawJSONDropped)
+				}
+				if len(rep.PrunedDays) > 0 {
+					log.Printf("retention: pruned %d row(s) of %d day(s) through %s", rep.PrunedRows, len(rep.PrunedDays), rep.PrunedDays[len(rep.PrunedDays)-1])
+					live.Set("raw_from", rep.PrunedDays[len(rep.PrunedDays)-1])
+				}
+			}
+		}
+		if exporter != nil {
+			if built, err := exporter.Run(now); err != nil {
+				log.Printf("export: %v", err)
+				live.Error(fmt.Sprintf("export: %v", err))
+			} else if len(built) > 0 {
+				live.Set("last_export", built[len(built)-1])
 			}
 		}
 		if chain != nil && *escEvery > 0 && time.Since(lastEscrow) >= *escEvery {

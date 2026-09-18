@@ -1,0 +1,403 @@
+// Package export builds the daily export: one tarball per UTC day holding
+// every record the observer wrote for that day, straight from the JSONL
+// files, with a manifest of line counts and digests. The export is what a
+// verifier downloads: sentinel-recompute re-derives every verdict and every
+// published figure from it, and the digests let two verifiers agree they
+// hold the same bytes.
+//
+// Records are assigned to a day by their own timestamp (a publication's
+// settlement time, a probe's start, an endpoint event's time), not by when
+// they reached the file. Each file is read from where the previous build
+// stopped up to the first record dated after the day; records dated
+// before the day that turn up in that range (a late probe row, a straggler
+// after a restart) are included and counted as late, so every line lands
+// in exactly one export and the manifest says which ones came late.
+package export
+
+import (
+	"archive/tar"
+	"bufio"
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+)
+
+// FileSpec names one JSONL file and the field that dates its records.
+type FileSpec struct {
+	Name      string `json:"name"`
+	TimeField string `json:"time_field"`
+}
+
+// Files is every record file the observer writes, in export order.
+var Files = []FileSpec{
+	{"publications.jsonl", "settlement_time"},
+	{"payments.jsonl", "time"},
+	{"measurements.jsonl", "started_at"},
+	{"reachability.jsonl", "started_at"},
+	{"registry.jsonl", "at"},
+	{"runs.jsonl", "at"},
+	{"sampling-secrets.jsonl", "revealed_at"},
+	{"amendments.jsonl", "judged_at"},
+}
+
+// Member describes one file inside an export.
+type Member struct {
+	Name      string `json:"name"`
+	TimeField string `json:"time_field"`
+	Lines     int64  `json:"lines"`
+	// LateLines are records dated before the export's day that reached the
+	// file after that day's export was built (or, on the first export, any
+	// earlier record still unexported). They are in this export.
+	LateLines int64  `json:"late_lines"`
+	Bytes     int64  `json:"bytes"`
+	SHA256    string `json:"sha256"`
+	// From and To are the byte range of the source file the lines were
+	// read from, so a holder of the original file can re-derive the member.
+	From int64 `json:"source_from"`
+	To   int64 `json:"source_to"`
+}
+
+// Manifest is manifest.json inside the tarball and the index entry.
+type Manifest struct {
+	Vantage     string    `json:"vantage"`
+	Day         string    `json:"day"`
+	GeneratedAt time.Time `json:"generated_at"`
+	Build       string    `json:"build"`
+	Files       []Member  `json:"files"`
+	Rule        string    `json:"rule"`
+}
+
+// Entry is one line of the index the API serves.
+type Entry struct {
+	Name   string `json:"name"`
+	Bytes  int64  `json:"bytes"`
+	SHA256 string `json:"sha256"`
+	Manifest
+}
+
+const rule = "records dated (by time_field, UTC) on this day, plus late records dated earlier, read from each source file between source_from and source_to; every line of every source file is in exactly one export"
+
+// state is exports/state.json: how far each source file has been exported
+// and the last day built.
+type state struct {
+	LastDay string           `json:"last_day"`
+	Offsets map[string]int64 `json:"offsets"`
+}
+
+// Builder builds exports for one observer.
+type Builder struct {
+	DataDir string
+	Dir     string // where exports and their index live
+	Vantage string
+	Build   string
+	// Hour is the UTC hour after which a day's export may be built (the
+	// grace for late rows). 3 means 03:00 the next day.
+	Hour int
+	Logf func(string, ...any)
+}
+
+// NamePattern is what an export file name looks like.
+var NamePattern = regexp.MustCompile(`^fibrescope-[A-Za-z0-9._-]+-\d{4}-\d{2}-\d{2}\.tar\.gz(\.sha256)?$`)
+
+func (b *Builder) name(day string) string {
+	v := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' {
+			return r
+		}
+		return '-'
+	}, b.Vantage)
+	if v == "" {
+		v = "local"
+	}
+	return "fibrescope-" + v + "-" + day + ".tar.gz"
+}
+
+// Run builds every export that is due at now and not built yet: from the
+// day after the last built one up to yesterday, once the grace hour has
+// passed. It returns the names built.
+func (b *Builder) Run(now time.Time) ([]string, error) {
+	st, err := b.loadState()
+	if err != nil {
+		return nil, err
+	}
+	now = now.UTC()
+	yesterday := dayOf(now).Add(-24 * time.Hour)
+	// A first run builds the newest day whose grace has passed; that export
+	// sweeps up everything older as late lines, so the record before the
+	// exports began is in an export too.
+	first := dayOf(now.Add(-time.Duration(b.Hour) * time.Hour)).Add(-24 * time.Hour)
+	if st.LastDay != "" {
+		d, err := time.Parse("2006-01-02", st.LastDay)
+		if err != nil {
+			return nil, fmt.Errorf("exports state: bad last_day %q", st.LastDay)
+		}
+		first = d.Add(24 * time.Hour)
+	}
+	var built []string
+	for d := first; !d.After(yesterday); d = d.Add(24 * time.Hour) {
+		if now.Before(d.Add(24 * time.Hour).Add(time.Duration(b.Hour) * time.Hour)) {
+			break // the grace for late rows has not passed
+		}
+		day := d.Format("2006-01-02")
+		if err := b.build(day, st, now); err != nil {
+			return built, fmt.Errorf("export %s: %w", day, err)
+		}
+		built = append(built, b.name(day))
+	}
+	return built, nil
+}
+
+func (b *Builder) loadState() (*state, error) {
+	st := &state{Offsets: map[string]int64{}}
+	raw, err := os.ReadFile(filepath.Join(b.Dir, "state.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return st, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(raw, st); err != nil {
+		return nil, fmt.Errorf("exports state: %w", err)
+	}
+	if st.Offsets == nil {
+		st.Offsets = map[string]int64{}
+	}
+	return st, nil
+}
+
+func (b *Builder) saveState(st *state) error {
+	raw, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(b.Dir, "state.json"), raw)
+}
+
+// build writes one day's export, its digest sidecar, updates the index and
+// then the state. The state is written last: a crash before it leaves an
+// export that the next run rebuilds from the same offsets, identically.
+func (b *Builder) build(day string, st *state, now time.Time) error {
+	if err := os.MkdirAll(b.Dir, 0o755); err != nil {
+		return err
+	}
+	man := Manifest{Vantage: b.Vantage, Day: day, GeneratedAt: now.UTC(), Build: b.Build, Rule: rule}
+	newOffsets := map[string]int64{}
+	var tarBuf bytes.Buffer
+	gz := gzip.NewWriter(&tarBuf)
+	tw := tar.NewWriter(gz)
+	for _, f := range Files {
+		from := st.Offsets[f.Name]
+		m, data, to, err := collect(filepath.Join(b.DataDir, f.Name), f, day, from)
+		if err != nil {
+			return err
+		}
+		newOffsets[f.Name] = to
+		man.Files = append(man.Files, m)
+		if err := addMember(tw, f.Name, data, now); err != nil {
+			return err
+		}
+	}
+	manJSON, err := json.MarshalIndent(man, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := addMember(tw, "manifest.json", manJSON, now); err != nil {
+		return err
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	if err := gz.Close(); err != nil {
+		return err
+	}
+	name := b.name(day)
+	path := filepath.Join(b.Dir, name)
+	if err := atomicWrite(path, tarBuf.Bytes()); err != nil {
+		return err
+	}
+	sum := sha256.Sum256(tarBuf.Bytes())
+	digest := hex.EncodeToString(sum[:])
+	if err := atomicWrite(path+".sha256", []byte(digest+"  "+name+"\n")); err != nil {
+		return err
+	}
+	if err := b.updateIndex(Entry{Name: name, Bytes: int64(tarBuf.Len()), SHA256: digest, Manifest: man}); err != nil {
+		return err
+	}
+	st.LastDay = day
+	for k, v := range newOffsets {
+		st.Offsets[k] = v
+	}
+	if err := b.saveState(st); err != nil {
+		return err
+	}
+	if b.Logf != nil {
+		var lines, late int64
+		for _, m := range man.Files {
+			lines += m.Lines
+			late += m.LateLines
+		}
+		b.Logf("export: %s written (%d lines, %d late, %d bytes, sha256 %s)", name, lines, late, tarBuf.Len(), digest[:12])
+	}
+	return nil
+}
+
+func addMember(tw *tar.Writer, name string, data []byte, now time.Time) error {
+	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data)), ModTime: now.UTC(), Format: tar.FormatPAX}); err != nil {
+		return err
+	}
+	_, err := tw.Write(data)
+	return err
+}
+
+// collect reads path from offset `from`, taking every complete line dated
+// on or before day and stopping at the first dated after it. It returns
+// the member description, the bytes taken, and the offset to resume from.
+// A missing file is an empty member.
+func collect(path string, f FileSpec, day string, from int64) (Member, []byte, int64, error) {
+	m := Member{Name: f.Name, TimeField: f.TimeField, From: from, To: from}
+	fh, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		m.SHA256 = emptySHA
+		return m, nil, from, nil
+	}
+	if err != nil {
+		return m, nil, from, err
+	}
+	defer fh.Close()
+	info, err := fh.Stat()
+	if err != nil {
+		return m, nil, from, err
+	}
+	if info.Size() < from {
+		// The file shrank: it was replaced. Start over; the old bytes are
+		// in earlier exports and the new ones will be counted late.
+		from = 0
+		m.From = 0
+	}
+	if _, err := fh.Seek(from, io.SeekStart); err != nil {
+		return m, nil, from, err
+	}
+	r := bufio.NewReaderSize(fh, 1<<20)
+	var out bytes.Buffer
+	pos := from
+	h := sha256.New()
+	for {
+		raw, err := r.ReadBytes('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break // a partial trailing line waits for the next build
+			}
+			return m, nil, from, err
+		}
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 {
+			pos += int64(len(raw))
+			continue
+		}
+		d, ok := dayOfLine(trimmed, f.TimeField)
+		if !ok {
+			// An undated or undecodable line goes with the day being built:
+			// it is in the record and must be in exactly one export.
+			d = day
+		}
+		if d > day {
+			break // the first record of a later day: tomorrow's export starts here
+		}
+		pos += int64(len(raw))
+		out.Write(raw)
+		h.Write(raw)
+		m.Lines++
+		if d < day {
+			m.LateLines++
+		}
+	}
+	m.To = pos
+	m.Bytes = int64(out.Len())
+	m.SHA256 = hex.EncodeToString(h.Sum(nil))
+	return m, out.Bytes(), pos, nil
+}
+
+// emptySHA is SHA-256 of nothing, the digest of an empty member.
+const emptySHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// dayOfLine reads the record's timestamp field as a UTC day.
+func dayOfLine(line []byte, field string) (string, bool) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(line, &m); err != nil {
+		return "", false
+	}
+	raw, ok := m[field]
+	if !ok {
+		return "", false
+	}
+	var t time.Time
+	if err := json.Unmarshal(raw, &t); err != nil || t.IsZero() {
+		return "", false
+	}
+	return t.UTC().Format("2006-01-02"), true
+}
+
+func dayOf(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// updateIndex rewrites index.json with the entry added or replaced.
+func (b *Builder) updateIndex(e Entry) error {
+	entries, err := ReadIndex(b.Dir)
+	if err != nil {
+		return err
+	}
+	kept := entries[:0]
+	for _, x := range entries {
+		if x.Name != e.Name {
+			kept = append(kept, x)
+		}
+	}
+	kept = append(kept, e)
+	sort.Slice(kept, func(i, j int) bool { return kept[i].Day > kept[j].Day })
+	raw, err := json.MarshalIndent(kept, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(b.Dir, "index.json"), raw)
+}
+
+// ReadIndex returns the exports listed in dir's index, newest day first.
+// A missing index is an empty list.
+func ReadIndex(dir string) ([]Entry, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "index.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return []Entry{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []Entry
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("exports index: %w", err)
+	}
+	if out == nil {
+		out = []Entry{}
+	}
+	return out, nil
+}
+
+func atomicWrite(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}

@@ -109,6 +109,8 @@ export type Health = {
   server_time: string;
 };
 
+export type RolledUp = { raw_from: string; days: number; note: string };
+
 export type Network = {
   /**
    * When this summary was computed and how long it took. It is a snapshot
@@ -146,6 +148,8 @@ export type Network = {
   probe_gaps: number;
   probe_gaps_by_outcome: ClassCounts;
   vantage_health: VantageHealth;
+  /** set when the window rests partly on the daily rollup: past the raw retention, "all" is the rollup for days before raw_from plus the raw rows */
+  rolled_up?: RolledUp;
   serve_rate_by_point: { key: string; serve_rate: Rate }[];
   /** whole-probe duration, dial to verified rows, over HEALTHY probes */
   serve_latency_p50_ms: number | null;
@@ -334,6 +338,16 @@ export type Probe = {
   shadowed_by?: string;
   observer_build?: string;
   app_version?: number;
+  /** the verdict the row was stamped with, when the collector's late shadow judgement replaced it */
+  classification_at_probe?: string;
+  amended_at?: string;
+  shadow_gap?: string;
+  /** where the upload went; host_changed when the host probed differs (the validator re-registered during the window) */
+  host_at_settlement?: string;
+  host_changed?: boolean;
+  /** the evidence probe of the settlement host, run when the current host did not serve; never the verdict */
+  settlement_host_outcome?: string;
+  settlement_host_served?: boolean;
 };
 
 // Below this many rated probes a percentage is noise dressed as a

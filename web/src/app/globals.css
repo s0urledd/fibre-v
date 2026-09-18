@@ -243,6 +243,7 @@ main { min-height: 60vh; padding-top: var(--s5); }
 .note .label { display: block; margin-bottom: var(--s1); }
 .note p { margin: 0; font-size: var(--t-table); color: var(--text-2); }
 .coverage { font-size: var(--t-small); color: var(--text-3); margin: var(--s3) 0 0; display: flex; align-items: center; flex-wrap: wrap; gap: var(--s1); }
+.rolled { font-size: var(--t-small); margin: var(--s2) 0 0; }
 .notice { border-left: 3px solid var(--line-2); background: var(--card); border-radius: var(--r-sm); padding: var(--s3) var(--s4); margin: var(--s4) 0; max-width: var(--measure); }
 
 /* -------------------------------------------------------------------- bar --- */

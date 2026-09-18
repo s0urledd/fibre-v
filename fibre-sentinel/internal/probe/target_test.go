@@ -69,3 +69,21 @@ func TestResolverCachesEvictOldestFirst(t *testing.T) {
 		t.Fatal("the most recently confirmed host was evicted")
 	}
 }
+
+// With nothing in the live registry and nothing this observer ever saw,
+// the publication record still says where the shard went: the settlement
+// host is the last fallback, and the row says so. A host from the registry
+// is never overridden by it.
+func TestWithSettlementFallback(t *testing.T) {
+	settled := time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC)
+	seen := settled.Add(time.Hour)
+	if h, src, at := withSettlementFallback("", "", time.Time{}, "s.example:9090", settled); h != "s.example:9090" || src != "settlement" || !at.Equal(settled) {
+		t.Fatalf("fallback = %q via %q at %s", h, src, at)
+	}
+	if h, src, at := withSettlementFallback("b.example:9090", "bonded", seen, "s.example:9090", settled); h != "b.example:9090" || src != "bonded" || !at.Equal(seen) {
+		t.Fatalf("registry host overridden: %q via %q at %s", h, src, at)
+	}
+	if h, src, _ := withSettlementFallback("", "", time.Time{}, "", settled); h != "" || src != "" {
+		t.Fatalf("no host anywhere resolved to %q via %q", h, src)
+	}
+}

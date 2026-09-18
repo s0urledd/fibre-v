@@ -13,6 +13,8 @@ type Detail = {
   window: Window;
   validator: Validator;
   recent_probes: Probe[];
+  /** set when this window rests partly on the daily rollup (the "all" window past the raw retention) */
+  rolled_up?: { raw_from: string; days: number; note: string };
   /** schedule points, over all time, that no rate counts: the observer's own correlated failures */
   suspect_points: { at: string; label: string; reason: string }[];
 };
@@ -168,6 +170,11 @@ function Page() {
           </>} />
       </div>
 
+      {data.rolled_up && (
+        <p className="muted rolled">
+          Rolled up after 90 days: figures before {data.rolled_up.raw_from} come from the daily rollup ({data.rolled_up.days.toLocaleString("en-US")} days); latency, by-point, attestation and throughput cover the raw rows from then on.
+        </p>
+      )}
       {o && o.total > 0 && (
         <p className="coverage">
           {o.total.toLocaleString("en-US")} proven obligation{o.total === 1 ? "" : "s"} in this window:
@@ -235,6 +242,16 @@ function Page() {
                   {p.retry_first_outcome && (
                     <span className="faint" title={`First attempt: ${p.retry_first_outcome}. Retried once from the same location.`}>
                       {" "}(retried after {p.retry_first_outcome})
+                    </span>
+                  )}
+                  {p.host_changed && (
+                    <span className="faint" title={`The validator re-registered during the window: the upload went to ${p.host_at_settlement}, this probe went to the host registered now.${p.settlement_host_outcome ? ` Asked as evidence, the old host answered ${p.settlement_host_outcome}${p.settlement_host_served ? " with the exact rows: the data was left behind, not lost" : ""}.` : ""}`}>
+                      {" "}(host changed{p.settlement_host_served ? "; old host still serves" : p.settlement_host_outcome ? `; old host ${p.settlement_host_outcome}` : ""})
+                    </span>
+                  )}
+                  {p.amended_at && p.classification_at_probe && (
+                    <span className="faint" title={`Filed as ${p.classification_at_probe} at the probe and judged ${p.classification} once every promise that could have answered was on record (${p.amended_at}).`}>
+                      {" "}(judged late)
                     </span>
                   )}
                 </td>

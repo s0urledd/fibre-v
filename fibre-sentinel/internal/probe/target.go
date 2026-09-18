@@ -46,6 +46,11 @@ type Target struct {
 	HostSource string
 	// HostSeenAt is when the registry entry behind Host was last confirmed.
 	HostSeenAt time.Time
+	// HostAtSettlement is the host registered when the promise settled, from
+	// the publication record ("" when none, or when the scanner could not
+	// read the registry at that height). It is the last fallback for Host
+	// and the evidence probe's target when Host differs from it.
+	HostAtSettlement string
 }
 
 // Resolver turns a publication into probe targets: it fetches the validator set
@@ -131,6 +136,20 @@ func (r *Resolver) hostMap(ctx context.Context) (map[string]string, error) {
 	return m, nil
 }
 
+// seedLastKnown records a host this observer saw registered for a validator
+// at time at, from the durable registry (see hostRegistry). A record older
+// than what is already known is ignored: the live bonded poll and the
+// registry describe the same history, and the newer confirmation wins.
+func (r *Resolver) seedLastKnown(addrHex, host string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if k, ok := r.lastKnown[addrHex]; ok && !k.at.Before(at) {
+		return
+	}
+	r.lastKnown[addrHex] = knownHost{host: host, at: at}
+	r.evictLastKnown()
+}
+
 // evictLastKnown keeps the fallback map bounded, dropping the entries
 // confirmed longest ago first. Emptying it wholesale would throw away exactly
 // the validators that have been gone longest, which are the ones the fallback
@@ -156,6 +175,13 @@ func (r *Resolver) evictLastKnown() {
 	for i := 0; i < len(all)-maxLastKnownHosts; i++ {
 		delete(r.lastKnown, all[i].key)
 	}
+}
+
+// knownHosts is how many validators have a host on record, bonded or not.
+func (r *Resolver) knownHosts() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.lastKnown)
 }
 
 // hostFor resolves one validator's host, preferring the bonded registry and
@@ -266,7 +292,11 @@ func (r *Resolver) TargetsFor(ctx context.Context, p scan.Publication, includeUn
 		recByAddr[a.String()] = len(rows)
 	}
 	attestedByAddr := map[string]bool{}
+	settlementHost := map[string]string{}
 	for _, v := range p.Assignment.Validators {
+		if v.Host != "" {
+			settlementHost[strings.ToLower(v.Address)] = v.Host
+		}
 		if recByAddr[v.Address] != v.RowCount {
 			return nil, fmt.Errorf("assignment mismatch for %s: record says %d rows, recompute says %d — record and chain disagree",
 				v.Address, v.RowCount, recByAddr[v.Address])
@@ -285,7 +315,10 @@ func (r *Resolver) TargetsFor(ctx context.Context, p scan.Publication, includeUn
 		}
 		addrHex := v.Address.String()
 		host, source, seenAt := r.hostFor(hosts, addrHex)
+		atSettlement := settlementHost[strings.ToLower(addrHex)]
+		host, source, seenAt = withSettlementFallback(host, source, seenAt, atSettlement, p.SettlementTime)
 		out = append(out, Target{
+			HostAtSettlement:   atSettlement,
 			Address:            v.Address,
 			AddressHex:         addrHex,
 			PubKey:             pubByAddr[v.Address],
@@ -301,4 +334,15 @@ func (r *Resolver) TargetsFor(ctx context.Context, p scan.Publication, includeUn
 		})
 	}
 	return out, nil
+}
+
+// withSettlementFallback is the last step of host resolution: with nothing
+// in the live registry and nothing this observer ever saw, the publication
+// record still says where the shard went, and the row says the host came
+// from there ("settlement", seen at the settlement time).
+func withSettlementFallback(host, source string, at time.Time, atSettlement string, settled time.Time) (string, string, time.Time) {
+	if host == "" && atSettlement != "" {
+		return atSettlement, "settlement", settled
+	}
+	return host, source, at
 }

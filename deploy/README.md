@@ -12,7 +12,9 @@ The JSONL files are the append-only raw record; the SQLite database is
 derived from them and can be rebuilt by deleting it and restarting the
 collector. The collector's own `registry.jsonl` carries the endpoint
 history (which validator registered which host, when), the one derived
-table that has no other source. Back up the JSONL files and the database
+table that has no other source; the prober reads it too, so a validator
+that left the bonded list keeps being probed at its last registered host
+across prober restarts. Back up the JSONL files and the database
 (see "Backups"). Every process keeps a status file under `status/`, and
 `/v1/health` turns them into one answer (see "Health and alerting").
 
@@ -115,10 +117,22 @@ user cannot write there.
 That file is what makes the sample auditable. The commitments published at
 `/v1/sampling` are SHA-256 of a per-day secret derived from it, so if the
 master is regenerated on every restart the commitments change with it and
-nobody can ever check a day's draw against them. It is also the reason the
+nobody can ever check a day's draw against them. The prober publishes each
+day's secret seven days after the day ends (`-reveal-after`), to
+`<DATA_DIR>/sampling-secrets.jsonl`; the collector serves it beside the
+day's commitment. Only the day secrets are ever revealed, never the master. It is also the reason the
 sample is unpredictable: a publisher who learned the master in advance could
 work out which of its blobs would be probed, so do not put it anywhere the
 publishers can read, and do not include it in a backup that leaves the host.
+
+The scanner reads the Fibre host registry at each settlement height
+(`host_at_settlement` on every assignment), which needs a node that keeps
+state at that height; against a pruning node the field is recorded as
+unknown, never as "no host", and the log says so once. Size the node's
+`min-retain-blocks` (and `pruning-keep-recent`) to cover the scanner's
+worst lag behind the tip plus a margin: a scanner that falls a day behind
+needs a day of retained state, or every settlement in that day is
+recorded without its hosts.
 
 Leave `-probe-unassigned` off on a public vantage. The read-path rate
 limiting Celestia is designing (forum topic 2295) treats requests for
@@ -283,15 +297,35 @@ box (they are append-only; a copy is complete the moment it is taken) and
 rebuild the database from the rest if you want it smaller. Nothing here
 deletes a probe row yet: the "all" window is exactly that.
 
-**Retention decision (taken 2026-09-18, to be implemented before mainnet):**
-raw probe rows are kept for **90 days**; `raw_json` (the bulk of a row) is
-dropped after **30 days** while every typed column, including the evidence
-columns from schema 9, stays; beyond 90 days the "all" figures come from a
-**daily per-validator obligation rollup** (served, broken, end unobserved,
-unobserved by kind, pending, faults, reachability), and every figure that
-rests on the rollup says "rolled up after 90 days" beside its sample. The
+**Retention (decided 2026-09-18, implemented in the collector):** raw
+probe and heartbeat rows are kept for **90 days** (`-retain-raw`);
+`raw_json` (the bulk of a row) is dropped after **30 days**
+(`-retain-raw-json`) while every typed column, including the evidence
+columns from schema 9, stays; **14 days** after a UTC day ends
+(`-rollup-after`) the collector computes the day's per-validator rollup
+(obligation buckets by settlement day; classes, faults, gaps and
+heartbeats by start day) with the API's own SQL, and only a rolled day is
+ever pruned, whole days at a time. `-rollup-after` is a floor, not the
+rule: a day rolls only once every promise settled on it has left its
+window (`must_serve_until` plus an hour) and no probe row of theirs still
+awaits the late shadow verdict, so a chain whose retention is longer than
+the flag holds the rollup rather than rolling a pending obligation; the
+log says which day is waiting and why. From the first prune on the "all"
+figures are the rollup plus the raw rows and carry a `rolled_up` label
+(`raw_from`, days folded in); the shorter windows never touch it. The
+retention pass runs hourly (`-retention-every`); the status file shows
+`rollup_through` and `raw_from`. A warning in the log that obligations
+were still pending at roll means `-rollup-after` is shorter than a
+retention window on this chain: raise it. The
 JSONL files are never rotated by the tools and remain the record; the
-daily export is what a verifier downloads. At mainnet's 148 MB/s the
+daily export is what a verifier downloads. The collector builds it: one
+tarball per UTC day under `<DATA_DIR>/exports` (`-exports-dir`), once the
+grace hour has passed (`-export-hour`, default 03:00 UTC, so late rows
+land in their own day), served at `/v1/exports` with a manifest of
+digests. `sentinel-recompute` re-derives every verdict and every
+obligation figure from an untarred export and compares them with the
+API's `?as_of=` answer; see `docs/verdicts.md`, "Reproducing the
+figures". At mainnet's 148 MB/s the
 publication rate is many times mocha's, which is why the decision is
 written down now: a rollup added later could not reconstruct the "all"
 window it replaced.
@@ -305,8 +339,9 @@ Two copies, both shipped:
   `fibre-litestream@mocha`. It replicates the **derived** database only,
   continuously, with 72 h of history.
 - **fibre-backup** for the record: `fibre-backup@mocha.timer` runs
-  `rclone sync` of every `.jsonl`, `state.json`, `registry.jsonl` and the
-  status files to `BACKUP_REMOTE/<network>` nightly (`deploy/backup.sh`),
+  `rclone sync` of every `.jsonl` (the record, `registry.jsonl`,
+  `runs.jsonl`, `sampling-secrets.jsonl`, `amendments.jsonl`), `state.json`, the status files
+  and the daily exports to `BACKUP_REMOTE/<network>` nightly (`deploy/backup.sh`),
   with the rclone remote configured once in `/etc/fibre-observer/rclone.conf`.
   It never copies `sampling-master.key`, which must not leave the host, nor
   the database, which litestream covers. With `BACKUP_REMOTE` empty the
@@ -317,11 +352,15 @@ Two copies, both shipped:
 `observer.db*` aside, start the collector: it recreates the schema, replays
 `registry.jsonl` (endpoint history), then tails the JSONL files from zero.
 Every record has a natural key and every insert is `ON CONFLICT DO
-NOTHING`, so a replay never duplicates. What a rebuild does **not** bring
-back, because it has no JSONL source: the collector's own run spans
-(`/v1/runs`, the downtime record), the escrow balances and validator
-identities (re-polled within minutes), and the chain-side `meta` keys
-(re-polled at once). Litestream's copy is the backup for those.
+NOTHING`, so a replay never duplicates. The run record (`/v1/runs`) comes
+back from `runs.jsonl`, which every component appends its starts, stops
+and flags to, the revealed sampling secrets from
+`sampling-secrets.jsonl`, and the late shadow verdicts from
+`amendments.jsonl`, the collector's own log of them (replayed before
+anything is re-judged, so a rebuild never draws a verdict twice). What a rebuild does **not** bring back, because
+it has no JSONL source: the collector's own run row, the escrow balances
+and validator identities (re-polled within minutes), and the chain-side
+`meta` keys (re-polled at once). Litestream's copy is the backup for those.
 
 **Restore the database** from litestream: stop `fibre-collector@mocha` and
 `fibre-api@mocha` (each holds the WAL), then

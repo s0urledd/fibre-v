@@ -45,7 +45,10 @@ func main() {
 		log.Printf("WARNING: -rows=false omits the per-validator row lists, so the observer cannot compute which distinct rows were served; the dashboard's reconstructability verdict will read \"unknown\" for every blob recorded in this run")
 	}
 
+	runCfg := map[string]any{}
+	flag.VisitAll(func(f *flag.Flag) { runCfg[f.Name] = f.Value.String() })
 	s, err := scan.New(scan.Config{
+		RunConfig:       runCfg,
 		RPCURL:          *rpc,
 		DataDir:         *dataDir,
 		StartHeight:     *startHeight,
