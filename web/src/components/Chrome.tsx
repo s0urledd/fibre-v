@@ -51,33 +51,34 @@ function Mark() {
   );
 }
 
-type Theme = "system" | "light" | "dark";
+type Theme = "light" | "dark";
 
-/** Three states, in the order a reader expects: follow the OS, then light, then dark. */
+/** Two states, sun and moon. The first visit starts from the system
+ *  preference; from then on the choice is the reader's and is remembered. */
 function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>("system");
+  const [theme, setTheme] = useState<Theme>("dark");
   useEffect(() => {
-    try {
-      const t = localStorage.getItem("theme");
-      if (t === "light" || t === "dark") setTheme(t);
-    } catch { /* storage unavailable: stay on system */ }
+    let t: string | null = null;
+    try { t = localStorage.getItem("theme"); } catch { /* storage unavailable */ }
+    if (t !== "light" && t !== "dark") {
+      t = window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    }
+    setTheme(t as Theme);
+    document.documentElement.dataset.theme = t;
   }, []);
   const apply = (t: Theme) => {
     setTheme(t);
-    const root = document.documentElement;
-    if (t === "system") delete root.dataset.theme; else root.dataset.theme = t;
-    try { if (t === "system") localStorage.removeItem("theme"); else localStorage.setItem("theme", t); } catch { /* fine */ }
+    document.documentElement.dataset.theme = t;
+    try { localStorage.setItem("theme", t); } catch { /* fine */ }
   };
-  const next: Theme = theme === "system" ? "light" : theme === "light" ? "dark" : "system";
-  const title = theme === "system" ? "Theme: follows your system. Click for light." : theme === "light" ? "Theme: light. Click for dark." : "Theme: dark. Click to follow your system.";
+  const next: Theme = theme === "light" ? "dark" : "light";
+  const title = theme === "light" ? "Theme: light. Click for dark." : "Theme: dark. Click for light.";
   return (
     <button type="button" className="theme" onClick={() => apply(next)} title={title} aria-label={title}>
       {theme === "dark" ? (
         <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7z" fill="currentColor" /></svg>
-      ) : theme === "light" ? (
-        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.2" fill="currentColor" /><g stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" /></g></svg>
       ) : (
-        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.4" /><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" /></svg>
+        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.2" fill="currentColor" /><g stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" /></g></svg>
       )}
     </button>
   );
