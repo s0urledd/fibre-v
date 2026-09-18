@@ -2,7 +2,10 @@ package store_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -311,4 +314,60 @@ func TestAvatars(t *testing.T) {
 	if _, _, _, ok, _ := st.Avatar(ctx, "D27EE330254D4F6A"); ok {
 		t.Fatal("a picture Keybase no longer has is still served")
 	}
+}
+
+// SQLite's auto-checkpoint copies WAL pages back but never resets the file,
+// and cannot reset one while a reader holds a snapshot. The API holds one
+// through every snapshot refresh, so a batch ingest left the -wal at its
+// high-water mark for good — on the same volume as the database, counted by
+// the health check's disk threshold.
+func TestCheckpointWALTruncatesTheLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	for i := 0; i < 3000; i++ {
+		if _, err := st.DB().ExecContext(ctx,
+			`INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+			"k"+strconv.Itoa(i), strings.Repeat("x", 200), "2026-09-18T00:00:00.000000000Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wal := path + "-wal"
+	before := int64(0)
+	if fi, err := os.Stat(wal); err == nil {
+		before = fi.Size()
+	}
+	if before == 0 {
+		t.Skip("no write-ahead log on this build")
+	}
+
+	busy, _, _, err := st.CheckpointWAL(ctx)
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if busy {
+		t.Fatal("checkpoint reported busy with no reader open")
+	}
+	// The frame counts depend on whether SQLite's own auto-checkpoint got
+	// there first, which is timing. What has to hold is the file: the log is
+	// reset, which is the thing the auto-checkpoint never does.
+	after := int64(0)
+	if fi, err := os.Stat(wal); err == nil {
+		after = fi.Size()
+	}
+	if after >= before {
+		t.Fatalf("the log was %d bytes and is %d after the checkpoint", before, after)
+	}
+
+	// A reader in the way makes it a no-op rather than an error, which the
+	// caller treats as "try again next pass". That path is not exercised
+	// here: the readers it guards against are in the API process, and
+	// holding one open on this pool would only deadlock the test against
+	// itself.
 }

@@ -293,3 +293,48 @@ func TestObligationsAreJudgedByTheNewestProbe(t *testing.T) {
 		}
 	}
 }
+
+// The obligation SQL gained a lower bound on the probe rows so the planner
+// stops walking the whole retained record for a windowed figure. It is a cost
+// bound, not a filter, and the claim that lets it exist is narrow: a row with
+// phase = 'in_window' was scheduled inside its promise's retention window,
+// which opens at settlement_time, so a probe of a promise settled at or after
+// the window start cannot have started materially before it. If that claim is
+// ever wrong, an obligation silently leaves the count — the one direction
+// this observer must not move in without saying so.
+func TestObligationRowBoundDoesNotDropAnObligation(t *testing.T) {
+	ts := obligationsFixture(t)
+	type oblJSON struct {
+		Total  int64 `json:"total"`
+		Served int64 `json:"served"`
+		Broken int64 `json:"broken"`
+	}
+	read := func(q string) oblJSON {
+		t.Helper()
+		var resp struct {
+			Obligations oblJSON `json:"obligations"`
+		}
+		if code := get(t, ts, q, &resp); code != 200 {
+			t.Fatalf("%s: %d", q, code)
+		}
+		return resp.Obligations
+	}
+	// Every window the dashboard offers, against the same record. The "all"
+	// window's bound is the zero string, so it is the unbounded reference:
+	// a narrower window may hold fewer obligations, but never more, and a
+	// window wide enough to cover the record must match "all" exactly.
+	all := read("/v1/network?window=all")
+	if all.Total == 0 {
+		t.Fatal("the sample record has no obligations; this test would prove nothing")
+	}
+	wide := read("/v1/network?window=30d")
+	if wide != all {
+		t.Errorf("30d = %+v but all = %+v, over a record that fits inside 30 days", wide, all)
+	}
+	for _, w := range []string{"24h", "7d", "30d"} {
+		got := read("/v1/network?window=" + w)
+		if got.Total > all.Total || got.Served > all.Served || got.Broken > all.Broken {
+			t.Errorf("%s = %+v exceeds all = %+v", w, got, all)
+		}
+	}
+}

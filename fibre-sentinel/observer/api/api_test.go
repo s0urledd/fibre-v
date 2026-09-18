@@ -657,3 +657,56 @@ func TestProbesReportTheirBoundAndCanBeWalked(t *testing.T) {
 		t.Errorf("a malformed before was %d, want 400", code)
 	}
 }
+
+// ?at= is the link the dashboard publishes beside every correlated-failure
+// point: "here are the rows we left out". It filtered on the raw string, so a
+// timestamp in any spelling but the stored one scanned the whole table and
+// answered with nothing — which reads as "there were no rows at that point",
+// the opposite of what the link is for.
+func TestProbesAtAcceptsThePublishedSpellingAndRejectsNonsense(t *testing.T) {
+	ts, _ := serverAndStore(t)
+	var probes struct {
+		Probes []struct {
+			ScheduledAt string `json:"scheduled_at"`
+		} `json:"probes"`
+	}
+	if code := get(t, ts, "/v1/probes?limit=1", &probes); code != 200 || len(probes.Probes) == 0 {
+		t.Skip("the sample record has no probes")
+	}
+	at := probes.Probes[0].ScheduledAt
+
+	var byAt struct {
+		Probes []struct {
+			ScheduledAt string `json:"scheduled_at"`
+		} `json:"probes"`
+	}
+	if code := get(t, ts, "/v1/probes?at="+url.QueryEscape(at), &byAt); code != 200 {
+		t.Fatalf("at=%s: %d", at, code)
+	}
+	if len(byAt.Probes) == 0 {
+		t.Fatalf("at=%s matched no rows, though that is the value the API itself printed", at)
+	}
+	for _, p := range byAt.Probes {
+		if p.ScheduledAt != at {
+			t.Errorf("at=%s returned a row scheduled at %s", at, p.ScheduledAt)
+		}
+	}
+
+	// The same instant in plain RFC 3339 reaches the same rows.
+	if parsed, err := time.Parse(time.RFC3339Nano, at); err == nil {
+		var alt struct {
+			Probes []struct{} `json:"probes"`
+		}
+		if code := get(t, ts, "/v1/probes?at="+url.QueryEscape(parsed.UTC().Format(time.RFC3339Nano)), &alt); code != 200 {
+			t.Errorf("RFC 3339 spelling: %d", code)
+		} else if len(alt.Probes) != len(byAt.Probes) {
+			t.Errorf("RFC 3339 spelling matched %d rows, the stored spelling matched %d", len(alt.Probes), len(byAt.Probes))
+		}
+	}
+
+	for _, bad := range []string{"yesterday", "2026-09-18", "1758196800"} {
+		if code := get(t, ts, "/v1/probes?at="+url.QueryEscape(bad), nil); code != 400 {
+			t.Errorf("at=%q was %d, want 400: an unparseable point must not be scanned for", bad, code)
+		}
+	}
+}

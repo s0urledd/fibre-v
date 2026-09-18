@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 17
+const SchemaVersion = 18
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -441,6 +441,26 @@ var migrations = []migration{
 			`ALTER TABLE probe_daily ADD COLUMN attested INTEGER NOT NULL DEFAULT 0`,
 			`ALTER TABLE probe_daily ADD COLUMN unattested INTEGER NOT NULL DEFAULT 0`,
 			`ALTER TABLE probe_daily ADD COLUMN unknown_att INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		version: 18,
+		note:    "indexes for the two public routes that had none: /v1/probes?at= and /v1/sampling; and the sampling index no query could use is replaced",
+		stmts: []string{
+			// ?at= filters on scheduled_at, which no index led with — and the
+			// dashboard itself links to it, from every correlated-failure
+			// point it publishes. A full scan behind a public link is an
+			// amplifier: one cheap GET buys the table.
+			`CREATE INDEX IF NOT EXISTS probes_scheduled ON probes (scheduled_at)`,
+			// probes_sampling was (sampling_commitment, started_at). The one
+			// query reading those columns constrains started_at, the second
+			// column, and wraps the first in COALESCE, so the index could
+			// never be used for it: pure cost, a b-tree write on every probe
+			// insert and its share of the WAL. Replaced with one the handler
+			// can seek and that covers every column it reads.
+			`DROP INDEX IF EXISTS probes_sampling`,
+			`CREATE INDEX IF NOT EXISTS probes_sampling_started ON probes
+				(started_at, sampling_commitment, sampling_binding, sampling_p, classification, promise_hash)`,
 		},
 	},
 }
@@ -1371,6 +1391,27 @@ type Endpoint struct {
 	LastSeenAt           string
 	LastSeenHeight       int64
 	ClosedAt             *string
+}
+
+// CheckpointWAL copies the write-ahead log back into the database and, when
+// no reader is holding a snapshot, truncates it.
+//
+// SQLite's own auto-checkpoint copies pages back but never resets the file,
+// and it cannot reset one while any reader has a snapshot open. The API holds
+// one through every snapshot refresh, which on a busy vantage is much of the
+// time, so a batch ingest — a collector restarting with a day of measurements
+// unread, or the first pass after an outage — leaves the -wal at its
+// high-water mark for good: measured at about a gigabyte for one mocha day of
+// probe rows, on the same volume as the database and counted by the health
+// check's disk threshold.
+//
+// Called once per collector pass. It returns busy without doing anything when
+// a reader is in the way, which is not an error: the next pass tries again.
+// The counts are the SQLite pragma's own: log frames and frames checkpointed.
+func (s *Store) CheckpointWAL(ctx context.Context) (busy bool, inLog, checkpointed int64, err error) {
+	var b int64
+	err = s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&b, &inLog, &checkpointed)
+	return b == 1, inLog, checkpointed, err
 }
 
 // CurrentEndpoints lists open endpoint rows.

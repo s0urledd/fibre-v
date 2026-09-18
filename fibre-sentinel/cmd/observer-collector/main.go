@@ -287,6 +287,15 @@ func main() {
 		} else if r.Inserted > 0 {
 			log.Printf("amendments: +%d late verdict(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
+		// Copy the write-ahead log back and truncate it while nothing is
+		// reading. A pass that ingested a backlog can leave hundreds of
+		// megabytes of WAL behind otherwise, and SQLite will not reset it on
+		// its own while the API holds a snapshot.
+		if busy, inLog, done, err := st.CheckpointWAL(ctx); err != nil {
+			log.Printf("wal checkpoint: %v", err)
+		} else if !busy && done > 0 && inLog > 2000 {
+			log.Printf("wal checkpoint: %d of %d frame(s) written back and the log truncated", done, inLog)
+		}
 		judgeLate(now)
 		if *retEvery > 0 && time.Since(lastRetention) >= *retEvery {
 			lastRetention = now

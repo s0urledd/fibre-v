@@ -26,8 +26,21 @@ import (
 
 // ObligationBuckets reduces probe rows to one row per (validator, promise)
 // obligation. Arguments, in order: the as-of moment (pending cut), the
-// settlement window start and end (inclusive), the row start bound, then
-// any suspect-point exclusion and caller filter appended to the WHERE.
+// settlement window start and end (inclusive), the row upper bound (as_of),
+// the row lower bound, then any suspect-point exclusion and caller filter
+// appended to the WHERE.
+//
+// The row lower bound is not a filter on the answer; it is what keeps the
+// cost proportional to the window. With only an upper bound on pr.started_at
+// the planner drives the join from probes and walks every in-window assigned
+// row the store holds, doing a publications lookup per row to discard almost
+// all of them, so a 24h figure costs exactly what "all" costs and the
+// snapshot refresh grows with -retain-raw rather than with the window. It
+// cannot narrow the result: a row with phase = 'in_window' was scheduled
+// inside its promise's retention window, which opens at settlement_time, so
+// a probe of a promise settled at or after the window start cannot have
+// started materially before it. Callers pass the settlement start less an
+// hour, which covers prober and chain clock skew many times over.
 const ObligationBuckets = `SELECT validator_address, promise_hash,
 			SUM(classification = 'FAULT')   AS faults,
 			SUM(classification = 'HEALTHY') AS healthy,
@@ -40,8 +53,20 @@ const ObligationBuckets = `SELECT validator_address, promise_hash,
 			       ROW_NUMBER() OVER (PARTITION BY pr.validator_address, pr.promise_hash
 			                          ORDER BY (pr.classification IN ('NOT_PROBED','PROBE_ERROR')), pr.scheduled_at DESC, pr.started_at DESC) AS rn
 			FROM probes pr JOIN publications pb ON pb.promise_hash = pr.promise_hash
-			WHERE pb.settlement_time >= ? AND pb.settlement_time <= ? AND pr.started_at <= ?
+			WHERE pb.settlement_time >= ? AND pb.settlement_time <= ? AND pr.started_at <= ? AND pr.started_at >= ?
 			  AND pr.assigned = 1 AND pr.phase = 'in_window' AND pr.attested = 1`
+
+// RowLowerBound is the probe-row lower bound that goes with a settlement
+// window start: the start less an hour of clock-skew margin, or the zero
+// string when the window is unbounded. Written once so the API and the
+// rollup cannot disagree about it.
+func RowLowerBound(settlementStart string) string {
+	t, err := time.Parse(store.TimeLayout, settlementStart)
+	if err != nil {
+		return "0000" // an unbounded window: admit every row
+	}
+	return store.TS(t.Add(-time.Hour))
+}
 
 // ObligationSums turns bucketed obligations into the eight counts, in the
 // order Obligations' fields are scanned: total, broken, served,
@@ -407,7 +432,9 @@ func rollDay(ctx context.Context, db *sql.DB, d, now time.Time) (int64, error) {
 		return 0, err
 	}
 	excl, exclArgs := Exclusion("pr.scheduled_at", pts)
-	args := append([]any{store.TS(now), lo, hi, store.TS(now)}, exclArgs...)
+	// lo is the day's first moment; rows of a promise settled that day cannot
+	// have started before it, less the skew margin.
+	args := append([]any{store.TS(now), lo, hi, store.TS(now), RowLowerBound(lo)}, exclArgs...)
 	rows, err := tx.QueryContext(ctx, `SELECT validator_address, `+ObligationSums+` FROM (`+ObligationBuckets+excl+`)
 			GROUP BY validator_address, promise_hash) GROUP BY validator_address`, args...)
 	if err != nil {

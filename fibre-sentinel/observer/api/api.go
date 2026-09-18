@@ -1026,8 +1026,8 @@ func (o *obligationStats) finish() {
 }
 
 // obligationArgs is the argument list obligationBuckets expects: as_of (the
-// pending cut), the window's settlement bounds, the row bound, the suspect
-// points, then the caller's own.
+// pending cut), the window's settlement bounds, the row upper and lower
+// bounds, the suspect points, then the caller's own.
 //
 // Past the first prune the "all" window's raw part starts at raw_from:
 // the rollup holds every obligation of a promise settled before it (the
@@ -1042,7 +1042,7 @@ func (s *Server) obligationArgs(win Window, ss suspectSet, extra ...any) []any {
 			start = store.TS(from)
 		}
 	}
-	args := []any{store.TS(win.End), start, win.endArg(), win.endArg()}
+	args := []any{store.TS(win.End), start, win.endArg(), win.endArg(), rollup.RowLowerBound(start)}
 	args = append(args, ss.args...)
 	return append(args, extra...)
 }
@@ -3336,7 +3336,18 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 	// at: one schedule point, exactly as vantage_health.suspect lists it, so
 	// the rows behind an incident are one link away.
 	if at := q.Get("at"); at != "" {
-		conds, args = append(conds, `scheduled_at = ?`), append(args, at)
+		// Parsed, not passed through. A timestamp in any other spelling
+		// matched nothing after scanning the table for it, which reads to a
+		// caller as "no rows at that point" — the opposite of what an
+		// exclusion's evidence link is for.
+		t, err := time.Parse(store.TimeLayout, at)
+		if err != nil {
+			if t, err = time.Parse(time.RFC3339, at); err != nil {
+				writeErr(w, 400, "at must be a schedule point as vantage_health.suspect prints it (RFC 3339)")
+				return
+			}
+		}
+		conds, args = append(conds, `scheduled_at = ?`), append(args, store.TS(t))
 	}
 	// before: the upper bound that makes the list walkable. The order is
 	// started_at DESC and since is a lower bound, so without this there was
