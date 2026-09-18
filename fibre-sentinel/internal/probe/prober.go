@@ -1,6 +1,9 @@
 package probe
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 
 	"context"
@@ -118,6 +121,10 @@ type Prober struct {
 	// the chain's app version as last polled. pinMu guards the version.
 	observer ObserverInfo
 	pinMu    sync.Mutex
+	// gaps is the scanner's own record of blocks it could not read, from
+	// state.json, re-read every cycle. A probe whose verdict would rest on
+	// "no other promise owns these rows" consults it first.
+	gaps     []scan.ScanGap
 	resolver *Resolver
 	store    *MeasurementStore
 	feed     *pubFeed
@@ -254,6 +261,7 @@ func (p *Prober) Run(parent context.Context) error {
 
 		p.measureClock(ctx)
 		p.pollAppVersion(ctx)
+		p.loadGaps()
 
 		if added, err := p.feed.refresh(); err != nil {
 			p.log.Fatalf("load publications: %v", err)
@@ -377,6 +385,56 @@ func (p *Prober) pollAppVersion(ctx context.Context) {
 		p.status.Set("app_version", v)
 		p.status.Set("pin_stale", cur.PinStale)
 	}
+}
+
+// loadGaps re-reads the scanner's gap list from state.json. A missing or
+// unreadable file keeps the previous list: the prober must not start
+// accusing because the scanner's state was mid-write.
+func (p *Prober) loadGaps() {
+	b, err := os.ReadFile(filepath.Join(p.cfg.DataDir, "state.json"))
+	if err != nil {
+		return
+	}
+	var st struct {
+		Gaps []scan.ScanGap `json:"gaps"`
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		p.log.Printf("state.json: %v (keeping previous gap list)", err)
+		return
+	}
+	p.gaps = st.Gaps
+}
+
+// shardLifetime is the longest a shard over a commitment can outlive the
+// settlement of the promise that stored it: creation precedes settlement,
+// the store prunes at max(expiry, creation + retention), and the prober
+// tolerates prune lag on top. A promise settled earlier than this before a
+// probe cannot still have a shard on disk at the probe.
+func shardLifetime(pub scan.Publication, tolerance time.Duration) time.Duration {
+	r := time.Duration(pub.ParamsAtPublication.ShardRetentionSeconds) * time.Second
+	t := time.Duration(pub.ParamsAtPublication.PaymentPromiseTimeoutSeconds) * time.Second
+	if t > r {
+		r = t
+	}
+	return r + tolerance
+}
+
+// shadowGapFor names the first scan gap that overlaps (probeAt - lifetime,
+// probeAt], the interval in which a promise whose shard could still be on
+// disk at probeAt would have settled. "" when no gap does.
+func shadowGapFor(gaps []scan.ScanGap, probeAt time.Time, lifetime time.Duration) string {
+	if lifetime <= 0 {
+		return ""
+	}
+	earliest := probeAt.Add(-lifetime)
+	for _, g := range gaps {
+		from, to := g.Spans()
+		if to.After(earliest) && !from.After(probeAt) {
+			return fmt.Sprintf("scan gap #%d-#%d (%s to %s) overlaps the shard lifetime", g.From, g.To,
+				from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+		}
+	}
+	return ""
 }
 
 // observerInfo is the stamp for the next row.
@@ -689,6 +747,7 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 		MaxMessageSize:     maxMessageSizeFor(pub.Assignment.ProtocolParams),
 		ClockOffsetMS:      p.clockOffsetMS(),
 		Shadowers:          p.feed.shadowersFor(ph, pub.Promise.Commitment, t.AddressHex),
+		ShadowGap:          shadowGapFor(p.gaps, time.Now().UTC(), shardLifetime(pub, p.schedCfg().PruneTolerance)),
 		Observer:           p.observerInfo(),
 	}
 

@@ -274,17 +274,25 @@ func (s *Scanner) checkpoint(lastScanned int64) {
 // published rather than hidden: state.json carries the ranges, the API and
 // the dashboard show them. Consecutive heights merge into one range. Returns
 // false when err is not that kind of failure.
-func (s *Scanner) recordGap(h int64, err error) bool {
+func (s *Scanner) recordGap(h int64, err error, blockTime time.Time) bool {
 	var ue *ErrHeightUnavailable
 	if !errors.As(err, &ue) {
 		return false
 	}
 	reason := "height unavailable from the RPC node (pruned, or storage.discard_abci_responses = true)"
+	var bt *time.Time
+	if !blockTime.IsZero() {
+		t := blockTime.UTC()
+		bt = &t
+	}
 	if n := len(s.gaps); n > 0 && s.gaps[n-1].To == h-1 {
 		s.gaps[n-1].To = h
 		s.gaps[n-1].LastError = ue.Err.Error()
+		if bt != nil {
+			s.gaps[n-1].ToTime = bt
+		}
 	} else {
-		s.gaps = append(s.gaps, ScanGap{From: h, To: h, Reason: reason, LastError: ue.Err.Error(), At: time.Now().UTC()})
+		s.gaps = append(s.gaps, ScanGap{From: h, To: h, Reason: reason, LastError: ue.Err.Error(), At: time.Now().UTC(), FromTime: bt, ToTime: bt})
 	}
 	s.log.Printf("WARNING: GAP h=%d not scanned: %v; recorded and moving on (%d gap ranges so far)", h, ue.Err, len(s.gaps))
 	s.status.Error(fmt.Sprintf("gap at h=%d: %v", h, ue.Err))
@@ -529,7 +537,7 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 		blk, err = s.chain.Block(ctx, h)
 		return err
 	}); err != nil {
-		if s.recordGap(h, err) {
+		if s.recordGap(h, err, time.Time{}) {
 			return 0
 		}
 		s.log.Fatalf("fetch block %d: %v", h, err)
@@ -539,7 +547,8 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 		res, err = s.chain.BlockResults(ctx, h)
 		return err
 	}); err != nil {
-		if s.recordGap(h, err) {
+		// The header was read a moment ago: the gap gets the chain's clock.
+		if s.recordGap(h, err, blk.Time) {
 			return 0
 		}
 		s.log.Fatalf("fetch block_results %d: %v", h, err)

@@ -156,6 +156,11 @@ type Input struct {
 	// verify against the commitment but are not this promise's assignment
 	// are SHADOWED_SHARD only when they are exactly one of these sets.
 	Shadowers []ShadowCandidate
+	// ShadowGap names a scan gap overlapping the interval in which a promise
+	// whose shard could still be on disk at probe time would have settled;
+	// empty when the scanner saw every block that matters. With no matching
+	// Shadower, it turns a would-be fault into an observer gap.
+	ShadowGap string
 
 	// Observer is the build and chain state stamped on the row (see
 	// ObserverInfo). Zero value means "not stamped".
@@ -254,6 +259,7 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 			Outcome:            m.Outcome,
 			CommitmentVerified: m.Download.CommitmentVerified,
 			Shadowed:           m.Download.ShadowedBy != "",
+			ShadowUncertain:    m.Download.ShadowedBy == "" && m.Download.ShadowGap != "",
 			IdentityStale:      m.Identity.Stale,
 			PinStale:           m.Observer != nil && m.Observer.PinStale,
 		})
@@ -643,6 +649,9 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint str
 	if verr := sm.Verify(in.Target.Address, idx); verr != nil {
 		r.Error = "assignment verify: " + verr.Error()
 		r.ShadowedBy = shadowedBy(idx, in.Shadowers)
+		if r.ShadowedBy == "" {
+			r.ShadowGap = in.ShadowGap
+		}
 		if len(proofs) < in.Target.RowCount {
 			r.outcome, r.rawErr = OutcomePartial, verr.Error()
 		} else {

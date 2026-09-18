@@ -54,6 +54,28 @@ type ScanGap struct {
 	Reason    string    `json:"reason"`
 	LastError string    `json:"last_error,omitempty"`
 	At        time.Time `json:"at"`
+	// FromTime and ToTime are the block times of From and To when the
+	// block header could still be read (a node that discards ABCI responses
+	// keeps headers). They let a reader place the gap on the chain's clock
+	// rather than the scanner's; absent, At is the only clue.
+	FromTime *time.Time `json:"from_time,omitempty"`
+	ToTime   *time.Time `json:"to_time,omitempty"`
+}
+
+// Spans reports the chain-time interval a gap covers, falling back to the
+// scanner's own clock at the moment it hit the gap when no block time was
+// read. The fallback is deliberately the conservative one: a gap whose
+// blocks are actually old reads as recent, which errs toward "a promise may
+// be hiding in there" rather than toward an accusation.
+func (g ScanGap) Spans() (from, to time.Time) {
+	from, to = g.At, g.At
+	if g.FromTime != nil {
+		from = *g.FromTime
+	}
+	if g.ToTime != nil {
+		to = *g.ToTime
+	}
+	return from, to
 }
 
 // OpenStore opens or creates the store in dir.
