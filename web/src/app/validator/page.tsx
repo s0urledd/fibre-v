@@ -165,29 +165,22 @@ function Page() {
       </div>
       </Panel>
 
-      <Panel title="Speed" right="download step and whole probe, from one location">
-      <div className="cells two">
+      <Panel title="Throughput" right="download step only, from one location">
+      <div className="cells four">
         <Cell label="Throughput"
           value={v.serve_bytes_per_second == null ? "—" : bytesPerSecond(v.serve_bytes_per_second)}
           tone={v.serve_bytes_per_second == null ? "absent" : undefined}
           sub={v.serve_bytes_per_second == null ? "not observed" : `median over ${v.serve_throughput_sample.toLocaleString("en-US")} healthy probes`}
           info={<>
-            <p>Bytes handed over per second during the download itself, median over {v.serve_throughput_sample.toLocaleString("en-US")} healthy probes. Connecting and checking the certificate are not in it.</p>
-          </>} />
-        <Cell label="Latency"
-          value={v.serve_latency_p50_ms != null ? v.serve_latency_p50_ms.toLocaleString("en-US") : "—"} unit={v.serve_latency_p50_ms != null ? "ms" : undefined}
-          tone={v.serve_latency_p50_ms != null ? undefined : "absent"}
-          sub={v.serve_latency_p50_ms != null ? `p50 · p95 ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms · ${v.serve_latency_sample.toLocaleString("en-US")} probes` : "not observed"}
-          info={<>
-            <p>The whole probe, dial to verified rows: what a client waits for. Median over healthy probes, with the 95th percentile beside it.</p>
-            <p>Measured from one location, so part of every figure is our own path.</p>
+            <p>Bytes handed over per second during the download itself, median over healthy probes. Connecting and checking the certificate are not in it.</p>
+            <p>Measured from one location, so the absolute figure includes our own path; validators measured from the same place at the same time compare.</p>
           </>} />
       </div>
       </Panel>
 
       {data.rolled_up && (
         <p className="muted rolled">
-          Rolled up after 90 days: figures before {data.rolled_up.raw_from} come from the daily rollup ({data.rolled_up.days.toLocaleString("en-US")} days); latency, by-point, attestation and throughput cover the raw rows from then on.
+          Rolled up after 90 days: figures before {data.rolled_up.raw_from} come from the daily rollup ({data.rolled_up.days.toLocaleString("en-US")} days); by-point, attestation and throughput figures cover the raw rows from then on.
         </p>
       )}
       {o && o.total > 0 && (

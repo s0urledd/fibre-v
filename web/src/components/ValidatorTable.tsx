@@ -241,7 +241,7 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                     <RateCell r={o?.rate} obligations={o?.rate} kind="serve" unreachable={o?.unobserved ?? 0} sample={obligationSample(v)} />
                   </td>
                   <td className="right" title={v.serve_bytes_per_second == null ? "No healthy probe with a byte count in this window." :
-                    `Median over ${v.serve_throughput_sample.toLocaleString("en-US")} healthy probes, download step only. Whole probe: ${v.serve_latency_p50_ms?.toLocaleString("en-US") ?? "—"} ms typical, ${v.serve_latency_p95_ms?.toLocaleString("en-US") ?? "—"} ms at p95.`}>
+                    `Median over ${v.serve_throughput_sample.toLocaleString("en-US")} healthy probes, download step only.`}>
                     {v.serve_bytes_per_second == null
                       ? <span className="nil">·</span>
                       : <span className="rate"><span className="v">{bytesPerSecond(v.serve_bytes_per_second)}</span></span>}

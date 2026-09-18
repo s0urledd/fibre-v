@@ -11,7 +11,7 @@ const WINDOWS = ["24h", "7d", "30d", "all"];
 
 /**
  * The overview: six network figures, then the validator table. Everything
- * else (per-point rates, latency, the census bar) lives on the validator and
+ * else (per-point rates, the census bar) lives on the validator and
  * methodology pages.
  */
 export default function Overview() {
@@ -141,7 +141,7 @@ export default function Overview() {
 
       {net?.rolled_up && (
         <p className="muted rolled">
-          Rolled up after 90 days: figures before {net.rolled_up.raw_from} come from the daily per-validator rollup ({net.rolled_up.days.toLocaleString("en-US")} days); latency, by-point, attestation and recoverability cover the raw rows from then on.
+          Rolled up after 90 days: figures before {net.rolled_up.raw_from} come from the daily per-validator rollup ({net.rolled_up.days.toLocaleString("en-US")} days); by-point, attestation, throughput and recoverability figures cover the raw rows from then on.
         </p>
       )}
       {noPubs && (
