@@ -452,6 +452,11 @@ type dlResult struct {
 	rawErr  string
 }
 
+// downloadRPCUnary names the read RPC this build calls. celestia-app #7857
+// adds DownloadShardStream beside it; a row records which one it used so a
+// verdict from either can be told apart once both are in play.
+const downloadRPCUnary = "DownloadShard"
+
 // defaultMaxRecvMsgSize matches the reference client's receive bound
 // (fibre/internal/grpc/fibre_client.go: MaxCallRecvMsgSize(maxMsgSize) with
 // maxMsgSize = ProtocolParams.MaxMessageSize()). grpc-go's default is 4 MiB,
@@ -488,7 +493,7 @@ const userAgent = "fibre-sentinel-observer"
 // that the validator refused to serve, so the trade costs coverage of a
 // multi-address host rather than fairness to it.
 func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Conn, hs *handshake, timeout time.Duration) dlResult {
-	r := dlResult{DownloadResult: DownloadResult{Attempted: true, RowsExpected: in.Target.RowCount}}
+	r := dlResult{DownloadResult: DownloadResult{Attempted: true, RowsExpected: in.Target.RowCount, RPC: downloadRPCUnary}}
 	t0 := time.Now()
 	// grpc closes conn once it owns it; until then, and on every early
 	// return, it is this function's to close.
@@ -722,6 +727,15 @@ func classifyDownloadError(err error) Outcome {
 			// our request was refused as malformed: not a retention verdict.
 			return OutcomeProbeError
 		case codes.Canceled:
+			return OutcomeProbeError
+		case codes.Unimplemented:
+			// The server does not speak the RPC this observer called. A
+			// Fibre server that has moved to DownloadShardStream (upstream
+			// #7857) and dropped the unary read answers this way; that is
+			// the observer's client being behind, never a retention verdict.
+			// When both RPCs exist the prober will try the other and record
+			// which one answered (download.rpc); until then the row says
+			// which one it asked for.
 			return OutcomeProbeError
 		case codes.Internal, codes.Unknown, codes.DataLoss, codes.Aborted:
 			// The endpoint was reached, completed TLS, proved its identity

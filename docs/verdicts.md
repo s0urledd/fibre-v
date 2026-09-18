@@ -224,6 +224,10 @@ One sentence each, and what a reader should conclude.
   `download.row_indices` (the indices returned, in returned order),
   `download.rows_sha256` (SHA-256 over the returned row payloads in that
   order), `download.rpc_code` (the gRPC status code of a failed download),
+  `download.rpc` (the read method called: `DownloadShard`; once upstream
+  ships `DownloadShardStream` the prober tries both and records which one
+  answered, and `Unimplemented` on either is an observer error, never a
+  verdict),
   `download.shadowed_by` (the promise whose assignment the returned rows
   match), `observer.build` (the observer's VCS revision), and
   `observer.assign_pin` / `observer.app_version`. The store keeps them as

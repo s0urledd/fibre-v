@@ -595,6 +595,9 @@ func TestClassifyDownloadError_StatusCodes(t *testing.T) {
 		{status.Error(codes.DeadlineExceeded, "context deadline exceeded"), OutcomeRPCDeadline},
 		{status.Error(codes.ResourceExhausted, "grpc: received message larger than max (5000000 vs. 4194304)"), OutcomeProbeError},
 		{status.Error(codes.InvalidArgument, "bad blob id"), OutcomeProbeError},
+		// a server that no longer serves the unary read (a streaming-only
+		// build) is the observer's client being behind, never a verdict
+		{status.Error(codes.Unimplemented, "unknown method DownloadShard"), OutcomeProbeError},
 		// the endpoint was reached, proved its identity and answered; calling
 		// that "unreachable" would be false about a server we just talked to
 		{status.Error(codes.Internal, "store: i/o error"), OutcomeServerError},

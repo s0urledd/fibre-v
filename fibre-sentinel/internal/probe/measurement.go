@@ -229,6 +229,9 @@ type DownloadResult struct {
 	// free-text error so the SERVER_ERROR / THROTTLED / NOT_FOUND split is
 	// machine-readable. Empty on success and on non-status errors.
 	RPCCode string `json:"rpc_code,omitempty"`
+	// RPC is the read method the probe called: DownloadShard today; the
+	// streaming read once upstream ships it and the prober tries both.
+	RPC string `json:"rpc,omitempty"`
 	// ShadowedBy is the promise hash of another settled promise over the
 	// same commitment whose assignment for this validator is exactly the row
 	// set returned. Set only when the rows verify against the commitment

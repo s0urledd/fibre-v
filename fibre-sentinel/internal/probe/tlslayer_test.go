@@ -176,7 +176,7 @@ func TestRun_OneConnectionCarriesHandshakeIdentityAndDownload(t *testing.T) {
 	if !m.TLS.SharedWithDownload {
 		t.Error("the download must be recorded as riding the handshake's connection")
 	}
-	if !m.Download.Attempted || m.Download.RPCCode != "NotFound" {
+	if !m.Download.Attempted || m.Download.RPCCode != "NotFound" || m.Download.RPC != "DownloadShard" {
 		t.Errorf("download = %+v", m.Download)
 	}
 	if n := ln.accepted.Load(); n != 1 {
