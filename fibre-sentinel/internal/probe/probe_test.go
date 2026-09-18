@@ -401,27 +401,23 @@ func TestShadowGapFor(t *testing.T) {
 // timeout of a creation that preceded this publication's settlement, so the
 // set is complete once the scanner has read past settlement + timeout, and
 // incomplete before that, however small the lag.
-func TestShadowLagFor(t *testing.T) {
-	settled := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+func TestShadowPending(t *testing.T) {
+	settled := time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
+	now := settled.Add(20 * time.Minute)
 	pub := scan.Publication{SettlementTime: settled}
 	pub.ParamsAtPublication.PaymentPromiseTimeoutSeconds = 3600
-	at := func(t time.Time) scannedMark { return scannedMark{height: 100, timedFor: 100, at: t} }
-	if got := shadowLagFor(at(settled.Add(61*time.Minute)), pub); got != "" {
-		t.Errorf("frontier past settlement+timeout named a lag: %q", got)
+	mark := scannedMark{height: 100, timedFor: 100, at: now}
+	// always pending at the probe, and the bound is the probe time plus the
+	// timeout, not the settlement: the store serves by promise-hash order
+	got := shadowPending(now, pub, mark)
+	if !strings.Contains(got, "shadow_pending") || !strings.Contains(got, now.Add(time.Hour).Format(time.RFC3339)) || !strings.Contains(got, "#100") {
+		t.Errorf("got %q", got)
 	}
-	if got := shadowLagFor(at(settled.Add(30*time.Minute)), pub); got == "" || !strings.Contains(got, "scanner_lag") {
-		t.Errorf("frontier inside settlement+timeout not named: %q", got)
+	if got := shadowPending(now, pub, scannedMark{}); !strings.Contains(got, "frontier unknown") {
+		t.Errorf("unknown frontier: %q", got)
 	}
-	if got := shadowLagFor(scannedMark{height: 100}, pub); got == "" || !strings.Contains(got, "unknown") {
-		t.Errorf("unknown frontier must read as blind: %q", got)
-	}
-	// a stale time (frontier moved, time not yet read) is unknown, not the old time
-	if got := shadowLagFor(scannedMark{height: 101, timedFor: 100, at: settled.Add(2 * time.Hour)}, pub); got == "" {
-		t.Error("a mark whose time is for an older height must read as unknown")
-	}
-	// no timeout on the record: nothing to bound, so no claim
-	if got := shadowLagFor(at(settled), scan.Publication{SettlementTime: settled}); got != "" {
-		t.Errorf("a record without a timeout named a lag: %q", got)
+	if got := shadowPending(now, scan.Publication{SettlementTime: settled}, mark); !strings.Contains(got, "not on record") {
+		t.Errorf("no timeout on record: %q", got)
 	}
 }
 

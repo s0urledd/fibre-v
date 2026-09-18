@@ -317,7 +317,7 @@ func Classify(in Evidence) (Classification, string) {
 	// overlaps the lifetime such a shard would have. Not a fault, not a
 	// shadow: a gap in observation, re-classifiable once the gap is scanned.
 	if (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified && in.ShadowUncertain {
-		return ClassProbeError, "returned genuine rows of this blob that no known promise assigns, and a scan gap overlaps the lifetime a shard over this commitment could have: a promise this observer never scanned may own them; no verdict until the gap is scanned"
+		return ClassProbeError, "returned genuine rows of this blob that no promise this observer has scanned assigns; the store serves the first shard by promise-hash order, so a promise settling after this probe may own them: verdict deferred until the scanner passes probe time + payment_promise_timeout (probe_amendments), permanent when a scan gap covers the interval"
 	}
 
 	// assigned and attested validator.

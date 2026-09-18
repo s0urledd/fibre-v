@@ -35,12 +35,16 @@ type Store struct {
 
 // PersistState is state.json.
 type PersistState struct {
-	SchemaVersion     int          `json:"schema_version"`
-	ChainID           string       `json:"chain_id"`
-	StartHeight       int64        `json:"start_height"`
-	LastScannedHeight int64        `json:"last_scanned_height"`
-	ParamFingerprint  string       `json:"protocol_params_fingerprint"`
-	ParamHistory      []ParamEntry `json:"param_history"`
+	SchemaVersion     int    `json:"schema_version"`
+	ChainID           string `json:"chain_id"`
+	StartHeight       int64  `json:"start_height"`
+	LastScannedHeight int64  `json:"last_scanned_height"`
+	// LastScannedTime is the block time of LastScannedHeight: the frontier
+	// on the chain's clock, which the deferred shadow verdict is drawn
+	// against. Zero when the scanner has not read a block yet.
+	LastScannedTime  time.Time    `json:"last_scanned_time,omitempty"`
+	ParamFingerprint string       `json:"protocol_params_fingerprint"`
+	ParamHistory     []ParamEntry `json:"param_history"`
 	// Gaps are height ranges the scanner had to skip because the node could
 	// not serve them. Published, never hidden: a publication in one of these
 	// blocks is unknown to this observer.

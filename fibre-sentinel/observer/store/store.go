@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 11
+const SchemaVersion = 12
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -332,6 +332,33 @@ var migrations = []migration{
 				beats_up          INTEGER NOT NULL,
 				computed_at       TEXT NOT NULL,
 				PRIMARY KEY (day, validator_address)
+			)`,
+		},
+	},
+	{
+		version: 12,
+		note:    "deferred shadow verdicts: shadow_gap as a column, the verdict at probe time kept beside the amended one, and the amendment log",
+		stmts: []string{
+			// The Fibre store serves the first shard of a commitment by
+			// promise-hash order, so a promise settling after a probe can own
+			// the rows it returned; the prober defers such a verdict and the
+			// collector judges it once the scanner has read past probe time +
+			// payment_promise_timeout (LateShadowVerdicts). The row keeps the
+			// verdict it was stamped with beside the amended one.
+			`ALTER TABLE probes ADD COLUMN shadow_gap TEXT`,
+			`ALTER TABLE probes ADD COLUMN classification_at_probe TEXT`,
+			`ALTER TABLE probes ADD COLUMN amended_at TEXT`,
+			`UPDATE probes SET shadow_gap = json_extract(raw_json, '$.download.shadow_gap')
+			 WHERE raw_json <> '' AND json_valid(raw_json) AND json_extract(raw_json, '$.download.shadow_gap') IS NOT NULL`,
+			`CREATE INDEX IF NOT EXISTS probes_deferred ON probes (classification, amended_at) WHERE shadow_gap IS NOT NULL`,
+			`CREATE TABLE IF NOT EXISTS probe_amendments (
+				dedupe_key          TEXT PRIMARY KEY REFERENCES probes(dedupe_key) ON DELETE CASCADE,
+				from_classification TEXT NOT NULL,
+				to_classification   TEXT NOT NULL,
+				reason              TEXT NOT NULL,
+				shadowed_by         TEXT,
+				judged_at           TEXT NOT NULL,
+				scanner_frontier    TEXT NOT NULL
 			)`,
 		},
 	},
@@ -827,9 +854,9 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		 identity_ok, identity_reason, download_ok, download_ms, rows_returned, rows_expected, commitment_verified,
 		 assignment_verified, phase, outcome, classification, classification_reason, raw_error, total_duration_ms, raw_json,
 		 attested, bytes_returned, row_indices, rows_sha256, rpc_code, shadowed_by, observer_build, app_version,
-		 sampling_p, sampling_binding, sampling_commitment, retry_first_outcome, clock_offset_ms)
+		 sampling_p, sampling_binding, sampling_commitment, retry_first_outcome, clock_offset_ms, shadow_gap)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(dedupe_key) DO NOTHING`,
 		m.DedupeKey(), m.Vantage, m.PromiseHash, m.Commitment, m.BlobVersion, ts(m.MustServeUntil), m.ValidatorSetHeight,
 		m.ValidatorAddress, m.ValidatorHost, b2i(m.Assigned), m.AssignedRowCount, m.ScheduleLabel, ts(m.ScheduledAt),
@@ -844,7 +871,8 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		nullIfEmpty(rowIndicesJSON(m)), nullIfEmpty(m.Download.RowsSHA256), nullIfEmpty(m.Download.RPCCode),
 		nullIfEmpty(m.Download.ShadowedBy), nullIfEmpty(observerBuild(m)), observerAppVersion(m),
 		samplingP(m), samplingField(m, func(d *probe.SamplingDecision) string { return d.Binding }),
-		samplingField(m, func(d *probe.SamplingDecision) string { return d.DayCommitment }), retryFirstOutcome(m), m.ClockOffsetMS)
+		samplingField(m, func(d *probe.SamplingDecision) string { return d.DayCommitment }), retryFirstOutcome(m), m.ClockOffsetMS,
+		nullIfEmpty(m.Download.ShadowGap))
 	if err != nil {
 		return false, fmt.Errorf("probe %s: %w", m.DedupeKey(), err)
 	}
@@ -1249,4 +1277,175 @@ func (s *Store) InsertReachability(m probe.Measurement, raw []byte) (inserted bo
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// Amendment is one late verdict on a probe row (probe_amendments), as the
+// collector appends it to amendments.jsonl. The prober defers the verdict on
+// genuine rows that no scanned promise assigns, because the Fibre store
+// serves the first shard of a commitment by promise-hash order and a promise
+// settling after the probe can own them; once the scanner has read past
+// probe time + payment_promise_timeout every candidate is on record and the
+// verdict is drawn: SHADOWED_SHARD when a settled promise over the
+// commitment, alive at the probe, assigns exactly the returned rows, FAULT
+// otherwise, and PROBE_ERROR for good when a scan gap covers the interval
+// or the assignment rows were not recorded.
+type Amendment struct {
+	DedupeKey        string    `json:"dedupe_key"`
+	PromiseHash      string    `json:"promise_hash"`
+	ValidatorAddress string    `json:"validator_address"`
+	ScheduledAt      time.Time `json:"scheduled_at"`
+	From             string    `json:"from"`
+	To               string    `json:"to"`
+	Reason           string    `json:"reason"`
+	ShadowedBy       string    `json:"shadowed_by,omitempty"`
+	JudgedAt         time.Time `json:"judged_at"`
+	ScannerFrontier  time.Time `json:"scanner_frontier"`
+}
+
+// LateShadowVerdicts draws the deferred verdicts the scanner frontier now
+// allows. frontier is the block time of the last scanned height; a row is
+// judged once frontier >= started_at + payment_promise_timeout. tolerance
+// is how long past must_serve_until a candidate's shard is still taken to
+// be on disk (the store's prune lag). Nothing is written: the caller applies
+// each amendment (ApplyAmendment) and records it.
+func (s *Store) LateShadowVerdicts(ctx context.Context, frontier, now time.Time, tolerance time.Duration) ([]Amendment, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT pr.dedupe_key, pr.promise_hash, pr.commitment, pr.validator_address, pr.scheduled_at, pr.started_at,
+			COALESCE(pr.row_indices, ''), pr.shadow_gap, pr.classification, pb.payment_promise_timeout_s
+		FROM probes pr JOIN publications pb ON pb.promise_hash = pr.promise_hash
+		WHERE pr.classification = 'PROBE_ERROR' AND pr.shadow_gap IS NOT NULL AND pr.amended_at IS NULL
+		  AND pr.outcome IN ('WRONG_ROWS','PARTIAL') AND pr.commitment_verified = 1
+		ORDER BY pr.started_at`)
+	if err != nil {
+		return nil, err
+	}
+	type pending struct {
+		key, hash, commitment, addr, scheduled, started, indices, gap, cls string
+		timeoutS                                                           int64
+	}
+	var todo []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.key, &p.hash, &p.commitment, &p.addr, &p.scheduled, &p.started, &p.indices, &p.gap, &p.cls, &p.timeoutS); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		todo = append(todo, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []Amendment
+	for _, p := range todo {
+		started, err := time.Parse(TimeLayout, p.started)
+		if err != nil {
+			continue
+		}
+		scheduled, _ := time.Parse(TimeLayout, p.scheduled)
+		a := Amendment{DedupeKey: p.key, PromiseHash: p.hash, ValidatorAddress: p.addr, ScheduledAt: scheduled, From: p.cls,
+			JudgedAt: now.UTC(), ScannerFrontier: frontier.UTC()}
+		if strings.HasPrefix(p.gap, "scan_gap") {
+			// A block the scanner could not read can hold the promise that
+			// owns these rows; nothing later fills it.
+			a.To, a.Reason = string(probe.ClassProbeError), "no verdict: a scan gap covers the interval the owning promise would have settled in ("+p.gap+")"
+			out = append(out, a)
+			continue
+		}
+		deadline := started.Add(time.Duration(p.timeoutS) * time.Second)
+		if p.timeoutS <= 0 || frontier.Before(deadline) {
+			continue // not every candidate is on record yet
+		}
+		var got []int
+		if p.indices == "" || json.Unmarshal([]byte(p.indices), &got) != nil {
+			a.To, a.Reason = string(probe.ClassProbeError), "no verdict: the returned row indices were not recorded on this row"
+			out = append(out, a)
+			continue
+		}
+		cands, err := s.db.QueryContext(ctx, `SELECT pb.promise_hash, a.rows_json FROM publications pb
+				JOIN assignments a ON a.promise_hash = pb.promise_hash
+			WHERE pb.commitment = ? AND pb.promise_hash <> ? AND a.validator_address = ?
+			  AND pb.settlement_time <= ? AND pb.must_serve_until >= ?
+			ORDER BY pb.promise_hash`, p.commitment, p.hash, p.addr, ts(deadline), ts(started.Add(-tolerance)))
+		if err != nil {
+			return out, err
+		}
+		match, unrecorded := "", false
+		for cands.Next() {
+			var h string
+			var rj sql.NullString
+			if err := cands.Scan(&h, &rj); err != nil {
+				cands.Close()
+				return out, err
+			}
+			if !rj.Valid {
+				unrecorded = true
+				continue
+			}
+			var want []int
+			if json.Unmarshal([]byte(rj.String), &want) != nil {
+				unrecorded = true
+				continue
+			}
+			if sameRowSet(got, want) {
+				match = h
+				break
+			}
+		}
+		cands.Close()
+		switch {
+		case match != "":
+			a.To, a.ShadowedBy = string(probe.ClassShadowedShard), match
+			a.Reason = "returned rows of this blob that verify against the commitment and are exactly another settled promise's assignment for this validator; DownloadShard is addressed by commitment alone, so that promise answers in this one's place (judged once every promise settling by " + deadline.UTC().Format(time.RFC3339) + " was on record)"
+		case unrecorded:
+			a.To, a.Reason = string(probe.ClassProbeError), "no verdict: a candidate promise's assignment rows were not recorded (scanner ran without -rows)"
+		default:
+			a.To, a.Reason = string(probe.ClassFault), "incomplete or wrong delivery: rows verify against the commitment but no promise over it settled by "+deadline.UTC().Format(time.RFC3339)+" assigns them to this validator; the row carries the indices"
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+func sameRowSet(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := map[int]int{}
+	for _, x := range a {
+		seen[x]++
+	}
+	for _, x := range b {
+		if seen[x] == 0 {
+			return false
+		}
+		seen[x]--
+	}
+	return true
+}
+
+// ApplyAmendment writes one late verdict: the row's classification moves,
+// the verdict it was stamped with is kept, and the amendment is logged. A
+// row already amended is left alone. Returns whether a row changed.
+func (s *Store) ApplyAmendment(a Amendment) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE probes SET classification_at_probe = COALESCE(classification_at_probe, classification),
+			classification = ?, classification_reason = ?, shadowed_by = COALESCE(?, shadowed_by), amended_at = ?
+		WHERE dedupe_key = ? AND amended_at IS NULL`, a.To, a.Reason, nullIfEmpty(a.ShadowedBy), ts(a.JudgedAt), a.DedupeKey)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(`INSERT INTO probe_amendments (dedupe_key, from_classification, to_classification, reason, shadowed_by, judged_at, scanner_frontier)
+		VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(dedupe_key) DO NOTHING`,
+		a.DedupeKey, a.From, a.To, a.Reason, nullIfEmpty(a.ShadowedBy), ts(a.JudgedAt), ts(a.ScannerFrontier)); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }

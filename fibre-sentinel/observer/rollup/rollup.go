@@ -177,11 +177,15 @@ func Default() Config {
 
 // Report is what one pass did.
 type Report struct {
-	RolledDays     []string
-	PendingAtRoll  int64 // obligations still pending when their day was rolled: RollupAfter is too short
-	RawJSONDropped int64
-	PrunedDays     []string
-	PrunedRows     int64
+	RolledDays []string
+	// Waiting is the first due day that is not final yet, and why: a
+	// promise settled that day is still under obligation, or rows await
+	// the late shadow verdict. RollupAfter is a floor; this is the ceiling.
+	Waiting, WaitingWhy string
+	PendingAtRoll       int64 // obligations still pending when their day was rolled, which dayFinal should make impossible
+	RawJSONDropped      int64
+	PrunedDays          []string
+	PrunedRows          int64
 }
 
 const (
@@ -235,6 +239,17 @@ func Run(ctx context.Context, st *store.Store, now time.Time, cfg Config) (Repor
 		for d := start; ok && !d.After(lastDue); d = d.Add(24 * time.Hour) {
 			if ctx.Err() != nil {
 				return rep, ctx.Err()
+			}
+			final, why, err := dayFinal(ctx, db, d, now)
+			if err != nil {
+				return rep, err
+			}
+			if !final {
+				// Days roll in order; a day that is not final holds every
+				// later one, so the rollup never silently carries a
+				// pending obligation.
+				rep.Waiting, rep.WaitingWhy = d.Format(dayLayout), why
+				break
 			}
 			pending, err := rollDay(ctx, db, d, now)
 			if err != nil {
@@ -300,6 +315,43 @@ func Run(ctx context.Context, st *store.Store, now time.Time, cfg Config) (Repor
 		}
 	}
 	return rep, nil
+}
+
+// finalMargin is added to the last must_serve_until of a day's promises
+// before the day counts as final: the last in-window probe may start late
+// (the prober's lateness allowance) and the prune tolerance sits past the
+// deadline.
+const finalMargin = time.Hour
+
+// dayFinal reports whether every obligation of the promises settled on d
+// is decided: their windows have closed, and no probe row of theirs still
+// awaits the late shadow verdict.
+func dayFinal(ctx context.Context, db *sql.DB, d, now time.Time) (bool, string, error) {
+	lo, hi := dayRange(d)
+	var last sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT MAX(must_serve_until) FROM publications WHERE settlement_time >= ? AND settlement_time <= ?`, lo, hi).Scan(&last); err != nil {
+		return false, "", err
+	}
+	if last.Valid && last.String != "" {
+		t, err := time.Parse(store.TimeLayout, last.String)
+		if err != nil {
+			return false, "", fmt.Errorf("must_serve_until %q: %w", last.String, err)
+		}
+		if now.Before(t.Add(finalMargin)) {
+			return false, "a promise settled that day is under obligation until " + t.UTC().Format(time.RFC3339), nil
+		}
+	}
+	var deferred int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes pr JOIN publications pb ON pb.promise_hash = pr.promise_hash
+		WHERE pb.settlement_time >= ? AND pb.settlement_time <= ?
+		  AND pr.classification = 'PROBE_ERROR' AND pr.shadow_gap IS NOT NULL AND pr.amended_at IS NULL
+		  AND pr.outcome IN ('WRONG_ROWS','PARTIAL') AND pr.commitment_verified = 1`, lo, hi).Scan(&deferred); err != nil {
+		return false, "", err
+	}
+	if deferred > 0 {
+		return false, fmt.Sprintf("%d probe row(s) of its promises await the late shadow verdict", deferred), nil
+	}
+	return true, "", nil
 }
 
 // nextRollupDay is the day after the last rolled one, or the first day with

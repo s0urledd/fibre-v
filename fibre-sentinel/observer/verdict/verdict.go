@@ -273,3 +273,55 @@ func newer(a, b *Row) bool {
 	}
 	return a.StartedAt.After(b.StartedAt)
 }
+
+// Candidate is a settled promise over a commitment with the rows it
+// assigns one validator, for LateShadow.
+type Candidate struct {
+	PromiseHash    string
+	Commitment     string
+	SettlementTime time.Time
+	MustServeUntil time.Time
+	Rows           []int
+}
+
+// LateShadow draws the deferred verdict on a row that returned genuine
+// rows no promise assigned at the probe, the way the collector does once
+// the scanner has read past probe time + timeout: SHADOWED_SHARD with the
+// owning promise when a candidate settled by then, alive at the probe
+// (must_serve_until + tolerance after it), assigns exactly the returned
+// rows; FAULT otherwise. ok is false when the frontier has not reached the
+// bound, or the row carries no indices, or timeout is unknown.
+func LateShadow(got []uint32, probeAt, frontier time.Time, timeout, tolerance time.Duration, cands []Candidate) (cls probe.Classification, shadowedBy string, ok bool) {
+	if timeout <= 0 || len(got) == 0 {
+		return "", "", false
+	}
+	deadline := probeAt.Add(timeout)
+	if frontier.Before(deadline) {
+		return "", "", false
+	}
+	want := map[int]int{}
+	for _, g := range got {
+		want[int(g)]++
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].PromiseHash < cands[j].PromiseHash })
+	for _, c := range cands {
+		if c.SettlementTime.After(deadline) || c.MustServeUntil.Add(tolerance).Before(probeAt) || len(c.Rows) != len(got) {
+			continue
+		}
+		seen := map[int]int{}
+		for _, r := range c.Rows {
+			seen[r]++
+		}
+		same := true
+		for r, n := range want {
+			if seen[r] != n {
+				same = false
+				break
+			}
+		}
+		if same {
+			return probe.ClassShadowedShard, c.PromiseHash, true
+		}
+	}
+	return probe.ClassFault, "", true
+}

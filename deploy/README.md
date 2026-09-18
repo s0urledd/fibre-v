@@ -296,7 +296,12 @@ columns from schema 9, stays; **14 days** after a UTC day ends
 (`-rollup-after`) the collector computes the day's per-validator rollup
 (obligation buckets by settlement day; classes, faults, gaps and
 heartbeats by start day) with the API's own SQL, and only a rolled day is
-ever pruned, whole days at a time. From the first prune on the "all"
+ever pruned, whole days at a time. `-rollup-after` is a floor, not the
+rule: a day rolls only once every promise settled on it has left its
+window (`must_serve_until` plus an hour) and no probe row of theirs still
+awaits the late shadow verdict, so a chain whose retention is longer than
+the flag holds the rollup rather than rolling a pending obligation; the
+log says which day is waiting and why. From the first prune on the "all"
 figures are the rollup plus the raw rows and carry a `rolled_up` label
 (`raw_from`, days folded in); the shorter windows never touch it. The
 retention pass runs hourly (`-retention-every`); the status file shows
@@ -326,7 +331,7 @@ Two copies, both shipped:
   continuously, with 72 h of history.
 - **fibre-backup** for the record: `fibre-backup@mocha.timer` runs
   `rclone sync` of every `.jsonl` (the record, `registry.jsonl`,
-  `runs.jsonl`, `sampling-secrets.jsonl`), `state.json`, the status files
+  `runs.jsonl`, `sampling-secrets.jsonl`, `amendments.jsonl`), `state.json`, the status files
   and the daily exports to `BACKUP_REMOTE/<network>` nightly (`deploy/backup.sh`),
   with the rclone remote configured once in `/etc/fibre-observer/rclone.conf`.
   It never copies `sampling-master.key`, which must not leave the host, nor
@@ -340,8 +345,10 @@ Two copies, both shipped:
 Every record has a natural key and every insert is `ON CONFLICT DO
 NOTHING`, so a replay never duplicates. The run record (`/v1/runs`) comes
 back from `runs.jsonl`, which every component appends its starts, stops
-and flags to, and the revealed sampling secrets from
-`sampling-secrets.jsonl`. What a rebuild does **not** bring back, because
+and flags to, the revealed sampling secrets from
+`sampling-secrets.jsonl`, and the late shadow verdicts from
+`amendments.jsonl`, the collector's own log of them (replayed before
+anything is re-judged, so a rebuild never draws a verdict twice). What a rebuild does **not** bring back, because
 it has no JSONL source: the collector's own run row, the escrow balances
 and validator identities (re-polled within minutes), and the chain-side
 `meta` keys (re-polled at once). Litestream's copy is the backup for those.

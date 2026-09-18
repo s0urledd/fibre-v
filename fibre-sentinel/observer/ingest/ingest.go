@@ -177,6 +177,7 @@ func State(st *store.Store, path string, now time.Time) error {
 		"last_scanned_height":         fmt.Sprint(ps.LastScannedHeight),
 		"protocol_params_fingerprint": ps.ParamFingerprint,
 		"scan_gaps":                   gaps,
+		"last_scanned_time":           scannedTime(ps),
 	} {
 		if err := st.SetMeta(k, v, now); err != nil {
 			return err
@@ -256,5 +257,29 @@ func SamplingSecrets(st *store.Store, path string, now time.Time) (Result, error
 			return false, fmt.Errorf("%w: sampling secret without day, commitment, secret or time", ErrBadRecord)
 		}
 		return st.UpsertSamplingSecret(e)
+	}, now)
+}
+
+// scannedTime is the scanner's frontier on the chain's clock, or "" when
+// the state predates the field.
+func scannedTime(ps scan.PersistState) string {
+	if ps.LastScannedTime.IsZero() {
+		return ""
+	}
+	return store.TS(ps.LastScannedTime)
+}
+
+// Amendments replays amendments.jsonl, the collector's own log of late
+// shadow verdicts, so a rebuilt database carries them without re-judging.
+func Amendments(st *store.Store, path string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var a store.Amendment
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return false, fmt.Errorf("%w: decode amendment: %v", ErrBadRecord, err)
+		}
+		if a.DedupeKey == "" || a.To == "" || a.JudgedAt.IsZero() {
+			return false, fmt.Errorf("%w: amendment without key, verdict or time", ErrBadRecord)
+		}
+		return st.ApplyAmendment(a)
 	}, now)
 }

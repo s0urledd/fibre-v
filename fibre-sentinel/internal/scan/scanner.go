@@ -45,12 +45,15 @@ type Config struct {
 
 // Scanner is the chain scanner: discovery + recording only, no probing.
 type Scanner struct {
-	cfg    Config
-	log    *Logger
-	chain  *Chain
-	store  *Store
-	status *status.Writer
-	gaps   []ScanGap
+	// lastBlockTime is the block time of the newest header read, saved in
+	// state.json as last_scanned_time.
+	lastBlockTime time.Time
+	cfg           Config
+	log           *Logger
+	chain         *Chain
+	store         *Store
+	status        *status.Writer
+	gaps          []ScanGap
 
 	params      *ParamHistory
 	chainID     string
@@ -264,6 +267,7 @@ func (s *Scanner) checkpoint(lastScanned int64) {
 		ChainID:           s.chainID,
 		StartHeight:       s.startHeight,
 		LastScannedHeight: lastScanned,
+		LastScannedTime:   s.lastBlockTime,
 		ParamFingerprint:  assign.ParamsV10BlobV0.Fingerprint(),
 		ParamHistory:      s.params.Entries(),
 		Gaps:              s.gaps,
@@ -546,6 +550,9 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 		}
 		s.log.Fatalf("fetch block %d: %v", h, err)
 	}
+	// The frontier on the chain's clock, persisted with the next checkpoint:
+	// the deferred shadow verdict is drawn against it.
+	s.lastBlockTime = blk.Time.UTC()
 	if err := s.retryRPCAt(ctx, fmt.Sprintf("fetch block_results %d", h), h, func() error {
 		var err error
 		res, err = s.chain.BlockResults(ctx, h)

@@ -2940,13 +2940,23 @@ type probeRow struct {
 	ShadowedBy    string   `json:"shadowed_by,omitempty"`
 	ObserverBuild string   `json:"observer_build,omitempty"`
 	AppVersion    int64    `json:"app_version,omitempty"`
+	// ShadowGap says why the verdict on genuine rows no scanned promise
+	// assigns was deferred at the probe (the store serves by promise-hash
+	// order, so a promise settling after the probe can own them), or that
+	// a scan gap makes it permanent. ClassificationAtProbe and AmendedAt
+	// are set once the collector's late judgement replaced the verdict
+	// (probe_amendments): the row keeps what it was stamped with.
+	ShadowGap             string `json:"shadow_gap,omitempty"`
+	ClassificationAtProbe string `json:"classification_at_probe,omitempty"`
+	AmendedAt             string `json:"amended_at,omitempty"`
 }
 
 func (s *Server) probeRows(ctx context.Context, where string, limit int, args ...any) ([]probeRow, error) {
 	q := `SELECT vantage, promise_hash, validator_address, validator_host, assigned, attested, assigned_row_count, schedule_label, scheduled_at,
 		started_at, phase, outcome, classification, classification_reason, rows_returned, rows_expected, total_duration_ms, tls_ok, identity_ok, raw_error,
 		COALESCE(retry_first_outcome, ''), COALESCE(clock_offset_ms, 0),
-		COALESCE(row_indices, ''), COALESCE(rows_sha256, ''), COALESCE(rpc_code, ''), COALESCE(shadowed_by, ''), COALESCE(observer_build, ''), COALESCE(app_version, 0)
+		COALESCE(row_indices, ''), COALESCE(rows_sha256, ''), COALESCE(rpc_code, ''), COALESCE(shadowed_by, ''), COALESCE(observer_build, ''), COALESCE(app_version, 0),
+		COALESCE(shadow_gap, ''), COALESCE(classification_at_probe, ''), COALESCE(amended_at, '')
 		FROM probes`
 	if where != "" {
 		q += " WHERE " + where
@@ -2966,7 +2976,8 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 		if err := rows.Scan(&p.Vantage, &p.PromiseHash, &p.ValidatorAddress, &p.ValidatorHost, &assigned, &att, &p.AssignedRowCount, &p.ScheduleLabel,
 			&p.ScheduledAt, &p.StartedAt, &p.Phase, &p.Outcome, &p.Classification, &p.Reason, &p.RowsReturned, &p.RowsExpected,
 			&p.TotalDurationMS, &tls, &id, &p.RawError, &p.RetryFirstOutcome, &p.ClockOffsetMS,
-			&idxJSON, &p.RowsSHA256, &p.RPCCode, &p.ShadowedBy, &p.ObserverBuild, &p.AppVersion); err != nil {
+			&idxJSON, &p.RowsSHA256, &p.RPCCode, &p.ShadowedBy, &p.ObserverBuild, &p.AppVersion,
+			&p.ShadowGap, &p.ClassificationAtProbe, &p.AmendedAt); err != nil {
 			return nil, err
 		}
 		if idxJSON != "" {

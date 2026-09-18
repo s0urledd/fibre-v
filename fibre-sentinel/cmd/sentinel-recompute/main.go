@@ -38,6 +38,7 @@ import (
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/policy"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/verdict"
 )
 
@@ -97,6 +98,17 @@ func main() {
 	differs := false
 
 	// ---- rows: phase and classification from the row's own fields ----
+	// A verdict the prober deferred (genuine rows no scanned promise
+	// assigned) is drawn here the way the collector draws it late, against
+	// every promise in the record and the scanner's frontier, and compared
+	// with amendments.jsonl when the record carries it.
+	byCommit := map[string][]scan.Publication{}
+	for _, p := range pubs {
+		byCommit[p.Promise.Commitment] = append(byCommit[p.Promise.Commitment], p)
+	}
+	frontier := loadFrontier(*dataDir, pubs)
+	amendments := loadAmendments(filepath.Join(*dataDir, "amendments.jsonl"))
+	var deferred, judged, amendDiffs int
 	var rowDiffs, tolFromRuns, tolFallback int
 	printed := 0
 	for _, m := range ms {
@@ -111,7 +123,42 @@ func main() {
 			}
 		}
 		rc := m.Recompute(tol)
-		if rc.Phase != m.Phase || rc.Classification != m.Classification {
+		stored := m.Classification
+		if rc.Classification == probe.ClassProbeError && m.Download.ShadowGap != "" && !strings.HasPrefix(m.Download.ShadowGap, "scan_gap") &&
+			(m.Outcome == probe.OutcomeWrongRows || m.Outcome == probe.OutcomePartial) && m.Download.CommitmentVerified {
+			deferred++
+			timeout := time.Duration(pubTimeout(pubs, m.PromiseHash)) * time.Second
+			var cands []verdict.Candidate
+			for _, p := range byCommit[m.Commitment] {
+				if p.PromiseHash == m.PromiseHash {
+					continue
+				}
+				for _, v := range p.Assignment.Validators {
+					if v.Address == m.ValidatorAddress {
+						cands = append(cands, verdict.Candidate{PromiseHash: p.PromiseHash, Commitment: p.Promise.Commitment,
+							SettlementTime: p.SettlementTime, MustServeUntil: p.MustServeUntil, Rows: v.Rows})
+					}
+				}
+			}
+			if cls, by, ok := verdict.LateShadow(m.Download.RowIndices, m.StartedAt, frontier, timeout, 5*time.Minute, cands); ok {
+				judged++
+				rc.Classification = cls
+				if a, ok := amendments[m.DedupeKey()]; ok {
+					stored = probe.Classification(a.To)
+					if a.To != string(cls) || a.ShadowedBy != by {
+						amendDiffs++
+						if printed < *maxDiff {
+							printed++
+							fmt.Printf("late| %s %s %s: amendment says %s (%s), recomputed %s (%s)\n", short(m.PromiseHash), m.ValidatorAddress,
+								m.ScheduledAt.UTC().Format(time.RFC3339), a.To, a.ShadowedBy, cls, by)
+						}
+					}
+				} else {
+					stored = cls // no amendment on record yet: the late verdict stands as computed
+				}
+			}
+		}
+		if rc.Phase != m.Phase || rc.Classification != stored {
 			rowDiffs++
 			if printed < *maxDiff {
 				printed++
@@ -121,11 +168,13 @@ func main() {
 			}
 		}
 	}
-	if rowDiffs > 0 {
+	if rowDiffs > 0 || amendDiffs > 0 {
 		differs = true
 	}
 	fmt.Printf("rows| %d rows, %d differ from their stored phase or classification (tolerance from runs.jsonl for %d, fallback for %d)\n",
 		len(ms), rowDiffs, tolFromRuns, tolFallback)
+	fmt.Printf("late| %d verdicts deferred at the probe, %d drawable at scanner frontier %s, %d differ from amendments.jsonl (%d amendments on record)\n",
+		deferred, judged, frontier.Format(time.RFC3339), amendDiffs, len(amendments))
 
 	// ---- obligations ----
 	rows := make([]verdict.Row, 0, len(ms))
@@ -415,4 +464,59 @@ func checkSampling(path string, pubs []scan.Publication, ms []probe.Measurement,
 		}
 	}
 	return checked, diffs, nil
+}
+
+// pubTimeout is the payment promise timeout the publication was settled
+// under, in seconds; 0 when unknown.
+func pubTimeout(pubs []scan.Publication, hash string) int64 {
+	for _, p := range pubs {
+		if p.PromiseHash == hash {
+			return p.ParamsAtPublication.PaymentPromiseTimeoutSeconds
+		}
+	}
+	return 0
+}
+
+// loadFrontier is the scanner's frontier on the chain's clock: state.json's
+// last_scanned_time when the record carries it, else the newest settlement
+// time seen, which is never past the true frontier.
+func loadFrontier(dir string, pubs []scan.Publication) time.Time {
+	var out time.Time
+	for _, p := range pubs {
+		if p.SettlementTime.After(out) {
+			out = p.SettlementTime
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "state.json")); err == nil {
+		var st struct {
+			LastScannedTime time.Time `json:"last_scanned_time"`
+		}
+		if json.Unmarshal(b, &st) == nil && st.LastScannedTime.After(out) {
+			out = st.LastScannedTime
+		}
+	}
+	return out.UTC()
+}
+
+// loadAmendments reads amendments.jsonl by probe key; a missing file is
+// no amendments.
+func loadAmendments(path string) map[string]store.Amendment {
+	out := map[string]store.Amendment{}
+	f, err := os.Open(path)
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
+		if err != nil {
+			break
+		}
+		var a store.Amendment
+		if json.Unmarshal(line, &a) == nil && a.DedupeKey != "" {
+			out[a.DedupeKey] = a
+		}
+	}
+	return out
 }

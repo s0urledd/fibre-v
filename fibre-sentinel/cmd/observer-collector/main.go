@@ -50,6 +50,8 @@ func main() {
 		regPath   = flag.String("registry", "", "path to registry.jsonl, this collector's own endpoint-history log (default <data-dir>/registry.jsonl)")
 		runsPath  = flag.String("runs", "", "path to runs.jsonl, every component's record of its starts, stops and configuration (default <data-dir>/runs.jsonl)")
 		secPath   = flag.String("sampling-secrets", "", "path to sampling-secrets.jsonl, the prober's revealed day secrets (default <data-dir>/sampling-secrets.jsonl)")
+		amendPath = flag.String("amendments", "", "path to amendments.jsonl, this collector's own log of late shadow verdicts (default <data-dir>/amendments.jsonl)")
+		pruneTol  = flag.Duration("prune-tolerance", 5*time.Minute, "how long past must_serve_until a promise's shard is still taken to be on disk when judging a deferred shadow verdict")
 		expDir    = flag.String("exports-dir", "", "where the daily export tarballs are built (default <data-dir>/exports)")
 		expHour   = flag.Int("export-hour", 3, "UTC hour after which a day's export is built, the grace for late rows (-1 = never build exports)")
 		retainRaw = flag.Duration("retain-raw", rollup.Default().RetainRaw, "keep probe and heartbeat rows this long; older rolled days are pruned, whole days at a time (0 = keep forever)")
@@ -88,6 +90,9 @@ func main() {
 	}
 	if *expDir == "" {
 		*expDir = filepath.Join(*dataDir, "exports")
+	}
+	if *amendPath == "" {
+		*amendPath = filepath.Join(*dataDir, "amendments.jsonl")
 	}
 
 	log := scan.NewLogger(*logLines)
@@ -144,6 +149,60 @@ func main() {
 	var exporter *export.Builder
 	if *expHour >= 0 {
 		exporter = &export.Builder{DataDir: *dataDir, Dir: *expDir, Vantage: *vantage, Build: status.BuildRevision(), Hour: *expHour, Logf: log.Printf}
+	}
+	// Late shadow verdicts are this collector's own judgement and, like the
+	// endpoint history, have no source but this process: every one is
+	// appended here as well as written to the database, and replayed on a
+	// rebuild before anything is re-judged.
+	amendFile, err := os.OpenFile(*amendPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Fatalf("open %s: %v", *amendPath, err)
+	}
+	defer amendFile.Close()
+	frontierMissing := false
+	judgeLate := func(now time.Time) {
+		v, err := st.Meta("last_scanned_time")
+		if err != nil || v == "" {
+			if !frontierMissing {
+				log.Printf("late verdicts: the scanner's frontier time is not on record yet (state.json last_scanned_time); deferred shadow verdicts wait")
+				frontierMissing = true
+			}
+			return
+		}
+		frontier, err := time.Parse(store.TimeLayout, v)
+		if err != nil {
+			log.Printf("late verdicts: bad last_scanned_time %q", v)
+			return
+		}
+		ams, err := st.LateShadowVerdicts(ctx, frontier, now, *pruneTol)
+		if err != nil {
+			log.Printf("late verdicts: %v", err)
+			live.Error(fmt.Sprintf("late verdicts: %v", err))
+			return
+		}
+		applied := 0
+		for _, a := range ams {
+			ok, err := st.ApplyAmendment(a)
+			if err != nil {
+				log.Printf("late verdicts: apply %s: %v", a.DedupeKey, err)
+				continue
+			}
+			if !ok {
+				continue
+			}
+			applied++
+			if b, err := json.Marshal(a); err == nil {
+				if _, err := amendFile.Write(append(b, '\n')); err != nil {
+					log.Printf("amendments: write: %v", err)
+					live.Error(fmt.Sprintf("amendments write: %v", err))
+				}
+			}
+			log.Printf("late verdict: %s %s %s: %s -> %s", a.PromiseHash[:min(12, len(a.PromiseHash))], a.ValidatorAddress, a.ScheduledAt.UTC().Format(time.RFC3339), a.From, a.To)
+		}
+		if applied > 0 {
+			_ = amendFile.Sync()
+			live.Set("late_verdicts", applied)
+		}
 	}
 	log.Printf("collector up: run=%d vantage=%s db=%s data=%s exports=%s", runID, *vantage, *dbPath, *dataDir, *expDir)
 
@@ -210,6 +269,12 @@ func main() {
 		} else if r.Inserted > 0 {
 			log.Printf("sampling secrets: +%d day(s) revealed (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
+		if r, err := ingest.Amendments(st, *amendPath, now); err != nil {
+			log.Printf("amendments: %v", err)
+		} else if r.Inserted > 0 {
+			log.Printf("amendments: +%d late verdict(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		judgeLate(now)
 		if *retEvery > 0 && time.Since(lastRetention) >= *retEvery {
 			lastRetention = now
 			if rep, err := rollup.Run(ctx, st, now, retention); err != nil {

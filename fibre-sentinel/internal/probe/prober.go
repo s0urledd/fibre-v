@@ -454,6 +454,7 @@ func (p *Prober) loadGaps() {
 	var st struct {
 		Gaps              []scan.ScanGap `json:"gaps"`
 		LastScannedHeight int64          `json:"last_scanned_height"`
+		LastScannedTime   time.Time      `json:"last_scanned_time"`
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
 		p.log.Printf("state.json: %v (keeping previous gap list)", err)
@@ -461,6 +462,14 @@ func (p *Prober) loadGaps() {
 	}
 	p.gaps = st.Gaps
 	p.scanned.height = st.LastScannedHeight
+	if !st.LastScannedTime.IsZero() {
+		// The scanner records the frontier's block time itself; no RPC
+		// round trip is needed to place it on the chain's clock.
+		p.scanned.timedFor, p.scanned.at = st.LastScannedHeight, st.LastScannedTime.UTC()
+		if p.status != nil {
+			p.status.Set("scanned_until", p.scanned.at.Format(time.RFC3339))
+		}
+	}
 }
 
 // scannedMark is the scanner's frontier on the chain's clock.
@@ -497,35 +506,40 @@ func (p *Prober) pollScanned(ctx context.Context) {
 // the payment-promise timeout of its creation; so every candidate has
 // settled by settlement + timeout, and until the scanner has read that far
 // a promise the feed does not hold may still own the returned rows.
-func shadowLagFor(m scannedMark, pub scan.Publication) string {
+// shadowPending says why an unmatched genuine-rows answer cannot be judged
+// at the probe. The Fibre store keeps every (commitment, promise) shard
+// side by side and Get(commitment) returns the first readable one in
+// promise-hash order (celestia-app fibre/store.go), so which promise
+// answers is decided by hash order, not by time: a promise uploaded before
+// this probe and settled after it, up to payment_promise_timeout after its
+// creation, can own the returned rows and is not in the feed yet. The
+// candidate set is complete only once the scanner has read past
+// probe time + payment_promise_timeout, which is never at probe time; the
+// verdict is deferred to the collector's late judgement (probe_amendments).
+func shadowPending(now time.Time, pub scan.Publication, m scannedMark) string {
+	frontier := "scanner frontier unknown"
+	if m.known() {
+		frontier = fmt.Sprintf("scanned to #%d (%s)", m.height, m.at.UTC().Format(time.RFC3339))
+	}
 	timeout := time.Duration(pub.ParamsAtPublication.PaymentPromiseTimeoutSeconds) * time.Second
-	base := pub.SettlementTime
-	if base.IsZero() {
-		base = pub.Promise.CreationTimestamp
+	if timeout <= 0 {
+		return "shadow_pending: a promise uploaded before this probe may settle after it (payment promise timeout not on record); " + frontier
 	}
-	if base.IsZero() || timeout <= 0 {
-		return ""
-	}
-	until := base.Add(timeout)
-	if !m.known() {
-		return fmt.Sprintf("scanner_lag: scanner frontier unknown; promises settling until %s may own these rows", until.UTC().Format(time.RFC3339))
-	}
-	if m.at.Before(until) {
-		return fmt.Sprintf("scanner_lag: scanned to #%d (%s); promises settling until %s not all seen", m.height,
-			m.at.UTC().Format(time.RFC3339), until.UTC().Format(time.RFC3339))
-	}
-	return ""
+	return fmt.Sprintf("shadow_pending: a promise uploaded before this probe may settle until %s and own these rows; %s",
+		now.Add(timeout).UTC().Format(time.RFC3339), frontier)
 }
 
-// shadowBlindness names the first reason the shadow candidate set for pub
-// may be incomplete: a scan gap inside the interval a shadowing promise
-// would have settled in, or a scanner frontier that has not yet passed that
-// interval. "" when the observer has seen every promise that could answer.
+// shadowBlindness names why the shadow candidate set for pub is incomplete
+// at this probe. It always is (see shadowPending); a scan gap inside the
+// interval a shadowing promise could have settled in is named first
+// because it is permanent, where the pending case resolves once the
+// scanner passes probe time + payment_promise_timeout.
 func (p *Prober) shadowBlindness(pub scan.Publication) string {
-	if g := shadowGapFor(p.gaps, time.Now().UTC(), shardLifetime(pub, p.schedCfg().PruneTolerance)); g != "" {
+	now := time.Now().UTC()
+	if g := shadowGapFor(p.gaps, now, shardLifetime(pub, p.schedCfg().PruneTolerance)); g != "" {
 		return g
 	}
-	return shadowLagFor(p.scanned, pub)
+	return shadowPending(now, pub, p.scanned)
 }
 
 // shardLifetime is the longest a shard over a commitment can outlive the
