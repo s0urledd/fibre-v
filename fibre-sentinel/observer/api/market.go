@@ -69,6 +69,18 @@ type dayBucket struct {
 	TimedOutUtia int64  `json:"timed_out_utia"`
 }
 
+// dayPublisher is one publisher's share of one day, for the stacked daily
+// chart: the window's top five publishers by fees keep their identity, the
+// rest fold into one "other" row per day (publisher empty).
+type dayPublisher struct {
+	Day         string `json:"day"`
+	Publisher   string `json:"publisher"`
+	Label       string `json:"label,omitempty"`
+	FeesUtia    int64  `json:"fees_utia"`
+	Bytes       int64  `json:"bytes"`
+	Settlements int64  `json:"settlements"`
+}
+
 // publisherShare is one slice of the top-N breakdown.
 type publisherShare struct {
 	Publisher   string   `json:"publisher"` // empty for the "other" bucket
@@ -112,6 +124,7 @@ type marketResponse struct {
 	EscrowAccounts int64 `json:"escrow_accounts"`
 
 	Daily        []dayBucket      `json:"daily"`
+	DailyByPub   []dayPublisher   `json:"daily_by_publisher"`
 	Top          []publisherShare `json:"top_publishers"`
 	Other        *publisherShare  `json:"other_publishers"`
 	PriceFormula priceFormula     `json:"price_formula"`
@@ -335,6 +348,57 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 		r.Other = &other
 	}
 	r.LargestPoster = largest
+
+	// Per day per top publisher, the rest of each day folded into "other".
+	// Identity is fixed by the window's ranking above, so a publisher keeps
+	// its slot on every day of the chart.
+	top := map[string]bool{}
+	for _, p := range r.Top {
+		top[p.Publisher] = true
+	}
+	drow, err := db.QueryContext(ctx, `SELECT substr(time, 1, 10) AS day, publisher, COUNT(*), COALESCE(SUM(amount_utia),0), COALESCE(SUM(blob_size),0)
+		FROM payments WHERE kind = 'settlement' AND time >= ?
+		GROUP BY day, publisher ORDER BY day, publisher`, start)
+	if err != nil {
+		return nil, fmt.Errorf("daily by publisher: %w", err)
+	}
+	r.DailyByPub = []dayPublisher{}
+	otherByDay := map[string]*dayPublisher{}
+	var otherDays []string
+	for drow.Next() {
+		var d dayPublisher
+		if err := drow.Scan(&d.Day, &d.Publisher, &d.Settlements, &d.FeesUtia, &d.Bytes); err != nil {
+			drow.Close()
+			return nil, err
+		}
+		if top[d.Publisher] {
+			d.Label, _ = s.label(d.Publisher)
+			r.DailyByPub = append(r.DailyByPub, d)
+			continue
+		}
+		o := otherByDay[d.Day]
+		if o == nil {
+			o = &dayPublisher{Day: d.Day}
+			otherByDay[d.Day] = o
+			otherDays = append(otherDays, d.Day)
+		}
+		o.Settlements += d.Settlements
+		o.FeesUtia += d.FeesUtia
+		o.Bytes += d.Bytes
+	}
+	drow.Close()
+	if err := drow.Err(); err != nil {
+		return nil, err
+	}
+	for _, day := range otherDays {
+		r.DailyByPub = append(r.DailyByPub, *otherByDay[day])
+	}
+	sort.Slice(r.DailyByPub, func(i, j int) bool {
+		if r.DailyByPub[i].Day != r.DailyByPub[j].Day {
+			return r.DailyByPub[i].Day < r.DailyByPub[j].Day
+		}
+		return r.DailyByPub[i].Publisher < r.DailyByPub[j].Publisher
+	})
 	return r, nil
 }
 

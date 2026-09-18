@@ -39,6 +39,8 @@
   --fault:    #ee7b6a;
   --fault-2:  rgb(238 123 106 / .16);
   --gap-hatch: repeating-linear-gradient(45deg, var(--card-2) 0 4px, var(--line-2) 4px 5px);
+  /* categorical series, fixed order, validated on this surface */
+  --cat-1: #3987e5; --cat-2: #d95926; --cat-3: #199e70; --cat-4: #c98500; --cat-5: #d55181; --cat-other: rgb(var(--ink) / .28);
 
   /* IBM Plex, bundled at build time and served from this origin (see
      layout.tsx): a visitor's browser opens no connection to a font CDN. One
@@ -80,6 +82,7 @@
     --hold-2: rgb(138 92 0 / .14);
     --fault:  #b8402c;
     --fault-2: rgb(184 64 44 / .12);
+  --cat-1: #2a78d6; --cat-2: #eb6834; --cat-3: #1baf7a; --cat-4: #eda100; --cat-5: #e87ba4; --cat-other: rgb(var(--ink) / .22);
   }
 }
 :root[data-theme="light"] {
@@ -99,6 +102,7 @@
   --hold-2: rgb(138 92 0 / .14);
   --fault:  #b8402c;
   --fault-2: rgb(184 64 44 / .12);
+  --cat-1: #2a78d6; --cat-2: #eb6834; --cat-3: #1baf7a; --cat-4: #eda100; --cat-5: #e87ba4; --cat-other: rgb(var(--ink) / .22);
 }
 @media (prefers-reduced-motion: reduce) { :root { --dur: 0ms; } }
 
@@ -421,30 +425,40 @@ dl.kv dd { margin: 0; word-break: break-all; }
   .card { padding: var(--s3) var(--s4); }
 }
 
-/* ---- publishers: daily bars and the share bar ---- */
-.bars-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s5); }
-.bars { min-width: 0; }
-.bars-head { display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s2); }
-.bars-plot { display: flex; align-items: flex-end; gap: 3px; height: 132px; border-bottom: 1px solid var(--line-2); padding-bottom: 18px; box-sizing: border-box; position: relative; }
-.bars-plot .slot { flex: 1 1 0; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; position: relative; }
-.bars-plot .bar { width: 72%; max-width: 28px; background: var(--accent); border-radius: 2px 2px 0 0; }
-.bars.fault .bar { background: var(--fault); }
-.bars-plot .bar.quiet { background: var(--line-2); }
-.bars-plot .tick { position: absolute; top: 100%; margin-top: 4px; font-family: var(--mono); font-size: 10px; color: var(--text-3); white-space: nowrap; }
-.bars-plot .tick.hidden { visibility: hidden; }
-.bars.empty p { margin: var(--s2) 0 0; font-size: var(--t-table); }
-.shares-bar { display: flex; height: 14px; border-radius: var(--r-sm); overflow: hidden; background: var(--card-2); }
-.shares-bar .seg { flex: 0 0 auto; background: var(--accent); border-right: 1px solid var(--card); min-width: 2px; }
-.shares-bar .seg.other { background: var(--line-2); }
-.shares-legend { list-style: none; margin: var(--s3) 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--s2) var(--s5); font-size: var(--t-table); }
-.shares-legend li { display: grid; grid-template-columns: 10px 1fr; column-gap: var(--s2); align-items: center; min-width: 0; }
-.shares-legend li .who { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.shares-legend li .figs { grid-column: 2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.shares-legend .swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--accent); }
-.shares-legend .swatch.other { background: var(--line-2); }
-.notes { margin: var(--s1) 0 0; padding-left: 1.2em; font-size: var(--t-table); color: var(--text-2); }
-.notes li + li { margin-top: 2px; }
+/* ---- charts ---- */
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s4); margin-top: var(--s4); }
+.charts .card + .card { margin-top: 0; }
+.chart { min-width: 0; }
+.chart-head { display: flex; align-items: baseline; gap: var(--s3); margin-bottom: var(--s2); }
+.chart-plot { position: relative; }
+.chart svg { display: block; overflow: visible; }
+.chart svg .grid { stroke: var(--line); stroke-width: 1; }
+.chart svg .axis { stroke: var(--line-2); stroke-width: 1; }
+.chart svg .tick { font-family: var(--mono); font-size: 11px; fill: var(--text-3); }
+.chart svg .hl { fill: var(--wash); }
+.chart svg .quiet { fill: var(--line-2); }
+.chart-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: var(--t-small); color: var(--text-3); pointer-events: none; }
+.chart-tip { position: absolute; top: 6px; width: 180px; background: var(--card); border: 1px solid var(--line-2); border-radius: var(--r-sm); padding: 6px 8px; font-size: var(--t-small); box-shadow: 0 4px 16px rgb(0 0 0 / .18); pointer-events: none; z-index: 2; }
+.chart-tip .tip-x { font-family: var(--mono); color: var(--text-3); margin-bottom: 4px; }
+.chart-tip .tip-row { display: flex; align-items: center; gap: 6px; color: var(--text-2); }
+.chart-tip .tip-row b { margin-left: auto; font-family: var(--mono); font-weight: 500; color: var(--text); }
+.chart-tip .tip-row.total { border-top: 1px solid var(--line); margin-top: 3px; padding-top: 3px; }
+.chart-tip .tip-note { color: var(--text-3); margin-top: 3px; }
+.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.chart-legend { list-style: none; margin: var(--s2) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); font-size: var(--t-small); color: var(--text-2); }
+.chart-legend li { display: flex; align-items: center; gap: 6px; }
+/* meter: one ratio against a threshold */
+.meter { flex: 1 1 100%; margin-top: var(--s3); }
+.meter-track { position: relative; height: 10px; background: var(--card-2); border-radius: var(--r-sm); overflow: visible; }
+.meter-fill { height: 100%; border-radius: var(--r-sm); background: var(--ok); }
+.meter-fill.short { background: var(--hold); }
+.meter-tick { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; background: var(--text); }
+.meter-scale { position: relative; display: flex; justify-content: space-between; font-family: var(--mono); font-size: var(--t-small); color: var(--text-3); margin-top: 6px; }
+.meter-need { position: absolute; transform: translateX(-50%); color: var(--text-2); white-space: nowrap; }
+/* probe matrix */
+table.matrix th.point, table.matrix td.point { text-align: left; white-space: nowrap; }
+table.matrix th.point.grace, table.matrix th.point.post { color: var(--text-3); }
 td .sans { font-family: var(--sans); }
 @media (max-width: 720px) {
-  .bars-row { grid-template-columns: 1fr; }
+  .charts { grid-template-columns: 1fr; }
 }
