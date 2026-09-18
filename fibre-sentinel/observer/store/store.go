@@ -23,6 +23,7 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 )
 
 //go:embed schema.sql
@@ -34,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 9
+const SchemaVersion = 10
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -249,6 +250,33 @@ var migrations = []migration{
 			`ALTER TABLE probes ADD COLUMN shadowed_by TEXT`,
 			`ALTER TABLE probes ADD COLUMN observer_build TEXT`,
 			`ALTER TABLE probes ADD COLUMN app_version INTEGER`,
+		},
+	},
+	{
+		version: 10,
+		note:    "run records with their configuration, replayed from runs.jsonl; revealed sampling day secrets",
+		stmts: []string{
+			// A run used to be the collector's own row only, written straight
+			// to the database and lost with it. Every component now appends
+			// its starts and stops to runs.jsonl with the configuration it
+			// ran under (status.RunEvent), and the collector replays them
+			// here. pid and hostname make the natural key: the same
+			// component can start twice in one second on two hosts.
+			`ALTER TABLE observer_runs ADD COLUMN pid INTEGER`,
+			`ALTER TABLE observer_runs ADD COLUMN hostname TEXT`,
+			`ALTER TABLE observer_runs ADD COLUMN config_json TEXT`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS observer_runs_natural ON observer_runs (component, vantage, started_at, pid)`,
+			// The prober reveals each day's sampling secret once the day is
+			// old enough that every publication settled on it has left its
+			// window; from then on the day's admission draws can be
+			// recomputed by anyone (see /v1/sampling).
+			`CREATE TABLE IF NOT EXISTS sampling_secrets (
+				day         TEXT PRIMARY KEY,
+				commitment  TEXT NOT NULL,
+				secret      TEXT NOT NULL,
+				revealed_at TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS sampling_secrets_commitment ON sampling_secrets (commitment)`,
 		},
 	},
 }
@@ -513,12 +541,71 @@ func b2i(b bool) int {
 
 // StartRun records a process start and returns the run id.
 func (s *Store) StartRun(component, vantage, version string, now time.Time) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO observer_runs (component, vantage, version, started_at, last_heartbeat_at)
-		VALUES (?, ?, ?, ?, ?)`, component, vantage, version, ts(now), ts(now))
+	host, _ := os.Hostname()
+	res, err := s.db.Exec(`INSERT INTO observer_runs (component, vantage, version, started_at, last_heartbeat_at, pid, hostname)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, component, vantage, version, ts(now), ts(now), os.Getpid(), host)
 	if err != nil {
 		return 0, fmt.Errorf("start run: %w", err)
 	}
 	return res.LastInsertId()
+}
+
+// ReplayRunEvent applies one runs.jsonl record (status.RunEvent). A start
+// inserts the run with its configuration, or is a no-op when the same
+// (component, vantage, started_at, pid) is already there; a stop closes the
+// matching open run. Returns whether a row changed.
+func (s *Store) ReplayRunEvent(e status.RunEvent) (bool, error) {
+	switch e.Kind {
+	case status.RunStarted:
+		var cfg any
+		if len(e.Config) > 0 {
+			b, err := json.Marshal(e.Config)
+			if err != nil {
+				return false, err
+			}
+			cfg = string(b)
+		}
+		res, err := s.db.Exec(`INSERT INTO observer_runs (component, vantage, version, started_at, last_heartbeat_at, pid, hostname, config_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+			e.Component, e.Vantage, e.Version, ts(e.At), ts(e.At), e.PID, nullIfEmpty(e.Hostname), cfg)
+		if err != nil {
+			return false, err
+		}
+		n, _ := res.RowsAffected()
+		return n > 0, nil
+	case status.RunStopped:
+		res, err := s.db.Exec(`UPDATE observer_runs SET stopped_at = ?, last_heartbeat_at = ?, stop_reason = ?
+			WHERE component = ? AND vantage = ? AND pid = ? AND started_at <= ? AND stopped_at IS NULL`,
+			ts(e.At), ts(e.At), e.Reason, e.Component, e.Vantage, e.PID, ts(e.At))
+		if err != nil {
+			return false, err
+		}
+		n, _ := res.RowsAffected()
+		return n > 0, nil
+	default:
+		return false, fmt.Errorf("unknown run event kind %q", e.Kind)
+	}
+}
+
+// SamplingSecret is one revealed per-day sampling secret, as the prober
+// appends it to sampling-secrets.jsonl (policy.Reveal).
+type SamplingSecret struct {
+	Day        string    `json:"day"`
+	Commitment string    `json:"commitment"`
+	Secret     string    `json:"secret"`
+	RevealedAt time.Time `json:"revealed_at"`
+}
+
+// UpsertSamplingSecret stores a revealed day secret; a day already revealed
+// is left as first recorded.
+func (s *Store) UpsertSamplingSecret(e SamplingSecret) (bool, error) {
+	res, err := s.db.Exec(`INSERT INTO sampling_secrets (day, commitment, secret, revealed_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT (day) DO NOTHING`, e.Day, e.Commitment, e.Secret, ts(e.RevealedAt))
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // Heartbeat extends a run's observed span.

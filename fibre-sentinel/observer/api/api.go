@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
 
@@ -105,6 +107,8 @@ type Server struct {
 	// Per-publication verdicts, keyed by what the publication's probes look
 	// like right now. See blobcache.go.
 	blobs *blobCache
+	// asOf rations pinned-window requests (see asOfLimiter).
+	asOf asOfLimiter
 }
 
 // Option configures a Server before it warms its caches.
@@ -181,6 +185,8 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/probes", s.handleProbes)
 	s.mux.HandleFunc("GET /v1/runs", s.handleRuns)
 	s.mux.HandleFunc("GET /v1/sampling", s.handleSampling)
+	s.mux.HandleFunc("GET /v1/exports", s.handleExports)
+	s.mux.HandleFunc("GET /v1/exports/{name}", s.handleExportFile)
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/market", s.handleMarket)
 	s.mux.HandleFunc("GET /v1/publishers", s.handlePublishers)
@@ -215,10 +221,13 @@ func (w *statusWriter) WriteHeader(status int) {
 		return
 	}
 	w.wrote = true
-	if status >= 200 && status < 300 {
-		w.Header().Set("Cache-Control", "public, max-age=15")
-	} else {
+	switch {
+	case status < 200 || status >= 300:
 		w.Header().Set("Cache-Control", "no-store")
+	case w.Header().Get("Cache-Control") == "":
+		// A handler that set its own policy (an immutable export, an
+		// uncached pinned window) keeps it.
+		w.Header().Set("Cache-Control", "public, max-age=15")
 	}
 	if status == http.StatusNotFound && !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
 		w.swallow = true
@@ -269,7 +278,16 @@ type Window struct {
 	Span  time.Duration `json:"-"`
 	Start time.Time     `json:"start"`
 	End   time.Time     `json:"end"`
+	// AsOf: End was pinned by the caller (?as_of=), so every figure is what
+	// the observer would have published at End from the rows it had by
+	// then: rows started after End are left out. What the chain says now
+	// (jailed, bonded, the current registry) is not rewound; see
+	// AsOfNote.
+	AsOf bool `json:"as_of,omitempty"`
 }
+
+// AsOfNote goes beside a pinned window's figures.
+const AsOfNote = "rows started after as_of are left out; chain state (jailed, bond_status, current host and endpoint counts) is as of now, not as_of"
 
 var windows = map[string]time.Duration{"24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour, "30d": 30 * 24 * time.Hour, "all": 0}
 
@@ -282,7 +300,17 @@ func parseWindow(r *http.Request, now time.Time) (Window, error) {
 	if !ok {
 		return Window{}, fmt.Errorf("window must be one of 24h, 7d, 30d, all")
 	}
-	w := Window{Name: name, Span: span, End: now}
+	if v := r.URL.Query().Get("as_of"); v != "" {
+		at, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return Window{}, fmt.Errorf("as_of must be RFC 3339, e.g. 2026-09-18T12:00:00Z")
+		}
+		if at.After(now.Add(time.Minute)) {
+			return Window{}, fmt.Errorf("as_of is in the future")
+		}
+		now = at
+	}
+	w := Window{Name: name, Span: span, End: now, AsOf: r.URL.Query().Get("as_of") != ""}
 	if span > 0 {
 		w.Start = now.Add(-span)
 	}
@@ -294,6 +322,49 @@ func (w Window) startArg() string {
 		return "0000"
 	}
 	return store.TS(w.Start)
+}
+
+// endArg bounds a query at the window's end. With an unpinned window End
+// is the moment the query was planned, so the bound admits every row the
+// store holds; with ?as_of= it is what makes the answer reproducible.
+func (w Window) endArg() string { return store.TS(w.End) }
+
+// asOfArg is the end bound for queries that only pinned windows need.
+func (w Window) asOfArg() string {
+	if !w.AsOf {
+		return ""
+	}
+	return w.endArg()
+}
+
+// asOfLimiter rations pinned-window requests, which bypass the snapshot
+// cache and cost a full aggregate each: a small burst, then one every two
+// seconds.
+type asOfLimiter struct {
+	mu     sync.Mutex
+	tokens float64
+	last   time.Time
+}
+
+const (
+	asOfBurst    = 4.0
+	asOfInterval = 2 * time.Second
+)
+
+func (l *asOfLimiter) allow(now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.last.IsZero() {
+		l.tokens = asOfBurst
+	} else {
+		l.tokens = min(asOfBurst, l.tokens+now.Sub(l.last).Seconds()/asOfInterval.Seconds())
+	}
+	l.last = now
+	if l.tokens < 1 {
+		return false
+	}
+	l.tokens--
+	return true
 }
 
 // Rate is a numerator, denominator and their ratio, never a bare percentage.
@@ -495,6 +566,15 @@ type runRow struct {
 	LastHeartbeat string  `json:"last_heartbeat_at"`
 	StoppedAt     *string `json:"stopped_at"`
 	StopReason    *string `json:"stop_reason"`
+	PID           *int64  `json:"pid"`
+	Hostname      *string `json:"hostname"`
+	// Config is what the run was started with: every flag by name, as the
+	// component recorded it in runs.jsonl (status.RunEvent). It is what a
+	// verifier needs to re-derive this run's rows: the prune tolerance
+	// behind a phase, the schedule points, the timeouts, the policy file.
+	// Null for a run recorded before the file existed, and for the
+	// collector's own row.
+	Config json.RawMessage `json:"config"`
 }
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
@@ -503,8 +583,8 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	rows, err := s.st.DB().QueryContext(r.Context(), `SELECT id, component, vantage, version, started_at, last_heartbeat_at, stopped_at, stop_reason
-		FROM observer_runs WHERE last_heartbeat_at >= ? ORDER BY started_at`, win.startArg())
+	rows, err := s.st.DB().QueryContext(r.Context(), `SELECT id, component, vantage, version, started_at, last_heartbeat_at, stopped_at, stop_reason, pid, hostname, config_json
+		FROM observer_runs WHERE last_heartbeat_at >= ? AND started_at <= ? ORDER BY started_at`, win.startArg(), win.endArg())
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
@@ -513,13 +593,20 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	out := []runRow{}
 	for rows.Next() {
 		var rr runRow
-		if err := rows.Scan(&rr.ID, &rr.Component, &rr.Vantage, &rr.Version, &rr.StartedAt, &rr.LastHeartbeat, &rr.StoppedAt, &rr.StopReason); err != nil {
+		var cfg *string
+		if err := rows.Scan(&rr.ID, &rr.Component, &rr.Vantage, &rr.Version, &rr.StartedAt, &rr.LastHeartbeat, &rr.StoppedAt, &rr.StopReason, &rr.PID, &rr.Hostname, &cfg); err != nil {
 			s.writeInternal(w, r.URL.Path, err)
 			return
 		}
+		if cfg != nil && json.Valid([]byte(*cfg)) {
+			rr.Config = json.RawMessage(*cfg)
+		} else {
+			rr.Config = json.RawMessage("null")
+		}
 		out = append(out, rr)
 	}
-	writeJSON(w, 200, map[string]any{"window": win, "runs": out})
+	writeJSON(w, 200, map[string]any{"window": win, "runs": out,
+		"note": "a run without stopped_at whose component's status file is stale is a crash; config is the component's flags at start, from runs.jsonl"})
 }
 
 // ---- network ----
@@ -527,8 +614,10 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 type classCounts map[string]int64
 
 type networkResponse struct {
-	Window  Window `json:"window"`
-	Vantage string `json:"vantage"`
+	// AsOfNote is set on a pinned window (see Window.AsOf).
+	AsOfNote string `json:"as_of_note,omitempty"`
+	Window   Window `json:"window"`
+	Vantage  string `json:"vantage"`
 	// ComputedAt and ComputeMs say when this summary was taken and how long it
 	// took. It is a snapshot refreshed on a schedule, not a live query, so its
 	// age is published rather than left for a reader to assume.
@@ -810,7 +899,8 @@ const obligationBuckets = `SELECT validator_address, promise_hash,
 			       ROW_NUMBER() OVER (PARTITION BY pr.validator_address, pr.promise_hash
 			                          ORDER BY (pr.classification IN ('NOT_PROBED','PROBE_ERROR')), pr.scheduled_at DESC, pr.started_at DESC) AS rn
 			FROM probes pr JOIN publications pb ON pb.promise_hash = pr.promise_hash
-			WHERE pb.settlement_time >= ? AND pr.assigned = 1 AND pr.phase = 'in_window' AND pr.attested = 1`
+			WHERE pb.settlement_time >= ? AND pb.settlement_time <= ? AND pr.started_at <= ?
+			  AND pr.assigned = 1 AND pr.phase = 'in_window' AND pr.attested = 1`
 
 const obligationSums = `COUNT(*),
 			COALESCE(SUM(NOT pending AND faults > 0), 0),
@@ -826,10 +916,11 @@ func (o *obligationStats) finish() {
 	o.Rate = rate(o.Served, o.Served+o.Broken)
 }
 
-// obligationArgs is the argument list obligationBuckets expects: as_of, the
-// window start, the suspect points, then the caller's own.
+// obligationArgs is the argument list obligationBuckets expects: as_of (the
+// pending cut), the window's settlement bounds, the row bound, the suspect
+// points, then the caller's own.
 func obligationArgs(win Window, ss suspectSet, extra ...any) []any {
-	args := []any{store.TS(win.End), win.startArg()}
+	args := []any{store.TS(win.End), win.startArg(), win.endArg(), win.endArg()}
 	args = append(args, ss.args...)
 	return append(args, extra...)
 }
@@ -954,9 +1045,9 @@ func (s *Server) suspectPoints(ctx context.Context, win Window) (vantageHealth, 
 			COUNT(DISTINCT CASE WHEN classification = 'FAULT' THEN validator_address END),
 			COUNT(DISTINCT validator_address), COUNT(*)
 		FROM probes
-		WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
+		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'
 		GROUP BY scheduled_at HAVING COUNT(DISTINCT validator_address) > 1
-		ORDER BY scheduled_at`, win.startArg())
+		ORDER BY scheduled_at`, win.startArg(), win.endArg())
 	if err != nil {
 		return out, ss, err
 	}
@@ -1101,6 +1192,24 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if win.AsOf {
+		// A pinned window is computed on demand, uncached and rationed.
+		if !s.asOf.allow(time.Now()) {
+			w.Header().Set("Retry-After", "2")
+			writeErr(w, 429, "as_of requests are limited to one every two seconds")
+			return
+		}
+		t0 := time.Now()
+		resp, err := s.computeNetwork(r.Context(), win)
+		if err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		resp.ComputedAt, resp.ComputeMs = t0.UTC().Format(time.RFC3339Nano), time.Since(t0).Milliseconds()
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, 200, resp)
+		return
+	}
 	resp, at, ms, err := s.net.get(r.Context(), s.logf(), win)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
@@ -1131,8 +1240,13 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	resp.Window, resp.Vantage = win, s.vantage
 	resp.ObservedFromOneVantage = s.vantageCount(ctx) == 1
 
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM endpoints WHERE closed_at IS NULL`).Scan(&resp.RegisteredEndpoints)
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT validator_address) FROM probes WHERE started_at >= ?`, win.startArg()).Scan(&resp.ValidatorsProbed)
+	if win.AsOf {
+		resp.AsOfNote = AsOfNote
+		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM endpoints WHERE first_seen_at <= ? AND (closed_at IS NULL OR closed_at > ?)`, win.endArg(), win.endArg()).Scan(&resp.RegisteredEndpoints)
+	} else {
+		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM endpoints WHERE closed_at IS NULL`).Scan(&resp.RegisteredEndpoints)
+	}
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT validator_address) FROM probes WHERE started_at >= ? AND started_at <= ?`, win.startArg(), win.endArg()).Scan(&resp.ValidatorsProbed)
 
 	// The points this observer does not trust itself at come first: every
 	// population below leaves them out.
@@ -1141,15 +1255,15 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		return nil, err
 	}
 	resp.VantageHealth = vh
-	pop := `started_at >= ? AND assigned = 1 AND phase = 'in_window'` + ss.clause("scheduled_at")
-	popArgs := append([]any{win.startArg()}, ss.args...)
+	pop := `started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'` + ss.clause("scheduled_at")
+	popArgs := append([]any{win.startArg(), win.endArg()}, ss.args...)
 
 	classes, total, err := s.classCountsWhere(ctx, pop, popArgs...)
 	if err != nil {
 		return nil, err
 	}
 	resp.Classes = classes
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at"), popArgs...).Scan(&resp.Faults)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at"), popArgs...).Scan(&resp.Faults)
 	resp.ServeRate = serveRate(classes)
 	resp.Coverage = coverage(classes)
 	resp.HeldOut = heldOut(classes)
@@ -1160,15 +1274,15 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	resp.ByObligation = resp.Obligations.Rate
 	_ = total
 	if resp.Attestation, err = s.attestationWhere(ctx,
-		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
+		`started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg(), win.endArg()); err != nil {
 		return nil, err
 	}
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ?`, win.startArg()).Scan(&resp.ProbeCount)
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`, win.startArg()).Scan(&resp.Gaps)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ?`, win.startArg(), win.endArg()).Scan(&resp.ProbeCount)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`, win.startArg(), win.endArg()).Scan(&resp.Gaps)
 	resp.GapsByOutcome = map[string]int64{}
 	if grows, gerr := db.QueryContext(ctx,
-		`SELECT outcome, COUNT(*) FROM probes WHERE started_at >= ? AND classification IN ('NOT_PROBED','PROBE_ERROR') GROUP BY outcome`,
-		win.startArg()); gerr == nil {
+		`SELECT outcome, COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND classification IN ('NOT_PROBED','PROBE_ERROR') GROUP BY outcome`,
+		win.startArg(), win.endArg()); gerr == nil {
 		for grows.Next() {
 			var o string
 			var n int64
@@ -1183,11 +1297,11 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		return nil, err
 	}
 	if resp.LatencyP50, resp.LatencyP95, resp.LatencySample, err = s.latencyWhere(ctx,
-		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
+		`started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg(), win.endArg()); err != nil {
 		return nil, err
 	}
 
-	reach, err := s.reachabilityNow(ctx, "")
+	reach, err := s.reachabilityNow(ctx, "", win.asOfArg())
 	if err != nil {
 		return nil, err
 	}
@@ -1202,12 +1316,12 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	var beats, beatsUp int64
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*),
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0)
-		FROM reachability WHERE started_at >= ? AND outcome <> 'PROBE_ERROR'`, win.startArg()).Scan(&beats, &beatsUp); err != nil {
+		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR'`, win.startArg(), win.endArg()).Scan(&beats, &beatsUp); err != nil {
 		return nil, err
 	}
 	resp.ReachabilityWindow = rate(beatsUp, beats)
 
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(blob_size),0) FROM publications WHERE settlement_time >= ?`, win.startArg()).Scan(&resp.Publications, &resp.PublicationBytes)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(blob_size),0) FROM publications WHERE settlement_time >= ? AND settlement_time <= ?`, win.startArg(), win.endArg()).Scan(&resp.Publications, &resp.PublicationBytes)
 
 	recon, err := s.reconstructableCount(ctx, win)
 	if err != nil {
@@ -1233,15 +1347,25 @@ type reachState struct {
 // reachabilityNow returns the latest evidence per validator, or for just one
 // when only is set: a request about a single validator has no reason to walk
 // the whole set, and the detail page is the caller that asks for one.
-func (s *Server) reachabilityNow(ctx context.Context, only string) (map[string]reachState, error) {
+func (s *Server) reachabilityNow(ctx context.Context, only, asOf string) (map[string]reachState, error) {
 	out := map[string]reachState{}
 	// The newest row per validator is the highest rowid: both files are
 	// ingested in write order. MAX(rowid) GROUP BY uses the validator index
 	// instead of a correlated MAX(started_at) per row over the whole table.
+	// A pinned window (asOf) asks for the newest row started by then.
 	rf, pf, args := "", "", []any{}
 	if only != "" {
 		rf, pf = " AND validator_address = ?", " AND validator_address = ?"
 		args = []any{only, only}
+	}
+	if asOf != "" {
+		rf += " AND started_at <= ?"
+		pf += " AND started_at <= ?"
+		if only != "" {
+			args = []any{only, asOf, only, asOf}
+		} else {
+			args = []any{asOf, asOf}
+		}
 	}
 	q := `SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'heartbeat' FROM reachability
 	      WHERE rowid IN (SELECT MAX(rowid) FROM reachability WHERE outcome <> 'PROBE_ERROR'` + rf + ` GROUP BY validator_address)
@@ -1484,7 +1608,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		return nil, err
 	}
 	sus := ss.clause("scheduled_at")
-	winArgs := append([]any{win.startArg()}, ss.args...)
+	winArgs := append([]any{win.startArg(), win.endArg()}, ss.args...)
 	byAddr := map[string]*validatorRow{}
 	get := func(addr string) *validatorRow {
 		v, ok := byAddr[addr]
@@ -1598,7 +1722,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		return nil, err
 	}
 	frows, err := db.QueryContext(ctx, `SELECT validator_address, COUNT(*) FROM probes
-		WHERE started_at >= ? AND assigned = 1 AND classification = 'FAULT'`+sus+vfilter("validator_address")+`
+		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address`, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
@@ -1618,7 +1742,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	}
 	// classes per validator in window
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, classification, COUNT(*) FROM probes
-		WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
+		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address, classification`, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
@@ -1642,7 +1766,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, schedule_label,
 			COALESCE(SUM(CASE WHEN classification = 'HEALTHY' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
+		FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address, schedule_label
 		ORDER BY validator_address, schedule_label`, vargs(winArgs...)...)
 	if err != nil {
@@ -1695,9 +1819,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			       SUM(CASE WHEN bytes_returned > 0 AND download_ms > 0 THEN 1 ELSE 0 END)
 			                    OVER (PARTITION BY validator_address)                            AS cb
 			FROM probes
-			WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
+			WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'
 			  AND classification = 'HEALTHY' AND total_duration_ms > 0`+vfilter("validator_address")+`
-		) GROUP BY validator_address`, vargs(win.startArg())...)
+		) GROUP BY validator_address`, vargs(win.startArg(), win.endArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1739,8 +1863,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN attested = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested IS NULL THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
-		GROUP BY validator_address`, vargs(win.startArg())...)
+		FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
+		GROUP BY validator_address`, vargs(win.startArg(), win.endArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1764,9 +1888,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN a IS NULL THEN 1 ELSE 0 END), 0)
 		FROM (
 			SELECT validator_address AS validator_address, MAX(attested) AS a
-			FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
+			FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
 			GROUP BY validator_address, promise_hash
-		) GROUP BY validator_address`, vargs(win.startArg())...)
+		) GROUP BY validator_address`, vargs(win.startArg(), win.endArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1786,7 +1910,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		return nil, err
 	}
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, COUNT(*), MAX(started_at) FROM probes
-		WHERE started_at >= ?`+vfilter("validator_address")+` GROUP BY validator_address`, vargs(win.startArg())...)
+		WHERE started_at >= ? AND started_at <= ?`+vfilter("validator_address")+` GROUP BY validator_address`, vargs(win.startArg(), win.endArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1816,8 +1940,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 AND identity_ok = 1 THEN 1 ELSE 0 END), 0),
 			MAX(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN NULL ELSE started_at END),
 			MAX(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN started_at END)
-		FROM reachability WHERE started_at >= ? AND outcome <> 'PROBE_ERROR'`+vfilter("validator_address")+`
-		GROUP BY validator_address`, vargs(win.startArg())...)
+		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR'`+vfilter("validator_address")+`
+		GROUP BY validator_address`, vargs(win.startArg(), win.endArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -1848,7 +1972,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	if err := hrows.Err(); err != nil {
 		return nil, err
 	}
-	reach, err := s.reachabilityNow(ctx, only)
+	reach, err := s.reachabilityNow(ctx, only, win.asOfArg())
 	if err != nil {
 		return nil, err
 	}
@@ -1996,6 +2120,25 @@ func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if win.AsOf {
+		if !s.asOf.allow(time.Now()) {
+			w.Header().Set("Retry-After", "2")
+			writeErr(w, 429, "as_of requests are limited to one every two seconds")
+			return
+		}
+		t0 := time.Now()
+		rows, err := s.validatorRows(r.Context(), win, "")
+		if err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, 200, map[string]any{
+			"window": win, "vantage": s.vantage, "validators": rows, "as_of_note": AsOfNote,
+			"computed_at": t0.UTC().Format(time.RFC3339Nano), "compute_ms": time.Since(t0).Milliseconds(),
+		})
+		return
+	}
 	rows, at, ms, err := s.vals.get(r.Context(), s.logf(), win)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
@@ -2053,8 +2196,8 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		if sw.Name == "all" {
 			suspectAll = ss.points
 		}
-		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND assigned = 1 AND phase = 'in_window'`+ss.clause("scheduled_at"),
-			append([]any{addr, sw.startArg()}, ss.args...)...)
+		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+ss.clause("scheduled_at"),
+			append([]any{addr, sw.startArg(), sw.endArg()}, ss.args...)...)
 		if err != nil {
 			s.writeInternal(w, r.URL.Path, err)
 			return
@@ -2414,12 +2557,12 @@ type reconstructSummary struct {
 func (s *Server) reconstructableCount(ctx context.Context, win Window) (reconstructSummary, error) {
 	out := reconstructSummary{SampleLimit: reconstructSample}
 	if err := s.st.DB().QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM publications WHERE settlement_time >= ?`, win.startArg()).Scan(&out.PublicationsInWindow); err != nil {
+		`SELECT COUNT(*) FROM publications WHERE settlement_time >= ? AND settlement_time <= ?`, win.startArg(), win.endArg()).Scan(&out.PublicationsInWindow); err != nil {
 		return out, err
 	}
 	// Statuses only: the summary publishes no row count, so the bounds settle
 	// every verdict and not one row list is parsed.
-	verdicts, err := s.reconstructBatch(ctx, `settlement_time >= ?`, reconstructSample, win.startArg())
+	verdicts, err := s.reconstructBatch(ctx, `settlement_time >= ? AND settlement_time <= ?`, reconstructSample, win.startArg(), win.endArg())
 	if err != nil {
 		return out, err
 	}
@@ -2586,6 +2729,23 @@ func (s *Server) handleSampling(w http.ResponseWriter, r *http.Request) {
 		Publications  int64   `json:"publications"`
 		Probed        int64   `json:"publications_probed"`
 		SampledOut    int64   `json:"publications_sampled_out"`
+		// Day, Secret and RevealedAt are filled once the prober has
+		// published the day's secret (sampling-secrets.jsonl): from then
+		// on H(promise_hash || secret) < p * 2^64 can be recomputed by
+		// anyone for every promise settled that day.
+		Day        *string `json:"day"`
+		Secret     *string `json:"secret"`
+		RevealedAt *string `json:"revealed_at"`
+	}
+	secrets := map[string]struct{ day, secret, at string }{}
+	if srows, err := s.st.DB().QueryContext(ctx, `SELECT commitment, day, secret, revealed_at FROM sampling_secrets`); err == nil {
+		for srows.Next() {
+			var c, d, sec, at string
+			if srows.Scan(&c, &d, &sec, &at) == nil {
+				secrets[c] = struct{ day, secret, at string }{d, sec, at}
+			}
+		}
+		srows.Close()
 	}
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT
 			COALESCE(json_extract(raw_json, '$.sampling.day_commitment'), '') AS c,
@@ -2594,19 +2754,25 @@ func (s *Server) handleSampling(w http.ResponseWriter, r *http.Request) {
 			COUNT(DISTINCT promise_hash),
 			COUNT(DISTINCT CASE WHEN classification != 'NOT_PROBED' THEN promise_hash END),
 			COUNT(DISTINCT CASE WHEN classification = 'NOT_PROBED' AND classification_reason LIKE 'budget:%' THEN promise_hash END)
-		FROM probes WHERE started_at >= ?
-		GROUP BY c, b, p ORDER BY c, p`, win.startArg())
+		FROM probes WHERE started_at >= ? AND started_at <= ?
+		GROUP BY c, b, p ORDER BY c, p`, win.startArg(), win.endArg())
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
 	defer rows.Close()
 	days := []day{}
+	revealed := 0
 	for rows.Next() {
 		var d day
 		if err := rows.Scan(&d.DayCommitment, &d.Binding, &d.P, &d.Publications, &d.Probed, &d.SampledOut); err != nil {
 			s.writeInternal(w, r.URL.Path, err)
 			return
+		}
+		if sec, ok := secrets[d.DayCommitment]; ok {
+			dd, ss, at := sec.day, sec.secret, sec.at
+			d.Day, d.Secret, d.RevealedAt = &dd, &ss, &at
+			revealed++
 		}
 		days = append(days, d)
 	}
@@ -2619,12 +2785,20 @@ func (s *Server) handleSampling(w http.ResponseWriter, r *http.Request) {
 		"vantage":   s.vantage,
 		"decisions": days,
 		"how_to_audit": "Each row commits to that day's secret as SHA256(secret). " +
-			"Once the secret is published, recompute H(promise_hash || secret) < p * 2^64 " +
-			"for every MsgPayForFibre settled that day: the promise hashes that pass are the ones " +
-			"this observer should have probed, and /v1/probes says which ones it did.",
-		"secret_published": false,
+			"The prober publishes a day's secret " + policyRevealNote + " after the day ends (the row's secret field; " +
+			"the record is sampling-secrets.jsonl, also in the daily export). With it, recompute " +
+			"H(promise_hash || secret) < p * 2^64 for every MsgPayForFibre settled that day: the promise hashes that " +
+			"pass are the ones this observer should have probed, and /v1/probes says which ones it did. " +
+			"sentinel-recompute -sampling does this from the export.",
+		"days_listed":      len(days),
+		"secrets_revealed": revealed,
+		"secret_published": revealed > 0,
 	})
 }
+
+// policyRevealNote is the reveal delay as the prober's default (policy.
+// DefaultRevealAfter); the API does not import the policy package.
+const policyRevealNote = "seven days"
 
 // ---- probes ----
 
@@ -2766,4 +2940,71 @@ func parseLimit(r *http.Request, def, max int) (int, error) {
 		return 0, fmt.Errorf("limit must be an integer between 1 and %d", max)
 	}
 	return l, nil
+}
+
+// ---- exports ----
+
+// exportsDir is where the collector builds the daily exports.
+func (s *Server) exportsDir() string {
+	if s.dataDir == "" {
+		return ""
+	}
+	return filepath.Join(s.dataDir, "exports")
+}
+
+// handleExports lists the daily exports: one tarball per UTC day holding
+// every record file's lines for that day, with a manifest of digests. It
+// is what a verifier downloads; sentinel-recompute re-derives every verdict
+// and every published figure from it.
+func (s *Server) handleExports(w http.ResponseWriter, r *http.Request) {
+	entries := []export.Entry{}
+	if dir := s.exportsDir(); dir != "" {
+		var err error
+		if entries, err = export.ReadIndex(dir); err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"vantage": s.vantage,
+		"exports": entries,
+		"how_to_verify": "download /v1/exports/<name>, check its sha256 against the entry (and the .sha256 sidecar), " +
+			"untar, check each member against manifest.json, then run sentinel-recompute on the directory: it re-derives " +
+			"every row's phase and classification from the row's own fields and the run's recorded configuration, and every " +
+			"obligation figure from the rows, and prints what differs from this API's /v1/validators?as_of=<day end>.",
+		"rule": "records are assigned to a day by their own timestamp; a record that reached the file after its day's export was built is in the next export, counted as late",
+	})
+}
+
+// handleExportFile serves one export or its digest sidecar. Names are
+// checked against the export name pattern, so nothing else under the
+// directory is reachable.
+func (s *Server) handleExportFile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	dir := s.exportsDir()
+	if dir == "" || !export.NamePattern.MatchString(name) {
+		writeErr(w, 404, "no such export")
+		return
+	}
+	path := filepath.Join(dir, name)
+	f, err := os.Open(path)
+	if err != nil {
+		writeErr(w, 404, "no such export")
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		writeErr(w, 404, "no such export")
+		return
+	}
+	if strings.HasSuffix(name, ".sha256") {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	} else {
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
+	}
+	// An export is written once and never changes; its name carries the day.
+	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+	http.ServeContent(w, r, name, info.ModTime(), f)
 }

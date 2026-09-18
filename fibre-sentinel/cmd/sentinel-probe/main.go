@@ -24,6 +24,18 @@ import (
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/policy"
 )
 
+// flagConfig is every flag as set for this run, by name, with durations as
+// their string form. It is recorded in runs.jsonl (status.RunEvent) so a
+// verdict can be traced to the settings that produced it: the prune
+// tolerance behind a phase, the schedule points, the timeouts, the policy.
+func flagConfig() map[string]any {
+	m := map[string]any{}
+	flag.VisitAll(func(f *flag.Flag) {
+		m[f.Name] = f.Value.String()
+	})
+	return m
+}
+
 func main() {
 	var (
 		rpc      = flag.String("rpc", "http://127.0.0.1:26657", "CometBFT RPC endpoint")
@@ -55,6 +67,7 @@ func main() {
 		dlTO        = flag.Duration("download-timeout", 25*time.Second, "")
 		logLines    = flag.Int("log-ring", 400, "log lines kept in memory for the crash dump")
 		policyPath  = flag.String("policy", "", "probe load policy YAML (observer/policy); \"default\" applies the R4 defaults; empty = no policy (probe everything)")
+		revealAfter = flag.Duration("reveal-after", policy.DefaultRevealAfter, "publish each day's sampling secret this long after the day ends, to <data-dir>/sampling-secrets.jsonl (0 = never)")
 	)
 	flag.Parse()
 
@@ -67,6 +80,7 @@ func main() {
 	fracs := probe.InWindowFractions(*inWindow)
 
 	var pol probe.Policy
+	var revealer *policy.Policy
 	if *policyPath != "" {
 		path := *policyPath
 		if path == "default" {
@@ -83,7 +97,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("policy: %v", err)
 		}
+		p.SetLogger(log.Printf)
 		pol = p
+		revealer = p
 	}
 
 	pr, err := probe.New(probe.Config{
@@ -114,6 +130,7 @@ func main() {
 		RetryDelay:            *retryDelay,
 		Concurrency:           *concurrency,
 		BackfillMissed:        *backfill,
+		RunConfig:             flagConfig(),
 	}, log)
 	if err != nil {
 		log.Fatalf("init: %v", err)
@@ -122,6 +139,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if revealer != nil {
+		go revealer.RevealLoop(ctx, filepath.Join(*dataDir, policy.SecretsFile), *revealAfter, log.Printf)
+	}
 	if err := pr.Run(ctx); err != nil {
 		log.Fatalf("run: %v", err)
 	}

@@ -403,6 +403,62 @@ what the measurement cannot separate.
   many validators were unreachable at once, because validators fail
   independently and one network does not.
 
+## Reproducing the figures
+
+Every figure on the site is a function of the record and the code, and the
+pieces needed to re-run that function are published:
+
+- **The record.** The JSONL files are the record; the daily export at
+  `/v1/exports` is one tarball per UTC day holding every record file's
+  lines for that day (`publications`, `payments`, `measurements`,
+  `reachability`, `registry`, `runs`, `sampling-secrets`), with a
+  `manifest.json` of line counts, byte ranges and SHA-256 digests, and a
+  `.sha256` sidecar for the tarball. A record is assigned to a day by its
+  own timestamp; one that reached the file after its day's export was
+  built is in the next export, counted as late. Every line of every file
+  is in exactly one export.
+- **The code's configuration.** Each component appends its starts and
+  stops to `runs.jsonl` with its flags (`status.RunEvent`); the collector
+  replays them into `/v1/runs`, so a row can be traced to the prune
+  tolerance, schedule and timeouts that produced it, and to the build
+  (`observer.build` on the row itself since schema 9).
+- **A pinned window.** `?as_of=<RFC 3339>` on `/v1/network` and
+  `/v1/validators` answers what the observer would have published at that
+  moment from the rows it had by then: rows started after `as_of` are
+  left out, an obligation whose deadline is after it is pending. What the
+  chain says now (jailed, bonded, the current registry) is not rewound,
+  and the answer says so (`as_of_note`). Pinned answers bypass the
+  snapshot cache and are rationed (a burst of four, then one every two
+  seconds; `429` with `Retry-After` past that).
+- **The sampling draw.** Seven days after a UTC day ends the prober
+  publishes that day's secret (`sampling-secrets.jsonl`, served beside the
+  day's commitment at `/v1/sampling`), and from then on
+  `H(promise_hash || secret) < p · 2^64` can be recomputed by anyone for
+  every promise settled that day. The delay clears any retention window
+  this observer schedules, so the draw stays unpredictable while it
+  matters.
+- **The tool.** `sentinel-recompute -data-dir <record or untarred export>`
+  re-derives every row's phase and classification from the row's own
+  fields and the run's recorded tolerance (`Measurement.Recompute`), the
+  correlated-failure guard and the obligation buckets for a window
+  (`observer/verdict`, a second implementation of the rules the API
+  evaluates in SQL, kept apart from it; the API's tests run both over the
+  same rows), and with `-api <base>` compares them to
+  `/v1/validators?window=&as_of=`; `-sampling` checks the draws of every
+  revealed day. Exit status 1 when anything differs.
+
+What a difference means. A row whose recomputed class differs from its
+stored one was classified by a different build: the class is stamped at
+probe time and the taxonomy has changed since (the sample record in
+`observer/testdata`, from before `UNREACHABLE` was held out, shows exactly
+this). The row's evidence is unchanged; the site publishes the stored
+class, and the export lets a reader apply today's rules to yesterday's
+rows. A NOT_FOUND graded at the phase boundary can differ by the
+microseconds between the RPC's return and the row's finish time. An
+obligation figure that differs from the API's with the same rows and the
+same `as_of` is a bug in one of the two implementations, and is why there
+are two.
+
 ## Adding a class
 
 A new classification must map to a new case in the taxonomy table in

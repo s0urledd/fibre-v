@@ -59,6 +59,10 @@ cd fibre-sentinel && go test ./...
 # fibre-sentinel — full devnet run with fault injection: 60 measurements, 0 misclassifications
 #   (needs a celestia-app + fibre build on PATH; ~14 min)
 cd fibre-sentinel && ./probe-devtest.sh 4 3
+
+# fibre-sentinel — re-derive every verdict and every obligation figure from a record or an
+#   untarred daily export (/v1/exports), and compare with the API's answer pinned to the same moment
+cd fibre-sentinel && go run ./cmd/sentinel-recompute -data-dir <dir> -window 7d -as-of 2026-09-18T00:00:00Z -api https://<site>
 ```
 
 ## The observer (dashboard, API, collector)

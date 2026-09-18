@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -186,6 +187,8 @@ type Policy struct {
 	decisions map[string]decision
 	lastP     float64
 	lastCap   string
+	lastProj  Projection
+	logf      func(string, ...any)
 }
 
 type pubLoad struct {
@@ -332,7 +335,45 @@ func (c Config) pointsPerPublication() float64 {
 // then denied probes mid schedule — and because the schedule is packed toward
 // the deadline, the points that were dropped were the late in-window and
 // grace ones, which are exactly where a retention breach shows.
+// Projection is the load estimate an admission probability was drawn
+// from: every input the cap comparison used, so a reader of the log or the
+// status file can check the arithmetic behind p rather than take it. Bytes
+// are per hour or per day as the cap they are held against.
+type Projection struct {
+	At           time.Time     `json:"at"`
+	P            float64       `json:"p"`
+	Binding      string        `json:"binding"`
+	Lookback     time.Duration `json:"-"`
+	LookbackS    int64         `json:"lookback_s"`
+	Publications int           `json:"publications_in_lookback"`
+
+	GlobalBytesPerHour int64 `json:"global_bytes_per_hour"`
+	GlobalCapPerHour   int64 `json:"global_cap_bytes_per_hour"`
+	GlobalBytesPerDay  int64 `json:"global_bytes_per_day"`
+	GlobalCapPerDay    int64 `json:"global_cap_bytes_per_day"`
+
+	// The validator whose projected hourly load is the largest share of
+	// its own cap: the one that binds first as load grows.
+	HeaviestValidator    string  `json:"heaviest_validator,omitempty"`
+	HeaviestRows         int     `json:"heaviest_rows,omitempty"`
+	HeaviestBytesHour    int64   `json:"heaviest_bytes_per_hour,omitempty"`
+	HeaviestCapHour      int64   `json:"heaviest_cap_bytes_per_hour,omitempty"`
+	HeaviestBytesDay     int64   `json:"heaviest_bytes_per_day,omitempty"`
+	HeaviestCapDay       int64   `json:"heaviest_cap_bytes_per_day,omitempty"`
+	RequestsPerMinute    float64 `json:"requests_per_minute"`
+	RequestsCapMinute    int     `json:"requests_cap_per_minute"`
+	PointsPerPublication float64 `json:"points_per_publication"`
+}
+
 func (p *Policy) projectedP(now time.Time) (float64, string) {
+	pj := p.project(now)
+	p.lastProj = pj
+	return pj.P, pj.Binding
+}
+
+// project computes the Projection for now. It drops publications that
+// left the lookback.
+func (p *Policy) project(now time.Time) Projection {
 	lookback := p.cfg.Sampling.ProjectionLookback
 	var global int64
 	perVal := map[string]int64{}
@@ -352,13 +393,16 @@ func (p *Policy) projectedP(now time.Time) (float64, string) {
 	hourly := float64(time.Hour) / float64(lookback)
 	daily := float64(24*time.Hour) / float64(lookback)
 
-	prob, binding := 1.0, "none"
+	pj := Projection{At: now.UTC(), P: 1, Binding: "none", Lookback: lookback, LookbackS: int64(lookback / time.Second),
+		Publications: len(p.recentPubs), PointsPerPublication: p.cfg.pointsPerPublication(),
+		GlobalBytesPerHour: int64(float64(global) * hourly), GlobalCapPerHour: p.cfg.Caps.Global.BytesPerHour,
+		GlobalBytesPerDay: int64(float64(global) * daily), GlobalCapPerDay: p.cfg.Caps.Global.BytesPerDay}
 	tighten := func(capBytes int64, projected float64, name string) {
 		if capBytes <= 0 || projected <= float64(capBytes) {
 			return
 		}
-		if q := float64(capBytes) / projected; q < prob {
-			prob, binding = q, name
+		if q := float64(capBytes) / projected; q < pj.P {
+			pj.P, pj.Binding = q, name
 		}
 	}
 
@@ -371,10 +415,20 @@ func (p *Policy) projectedP(now time.Time) (float64, string) {
 		addrs = append(addrs, a)
 	}
 	sort.Strings(addrs)
+	var heaviest float64
 	for _, a := range addrs {
 		rows := perValRows[a]
-		tighten(p.cfg.bytesPerHourCap(rows), float64(perVal[a])*hourly, "validator_bytes_per_hour")
-		tighten(p.cfg.bytesPerDayCap(rows), float64(perVal[a])*daily, "validator_bytes_per_day")
+		capH, capD := p.cfg.bytesPerHourCap(rows), p.cfg.bytesPerDayCap(rows)
+		tighten(capH, float64(perVal[a])*hourly, "validator_bytes_per_hour")
+		tighten(capD, float64(perVal[a])*daily, "validator_bytes_per_day")
+		if capH > 0 {
+			if share := float64(perVal[a]) * hourly / float64(capH); share > heaviest {
+				heaviest = share
+				pj.HeaviestValidator, pj.HeaviestRows = a, rows
+				pj.HeaviestBytesHour, pj.HeaviestCapHour = int64(float64(perVal[a])*hourly), capH
+				pj.HeaviestBytesDay, pj.HeaviestCapDay = int64(float64(perVal[a])*daily), capD
+			}
+		}
 	}
 
 	// The request cap is counted in probes rather than bytes. Each admitted
@@ -383,9 +437,74 @@ func (p *Policy) projectedP(now time.Time) (float64, string) {
 	// publications land per minute, not how many bytes they carry.
 	if rpm := p.cfg.Caps.PerValidator.RequestsPerMinute; rpm > 0 && len(addrs) > 0 {
 		perMinute := float64(len(p.recentPubs)) * p.cfg.pointsPerPublication() * (float64(time.Minute) / float64(lookback))
+		pj.RequestsPerMinute, pj.RequestsCapMinute = perMinute, rpm
 		tighten(int64(rpm), perMinute, "validator_requests_per_minute")
 	}
-	return prob, binding
+	return pj
+}
+
+// Projection returns the load estimate behind the last admission decision.
+func (p *Policy) Projection() Projection {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastProj
+}
+
+// ProjectionDetail is Projection as a status-file entry (see probe.Prober,
+// which asks for it through an interface so as not to import this package).
+func (p *Policy) ProjectionDetail() map[string]any {
+	pj := p.Projection()
+	if pj.At.IsZero() {
+		return nil
+	}
+	b, err := json.Marshal(pj)
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+// SetLogger installs where admission decisions are explained. Every change
+// of the admission probability or of the cap that binds it is logged with
+// the projection's inputs, so the log alone says why a publication was
+// sampled out.
+func (p *Policy) SetLogger(logf func(string, ...any)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.logf = logf
+}
+
+func (p *Policy) logProjection(prev Projection, cur Projection) {
+	if p.logf == nil || (prev.P == cur.P && prev.Binding == cur.Binding) {
+		return
+	}
+	msg := fmt.Sprintf("sampling: p=%.3f binding=%s over %d publications in the last %s: global %s/h of cap %s, %s/d of cap %s",
+		cur.P, cur.Binding, cur.Publications, cur.Lookback,
+		humanBytes(cur.GlobalBytesPerHour), humanBytes(cur.GlobalCapPerHour), humanBytes(cur.GlobalBytesPerDay), humanBytes(cur.GlobalCapPerDay))
+	if cur.HeaviestValidator != "" {
+		msg += fmt.Sprintf("; heaviest validator %s (%d rows) %s/h of cap %s", cur.HeaviestValidator, cur.HeaviestRows,
+			humanBytes(cur.HeaviestBytesHour), humanBytes(cur.HeaviestCapHour))
+	}
+	if cur.RequestsCapMinute > 0 {
+		msg += fmt.Sprintf("; %.2f requests/min per validator of cap %d (%.0f points per publication)", cur.RequestsPerMinute, cur.RequestsCapMinute, cur.PointsPerPublication)
+	}
+	p.logf("%s", msg)
+}
+
+func humanBytes(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.2f GiB", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.0f KiB", float64(b)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", b)
 }
 
 // Admit implements probe.Policy.
@@ -410,8 +529,10 @@ func (p *Policy) Admit(pub scan.Publication, alreadyStarted bool) (bool, string)
 	}
 	now := time.Now()
 	p.observe(pub, now)
+	prev := p.lastProj
 	prob, binding := p.projectedP(now)
 	p.lastP, p.lastCap = prob, binding
+	p.logProjection(prev, p.lastProj)
 	in := p.Sampled(pub.PromiseHash, pub.SettlementTime, prob)
 	p.remember(pub, in)
 	if in {

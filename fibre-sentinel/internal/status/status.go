@@ -81,6 +81,9 @@ type Writer struct {
 	pending bool // a delayed write is scheduled
 	stop    chan struct{}
 	stopped bool
+	// recordRuns: Start and Stop also append to runs.jsonl (see runs.go).
+	recordRuns bool
+	config     map[string]any
 }
 
 // New returns a Writer for component in dataDir. An empty dataDir yields a
@@ -102,6 +105,9 @@ func (w *Writer) Start() {
 	if w == nil {
 		return
 	}
+	w.mu.Lock()
+	w.appendRun(RunStarted, "", w.r.StartedAt)
+	w.mu.Unlock()
 	w.flush(true)
 	go func() {
 		t := time.NewTicker(Interval)
@@ -132,6 +138,7 @@ func (w *Writer) Stop(reason string) {
 	w.r.StoppedAt = &now
 	w.r.StopReason = reason
 	close(w.stop)
+	w.appendRun(RunStopped, reason, now)
 	w.mu.Unlock()
 	w.flush(true)
 }

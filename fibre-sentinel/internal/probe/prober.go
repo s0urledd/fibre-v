@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 
 	"context"
 	"encoding/hex"
@@ -53,6 +52,12 @@ type Config struct {
 	MaxLateness  time.Duration // a slot older than this is recorded MISSED, not probed
 	RPCTimeout   time.Duration
 	HostCacheTTL time.Duration
+
+	// RunConfig is what this run was configured with, as the operator's
+	// flags and derived settings, recorded in runs.jsonl on start (see
+	// status.RunEvent) so a row's verdict can be traced to the settings
+	// that produced it. nil records the run without a configuration.
+	RunConfig map[string]any
 
 	// Concurrency is how many probes run at once across all validators (R4
 	// section 3.5: global 8). A single validator never sees more than one
@@ -175,7 +180,7 @@ func New(cfg Config, log *scan.Logger) (*Prober, error) {
 		return nil, err
 	}
 	return &Prober{
-		observer:    ObserverInfo{Build: buildRevision(), AssignPin: assign.PinnedCelestiaAppCommit},
+		observer:    ObserverInfo{Build: status.BuildRevision(), AssignPin: assign.PinnedCelestiaAppCommit},
 		cfg:         cfg,
 		log:         log,
 		chain:       ch,
@@ -226,7 +231,8 @@ func (p *Prober) Run(parent context.Context) error {
 	}
 	defer p.store.Close()
 
-	st := status.New(p.cfg.DataDir, "prober", p.cfg.Vantage, "")
+	st := status.New(p.cfg.DataDir, "prober", p.cfg.Vantage, status.BuildRevision())
+	st.RecordRuns(p.cfg.RunConfig)
 	st.Start()
 	defer st.Stop("exit")
 	p.status = st
@@ -278,6 +284,7 @@ func (p *Prober) Run(parent context.Context) error {
 		p.loadGaps()
 		p.pollScanned(ctx)
 		p.refreshRegistry()
+		p.publishProjection()
 
 		if added, err := p.feed.refresh(); err != nil {
 			p.log.Fatalf("load publications: %v", err)
@@ -400,6 +407,22 @@ func (p *Prober) pollAppVersion(ctx context.Context) {
 	if p.status != nil {
 		p.status.Set("app_version", v)
 		p.status.Set("pin_stale", cur.PinStale)
+	}
+}
+
+// publishProjection puts the load policy's last projection, the inputs
+// behind the admission probability, in the status file. The policy is
+// asked through an interface so this package need not import it.
+func (p *Prober) publishProjection() {
+	if p.status == nil || p.cfg.Policy == nil {
+		return
+	}
+	pj, ok := p.cfg.Policy.(interface{ ProjectionDetail() map[string]any })
+	if !ok {
+		return
+	}
+	if d := pj.ProjectionDetail(); d != nil {
+		p.status.Set("sampling", d)
 	}
 }
 
@@ -1089,33 +1112,4 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
-}
-
-// buildRevision is the VCS revision the binary was built from, "-dirty" when
-// the tree had local changes, or "unknown". It is stamped on every row so a
-// classification can be traced to the code that made it.
-func buildRevision() string {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-	rev, dirty := "", false
-	for _, kv := range bi.Settings {
-		switch kv.Key {
-		case "vcs.revision":
-			rev = kv.Value
-		case "vcs.modified":
-			dirty = kv.Value == "true"
-		}
-	}
-	if rev == "" {
-		return "unknown"
-	}
-	if len(rev) > 12 {
-		rev = rev[:12]
-	}
-	if dirty {
-		rev += "-dirty"
-	}
-	return rev
 }

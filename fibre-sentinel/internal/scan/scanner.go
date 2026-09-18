@@ -17,8 +17,11 @@ import (
 
 // Config controls a scan run. Zero values fall back to the defaults in Run.
 type Config struct {
-	RPCURL  string
-	DataDir string
+	// RunConfig is what this run was configured with, recorded in
+	// runs.jsonl on start (status.RunEvent). nil records the run alone.
+	RunConfig map[string]any
+	RPCURL    string
+	DataDir   string
 
 	// StartHeight is where a FRESH scan begins (ignored on resume). 0 or
 	// negative means "latest height at startup".
@@ -89,7 +92,7 @@ func New(cfg Config, log *Logger) (*Scanner, error) {
 		return nil, err
 	}
 	return &Scanner{
-		status:  status.New(cfg.DataDir, "scanner", "", ""),
+		status:  status.New(cfg.DataDir, "scanner", "", status.BuildRevision()),
 		cfg:     cfg,
 		log:     log,
 		chain:   ch,
@@ -109,6 +112,7 @@ func (s *Scanner) Run(parent context.Context) error {
 		defer cancel()
 	}
 	defer s.store.Close()
+	s.status.RecordRuns(s.cfg.RunConfig)
 	s.status.Start()
 	defer s.status.Stop("exit")
 

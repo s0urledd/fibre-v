@@ -22,6 +22,7 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
@@ -46,6 +47,10 @@ func main() {
 		reachPath = flag.String("reachability", "", "path to reachability.jsonl (default <data-dir>/reachability.jsonl)")
 		payPath   = flag.String("payments", "", "path to payments.jsonl (default <data-dir>/payments.jsonl)")
 		regPath   = flag.String("registry", "", "path to registry.jsonl, this collector's own endpoint-history log (default <data-dir>/registry.jsonl)")
+		runsPath  = flag.String("runs", "", "path to runs.jsonl, every component's record of its starts, stops and configuration (default <data-dir>/runs.jsonl)")
+		secPath   = flag.String("sampling-secrets", "", "path to sampling-secrets.jsonl, the prober's revealed day secrets (default <data-dir>/sampling-secrets.jsonl)")
+		expDir    = flag.String("exports-dir", "", "where the daily export tarballs are built (default <data-dir>/exports)")
+		expHour   = flag.Int("export-hour", 3, "UTC hour after which a day's export is built, the grace for late rows (-1 = never build exports)")
 	)
 	flag.Parse()
 
@@ -69,6 +74,15 @@ func main() {
 	}
 	if *regPath == "" {
 		*regPath = filepath.Join(*dataDir, "registry.jsonl")
+	}
+	if *runsPath == "" {
+		*runsPath = filepath.Join(*dataDir, status.RunsFile)
+	}
+	if *secPath == "" {
+		*secPath = filepath.Join(*dataDir, "sampling-secrets.jsonl")
+	}
+	if *expDir == "" {
+		*expDir = filepath.Join(*dataDir, "exports")
 	}
 
 	log := scan.NewLogger(*logLines)
@@ -122,7 +136,11 @@ func main() {
 			_ = regFile.Sync()
 		}
 	}
-	log.Printf("collector up: run=%d vantage=%s db=%s data=%s", runID, *vantage, *dbPath, *dataDir)
+	var exporter *export.Builder
+	if *expHour >= 0 {
+		exporter = &export.Builder{DataDir: *dataDir, Dir: *expDir, Vantage: *vantage, Build: status.BuildRevision(), Hour: *expHour, Logf: log.Printf}
+	}
+	log.Printf("collector up: run=%d vantage=%s db=%s data=%s exports=%s", runID, *vantage, *dbPath, *dataDir, *expDir)
 
 	var lastEscrow time.Time
 	pass := func(pollEndpoints bool) {
@@ -173,6 +191,24 @@ func main() {
 			}
 			if r.Skipped > 0 {
 				log.Printf("payments: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
+			}
+		}
+		if r, err := ingest.Runs(st, *runsPath, now); err != nil {
+			log.Printf("runs: %v", err)
+		} else if r.Inserted > 0 {
+			log.Printf("runs: +%d run event(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		if r, err := ingest.SamplingSecrets(st, *secPath, now); err != nil {
+			log.Printf("sampling secrets: %v", err)
+		} else if r.Inserted > 0 {
+			log.Printf("sampling secrets: +%d day(s) revealed (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		if exporter != nil {
+			if built, err := exporter.Run(now); err != nil {
+				log.Printf("export: %v", err)
+				live.Error(fmt.Sprintf("export: %v", err))
+			} else if len(built) > 0 {
+				live.Set("last_export", built[len(built)-1])
 			}
 		}
 		if chain != nil && *escEvery > 0 && time.Since(lastEscrow) >= *escEvery {

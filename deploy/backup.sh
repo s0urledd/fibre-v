@@ -34,7 +34,7 @@ command -v rclone >/dev/null || { echo "fibre-backup: rclone is not installed" >
 dest="$remote/$instance"
 echo "fibre-backup[$instance]: $data -> $dest"
 rclone sync "$data" "$dest" \
-  --include '*.jsonl' --include 'state.json' --include 'registry.jsonl' --include 'status/**' \
+  --include '*.jsonl' --include 'state.json' --include 'registry.jsonl' --include 'status/**' --include 'exports/**' \
   --exclude 'sampling-master.key' --exclude 'observer.db*' --exclude 'snapshots/**' \
   --transfers 4 --checkers 8 --stats-one-line --stats 0 --log-level NOTICE
 echo "fibre-backup[$instance]: done"

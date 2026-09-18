@@ -117,7 +117,10 @@ user cannot write there.
 That file is what makes the sample auditable. The commitments published at
 `/v1/sampling` are SHA-256 of a per-day secret derived from it, so if the
 master is regenerated on every restart the commitments change with it and
-nobody can ever check a day's draw against them. It is also the reason the
+nobody can ever check a day's draw against them. The prober publishes each
+day's secret seven days after the day ends (`-reveal-after`), to
+`<DATA_DIR>/sampling-secrets.jsonl`; the collector serves it beside the
+day's commitment. Only the day secrets are ever revealed, never the master. It is also the reason the
 sample is unpredictable: a publisher who learned the master in advance could
 work out which of its blobs would be probed, so do not put it anywhere the
 publishers can read, and do not include it in a backup that leaves the host.
@@ -293,7 +296,14 @@ columns from schema 9, stays; beyond 90 days the "all" figures come from a
 unobserved by kind, pending, faults, reachability), and every figure that
 rests on the rollup says "rolled up after 90 days" beside its sample. The
 JSONL files are never rotated by the tools and remain the record; the
-daily export is what a verifier downloads. At mainnet's 148 MB/s the
+daily export is what a verifier downloads. The collector builds it: one
+tarball per UTC day under `<DATA_DIR>/exports` (`-exports-dir`), once the
+grace hour has passed (`-export-hour`, default 03:00 UTC, so late rows
+land in their own day), served at `/v1/exports` with a manifest of
+digests. `sentinel-recompute` re-derives every verdict and every
+obligation figure from an untarred export and compares them with the
+API's `?as_of=` answer; see `docs/verdicts.md`, "Reproducing the
+figures". At mainnet's 148 MB/s the
 publication rate is many times mocha's, which is why the decision is
 written down now: a rollup added later could not reconstruct the "all"
 window it replaced.
@@ -307,8 +317,9 @@ Two copies, both shipped:
   `fibre-litestream@mocha`. It replicates the **derived** database only,
   continuously, with 72 h of history.
 - **fibre-backup** for the record: `fibre-backup@mocha.timer` runs
-  `rclone sync` of every `.jsonl`, `state.json`, `registry.jsonl` and the
-  status files to `BACKUP_REMOTE/<network>` nightly (`deploy/backup.sh`),
+  `rclone sync` of every `.jsonl` (the record, `registry.jsonl`,
+  `runs.jsonl`, `sampling-secrets.jsonl`), `state.json`, the status files
+  and the daily exports to `BACKUP_REMOTE/<network>` nightly (`deploy/backup.sh`),
   with the rclone remote configured once in `/etc/fibre-observer/rclone.conf`.
   It never copies `sampling-master.key`, which must not leave the host, nor
   the database, which litestream covers. With `BACKUP_REMOTE` empty the
@@ -319,11 +330,13 @@ Two copies, both shipped:
 `observer.db*` aside, start the collector: it recreates the schema, replays
 `registry.jsonl` (endpoint history), then tails the JSONL files from zero.
 Every record has a natural key and every insert is `ON CONFLICT DO
-NOTHING`, so a replay never duplicates. What a rebuild does **not** bring
-back, because it has no JSONL source: the collector's own run spans
-(`/v1/runs`, the downtime record), the escrow balances and validator
-identities (re-polled within minutes), and the chain-side `meta` keys
-(re-polled at once). Litestream's copy is the backup for those.
+NOTHING`, so a replay never duplicates. The run record (`/v1/runs`) comes
+back from `runs.jsonl`, which every component appends its starts, stops
+and flags to, and the revealed sampling secrets from
+`sampling-secrets.jsonl`. What a rebuild does **not** bring back, because
+it has no JSONL source: the collector's own run row, the escrow balances
+and validator identities (re-polled within minutes), and the chain-side
+`meta` keys (re-polled at once). Litestream's copy is the backup for those.
 
 **Restore the database** from litestream: stop `fibre-collector@mocha` and
 `fibre-api@mocha` (each holds the WAL), then
