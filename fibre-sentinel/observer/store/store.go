@@ -1318,9 +1318,11 @@ func (s *Store) InsertReachability(m probe.Measurement, raw []byte) (inserted bo
 // settling after the probe can own them; once the scanner has read past
 // probe time + payment_promise_timeout every candidate is on record and the
 // verdict is drawn: SHADOWED_SHARD when a settled promise over the
-// commitment, alive at the probe, assigns exactly the returned rows, FAULT
-// otherwise, and PROBE_ERROR for good when a scan gap covers the interval
-// or the assignment rows were not recorded.
+// commitment, alive at the probe, assigns exactly the returned rows,
+// UNMATCHED_GENUINE otherwise (held out: an upload that never settled can
+// answer under hash-order serving, so no fault is supported), and
+// PROBE_ERROR for good when a scan gap covers the interval or the
+// assignment rows were not recorded.
 type Amendment struct {
 	DedupeKey        string    `json:"dedupe_key"`
 	PromiseHash      string    `json:"promise_hash"`
@@ -1431,7 +1433,10 @@ func (s *Store) LateShadowVerdicts(ctx context.Context, frontier, now time.Time,
 		case unrecorded:
 			a.To, a.Reason = string(probe.ClassProbeError), "no verdict: a candidate promise's assignment rows were not recorded (scanner ran without -rows)"
 		default:
-			a.To, a.Reason = string(probe.ClassFault), "incomplete or wrong delivery: rows verify against the commitment but no promise over it settled by "+deadline.UTC().Format(time.RFC3339)+" assigns them to this validator; the row carries the indices"
+			// Not a fault: a shard uploaded for a promise that never settled
+			// is on disk until its prune and never on chain, and it answers
+			// when its hash sorts first. Held out of the rate, beside it.
+			a.To, a.Reason = string(probe.ClassUnmatchedGenuine), "genuine rows of this blob that no promise over it settled by "+deadline.UTC().Format(time.RFC3339)+" assigns to this validator; under promise-hash-order serving an upload that never settled can answer, so this is held out of the rate, not a fault; the row carries the indices"
 		}
 		out = append(out, a)
 	}

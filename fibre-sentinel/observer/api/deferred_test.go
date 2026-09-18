@@ -126,8 +126,10 @@ func TestLateShadowVerdicts(t *testing.T) {
 	if a := byKey[shadowed.DedupeKey()]; a.To != "SHADOWED_SHARD" || a.ShadowedBy != "0bbb" || a.From != "PROBE_ERROR" {
 		t.Errorf("shadowed row: %+v", a)
 	}
-	if a := byKey[faulty.DedupeKey()]; a.To != "FAULT" || a.ShadowedBy != "" {
-		t.Errorf("faulty row: %+v", a)
+	// no settled promise assigns these rows: held out, not a fault, since
+	// an upload that never settled can answer under hash-order serving
+	if a := byKey[faulty.DedupeKey()]; a.To != "UNMATCHED_GENUINE" || a.ShadowedBy != "" {
+		t.Errorf("unmatched row: %+v", a)
 	}
 	if a := byKey[gapped.DedupeKey()]; a.To != "PROBE_ERROR" {
 		t.Errorf("gapped row: %+v", a)
@@ -177,12 +179,12 @@ func TestLateShadowVerdicts(t *testing.T) {
 	}
 	seen := 0
 	for _, p := range out.Probes {
-		if p.Validator == "v2" && p.Classification == "FAULT" && p.ClassificationAtProbe == "PROBE_ERROR" && p.AmendedAt != "" && p.ShadowGap != "" {
+		if p.Validator == "v2" && p.Classification == "UNMATCHED_GENUINE" && p.ClassificationAtProbe == "PROBE_ERROR" && p.AmendedAt != "" && p.ShadowGap != "" {
 			seen++
 		}
 	}
 	if seen != 1 {
-		t.Errorf("amended FAULT row not shown with its probe-time verdict: %+v", out.Probes)
+		t.Errorf("amended UNMATCHED_GENUINE row not shown with its probe-time verdict: %+v", out.Probes)
 	}
 
 	// the rollup waits for the deferred verdict and for the windows to close

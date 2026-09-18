@@ -858,6 +858,7 @@ var excludedFromRate = []excludedClass{
 	{"UNREACHABLE", "the observer could not complete a conversation with the endpoint; from one vantage that is not distinguishable from a problem on the observer's own path"},
 	{"NOT_REGISTERED", "the validator had no Fibre host in x/valaddr at the time of the probe; jailing and unbonding remove a provider from the bonded list while the chain keeps the entry"},
 	{"SHADOWED_SHARD", "the rows returned verify against the blob commitment but are not this promise's assignment; DownloadShard is addressed by commitment alone, so another promise over the same blob answers in its place"},
+	{"UNMATCHED_GENUINE", "the rows returned verify against the blob commitment but match no settled promise's assignment; the store serves the first shard by promise-hash order and an upload for a promise that never settled is never on chain, so no fault is supported; the row carries the indices"},
 	{"IDENTITY_EXPIRED", "the certificate is endorsed by the right consensus key but its signed validity window has lapsed; endpoint hygiene, not a retention failure"},
 	{"IDENTITY_MISMATCH", "the certificate is not endorsed by this validator's consensus key, so no client can download from the endpoint; a statement about the endpoint, shown as its status, not about any shard"},
 	{"SERVER_ERROR", "the endpoint was reached and answered with an application error instead of the shard; from one probe that is not distinguishable from a transient fault, so it is shown beside the rate"},

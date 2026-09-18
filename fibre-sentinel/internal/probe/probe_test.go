@@ -168,10 +168,12 @@ func TestClassify_Taxonomy(t *testing.T) {
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassShadowedShard, commitmentVerified: true, shadowed: true},
 		{assigned: true, phase: PhaseGrace, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true, shadowed: true},
 		{assigned: true, phase: PhasePost, outcome: OutcomeWrongRows, want: ClassShadowedShard, commitmentVerified: true, shadowed: true},
-		// verified rows, no promise that assigns them: an incomplete delivery
-		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassFault, commitmentVerified: true},
-		{assigned: true, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassFault, commitmentVerified: true},
-		{assigned: true, phase: PhaseGrace, outcome: OutcomePartial, want: ClassFault, commitmentVerified: true},
+		// verified rows, no settled promise that assigns them: held out, not
+		// a fault (an upload whose promise never settled can answer under
+		// hash-order serving)
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomePartial, want: ClassUnmatchedGenuine, commitmentVerified: true},
+		{assigned: true, phase: PhaseInWindow, outcome: OutcomeWrongRows, want: ClassUnmatchedGenuine, commitmentVerified: true},
+		{assigned: true, phase: PhaseGrace, outcome: OutcomePartial, want: ClassUnmatchedGenuine, commitmentVerified: true},
 		{assigned: true, phase: PhasePost, outcome: OutcomePartial, want: ClassServedPastWindow, commitmentVerified: true},
 		// no registered host is a registry state, not a refusal to serve
 		{assigned: true, phase: PhaseInWindow, outcome: OutcomeNoHost, want: ClassNotRegistered},
@@ -314,15 +316,24 @@ func TestClassify_ShadowedShardIsNeverAFault(t *testing.T) {
 // wrong delivery of this shard. Calling that "shadowed" made a validator
 // that lost half its shard and served the rest un-faultable, for as long as
 // the half it served verified.
-func TestClassify_PartialDeliveryWithoutAShadowIsAFault(t *testing.T) {
+func TestClassify_PartialDeliveryWithoutAShadowIsHeldOut(t *testing.T) {
+	// Genuine rows that no settled promise assigns are not a fault the
+	// evidence supports: the store serves the first shard by promise-hash
+	// order and an upload whose promise never settled can answer. Their
+	// own class, held out of the rate; FAULT stays for no shard at all and
+	// for bytes that do not verify.
 	for _, phase := range []Phase{PhaseInWindow, PhaseGrace} {
 		for _, o := range []Outcome{OutcomeWrongRows, OutcomePartial} {
 			got, reason := Classify(Evidence{Assigned: true, Attested: true, Phase: phase, Outcome: o, CommitmentVerified: true})
-			if got != ClassFault {
-				t.Errorf("%s %s verified but unshadowed = %s (%q), want FAULT", phase, o, got, reason)
+			if got != ClassUnmatchedGenuine {
+				t.Errorf("%s %s verified but unshadowed = %s (%q), want UNMATCHED_GENUINE", phase, o, got, reason)
 			}
-			if !strings.Contains(reason, "no other settled promise") {
+			if !strings.Contains(reason, "no settled promise") {
 				t.Errorf("%s %s: reason must say why it is not shadowed: %q", phase, o, reason)
+			}
+			// rows that do not verify are still corrupt data, and a fault
+			if got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: phase, Outcome: o}); got != ClassFault {
+				t.Errorf("%s %s unverified = %s, want FAULT", phase, o, got)
 			}
 		}
 	}

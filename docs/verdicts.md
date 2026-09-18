@@ -332,7 +332,9 @@ column:
 | no answer from the endpoint at all | `UNREACHABLE` | from one vantage, indistinguishable from the observer's own path failing |
 | no Fibre host in the registry | `NOT_REGISTERED` | jailing and unbonding remove the provider from the bonded list; the chain keeps the entry |
 | exactly another settled promise's rows for the same blob | `SHADOWED_SHARD` | `DownloadShard` takes a commitment, not a promise hash, and the store serves the first shard by promise-hash order; the validator cannot tell them apart |
-| genuine rows matching no promise the observer has scanned | `PROBE_ERROR` at the probe, then the late verdict | the owning promise may settle after the probe; `download.shadow_gap` says so, and the collector judges the row once the scanner has read past probe time + `payment_promise_timeout`: `SHADOWED_SHARD` if a promise on record assigns the rows, `FAULT` (an incomplete delivery) if none does, `PROBE_ERROR` for good if a scan gap covers the interval |
+| genuine rows of the blob that match no settled promise | `UNMATCHED_GENUINE` | an upload whose promise never settled can answer under hash-order serving; held out, beside the rate |
+| genuine rows matching no promise the observer has scanned | `PROBE_ERROR` at the probe, then the late verdict | the owning promise may settle after the probe; `download.shadow_gap` says so, and the collector judges the row once the scanner has read past probe time + `payment_promise_timeout`: `SHADOWED_SHARD` if a promise on record assigns the rows, `UNMATCHED_GENUINE` if none does, `PROBE_ERROR` for good if a scan gap covers the interval |
+| genuine rows matching no settled promise, judged late | `UNMATCHED_GENUINE` | a shard uploaded for a promise that never settled is on disk until its prune and never on chain, and answers when its hash sorts first; a validator serving it is serving a genuine piece of the blob. Not a fault the evidence supports: held out of the rate, counted beside it, indices on the row |
 | a lapsed but correctly signed certificate | `IDENTITY_EXPIRED` | a late renewal, not someone else answering |
 | a certificate signed by the wrong consensus key | `IDENTITY_MISMATCH` | an unusable endpoint, which is a statement about the endpoint (its status says so), not about a shard |
 | an application error instead of the shard | `SERVER_ERROR` | the server did not say it lacks the shard; from one probe a hiccup and a loss look the same |
@@ -390,9 +392,9 @@ what the measurement cannot separate.
   are the promises over the same commitment settled by that bound whose
   window was still open at the probe (`must_serve_until` plus the store's
   prune lag); if one assigns this validator exactly the returned indices
-  the row becomes `SHADOWED_SHARD` with `shadowed_by`, otherwise `FAULT`
-  ("incomplete or wrong delivery"); a scan-gap row, or a candidate whose
-  assignment rows were not recorded, stays `PROBE_ERROR` for good. The row
+  the row becomes `SHADOWED_SHARD` with `shadowed_by`, otherwise
+  `UNMATCHED_GENUINE`; a scan-gap row, or a candidate whose assignment
+  rows were not recorded, stays `PROBE_ERROR` for good. The row
   keeps the verdict it was stamped with (`classification_at_probe`) beside
   the amended one and `amended_at`; every amendment is appended to
   `amendments.jsonl`, replayed on a rebuild and shipped in the daily
@@ -412,11 +414,29 @@ what the measurement cannot separate.
   says so. With no host in the live registry and none this observer ever
   saw (a fresh vantage), the settlement host is the last fallback
   (`host_source = settlement`).
-- **What remains.** A shard uploaded for a promise that never settles
-  (abandoned before `MsgPayForFibre`) is on disk until its prune and never
-  on chain, so it can never be a candidate. A late `FAULT` carries that
-  residual: the row carries the returned indices, so the verdict is
-  contestable with the abandoned upload's assignment in hand.
+- **Why unmatched genuine rows are not a fault.** A shard uploaded for a
+  promise that never settles (abandoned before `MsgPayForFibre`) is on
+  disk until its prune and never on chain, so it can never be a
+  candidate, and under hash-order serving it answers whenever its hash
+  sorts first. A validator returning it is returning a genuine piece of
+  the blob it holds; nobody, the validator included, holds the abandoned
+  upload's assignment to contest with. So the late verdict for genuine
+  rows that no settled promise assigns is `UNMATCHED_GENUINE`: held out of
+  the rate, counted beside it, indices on the row. `FAULT` is reserved for
+  what hash order cannot excuse: no shard of the blob at all
+  (`NOT_FOUND` in window) or bytes that do not verify (`INVALID_ROWS`,
+  rows failing the commitment). A validator that wanted to hide behind
+  this would have to hold another shard of the same blob to serve, which
+  is genuine data of the blob; the reconstructable verdict already counts
+  the rows it returned.
+- **A protocol finding.** `DownloadShard` is addressed by commitment
+  alone, and the store answers with the first shard in promise-hash
+  order, so with several promises over one blob no client, the reference
+  client included, can ask for a particular promise's shard. A
+  per-promise retention obligation is therefore not checkable inside the
+  protocol, not only from this vantage. An optional `promise_hash` on
+  `DownloadShardRequest` would make it so; see
+  `docs/research/R12-download-by-promise-2026-09-18.md`.
 - **One vantage.** Every reachability observation comes from a single network
   path. `/v1/network` publishes the worst schedule point in the window by how
   many validators were unreachable at once, because validators fail

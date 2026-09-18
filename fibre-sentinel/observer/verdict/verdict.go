@@ -289,8 +289,10 @@ type Candidate struct {
 // the scanner has read past probe time + timeout: SHADOWED_SHARD with the
 // owning promise when a candidate settled by then, alive at the probe
 // (must_serve_until + tolerance after it), assigns exactly the returned
-// rows; FAULT otherwise. ok is false when the frontier has not reached the
-// bound, or the row carries no indices, or timeout is unknown.
+// rows; UNMATCHED_GENUINE otherwise, held out of the rate, because an
+// upload for a promise that never settled can answer under hash-order
+// serving and no fault is supported. ok is false when the frontier has not
+// reached the bound, or the row carries no indices, or timeout is unknown.
 func LateShadow(got []uint32, probeAt, frontier time.Time, timeout, tolerance time.Duration, cands []Candidate) (cls probe.Classification, shadowedBy string, ok bool) {
 	if timeout <= 0 || len(got) == 0 {
 		return "", "", false
@@ -323,5 +325,5 @@ func LateShadow(got []uint32, probeAt, frontier time.Time, timeout, tolerance ti
 			return probe.ClassShadowedShard, c.PromiseHash, true
 		}
 	}
-	return probe.ClassFault, "", true
+	return probe.ClassUnmatchedGenuine, "", true
 }
