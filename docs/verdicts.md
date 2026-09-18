@@ -230,7 +230,13 @@ One sentence each, and what a reader should conclude.
   verdict),
   `download.shadowed_by` (the promise whose assignment the returned rows
   match), `host_at_settlement` (the host registered when the promise
-  settled, where the upload went; the assignment carries it too) with
+  settled, where the upload went, derived from the chain's own
+  `set_fibre_provider_info` events as the scanner reads them in the same
+  `block_results` pass as everything else, seeded once from the bonded
+  registry at the scan's start; `host_at_settlement_source` says event,
+  seed, none, or unknown because a scan gap or a missing seed leaves the
+  question open; `host_history.jsonl` is the record and the export carries
+  it) with
   `settlement_host_probe` (what that host answered when the current one
   did not serve and differs from it), `observer.build` (the observer's VCS revision), and
   `observer.assign_pin` / `observer.app_version`. The store keeps them as

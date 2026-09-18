@@ -232,6 +232,30 @@ func main() {
 		fmt.Printf("api| %d validators compared, %d differ (API window %s, end %s)\n", len(resp.Validators), apiDiffs, resp.Window.Name, resp.Window.End.Format(time.RFC3339))
 	}
 
+	// ---- hosts: host_at_settlement from the event history in the record ----
+	if hh, gaps, ok := loadHostHistory(*dataDir); ok {
+		checked, hostDiffs := 0, 0
+		for _, p := range pubs {
+			for _, v := range p.Assignment.Validators {
+				if v.HostSource == "" {
+					continue // a record from before the field
+				}
+				checked++
+				host, src := hh.HostAt(v.Address, p.SettlementHeight, p.SettlementTxIndex, gaps)
+				if host != v.Host || src != v.HostSource {
+					hostDiffs++
+					if hostDiffs <= *maxDiff {
+						fmt.Printf("host| %s %s: record %q (%s), derived %q (%s)\n", short(p.PromiseHash), v.Address, v.Host, v.HostSource, host, src)
+					}
+				}
+			}
+		}
+		if hostDiffs > 0 {
+			differs = true
+		}
+		fmt.Printf("hosts| %d assignments checked against host_history.jsonl, %d differ\n", checked, hostDiffs)
+	}
+
 	// ---- sampling ----
 	if *sampling {
 		n, d, err := checkSampling(filepath.Join(*dataDir, policy.SecretsFile), pubs, ms, *maxDiff)
@@ -519,4 +543,41 @@ func loadAmendments(path string) map[string]store.Amendment {
 		}
 	}
 	return out
+}
+
+// loadHostHistory rebuilds the scanner's host history from
+// host_history.jsonl and the scan gaps from state.json; ok is false when
+// the record carries no history.
+func loadHostHistory(dir string) (*scan.HostHistory, []scan.ScanGap, bool) {
+	f, err := os.Open(filepath.Join(dir, "host_history.jsonl"))
+	if err != nil {
+		return nil, nil, false
+	}
+	defer f.Close()
+	var entries []scan.HostEntry
+	seeded, seedAt := false, int64(0)
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
+		if err != nil {
+			break
+		}
+		var e scan.HostEvent
+		if json.Unmarshal(line, &e) != nil || e.ConsAddress == "" {
+			continue
+		}
+		if e.Source == scan.HostFromSeed {
+			seeded, seedAt = true, e.FromHeight
+		}
+		entries = append(entries, e.HostEntry)
+	}
+	var st struct {
+		Gaps       []scan.ScanGap `json:"gaps"`
+		HostSeeded bool           `json:"host_seeded"`
+		HostSeedAt int64          `json:"host_seed_height"`
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "state.json")); err == nil && json.Unmarshal(b, &st) == nil && st.HostSeeded {
+		seeded, seedAt = true, st.HostSeedAt
+	}
+	return scan.LoadHostHistory(entries, seeded, seedAt), st.Gaps, true
 }

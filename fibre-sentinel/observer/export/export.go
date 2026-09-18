@@ -49,6 +49,7 @@ var Files = []FileSpec{
 	{"runs.jsonl", "at"},
 	{"sampling-secrets.jsonl", "revealed_at"},
 	{"amendments.jsonl", "judged_at"},
+	{"host_history.jsonl", "time"},
 }
 
 // Member describes one file inside an export.

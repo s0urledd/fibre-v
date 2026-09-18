@@ -27,10 +27,11 @@ type Store struct {
 	payPath  string
 	statePth string
 
-	pubFile *os.File
-	payFile *os.File
-	seen    map[string]bool
-	paySeen map[string]bool
+	pubFile  *os.File
+	payFile  *os.File
+	hostFile *os.File
+	seen     map[string]bool
+	paySeen  map[string]bool
 }
 
 // PersistState is state.json.
@@ -42,7 +43,12 @@ type PersistState struct {
 	// LastScannedTime is the block time of LastScannedHeight: the frontier
 	// on the chain's clock, which the deferred shadow verdict is drawn
 	// against. Zero when the scanner has not read a block yet.
-	LastScannedTime  time.Time    `json:"last_scanned_time,omitempty"`
+	LastScannedTime time.Time `json:"last_scanned_time,omitempty"`
+	// HostHistory is every Fibre host registration on record (HostHistory),
+	// with whether and where the bonded registry was read as its seed.
+	HostHistory      []HostEntry  `json:"host_history,omitempty"`
+	HostSeeded       bool         `json:"host_seeded,omitempty"`
+	HostSeedAt       int64        `json:"host_seed_height,omitempty"`
 	ParamFingerprint string       `json:"protocol_params_fingerprint"`
 	ParamHistory     []ParamEntry `json:"param_history"`
 	// Gaps are height ranges the scanner had to skip because the node could
@@ -273,6 +279,28 @@ func (s *Store) AppendPublication(p Publication) error {
 	return nil
 }
 
+// AppendHostEvent appends one registration to host_history.jsonl, the
+// record of every set_fibre_provider_info event (and the seed) the scanner
+// read; the collector ingests it and the export carries it, so a verifier
+// can derive host_at_settlement for every assignment from the record.
+func (s *Store) AppendHostEvent(e HostEvent) error {
+	if s.hostFile == nil {
+		f, err := os.OpenFile(filepath.Join(s.dir, "host_history.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return fmt.Errorf("open host_history.jsonl: %w", err)
+		}
+		s.hostFile = f
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	if _, err := s.hostFile.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	return s.hostFile.Sync()
+}
+
 // AppendPayment writes one escrow movement (skipping an already-seen one)
 // in a single write, under the same crash rules as AppendPublication.
 func (s *Store) AppendPayment(p Payment) error {
@@ -357,6 +385,11 @@ func (s *Store) Close() error {
 	}
 	if s.payFile != nil {
 		if err := s.payFile.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	if s.hostFile != nil {
+		if err := s.hostFile.Close(); err != nil && first == nil {
 			first = err
 		}
 	}

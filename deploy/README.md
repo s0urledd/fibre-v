@@ -125,14 +125,15 @@ sample is unpredictable: a publisher who learned the master in advance could
 work out which of its blobs would be probed, so do not put it anywhere the
 publishers can read, and do not include it in a backup that leaves the host.
 
-The scanner reads the Fibre host registry at each settlement height
-(`host_at_settlement` on every assignment), which needs a node that keeps
-state at that height; against a pruning node the field is recorded as
-unknown, never as "no host", and the log says so once. Size the node's
-`min-retain-blocks` (and `pruning-keep-recent`) to cover the scanner's
-worst lag behind the tip plus a margin: a scanner that falls a day behind
-needs a day of retained state, or every settlement in that day is
-recorded without its hosts.
+`host_at_settlement` on every assignment comes from the chain's
+`set_fibre_provider_info` events, read in the same `block_results` pass
+as the promises, seeded once from the bonded registry when the scan
+starts (`host_history.jsonl`). No state query at past heights is made, so
+the node's state pruning does not matter to the observer; what must be
+available is `block` and `block_results` over the scanner's lag behind
+the tip, which the scan needs anyway (a block the node cannot serve is a
+recorded gap, and a registration inside a gap makes the hosts of later
+settlements unknown until the gap is re-scanned).
 
 Leave `-probe-unassigned` off on a public vantage. The read-path rate
 limiting Celestia is designing (forum topic 2295) treats requests for

@@ -51,6 +51,7 @@ func main() {
 		runsPath  = flag.String("runs", "", "path to runs.jsonl, every component's record of its starts, stops and configuration (default <data-dir>/runs.jsonl)")
 		secPath   = flag.String("sampling-secrets", "", "path to sampling-secrets.jsonl, the prober's revealed day secrets (default <data-dir>/sampling-secrets.jsonl)")
 		amendPath = flag.String("amendments", "", "path to amendments.jsonl, this collector's own log of late shadow verdicts (default <data-dir>/amendments.jsonl)")
+		hostsPath = flag.String("host-history", "", "path to host_history.jsonl, the scanner's record of Fibre host registrations from the chain's events (default <data-dir>/host_history.jsonl)")
 		pruneTol  = flag.Duration("prune-tolerance", 5*time.Minute, "how long past must_serve_until a promise's shard is still taken to be on disk when judging a deferred shadow verdict")
 		expDir    = flag.String("exports-dir", "", "where the daily export tarballs are built (default <data-dir>/exports)")
 		expHour   = flag.Int("export-hour", 3, "UTC hour after which a day's export is built, the grace for late rows (-1 = never build exports)")
@@ -93,6 +94,9 @@ func main() {
 	}
 	if *amendPath == "" {
 		*amendPath = filepath.Join(*dataDir, "amendments.jsonl")
+	}
+	if *hostsPath == "" {
+		*hostsPath = filepath.Join(*dataDir, "host_history.jsonl")
 	}
 
 	log := scan.NewLogger(*logLines)
@@ -268,6 +272,11 @@ func main() {
 			log.Printf("sampling secrets: %v", err)
 		} else if r.Inserted > 0 {
 			log.Printf("sampling secrets: +%d day(s) revealed (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		if r, err := ingest.HostEvents(st, *hostsPath, now); err != nil {
+			log.Printf("host history: %v", err)
+		} else if r.Inserted > 0 {
+			log.Printf("host history: +%d registration(s) (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
 		if r, err := ingest.Amendments(st, *amendPath, now); err != nil {
 			log.Printf("amendments: %v", err)

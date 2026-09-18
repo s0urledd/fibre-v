@@ -269,6 +269,21 @@ func scannedTime(ps scan.PersistState) string {
 	return store.TS(ps.LastScannedTime)
 }
 
+// HostEvents replays host_history.jsonl, the scanner's record of every
+// Fibre host registration read from the chain's events and its seed.
+func HostEvents(st *store.Store, path string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var e scan.HostEvent
+		if err := json.Unmarshal(raw, &e); err != nil {
+			return false, fmt.Errorf("%w: decode host event: %v", ErrBadRecord, err)
+		}
+		if e.ConsAddress == "" || e.Source == "" {
+			return false, fmt.Errorf("%w: host event without address or source", ErrBadRecord)
+		}
+		return st.ReplayHostEvent(e)
+	}, now)
+}
+
 // Amendments replays amendments.jsonl, the collector's own log of late
 // shadow verdicts, so a rebuilt database carries them without re-judging.
 func Amendments(st *store.Store, path string, now time.Time) (Result, error) {

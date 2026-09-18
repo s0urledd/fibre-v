@@ -2,10 +2,8 @@ package scan
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/cosmos/cosmos-sdk/types/bech32"
 	"math"
 	"strings"
 	"time"
@@ -50,19 +48,17 @@ type Scanner struct {
 	// lastBlockTime is the block time of the newest header read, saved in
 	// state.json as last_scanned_time.
 	lastBlockTime time.Time
-	// hostsCache is the registry at one height (consHex -> host), the
-	// height it was read for, and whether the read succeeded; a block
-	// carries several promises and the registry is read once for it.
-	hostsCache       map[string]string
-	hostsCacheHeight int64
-	hostsCacheOK     bool
-	hostsWarned      bool
-	cfg              Config
-	log              *Logger
-	chain            *Chain
-	store            *Store
-	status           *status.Writer
-	gaps             []ScanGap
+	// hosts is every Fibre host registration on record, from the chain's
+	// set_fibre_provider_info events, seeded from the bonded registry at
+	// the scan's start: host_at_settlement comes from here, never from a
+	// state query at the settlement height.
+	hosts  *HostHistory
+	cfg    Config
+	log    *Logger
+	chain  *Chain
+	store  *Store
+	status *status.Writer
+	gaps   []ScanGap
 
 	params      *ParamHistory
 	chainID     string
@@ -215,6 +211,12 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 		s.fibreInactive = len(st.ParamHistory) == 0
 		s.startHeight = st.StartHeight
 		s.gaps = st.Gaps
+		s.hosts = LoadHostHistory(st.HostHistory, st.HostSeeded, st.HostSeedAt)
+		if !st.HostSeeded {
+			// a data dir from before the host history: seed now, at the
+			// resume height, and say so
+			s.seedHosts(ctx, st.LastScannedHeight+1)
+		}
 		resumeAt := st.LastScannedHeight + 1
 		s.log.Printf("resuming: last_scanned=%d, %d param-history entries%s", st.LastScannedHeight, len(st.ParamHistory),
 			map[bool]string{true: " (x/fibre not active yet)", false: ""}[s.fibreInactive])
@@ -244,15 +246,20 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 		return 0, fmt.Errorf("seed params at height %d: %w", start, err)
 	}
 	s.startHeight = start
+	s.seedHosts(ctx, start)
 
 	// persist the seed immediately so a crash before the first block still
 	// resumes with the right history.
+	seeded, seedAt := s.hosts.Seeded()
 	if err := s.store.SaveState(PersistState{
 		ChainID:           s.chainID,
 		StartHeight:       start,
 		LastScannedHeight: start - 1,
 		ParamFingerprint:  assign.ParamsV10BlobV0.Fingerprint(),
 		ParamHistory:      s.params.Entries(),
+		HostHistory:       s.hosts.Entries(),
+		HostSeeded:        seeded,
+		HostSeedAt:        seedAt,
 	}); err != nil {
 		return 0, err
 	}
@@ -272,6 +279,7 @@ func (s *Scanner) checkpoint(lastScanned int64) {
 	if err := s.store.Sync(); err != nil {
 		s.log.Fatalf("sync publications: %v", err)
 	}
+	seeded, seedAt := s.hosts.Seeded()
 	if err := s.store.SaveState(PersistState{
 		ChainID:           s.chainID,
 		StartHeight:       s.startHeight,
@@ -280,6 +288,9 @@ func (s *Scanner) checkpoint(lastScanned int64) {
 		ParamFingerprint:  assign.ParamsV10BlobV0.Fingerprint(),
 		ParamHistory:      s.params.Entries(),
 		Gaps:              s.gaps,
+		HostHistory:       s.hosts.Entries(),
+		HostSeeded:        seeded,
+		HostSeedAt:        seedAt,
 	}); err != nil {
 		s.log.Fatalf("save state: %v", err)
 	}
@@ -608,6 +619,31 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 		}
 	}
 
+	// 1b) Fibre host registrations, from the same results: a validator's
+	//     host at settlement is the newest registration at or before the
+	//     settlement tx. Only a successful tx registers; the keeper emits
+	//     nothing on failure, and a failed tx's events are not trusted.
+	for i, evs := range res.TxEvents {
+		if res.TxCodes[i] != 0 {
+			continue
+		}
+		for _, ev := range evs {
+			addr, host, isReg, perr := parseSetFibreProviderInfo(ev)
+			if !isReg {
+				continue
+			}
+			if perr != nil {
+				s.log.Fatalf("block %d tx %d: %v", h, i, perr)
+			}
+			if e, added := s.hosts.AddTxEvent(h, i, addr, host); added {
+				s.log.Printf("host registration @ h=%d tx=%d: %s -> %s", h, i, addr, host)
+				if err := s.store.AppendHostEvent(HostEvent{HostEntry: e, Time: blk.Time.UTC()}); err != nil {
+					s.log.Fatalf("host_history: %v", err)
+				}
+			}
+		}
+	}
+
 	// 2) MsgPayForFibre txs.
 	recorded := 0
 	for i, raw := range blk.Txs {
@@ -744,13 +780,11 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 		table = buildAssignmentTable(commitment, pp.BlobVersion, pp.Height, vals, s.cfg.StoreRows, att)
 	}
 	// The host each validator had registered when the promise settled: the
-	// endpoint the upload went to. A validator that re-registers later is
+	// endpoint the upload went to, from the chain's own events (HostHistory),
+	// never from a state query. A validator that re-registers later is
 	// probed at its new host, and the row can say the host changed.
-	if hosts, ok := s.hostsAt(ctx, blk.Height); ok {
-		table.HostsAtSettlementKnown = true
-		for i := range table.Validators {
-			table.Validators[i].Host = hosts[table.Validators[i].Address]
-		}
+	for i := range table.Validators {
+		table.Validators[i].Host, table.Validators[i].HostSource = s.hosts.HostAt(table.Validators[i].Address, blk.Height, txIndex, s.gaps)
 	}
 
 	return Publication{
@@ -828,28 +862,27 @@ func (s *Scanner) validatorSet(ctx context.Context, height int64) (valSetEntry, 
 	return e, nil
 }
 
-// hostsAt returns the Fibre host registry as it stood at height, keyed by
-// consensus address hex, and whether it could be read. Read once per block.
-func (s *Scanner) hostsAt(ctx context.Context, height int64) (map[string]string, bool) {
-	if s.hostsCacheHeight == height && s.hostsCache != nil {
-		return s.hostsCache, s.hostsCacheOK
-	}
-	s.hostsCacheHeight, s.hostsCache, s.hostsCacheOK = height, map[string]string{}, false
-	provs, err := s.chain.BondedFibreProvidersAt(ctx, height)
+// seedHosts reads the bonded registry once, as the scan starts, and seeds
+// the host history with it at startHeight: registrations older than the
+// scan are known only from this. The state at startHeight is asked for
+// first; a node that has pruned it answers with the current registry,
+// which is what a registration older than the scan looks like either way.
+func (s *Scanner) seedHosts(ctx context.Context, startHeight int64) {
+	s.hosts = NewHostHistory()
+	provs, err := s.chain.BondedFibreProvidersAt(ctx, startHeight)
 	if err != nil {
-		if !s.hostsWarned {
-			s.log.Printf("WARNING: h=%d: registry at the settlement height could not be read (%v); host_at_settlement is left unknown on this and any later failing block", height, err)
-			s.hostsWarned = true
-		}
-		return s.hostsCache, false
+		provs, err = s.chain.BondedFibreProvidersAt(ctx, 0)
 	}
-	for _, p := range provs {
-		_, raw, err := bech32.DecodeAndConvert(p.ConsAddressBech32)
-		if err != nil || len(raw) != 20 {
-			continue
-		}
-		s.hostsCache[strings.ToLower(hex.EncodeToString(raw))] = p.Host
+	if err != nil {
+		s.log.Printf("WARNING: bonded registry could not be read to seed the host history (%v); host_at_settlement is unknown until a validator registers again", err)
+		return
 	}
-	s.hostsCacheOK = true
-	return s.hostsCache, true
+	s.hosts.Seed(startHeight, provs)
+	for _, e := range s.hosts.Entries() {
+		if err := s.store.AppendHostEvent(HostEvent{HostEntry: e, Time: time.Now().UTC()}); err != nil {
+			s.log.Printf("host_history: %v", err)
+			break
+		}
+	}
+	s.log.Printf("host history seeded at h=%d with %d registrations", startHeight, len(provs))
 }
