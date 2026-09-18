@@ -254,8 +254,8 @@ main { min-height: 60vh; padding-top: var(--s5); }
 .panel-head .right { font-family: var(--mono); font-size: var(--t-small); color: var(--text-3); white-space: nowrap; }
 .panel-head .live { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-label); font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--ok); }
 .panel-head .live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
-.cells { display: grid; grid-template-columns: repeat(5, 1fr); }
-.cells.four { grid-template-columns: repeat(4, 1fr); }
+.cells { display: grid; grid-template-columns: repeat(4, 1fr); }
+.cells.five { grid-template-columns: repeat(5, 1fr); }
 .cell { background: var(--card); padding: 13px var(--s4) 12px; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
 .cells.five .cell:nth-child(5n+1), .cells.four .cell:nth-child(4n+1) { border-left: 0; }
 .cells.five .cell:nth-child(-n+5), .cells.four .cell:nth-child(-n+4) { border-top: 0; }

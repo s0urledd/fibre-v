@@ -46,7 +46,6 @@ export default function Overview() {
   const ourSide = suspect.filter((s) => !s.reason.includes("fault"));
   const ob = net?.obligations;
   const decided = !!ob && ob.rate.den > 0;
-  const recon = net?.reconstructable;
   const prev = net?.previous;
 
   return (
@@ -90,7 +89,7 @@ export default function Overview() {
       )}
 
       <Panel title="Service" live={!!net && meta?.health === "ok"} right={net ? <>{win === "all" ? "since the first record" : `${win} window`} · <Link href="/methodology/#verdicts">methodology →</Link></> : undefined}>
-        <div className="cells five">
+        <div className="cells four">
           <Cell label="Serve rate" loading={busy}
             value={!ob || !decided ? "—" : fmtPct(ob.rate)}
             tone={!decided ? "absent" : band(ob!.rate, "serve") === "ok" ? "ok" : band(ob!.rate, "serve") === "fault" ? "fault" : undefined}
@@ -131,17 +130,6 @@ export default function Overview() {
             detail={net?.serve_latency_p50_ms != null ? `Whole probe, dial to verified rows: ${net.serve_latency_p50_ms.toLocaleString("en-US")} ms typical, ${(net.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at the 95th percentile, over ${net.serve_latency_sample.toLocaleString("en-US")} healthy probes.` : undefined}
             info={<>
               <p>Whole probe, dial to verified rows: what a client waits for. Median over healthy probes, from one location, so part of it is our own path.</p>
-            </>} />
-          <Cell label="Recoverable" loading={busy}
-            value={recon && recon.recoverable.den > 0 ? fmtPct(recon.recoverable) : "—"}
-            tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}
-            sub={recon && recon.recoverable.den > 0 ? `${recon.recoverable.num.toLocaleString("en-US")} / ${recon.recoverable.den.toLocaleString("en-US")} blobs` : "no blob judged yet"}
-            detail={recon && recon.recoverable.den > 0
-              ? `${recon.recoverable.num.toLocaleString("en-US")} of ${recon.recoverable.den.toLocaleString("en-US")} blobs could be rebuilt from the rows fetched at the last probe; ${recon.rate.num.toLocaleString("en-US")} fully served (every signer answered).${recon.publications_in_window > recon.publications_examined ? ` Judged over the newest ${recon.publications_examined.toLocaleString("en-US")} of ${recon.publications_in_window.toLocaleString("en-US")} publications.` : ""}`
-              : undefined}
-            info={<>
-              <p>Blobs that could be rebuilt from the rows we fetched at the last probe inside the window.</p>
-              <p>Fully served: every validator that signed for the blob answered. Recoverable: enough rows came back, whoever answered.</p>
             </>} />
         </div>
       </Panel>
