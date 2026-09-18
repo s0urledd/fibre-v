@@ -203,13 +203,13 @@ main { min-height: 60vh; padding-top: var(--s5); }
 .pills button:last-child { border-right: 0; }
 .pills button:hover { color: var(--text); }
 .pills button[aria-pressed="true"] { color: var(--text); background: var(--card-2); }
-.tabs { display: inline-flex; gap: var(--s1); }
+.tabs { display: inline-flex; gap: 2px; background: var(--card-2); border-radius: var(--r-pill); padding: 3px; }
 .tabs button {
-  font: 600 var(--t-table)/1.2 var(--sans); color: var(--text-2); background: transparent; border: 1px solid transparent;
+  font: 500 var(--t-table)/1.2 var(--sans); color: var(--text-2); background: transparent; border: 0;
   border-radius: var(--r-pill); padding: 5px 12px; cursor: pointer;
 }
-.tabs button:hover { color: var(--text); background: var(--wash); }
-.tabs button[aria-pressed="true"] { color: var(--text); background: var(--card-2); border-color: var(--line-2); }
+.tabs button:hover { color: var(--text); }
+.tabs button[aria-pressed="true"] { color: var(--text); background: var(--card); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / .18); }
 .tabs .n { font-family: var(--mono); color: var(--text-3); margin-left: 6px; font-weight: 500; }
 
 /* ------------------------------------------------------------------ tiles --- */
@@ -241,6 +241,47 @@ main { min-height: 60vh; padding-top: var(--s5); }
 .tile .sub > span { display: block; overflow: hidden; text-overflow: ellipsis; }
 .tile .badge { margin-left: auto; }
 .tile.loading .value { color: transparent; background: var(--card-2); border-radius: 4px; width: 5ch; }
+
+/* ----------------------------------------------------------------- panels --- */
+/* The overview is built from framed panels with a header bar: what the panel
+   holds and where it comes from, then a row of cells parted by hairlines or
+   a table. The hairlines are the 1px grid gap over the line colour, so a row
+   that wraps needs no per-cell border arithmetic. */
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); margin: 0 0 var(--s4); overflow: hidden; }
+.panel-head { display: flex; align-items: center; gap: var(--s3); padding: 9px var(--s4); border-bottom: 1px solid var(--line); }
+.panel-title { font-size: var(--t-label); font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--text-2); }
+.panel-head .spacer { flex: 1; }
+.panel-head .right { font-family: var(--mono); font-size: var(--t-small); color: var(--text-3); white-space: nowrap; }
+.panel-head .live { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-label); font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--ok); }
+.panel-head .live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.cells { display: grid; grid-template-columns: repeat(5, 1fr); }
+.cells.four { grid-template-columns: repeat(4, 1fr); }
+.cell { background: var(--card); padding: 13px var(--s4) 12px; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
+.cells.five .cell:nth-child(5n+1), .cells.four .cell:nth-child(4n+1) { border-left: 0; }
+.cells.five .cell:nth-child(-n+5), .cells.four .cell:nth-child(-n+4) { border-top: 0; }
+.cell .label { display: flex; align-items: center; gap: var(--s1); white-space: nowrap; }
+.cell .value { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; white-space: nowrap; overflow: hidden; font-weight: 600; font-size: var(--t-big); line-height: 1.1; letter-spacing: -.015em; color: var(--text); }
+.cell .value .figure { min-width: 0; }
+.cell .value .unit { font-size: var(--t-small); font-weight: 500; color: var(--text-3); }
+.cell .value.ok { color: var(--ok); }
+.cell .value.fault { color: var(--fault); }
+.cell .value.absent { color: var(--text-3); font-weight: 500; }
+.cell .value.loading .figure { color: transparent; background: var(--card-2); border-radius: 4px; }
+.cell .sub { font-family: var(--mono); font-size: var(--t-small); color: var(--text-3); margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.cell .sub b { color: var(--fault); font-weight: 600; }
+.delta { align-self: center; font-family: var(--sans); font-size: 11px; font-weight: 600; line-height: 1; padding: 3px 6px; border-radius: 4px; letter-spacing: 0; }
+.delta.good { color: var(--ok); background: var(--ok-2); }
+.delta.bad { color: var(--fault); background: var(--fault-2); }
+.delta.flat { color: var(--text-3); background: var(--wash); }
+.panel .toolbar { margin: 0; padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); }
+.panel .tablewrap { border: 0; border-radius: 0; }
+.panel > .note, .panel > .coverage { margin: var(--s3) var(--s4); }
+.head-row { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; margin: 0 0 var(--s3); }
+.head-row .spacer { flex: 1; }
+/* rate figures in a table wear the tone of their band */
+.rate .v.ok { color: var(--ok); }
+.rate .v.hold { color: var(--hold); }
+.rate .v.fault { color: var(--fault); font-weight: 600; }
 
 /* ------------------------------------------------------------------ notes --- */
 .note { border-left: 3px solid var(--accent); background: var(--accent-2); border-radius: var(--r-sm); padding: var(--s3) var(--s4); margin: var(--s4) 0; }
@@ -410,6 +451,10 @@ dl.kv dd { margin: 0; word-break: break-all; }
 
 @media (max-width: 1000px) {
   .tile { padding: var(--s3); }
+  .cells, .cells.four { grid-template-columns: repeat(3, 1fr); }
+  .cells.five .cell, .cells.four .cell { border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
+  .cells.five .cell:nth-child(3n+1), .cells.four .cell:nth-child(3n+1) { border-left: 0; }
+  .cells.five .cell:nth-child(-n+3), .cells.four .cell:nth-child(-n+3) { border-top: 0; }
 }
 @media (max-width: 640px) {
   :root { --page: 100%; }
@@ -417,6 +462,17 @@ dl.kv dd { margin: 0; word-break: break-all; }
   .top .wrap { gap: var(--s3); }
   .tiles, .tiles.five, .tiles.six, .tiles.four { grid-template-columns: repeat(2, 1fr); }
   .tiles.five > .tile:last-child { grid-column: span 2; }
+  .cells, .cells.four { grid-template-columns: repeat(2, 1fr); }
+  .cells.five .cell, .cells.four .cell { border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
+  .cells.five .cell:nth-child(2n+1), .cells.four .cell:nth-child(2n+1) { border-left: 0; }
+  .cells.five .cell:nth-child(-n+2), .cells.four .cell:nth-child(-n+2) { border-top: 0; }
+  .cells > .cell:last-child:nth-child(odd) { grid-column: span 2; }
+  .panel-head { gap: var(--s2); }
+  .panel-title { white-space: nowrap; }
+  .panel-head .right { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .toolbar .tabs { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .toolbar .tabs button { white-space: nowrap; }
+  .cell .sub { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   /* narrow cells: the sample may take a second line rather than be cut */
   .tile .sub { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .grad-grid { grid-template-columns: repeat(2, 1fr); }

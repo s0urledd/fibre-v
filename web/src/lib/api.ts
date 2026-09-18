@@ -155,6 +155,14 @@ export type Network = {
   serve_latency_p50_ms: number | null;
   serve_latency_p95_ms: number | null;
   serve_latency_sample: number;
+  /** the same span ending where this window starts; absent on "all" and on a pinned window */
+  previous?: {
+    window: Window;
+    obligations: Obligations;
+    reachability_window: Rate;
+    faults: number;
+    serve_latency_p50_ms: number | null;
+  };
 };
 
 /** one schedule point the observer does not trust itself at */

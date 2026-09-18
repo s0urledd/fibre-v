@@ -17,11 +17,24 @@ export function boundTitle(r: Rate, obligations?: Rate | null): string | undefin
   return `At most ${(ub * 100).toFixed(1)}% of ${basis.den.toLocaleString("en-US")} ${unit} went unserved (95% confidence).`;
 }
 
-export default function RateCell({ r, obligations, gauge = "ok", sample, unreachable = 0 }: {
+/**
+ * The band a rate falls in, for its colour. A serve rate below its bands is
+ * broken obligations, which are faults, so red is allowed there; a low
+ * reachability is "could not measure" and never goes below amber.
+ */
+export function band(r: Rate | null | undefined, kind: "serve" | "reach"): "" | "ok" | "hold" | "fault" {
+  if (!r || r.den === 0 || r.value === null || !enoughToRank(r)) return "";
+  if (kind === "serve") return r.value >= 0.995 ? "ok" : r.value >= 0.95 ? "hold" : "fault";
+  return r.value >= 0.99 ? "ok" : "hold";
+}
+
+export default function RateCell({ r, obligations, gauge = "ok", sample, unreachable = 0, kind }: {
   r: Rate | null | undefined;
   obligations?: Rate | null;
   gauge?: "ok" | "hold";
   sample?: string;
+  /** colour the figure by its band */
+  kind?: "serve" | "reach";
   /** observations the rate does not speak for (obligations never seen
    *  served, probes that could not reach the validator); drawn as an amber
    *  share of the gauge so a rate over few decided observations does not look
@@ -38,7 +51,7 @@ export default function RateCell({ r, obligations, gauge = "ok", sample, unreach
   return (
     <span className="gauge-track" title={(boundTitle(r, obligations) ?? "") + (rankable ? "" : ` Fewer than ${MIN_RATED} observations.`)}>
       <span className="rate">
-        <span className={rankable ? "v" : "v dim"}>{fmtPct(r)}</span>
+        <span className={[rankable ? "v" : "v dim", kind ? band(r, kind) : ""].filter(Boolean).join(" ")}>{fmtPct(r)}</span>
         <span className="n">{sample ?? fmtCount(r)}</span>
       </span>
       {(rankable || unreachable > 0) && r.value !== null && (

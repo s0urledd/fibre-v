@@ -1,13 +1,24 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Network, type Validator, type Meta, type Market, fmtCount, fmtPct, bytes, utc, ago, tia } from "@/lib/api";
+import { useApi, type Network, type Validator, type Meta, type Market, type Rate, fmtCount, fmtPct, bytes, utc, ago, tia } from "@/lib/api";
 import ValidatorTable from "@/components/ValidatorTable";
-import Tile from "@/components/Tile";
+import { Panel, Cell, type Delta } from "@/components/Panel";
 import { Mark } from "@/components/Verdict";
-import { boundTitle } from "@/components/Rate";
+import { boundTitle, band } from "@/components/Rate";
 
 const WINDOWS = ["24h", "7d", "30d", "all"];
+
+/** change in percentage points between two rates, when both have enough behind them */
+function ptDelta(now: Rate | null | undefined, before: Rate | null | undefined, goodWhen: "up" | "down"): Delta | null {
+  if (!now || !before || now.den === 0 || before.den === 0 || now.value === null || before.value === null) return null;
+  return { value: (now.value - before.value) * 100, goodWhen, unit: " pt", decimals: 1,
+    title: `Previous window: ${fmtPct(before)} over ${fmtCount(before)}.` };
+}
+function countDelta(now: number | undefined, before: number | undefined, goodWhen: "up" | "down", unit = ""): Delta | null {
+  if (now === undefined || before === undefined) return null;
+  return { value: now - before, goodWhen, unit, decimals: 0, title: `Previous window: ${before.toLocaleString("en-US")}${unit}.` };
+}
 
 /**
  * The overview: six network figures, then the validator table. Everything
@@ -36,11 +47,12 @@ export default function Overview() {
   const ob = net?.obligations;
   const decided = !!ob && ob.rate.den > 0;
   const recon = net?.reconstructable;
+  const prev = net?.previous;
 
   return (
     <>
-      <div className="section-head">
-        <h1>Network</h1>
+      <div className="head-row">
+        <h1 className="sr-only">Network</h1>
         {net?.computed_at && (
           <span className="sample" title={`${net.window.start && !net.window.start.startsWith("0001-") ? `${utc(net.window.start)} → now` : "since the first record"}. Snapshot taken ${utc(net.computed_at)}, computed in ${net.compute_ms} ms.`}>
             updated {ago(net.computed_at)}
@@ -77,72 +89,91 @@ export default function Overview() {
         </div>
       )}
 
-      <div className="tiles">
-        <Tile hero label="Serve rate" loading={busy}
-          value={!ob || !decided ? "—" : fmtPct(ob.rate)}
-          tone={!decided ? "absent" : undefined}
-          sub={!net ? undefined : !decided ? (ob && ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} unobserved` : "nothing decided")
-            : `${ob!.served.toLocaleString("en-US")} / ${(ob!.served + ob!.broken).toLocaleString("en-US")} kept`}
-          detail={!net || !ob ? undefined : !decided ? (ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} obligations in the window, none observed serving.` : "No obligation decided in this window.")
-            : `${ob.served.toLocaleString("en-US")} of ${(ob.served + ob.broken).toLocaleString("en-US")} obligations kept${ob.unobserved > 0 ? `; ${ob.unobserved.toLocaleString("en-US")} never observed serving, counted beside the rate` : ""}. ${boundTitle(ob.rate, ob.rate) ?? ""} Per probe: ${fmtPct(sr)} over ${fmtCount(sr)}.`}
-          info={<>
-            <p>Obligations kept: a shard a validator signed for on chain, handed over at the last probe before its retention deadline. One observation per shard, not per probe.</p>
-            <p>An obligation we never saw served and never saw broken is counted beside the rate, not inside it. Unreachable, unproven and unregistered cases are never faults.</p>
-            <p><Link href="/methodology/#verdicts">How a probe is judged</Link></p>
-          </>} />
-        <Tile label="Faults" loading={busy}
-          value={!net ? "—" : faults > 0 ? <><Mark tier="fault" />{faults.toLocaleString("en-US")}</> : rated ? "none" : "—"}
-          tone={faults > 0 ? "fault" : "absent"}
-          sub={!net ? undefined : faults > 0 ? `${faulted} validator${faulted === 1 ? "" : "s"}` : rated ? "no unserved shard" : "nothing rated"}
-          detail={!net ? undefined : faults > 0 ? `${faults.toLocaleString("en-US")} probe${faults === 1 ? "" : "s"} where a validator answered but did not hand over a shard it had signed for, across ${faulted} validator${faulted === 1 ? "" : "s"}.` : rated ? "No signed shard went unserved in this window." : "Nothing rated in this window."}
-          info={<>
-            <p>The validator answered but did not hand over a shard it had signed for.</p>
-            <p>This is the only number counted against a validator.</p>
-          </>} />
-        <Tile label="Reachability" loading={busy}
-          value={net?.reachability_window?.den ? fmtPct(net.reachability_window) : "—"}
-          tone={net?.reachability_window?.den ? undefined : "absent"}
-          sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} handshakes` : "no handshake yet"}
-          info={<>
-            <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes with every registered Fibre endpoint, from one location. Nothing is downloaded.</p>
-            <p>This is not signing uptime. A validator can sign every block with its Fibre endpoint down, and the reverse.</p>
-          </>} />
-        <Tile label="Endpoints" loading={busy}
-          value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
-          sub={net ? `${net.reachability.num} up · ${net.validators_probed} probed` : undefined}
-          detail={net ? `${net.registered_endpoints.toLocaleString("en-US")} registered Fibre endpoints; ${net.reachability.num} answering the latest handshake; ${net.validators_probed} probed in this window.` : undefined} />
-        <Tile label="Publications" loading={busy}
-          value={net ? net.publications.toLocaleString("en-US") : "—"}
-          sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined} />
-        <Tile label="Fees settled" loading={busy}
-          value={market ? tia(market.fees_settled_utia, { unit: false }) : "—"} unit={market ? "TIA" : undefined}
-          tone={market && market.settlements === 0 ? "absent" : undefined}
-          sub={market ? `${market.publishers_active} publisher${market.publishers_active === 1 ? "" : "s"}${market.timeouts > 0 ? ` · ${market.timeouts} timed out` : ""}` : undefined}
-          info={<>
-            <p>What publishers paid for the blobs settled in this window, from the chain&rsquo;s own records. Not a measurement of ours.</p>
-            <p><Link href="/publishers/">Publishers</Link></p>
-          </>} />
-        <Tile label="Signed" loading={busy}
-          value={net?.attestation?.blob_coverage?.den ? fmtPct(net.attestation.blob_coverage) : "—"}
-          tone={net?.attestation?.blob_coverage?.den ? undefined : "absent"}
-          sub={net?.attestation?.blob_coverage?.den ? `${net.attestation.attested_blobs.toLocaleString("en-US")} / ${net.attestation.blob_coverage.den.toLocaleString("en-US")} shards` : "no assignment yet"}
-          detail={net?.attestation?.blob_coverage?.den ? `${net.attestation.attested_blobs.toLocaleString("en-US")} of ${net.attestation.blob_coverage.den.toLocaleString("en-US")} assigned shards carry their validator's signature on chain.` : undefined}
-          info={<>
-            <p>Assigned shards whose validator&rsquo;s signature reached the chain. Only these are proven stored and count in the serve rate.</p>
-            <p>Publishers stop collecting signatures at two thirds of stake, so this is the size of the quorum in practice, not a duty anyone missed.</p>
-          </>} />
-        <Tile label="Recoverable" loading={busy}
-          value={recon && recon.recoverable.den > 0 ? fmtPct(recon.recoverable) : "—"}
-          tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}
-          sub={recon && recon.recoverable.den > 0 ? `${recon.recoverable.num.toLocaleString("en-US")} / ${recon.recoverable.den.toLocaleString("en-US")} blobs` : "no blob judged yet"}
-          detail={recon && recon.recoverable.den > 0
-            ? `${recon.recoverable.num.toLocaleString("en-US")} of ${recon.recoverable.den.toLocaleString("en-US")} blobs could be rebuilt from the rows fetched at the last probe; ${recon.rate.num.toLocaleString("en-US")} fully served (every signer answered).${recon.publications_in_window > recon.publications_examined ? ` Judged over the newest ${recon.publications_examined.toLocaleString("en-US")} of ${recon.publications_in_window.toLocaleString("en-US")} publications.` : ""}`
-            : undefined}
-          info={<>
-            <p>Blobs that could be rebuilt from the rows we fetched at the last probe inside the window.</p>
-            <p>Fully served: every validator that signed for the blob answered. Recoverable: enough rows came back, whoever answered.</p>
-          </>} />
-      </div>
+      <Panel title="Service" live={!!net && meta?.health === "ok"} right={net ? <>{win === "all" ? "since the first record" : `${win} window`} · <Link href="/methodology/#verdicts">methodology →</Link></> : undefined}>
+        <div className="cells five">
+          <Cell label="Serve rate" loading={busy}
+            value={!ob || !decided ? "—" : fmtPct(ob.rate)}
+            tone={!decided ? "absent" : band(ob!.rate, "serve") === "ok" ? "ok" : band(ob!.rate, "serve") === "fault" ? "fault" : undefined}
+            delta={ptDelta(ob?.rate, prev?.obligations.rate, "up")}
+            sub={!net ? undefined : !decided ? (ob && ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} unobserved` : "nothing decided")
+              : `${ob!.served.toLocaleString("en-US")} / ${(ob!.served + ob!.broken).toLocaleString("en-US")} kept`}
+            detail={!net || !ob ? undefined : !decided ? (ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} obligations in the window, none observed serving.` : "No obligation decided in this window.")
+              : `${ob.served.toLocaleString("en-US")} of ${(ob.served + ob.broken).toLocaleString("en-US")} obligations kept${ob.unobserved > 0 ? `; ${ob.unobserved.toLocaleString("en-US")} never observed serving, counted beside the rate` : ""}. ${boundTitle(ob.rate, ob.rate) ?? ""} Per probe: ${fmtPct(sr)} over ${fmtCount(sr)}.`}
+            info={<>
+              <p>Obligations kept: a shard a validator signed for on chain, handed over at the last probe before its retention deadline. One observation per shard, not per probe.</p>
+              <p>An obligation we never saw served and never saw broken is counted beside the rate, not inside it. Unreachable, unproven and unregistered cases are never faults.</p>
+              <p><Link href="/methodology/#verdicts">How a probe is judged</Link></p>
+            </>} />
+          <Cell label="Faults" loading={busy}
+            value={!net ? "—" : faults > 0 ? faults.toLocaleString("en-US") : rated ? "0" : "—"}
+            tone={faults > 0 ? "fault" : "absent"}
+            delta={countDelta(net ? faults : undefined, prev?.faults, "down")}
+            sub={!net ? undefined : faults > 0 ? <><b>{ob!.broken.toLocaleString("en-US")} broken</b> · {faulted} validator{faulted === 1 ? "" : "s"}</> : rated ? "no unserved shard" : "nothing rated"}
+            detail={!net ? undefined : faults > 0 ? `${faults.toLocaleString("en-US")} probe${faults === 1 ? "" : "s"} where a validator answered but did not hand over a shard it had signed for; ${ob!.broken.toLocaleString("en-US")} obligations broken across ${faulted} validator${faulted === 1 ? "" : "s"}.` : rated ? "No signed shard went unserved in this window." : "Nothing rated in this window."}
+            info={<>
+              <p>The validator answered but did not hand over a shard it had signed for.</p>
+              <p>This is the only number counted against a validator.</p>
+            </>} />
+          <Cell label="Reachability" loading={busy}
+            value={net?.reachability_window?.den ? fmtPct(net.reachability_window) : "—"}
+            tone={net?.reachability_window?.den ? undefined : "absent"}
+            delta={ptDelta(net?.reachability_window, prev?.reachability_window, "up")}
+            sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} handshakes` : "no handshake yet"}
+            info={<>
+              <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes with every registered Fibre endpoint, from one location. Nothing is downloaded.</p>
+              <p>This is not signing uptime. A validator can sign every block with its Fibre endpoint down, and the reverse.</p>
+            </>} />
+          <Cell label="Latency · p50" loading={busy}
+            value={net?.serve_latency_p50_ms != null ? net.serve_latency_p50_ms.toLocaleString("en-US") : "—"} unit={net?.serve_latency_p50_ms != null ? "ms" : undefined}
+            tone={net?.serve_latency_p50_ms != null ? undefined : "absent"}
+            delta={countDelta(net?.serve_latency_p50_ms ?? undefined, prev?.serve_latency_p50_ms ?? undefined, "down", " ms")}
+            sub={net?.serve_latency_p50_ms != null ? `p95 ${(net.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms` : "no healthy probe yet"}
+            detail={net?.serve_latency_p50_ms != null ? `Whole probe, dial to verified rows: ${net.serve_latency_p50_ms.toLocaleString("en-US")} ms typical, ${(net.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at the 95th percentile, over ${net.serve_latency_sample.toLocaleString("en-US")} healthy probes.` : undefined}
+            info={<>
+              <p>Whole probe, dial to verified rows: what a client waits for. Median over healthy probes, from one location, so part of it is our own path.</p>
+            </>} />
+          <Cell label="Recoverable" loading={busy}
+            value={recon && recon.recoverable.den > 0 ? fmtPct(recon.recoverable) : "—"}
+            tone={recon && recon.recoverable.den > 0 ? undefined : "absent"}
+            sub={recon && recon.recoverable.den > 0 ? `${recon.recoverable.num.toLocaleString("en-US")} / ${recon.recoverable.den.toLocaleString("en-US")} blobs` : "no blob judged yet"}
+            detail={recon && recon.recoverable.den > 0
+              ? `${recon.recoverable.num.toLocaleString("en-US")} of ${recon.recoverable.den.toLocaleString("en-US")} blobs could be rebuilt from the rows fetched at the last probe; ${recon.rate.num.toLocaleString("en-US")} fully served (every signer answered).${recon.publications_in_window > recon.publications_examined ? ` Judged over the newest ${recon.publications_examined.toLocaleString("en-US")} of ${recon.publications_in_window.toLocaleString("en-US")} publications.` : ""}`
+              : undefined}
+            info={<>
+              <p>Blobs that could be rebuilt from the rows we fetched at the last probe inside the window.</p>
+              <p>Fully served: every validator that signed for the blob answered. Recoverable: enough rows came back, whoever answered.</p>
+            </>} />
+        </div>
+      </Panel>
+
+      <Panel title="Chain" right={<>from the chain&rsquo;s own records · <Link href="/publishers/">publishers →</Link></>}>
+        <div className="cells four">
+          <Cell label="Publications" loading={busy}
+            value={net ? net.publications.toLocaleString("en-US") : "—"}
+            sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined} />
+          <Cell label="Signed shards" loading={busy}
+            value={net?.attestation?.blob_coverage?.den ? fmtPct(net.attestation.blob_coverage) : "—"}
+            tone={net?.attestation?.blob_coverage?.den ? undefined : "absent"}
+            sub={net?.attestation?.blob_coverage?.den ? `${net.attestation.attested_blobs.toLocaleString("en-US")} / ${net.attestation.blob_coverage.den.toLocaleString("en-US")} · two-thirds quorum` : "no assignment yet"}
+            detail={net?.attestation?.blob_coverage?.den ? `${net.attestation.attested_blobs.toLocaleString("en-US")} of ${net.attestation.blob_coverage.den.toLocaleString("en-US")} assigned shards carry their validator's signature on chain. Publishers stop collecting signatures at two thirds of stake, so this is the size of the quorum in practice, not a duty anyone missed.` : undefined}
+            info={<>
+              <p>Assigned shards whose validator&rsquo;s signature reached the chain. Only these are proven stored and count in the serve rate.</p>
+              <p>Publishers stop collecting signatures at two thirds of stake, so this is the size of the quorum in practice, not a duty anyone missed.</p>
+            </>} />
+          <Cell label="Endpoints" loading={busy}
+            value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
+            sub={net ? `${net.reachability.num} answering now · ${net.validators_probed} probed` : undefined}
+            detail={net ? `${net.registered_endpoints.toLocaleString("en-US")} registered Fibre endpoints; ${net.reachability.num} answering the latest handshake; ${net.validators_probed} probed in this window.` : undefined} />
+          <Cell label="Fees settled" loading={busy}
+            value={market ? tia(market.fees_settled_utia, { unit: false }) : "—"} unit={market ? "TIA" : undefined}
+            tone={market && market.settlements === 0 ? "absent" : undefined}
+            sub={market ? `${market.publishers_active} publisher${market.publishers_active === 1 ? "" : "s"}${market.timeouts > 0 ? ` · ${market.timeouts} timed out` : ""}` : undefined}
+            info={<>
+              <p>What publishers paid for the blobs settled in this window, from the chain&rsquo;s own records. Not a measurement of ours.</p>
+              <p><Link href="/publishers/">Publishers</Link></p>
+            </>} />
+        </div>
+      </Panel>
 
       {net?.rolled_up && (
         <p className="muted rolled">
@@ -196,15 +227,12 @@ export default function Overview() {
         </div>
       )}
 
-      <div className="section-head" id="validators" style={{ marginTop: "var(--s6)" }}>
-        <h2 style={{ margin: 0 }}>Validators</h2>
-        <span className="sample">{win} window</span>
-        <span className="spacer" />
-        {net && recon && <Link href="/blobs/" className="sample">all publications</Link>}
-      </div>
-      {vals
-        ? <ValidatorTable rows={vals.validators} notLive={notLive} />
-        : <p className="muted">Loading validators…</p>}
+      <Panel title={<span id="validators">Validator set</span>} className="validators"
+        right={list.length > 0 ? <>{list.length} bonded · {list.filter((v) => !!v.host).length} with a Fibre endpoint · <Link href="/blobs/">all publications →</Link></> : undefined}>
+        {vals
+          ? <ValidatorTable rows={vals.validators} notLive={notLive} />
+          : <p className="muted" style={{ padding: "var(--s4)" }}>Loading validators…</p>}
+      </Panel>
     </>
   );
 }

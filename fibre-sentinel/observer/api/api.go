@@ -671,6 +671,10 @@ type networkResponse struct {
 	RolledUp *rolledUp `json:"rolled_up,omitempty"`
 	Window   Window    `json:"window"`
 	Vantage  string    `json:"vantage"`
+	// Previous is the same span ending where this window starts, for the
+	// change beside a headline figure. Absent on "all" and on a pinned
+	// window.
+	Previous *previousWindow `json:"previous,omitempty"`
 	// ComputedAt and ComputeMs say when this summary was taken and how long it
 	// took. It is a snapshot refreshed on a schedule, not a live query, so its
 	// age is published rather than left for a reader to assume.
@@ -1262,6 +1266,49 @@ func (s *Server) logf() logf {
 // computeNetwork does the work handleNetwork used to do inline. It is called
 // from the snapshot cache rather than from the request, so its context outlives
 // the reader who triggered it.
+// previousWindow holds the few figures a delta compares against: the same
+// span ending where the window starts, computed with the same statements,
+// its own suspect points left out.
+type previousWindow struct {
+	Window       Window          `json:"window"`
+	Obligations  obligationStats `json:"obligations"`
+	Reachability Rate            `json:"reachability_window"`
+	Faults       int64           `json:"faults"`
+	LatencyP50   *int64          `json:"serve_latency_p50_ms"`
+}
+
+func (s *Server) previousWindow(ctx context.Context, win Window) (*previousWindow, error) {
+	if win.Span <= 0 || win.AsOf {
+		return nil, nil
+	}
+	prev := Window{Name: win.Name, Span: win.Span, Start: win.Start.Add(-win.Span), End: win.Start}
+	_, ss, err := s.suspectPoints(ctx, prev)
+	if err != nil {
+		return nil, err
+	}
+	p := &previousWindow{Window: prev}
+	if p.Obligations, err = s.obligationsWhere(ctx, prev, ss, ""); err != nil {
+		return nil, err
+	}
+	db := s.st.DB()
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at"),
+		append([]any{prev.startArg(), prev.endArg()}, ss.args...)...).Scan(&p.Faults); err != nil {
+		return nil, err
+	}
+	var beats, beatsUp int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*),
+			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0)
+		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR'`, prev.startArg(), prev.endArg()).Scan(&beats, &beatsUp); err != nil {
+		return nil, err
+	}
+	p.Reachability = rate(beatsUp, beats)
+	if p.LatencyP50, _, _, err = s.latencyWhere(ctx,
+		`started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`, prev.startArg(), prev.endArg()); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
 func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkResponse, error) {
 	db := s.st.DB()
 	var resp networkResponse
@@ -1392,6 +1439,9 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 			vrows.Close()
 		}
 		resp.ValidatorsProbed = int64(len(seen))
+	}
+	if resp.Previous, err = s.previousWindow(ctx, win); err != nil {
+		return nil, err
 	}
 	return &resp, nil
 }
