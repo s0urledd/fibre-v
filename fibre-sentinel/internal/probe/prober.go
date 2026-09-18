@@ -74,6 +74,13 @@ type Config struct {
 	// connection from this vantage at a time, whatever this value is.
 	Concurrency int
 
+	// AllowUnroutableHosts dials a registered host that resolves to loopback
+	// or a private range. A local devnet needs it; a public vantage must not
+	// have it, because the host is whatever a validator put on chain and
+	// dialling it would make this observer a port scanner and a DNS resolver
+	// driven from the chain, publishing what it found.
+	AllowUnroutableHosts bool
+
 	// InFlightBytes bounds the shard bytes being downloaded at once, which
 	// Concurrency alone does not. DownloadShard is a unary RPC: an in-flight
 	// probe holds the whole shard as a gRPC receive buffer and again as the
@@ -1008,24 +1015,25 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 		skipDL = skip
 	}
 	in := Input{
-		Vantage:            p.cfg.Vantage,
-		ChainID:            p.chainID,
-		PromiseHash:        ph,
-		Commitment:         it.commitment,
-		CommitmentHex:      pub.Promise.Commitment,
-		BlobVersion:        pub.Promise.BlobVersion,
-		MustServeUntil:     pub.MustServeUntil,
-		ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
-		Target:             t,
-		SchedulePoint:      j.point,
-		PruneTolerance:     p.schedCfg().PruneTolerance,
-		SkipDownload:       skipDL,
-		ExpectedShardBytes: ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, t.RowCount),
-		MaxMessageSize:     maxMessageSizeFor(pub.Assignment.ProtocolParams),
-		ClockOffsetMS:      p.clockOffsetMS(),
-		Shadowers:          p.feed.shadowersFor(ph, pub.Promise.Commitment, t.AddressHex),
-		ShadowGap:          p.shadowBlindness(pub),
-		Observer:           p.observerInfo(),
+		Vantage:             p.cfg.Vantage,
+		ChainID:             p.chainID,
+		PromiseHash:         ph,
+		Commitment:          it.commitment,
+		CommitmentHex:       pub.Promise.Commitment,
+		BlobVersion:         pub.Promise.BlobVersion,
+		MustServeUntil:      pub.MustServeUntil,
+		ValidatorSetHeight:  pub.Assignment.ValidatorSetHeight,
+		Target:              t,
+		AllowUnroutableHost: p.cfg.AllowUnroutableHosts,
+		SchedulePoint:       j.point,
+		PruneTolerance:      p.schedCfg().PruneTolerance,
+		SkipDownload:        skipDL,
+		ExpectedShardBytes:  ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, t.RowCount),
+		MaxMessageSize:      maxMessageSizeFor(pub.Assignment.ProtocolParams),
+		ClockOffsetMS:       p.clockOffsetMS(),
+		Shadowers:           p.feed.shadowersFor(ph, pub.Promise.Commitment, t.AddressHex),
+		ShadowGap:           p.shadowBlindness(pub),
+		Observer:            p.observerInfo(),
 	}
 
 	lock := p.validatorLock(t.AddressHex)

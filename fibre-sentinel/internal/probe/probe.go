@@ -125,6 +125,13 @@ type Input struct {
 
 	Target Target
 
+	// AllowUnroutableHost dials an address this observer otherwise refuses:
+	// loopback, a private or link-local range. Tests and a local devnet
+	// only. A public vantage must leave it false, because the registered
+	// host is whatever a validator put on chain and connecting to it would
+	// make this observer a port scanner driven from the chain.
+	AllowUnroutableHost bool
+
 	SchedulePoint  SchedulePoint
 	PruneTolerance time.Duration // grace/post boundary; phase is computed from the actual start time
 
@@ -296,6 +303,19 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 	// ---- L1: DNS ----
 	var addrs []string
 	if pip := net.ParseIP(host); pip != nil {
+		if !routableIP(pip) && !in.AllowUnroutableHost {
+			// Registered as a literal address this observer will not dial.
+			// The chain checks only the host:port shape, so loopback and the
+			// private ranges register as readily as anything else, and a
+			// public observer that connected would be a port scanner driven
+			// from the chain — publishing the address it reached and the
+			// exact error. Recorded as what the validator published, with no
+			// connection attempted.
+			m.DNS = StepResult{Attempted: false, OK: false, Detail: "literal IP " + host, Error: addrClass(pip) + " address"}
+			m.Outcome = OutcomeBadHost
+			m.RawError = "registered host " + in.Target.Host + " is a " + addrClass(pip) + " address; not dialled"
+			return m
+		}
 		m.DNS = StepResult{Attempted: false, OK: true, Detail: "literal IP " + host}
 		addrs = []string{host}
 	} else {
@@ -310,8 +330,24 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 			m.RawError = derr.Error()
 			return m
 		}
-		addrs = orderAddrs(got)
+		// The same test after resolution: a name under the operator's control
+		// can point anywhere, and that is the shape this has to stop.
+		routable, dropped := got, []string(nil)
+		if !in.AllowUnroutableHost {
+			routable, dropped = splitRoutable(got)
+		}
+		addrs = orderAddrs(routable)
 		m.DNS.Detail = strings.Join(addrs, ",")
+		if len(addrs) == 0 {
+			m.DNS.OK = false
+			m.DNS.Error = "resolves only to " + strings.Join(dropped, ",")
+			m.Outcome = OutcomeBadHost
+			m.RawError = "registered host " + in.Target.Host + " resolves only to addresses this observer does not dial (" + strings.Join(dropped, ",") + ")"
+			return m
+		}
+		if len(dropped) > 0 {
+			m.DNS.Detail += " (not dialled: " + strings.Join(dropped, ",") + ")"
+		}
 	}
 
 	// ---- L2: TCP ----
@@ -731,6 +767,51 @@ func parseShard(shard *fibretypes.BlobShard, originalRows, totalRows int) ([]*rs
 		return nil, nil, err
 	}
 	return proofs, v, nil
+}
+
+// routableIP reports whether this observer will open a connection to an
+// address. Global unicast only: loopback, the private and link-local ranges,
+// the unspecified address and multicast are all things a validator can put
+// on chain and none of them is an endpoint a client could fetch from.
+func routableIP(ip net.IP) bool {
+	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast()
+}
+
+// addrClass names why an address was not dialled, for the row.
+func addrClass(ip net.IP) string {
+	switch {
+	case ip.IsLoopback():
+		return "loopback"
+	case ip.IsPrivate():
+		return "private"
+	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast():
+		return "link-local"
+	case ip.IsUnspecified():
+		return "unspecified"
+	case ip.IsMulticast():
+		return "multicast"
+	default:
+		return "non-routable"
+	}
+}
+
+// splitRoutable divides resolved addresses into the ones this observer will
+// dial and the ones it will not, keeping both so the row says what the name
+// resolved to rather than hiding it.
+func splitRoutable(got []string) (routable, dropped []string) {
+	for _, a := range got {
+		ip := net.ParseIP(a)
+		if ip == nil {
+			dropped = append(dropped, a)
+			continue
+		}
+		if routableIP(ip) {
+			routable = append(routable, a)
+		} else {
+			dropped = append(dropped, a+" ("+addrClass(ip)+")")
+		}
+	}
+	return routable, dropped
 }
 
 // localDialFault reports the dial failures that are the observer's own: the

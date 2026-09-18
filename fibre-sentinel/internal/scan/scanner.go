@@ -635,6 +635,16 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 	if s.fibreInactive && (h%inactiveRetryEvery == 0 || h == s.startHeight) {
 		s.trySeed(ctx, h)
 	}
+	// The host registry lives in x/valaddr, which does not exist before
+	// app version 10. A scanner started on a pre-activation chain therefore
+	// could not seed, and seeding ran only once per process from resume() —
+	// so a scanner that lived through activation had no host history and no
+	// back-fill path for the rest of its life, because lazySeed returns
+	// while unseeded. Only a restart fixed it, and nothing said so. Retried
+	// on the same cadence as the params seed until it takes.
+	if seeded, _ := s.hosts.Seeded(); !seeded && h%inactiveRetryEvery == 0 {
+		s.seedHosts(ctx, h)
+	}
 	var blk *Block
 	var res *BlockResults
 	if err := s.retryRPCAt(ctx, fmt.Sprintf("fetch block %d", h), h, func() error {
@@ -972,24 +982,44 @@ func (s *Scanner) validatorSet(ctx context.Context, height int64) (valSetEntry, 
 // scan are known only from this. The state at startHeight is asked for
 // first; a node that has pruned it answers with the current registry,
 // which is what a registration older than the scan looks like either way.
+// seedHosts reads the bonded registry into the host history, and leaves the
+// history it was given alone until it has something to put there.
+//
+// It used to empty s.hosts as its first statement and only then make the
+// query — which has no retry, unlike every other chain read here — so one
+// timeout at startup discarded the persisted history AND left seeded false.
+// The next checkpoint wrote the empty history back over state.json, and
+// lazySeed, the one back-fill path for a validator the seed missed, returns
+// immediately while unseeded: the loss was permanent for the life of the
+// process, and the process would not have noticed.
 func (s *Scanner) seedHosts(ctx context.Context, startHeight int64) {
-	s.hosts = NewHostHistory()
 	at, source := startHeight, HostFromSeed
-	provs, err := s.chain.BondedFibreProvidersAt(ctx, startHeight)
-	if err != nil {
+	var provs []FibreProvider
+	err := s.retryRPC(ctx, fmt.Sprintf("bonded registry at height %d", startHeight), func() error {
+		var e error
+		provs, e = s.chain.BondedFibreProvidersAt(ctx, startHeight)
+		return e
+	})
+	if err != nil && !IsModuleInactive(err) {
 		// The start's state is pruned: read the registry at the tip and
 		// record it at the tip's height. Settlements between the start and
 		// the tip with no event of their own are unknown, never this value.
 		_, tip, terr := s.chain.Status(ctx)
 		if terr == nil {
-			provs, err = s.chain.BondedFibreProvidersAt(ctx, tip)
+			err = s.retryRPC(ctx, fmt.Sprintf("bonded registry at height %d", tip), func() error {
+				var e error
+				provs, e = s.chain.BondedFibreProvidersAt(ctx, tip)
+				return e
+			})
 			at, source = tip, HostFromSeedCurrent
 		}
 	}
 	if err != nil {
-		s.log.Printf("WARNING: bonded registry could not be read to seed the host history (%v); host_at_settlement is unknown until a validator registers again", err)
+		s.log.Printf("WARNING: bonded registry could not be read to seed the host history (%v); host_at_settlement is unknown until a validator registers again, and this is retried every %d heights", err, inactiveRetryEvery)
 		return
 	}
+	// Only now: the entries already on record are kept, and the seed is
+	// merged into them.
 	s.hosts.Seed(at, provs, source)
 	for _, e := range s.hosts.Entries() {
 		if err := s.store.AppendHostEvent(HostEvent{HostEntry: e, Time: time.Now().UTC()}); err != nil {

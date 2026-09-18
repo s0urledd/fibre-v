@@ -141,6 +141,8 @@ func probeInput(host string, consPub ed25519.PublicKey) Input {
 			PubKey: consPub, AssignedRows: []int{0, 1, 2, 3},
 		},
 		SchedulePoint: SchedulePoint{Label: "w1", At: time.Now()},
+		// The test servers are on loopback, which a public vantage refuses.
+		AllowUnroutableHost: true,
 	}
 }
 
@@ -391,5 +393,46 @@ func TestRun_SizeBoundsAreToldApartFromAThrottle(t *testing.T) {
 	// reachable): never a fault and never our gap
 	if m.Classification == ClassFault || m.Classification == ClassProbeError {
 		t.Fatalf("a server's send bound classified %s", m.Classification)
+	}
+}
+
+// The registered host is whatever a validator put on chain, and the chain
+// checks only the host:port shape. A public observer that dialled a loopback
+// or private address would be a port scanner and a DNS resolver driven from
+// the chain, publishing the address it reached and the exact error. Nothing
+// is dialled, and the row says what was registered without holding it against
+// the shard.
+func TestRun_UnroutableRegisteredHostIsNotDialled(t *testing.T) {
+	consPub, consPriv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	cert := fibreCert(t, consPriv, "test-chain", now.Add(-time.Hour), now.Add(24*time.Hour))
+	host, _ := startFibre(t, cert, &fakeFibre{download: func(context.Context, *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error) {
+		return bigShard(64), nil
+	}})
+
+	for _, addr := range []string{"127.0.0.1:9000", "10.0.0.5:443", "192.168.1.1:443", "169.254.1.1:443", "[::1]:443", "0.0.0.0:443"} {
+		in := probeInput(addr, consPub)
+		in.AllowUnroutableHost = false
+		m := Run(context.Background(), in, mustCoder(t), StepTimeouts{})
+		if m.Outcome != OutcomeBadHost {
+			t.Errorf("%s: outcome=%s, want %s", addr, m.Outcome, OutcomeBadHost)
+			continue
+		}
+		if m.TCP.Attempted {
+			t.Errorf("%s: a connection was attempted", addr)
+		}
+		cls, reason := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: m.Outcome})
+		if cls == ClassFault {
+			t.Errorf("%s: recorded as a fault (%s)", addr, reason)
+		}
+		if cls != ClassNotRegistered {
+			t.Errorf("%s: class=%s, want %s", addr, cls, ClassNotRegistered)
+		}
+	}
+
+	// A real address is still probed, and the devnet escape still works.
+	in := probeInput(host, consPub)
+	if m := Run(context.Background(), in, mustCoder(t), StepTimeouts{}); m.Outcome == OutcomeBadHost {
+		t.Fatalf("the escape did not admit a loopback test server: %s", m.RawError)
 	}
 }

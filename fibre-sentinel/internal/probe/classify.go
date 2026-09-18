@@ -34,7 +34,15 @@ const (
 	OutcomeRPCDeadline Outcome = "RPC_DEADLINE"
 	// OutcomeNoHost: the validator has no fibre host registered in x/valaddr,
 	// so nobody can fetch its rows.
-	OutcomeNoHost     Outcome = "NO_REGISTERED_HOST"
+	OutcomeNoHost Outcome = "NO_REGISTERED_HOST"
+	// OutcomeBadHost: the registered host is an address this observer will
+	// not connect to — loopback, a private or link-local range, or the
+	// unspecified address. The chain validates only the host:port shape, so
+	// any of those can be registered, and a public observer that dialled
+	// them would be a port scanner and a DNS resolver driven from the chain,
+	// publishing the result. Nothing was attempted, so it is no more a
+	// statement about the shard than NO_REGISTERED_HOST is.
+	OutcomeBadHost    Outcome = "UNROUTABLE_HOST"
 	OutcomeRPCError   Outcome = "RPC_ERROR"   // some other gRPC error
 	OutcomeProbeError Outcome = "PROBE_ERROR" // the probe itself failed (bug / config), not the target
 	OutcomeMissed     Outcome = "MISSED"      // scheduled point elapsed before the prober could run it
@@ -47,7 +55,7 @@ var AllOutcomes = []Outcome{
 	OutcomeServedOK, OutcomeNotFound, OutcomeWrongRows, OutcomeInvalidRows, OutcomePartial,
 	OutcomeDNSFail, OutcomeTCPRefused, OutcomeTCPTimeout, OutcomeTCPUnreachable, OutcomeTLSFail,
 	OutcomeIdentityFail, OutcomeRPCUnavailable, OutcomeServerError, OutcomeThrottled, OutcomeRPCDeadline,
-	OutcomeNoHost, OutcomeRPCError, OutcomeProbeError, OutcomeMissed, OutcomeReachable,
+	OutcomeNoHost, OutcomeBadHost, OutcomeRPCError, OutcomeProbeError, OutcomeMissed, OutcomeReachable,
 }
 
 // Classification is the Sentinel's verdict on one measurement, given the probe
@@ -299,6 +307,16 @@ func Classify(in Evidence) (Classification, string) {
 			return ClassExpectedUnassigned, "validator not assigned this shard and has no registered Fibre host"
 		}
 		return ClassNotRegistered, "no Fibre host registered for this validator at the time of the probe, so nobody could fetch its rows"
+	}
+	// An unroutable registered host is the same kind of statement: the
+	// endpoint as published cannot be reached from the public internet, by
+	// this observer or by anyone. No connection was made, so there is
+	// nothing to hold against the shard.
+	if o == OutcomeBadHost {
+		if !in.Assigned {
+			return ClassExpectedUnassigned, "validator not assigned this shard, and its registered Fibre host is not a public address"
+		}
+		return ClassNotRegistered, "the registered Fibre host is not a public address, so no client on the internet could fetch its rows; this observer does not connect to it"
 	}
 
 	// A stale assignment pin is the observer's problem: after a chain

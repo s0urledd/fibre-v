@@ -1339,13 +1339,19 @@ func (s *Store) UpsertValidatorIdentities(ids []scan.ValidatorIdentity, now time
 // limit of them, oldest check first. Only well-formed key suffixes are
 // candidates; a moniker or URL in the identity field is never looked up.
 func (s *Store) AvatarsDue(ctx context.Context, now time.Time, maxAge time.Duration, limit int) ([]string, error) {
+	// Sixteen hex characters, the same test keybase.ValidIdentity applies.
+	// Selecting on length alone handed the lookup identities it refuses, so
+	// a validator with a 16-character non-hex identity produced a guaranteed
+	// failure every refresh cycle, forever, and an error row keyed by it.
+	//
 	// Joined case-insensitively, because the chain carries whatever the
 	// operator typed: keybase.ValidIdentity accepts both cases, and a
 	// mixed-case identity must not look unfetched forever beside the row
 	// already held for it.
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT vi.identity, COALESCE(a.checked_at, '')
 		FROM validator_identities vi LEFT JOIN validator_avatars a ON UPPER(a.identity) = UPPER(vi.identity)
-		WHERE length(vi.identity) = 16 AND (a.checked_at IS NULL OR a.checked_at < ?)
+		WHERE vi.identity GLOB '[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
+		  AND (a.checked_at IS NULL OR a.checked_at < ?)
 		ORDER BY COALESCE(a.checked_at, '') ASC LIMIT ?`, ts(now.Add(-maxAge)), limit)
 	if err != nil {
 		return nil, err

@@ -426,6 +426,41 @@ the database aside, restore or delete it, start the collector, and check
   new one if they do not: the vantage is what a validator matches its logs
   against.
 
+## 7a. Activation day
+
+Fibre exists only from app version 10. A vantage started before the upgrade is
+watching a chain where `x/fibre` and `x/valaddr` do not answer, and most of it
+recovers on its own the moment they do.
+
+What self-heals, without touching anything:
+
+- The scanner's params seed. It retries every 60 heights while the module is
+  inactive and seeds the first time the query succeeds.
+- The scanner's host registry. Same cadence: it retries until the bonded
+  registry can be read. (Before this was added, a scanner that lived through
+  activation had no host history and no back-fill for the rest of its life,
+  and only a restart fixed it.)
+- `fibre_active` and `app_version` in the store, which the collector re-reads
+  on every pass, and the "not active yet" banner the site draws from them.
+- The prober's app-version poll, which lifts the stale-pin hold on verdicts.
+- The heartbeat's inactive path, which logs once and reports OK rather than
+  failing.
+
+What to check once the upgrade lands, in this order:
+
+```
+curl -s localhost:${API_LISTEN}/v1/meta | jq '{fibre_active, app_version, chain_height}'
+curl -s localhost:${API_LISTEN}/v1/health | jq '.status, (.checks[] | select(.ok == false))'
+journalctl -u fibre-scan@mocha -n 50 --no-pager | grep -iE "seed|param|host history"
+curl -s localhost:${API_LISTEN}/v1/network | jq '{registered_endpoints, reachability, validators_probed}'
+```
+
+`registered_endpoints` moving off zero is the first sign the registry is being
+read. `reachability` follows within a heartbeat interval. Publications appear
+only once somebody actually pays for a blob, which may be hours later; an
+empty publication feed on activation day is a quiet network, not a broken
+observer, and the site says which.
+
 ## 8. Checks after deploy
 
 Run the smoke test first. It installs nothing and changes nothing: it parses

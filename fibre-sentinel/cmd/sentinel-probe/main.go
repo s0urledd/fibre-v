@@ -67,6 +67,8 @@ func main() {
 		rpcTO       = flag.Duration("rpc-timeout", 15*time.Second, "per-RPC-call timeout")
 		concurrency = flag.Int("concurrency", 8, "probes in flight across all validators (never more than one per validator)")
 		inFlightMiB = flag.Int64("in-flight-mib", 512, "shard bytes in flight at once, MiB; a count of probes does not bound memory when one shard can be hundreds of MiB")
+		localHosts  = flag.Bool("allow-unroutable-hosts", false,
+			"dial registered hosts on loopback or a private range (a local devnet; never a public vantage)")
 		backfill    = flag.Duration("backfill-missed", 0, "on (re)start, write NOT_PROBED markers only for slots newer than this; 0 (default) writes one for every elapsed slot of every publication still on record, so an obligation the prober never reached is counted as unobserved rather than missing from the total")
 		retryTO     = flag.Bool("retry-transport-timeout", true, "retry a probe once when the first attempt fails with a transport timeout (slot blocking during uploads)")
 		retryDelay  = flag.Duration("retry-delay", 20*time.Second, "wait before the transport-timeout retry")
@@ -157,6 +159,7 @@ func main() {
 		RetryDelay:            *retryDelay,
 		Concurrency:           *concurrency,
 		InFlightBytes:         *inFlightMiB << 20,
+		AllowUnroutableHosts:  *localHosts,
 		BackfillMissed:        *backfill,
 		RunConfig:             flagConfig(),
 	}, log)
