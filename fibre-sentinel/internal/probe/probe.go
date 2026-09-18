@@ -260,6 +260,7 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 			CommitmentVerified: m.Download.CommitmentVerified,
 			Shadowed:           m.Download.ShadowedBy != "",
 			ShadowUncertain:    m.Download.ShadowedBy == "" && m.Download.ShadowGap != "",
+			RowsSubsetOfOwn:    m.Download.RowsSubsetOfAssignment,
 			IdentityStale:      m.Identity.Stale,
 			PinStale:           m.Observer != nil && m.Observer.PinStale,
 		})
@@ -617,6 +618,7 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Con
 		}
 		if len(proofs) < in.Target.RowCount {
 			r.outcome, r.rawErr = OutcomePartial, verr.Error()
+			r.RowsSubsetOfAssignment = subsetOf(idx, in.Target.AssignedRows)
 		} else {
 			r.outcome, r.rawErr = OutcomeWrongRows, verr.Error()
 		}
@@ -629,6 +631,27 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Con
 }
 
 // parseShard mirrors fibre.parseShard (unexported).
+// subsetOf reports whether every index returned is one this promise assigns
+// this validator. With fewer rows than it owes, that is a short shard of this
+// promise, not another promise's shard answering in its place.
+func subsetOf(got []uint32, assigned []int) bool {
+	if len(got) == 0 || len(assigned) == 0 {
+		return false
+	}
+	owned := make(map[uint32]struct{}, len(assigned))
+	for _, r := range assigned {
+		if r >= 0 {
+			owned[uint32(r)] = struct{}{}
+		}
+	}
+	for _, g := range got {
+		if _, ok := owned[g]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func parseShard(shard *fibretypes.BlobShard, originalRows, totalRows int) ([]*rsema1d.RowProof, rlc.Vector, error) {
 	if shard == nil {
 		return nil, nil, errors.New("nil shard")

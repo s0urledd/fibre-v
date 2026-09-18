@@ -1015,6 +1015,12 @@ func (p *Prober) recordNotProbed(ctx context.Context, j job, reason string) {
 				Assigned:   v.RowCount > 0,
 				Attested:   v.Attested,
 				RowCount:   v.RowCount,
+				// A record from before signature verification says nothing
+				// about attestation, and "says nothing" must not be stored
+				// as "did not attest": the store writes NULL for the first
+				// and 0 for the second, and 0 puts the row outside the
+				// obligation population instead of into the unknown count.
+				AttestationUnknown: !pub.HasAttestation(),
 			}, reason+"; targets could not be resolved: "+err.Error())
 		}
 		p.complete[key] = true
@@ -1037,8 +1043,9 @@ func (p *Prober) recordNotProbedTarget(pub scan.Publication, pt SchedulePoint, t
 		BlobVersion: pub.Promise.BlobVersion, MustServeUntil: pub.MustServeUntil,
 		ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
 		ValidatorAddress:   t.AddressHex, ValidatorHost: t.Host, HostSource: t.HostSource,
-		Assigned: t.Assigned, Attested: t.Attested, AssignedRowCount: t.RowCount,
-		ScheduleLabel: pt.Label, ScheduledAt: pt.At.UTC(),
+		Assigned: t.Assigned, Attested: t.Attested, AttestationUnknown: t.AttestationUnknown,
+		AssignedRowCount: t.RowCount,
+		ScheduleLabel:    pt.Label, ScheduledAt: pt.At.UTC(),
 		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
 		Phase: PhaseAt(pt.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,
 		Classification: ClassNotProbed, ClassificationReason: reason,

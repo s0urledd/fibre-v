@@ -44,6 +44,29 @@ type ScheduleConfig struct {
 	// MinSpacing drops schedule points that would land within this of an
 	// earlier one (keeps a very short window from generating a burst).
 	MinSpacing time.Duration
+	// LastPointMargin caps how far before must_serve_until the final
+	// in-window probe may sit. The in-window points are fractions of the
+	// publication's own window, which was written for a devnet whose window
+	// was ten minutes: 0.92 of it put the last reading 48 seconds out. On
+	// mocha, where shard_retention is four hours, the same fraction puts it
+	// 19 minutes out, and the only later point is the grace probe, where a
+	// missing shard is TOLERATED by construction. So nothing could see a
+	// validator that pruned inside the last 19 minutes of its obligation,
+	// and the obligation bucketed as served — the exact failure this
+	// observer exists to catch, silently passed.
+	//
+	// The margin only ever moves the last point later, never earlier, so a
+	// short window keeps the tighter reading its fraction already gives it.
+	//
+	// It cannot usefully go below the chain's own prune granularity: the
+	// Fibre server's prune loop runs once a minute against a
+	// minute-granularity key, so a shard can legitimately survive up to two
+	// minutes past the deadline, and by the same token a validator whose
+	// loop ran early is not misbehaving on the order of a minute. Anything
+	// under that would be accusing an operator of the clock. 150s is that
+	// floor with room, and the same value the grace phase already allows in
+	// the other direction (PruneTolerance).
+	LastPointMargin time.Duration
 }
 
 // DefaultInWindowFractions: one early reading, then three clustered toward the
@@ -80,6 +103,7 @@ func DefaultScheduleConfig() ScheduleConfig {
 		PruneTolerance:    150 * time.Second,
 		PostMargin:        60 * time.Second,
 		MinSpacing:        20 * time.Second,
+		LastPointMargin:   150 * time.Second,
 	}
 }
 
@@ -99,6 +123,9 @@ func (c ScheduleConfig) withDefaults() ScheduleConfig {
 	}
 	if c.MinSpacing <= 0 {
 		c.MinSpacing = d.MinSpacing
+	}
+	if c.LastPointMargin <= 0 {
+		c.LastPointMargin = d.LastPointMargin
 	}
 	return c
 }
@@ -147,12 +174,19 @@ func ScheduleFor(p scan.Publication, cfg ScheduleConfig) []SchedulePoint {
 	span := msu.Sub(start)
 
 	var pts []SchedulePoint
+	// The latest a last reading may sit and still be a reading of the window:
+	// see LastPointMargin. A point is pulled forward to it, never pushed back.
+	deadline := msu.Add(-cfg.LastPointMargin)
 	for i, f := range cfg.InWindowFractions {
 		if f <= 0 || f >= 1 {
 			continue
 		}
+		at := start.Add(time.Duration(float64(span) * f))
+		if at.Before(deadline) && f == maxFraction(cfg.InWindowFractions) {
+			at = deadline
+		}
 		pts = append(pts, SchedulePoint{
-			At:    start.Add(time.Duration(float64(span) * f)),
+			At:    at,
 			Phase: PhaseInWindow,
 			Label: "w" + itoa(i+1),
 		})
@@ -197,6 +231,19 @@ func PhaseAtWindow(t, mustServeUntil time.Time, pruneTolerance time.Duration) Ph
 	default:
 		return PhasePost
 	}
+}
+
+// maxFraction is the last reading's position, whichever entry holds it: the
+// fractions are given in order by every caller here, but the clamp must not
+// depend on that.
+func maxFraction(fs []float64) float64 {
+	m := 0.0
+	for _, f := range fs {
+		if f > 0 && f < 1 && f > m {
+			m = f
+		}
+	}
+	return m
 }
 
 func sortByTime(pts []SchedulePoint) {

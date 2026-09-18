@@ -1293,8 +1293,12 @@ func (s *Store) UpsertValidatorIdentities(ids []scan.ValidatorIdentity, now time
 // limit of them, oldest check first. Only well-formed key suffixes are
 // candidates; a moniker or URL in the identity field is never looked up.
 func (s *Store) AvatarsDue(ctx context.Context, now time.Time, maxAge time.Duration, limit int) ([]string, error) {
+	// Joined case-insensitively, because the chain carries whatever the
+	// operator typed: keybase.ValidIdentity accepts both cases, and a
+	// mixed-case identity must not look unfetched forever beside the row
+	// already held for it.
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT vi.identity, COALESCE(a.checked_at, '')
-		FROM validator_identities vi LEFT JOIN validator_avatars a ON a.identity = vi.identity
+		FROM validator_identities vi LEFT JOIN validator_avatars a ON UPPER(a.identity) = UPPER(vi.identity)
 		WHERE length(vi.identity) = 16 AND (a.checked_at IS NULL OR a.checked_at < ?)
 		ORDER BY COALESCE(a.checked_at, '') ASC LIMIT ?`, ts(now.Add(-maxAge)), limit)
 	if err != nil {
@@ -1315,6 +1319,9 @@ func (s *Store) AvatarsDue(ctx context.Context, now time.Time, maxAge time.Durat
 // PutAvatar records the result of one resolution: the picture (status ok),
 // its absence (none) or a failed attempt (error, with the reason in url).
 func (s *Store) PutAvatar(identity, status, url, contentType string, data []byte, now time.Time) error {
+	// One canonical spelling for the key. The chain carries the operator's,
+	// which may be either case; the API serves /v1/avatars/<upper>.
+	identity = strings.ToUpper(identity)
 	_, err := s.db.Exec(`INSERT INTO validator_avatars (identity, url, content_type, data, status, checked_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(identity) DO UPDATE SET url = excluded.url, content_type = excluded.content_type,
@@ -1327,7 +1334,7 @@ func (s *Store) PutAvatar(identity, status, url, contentType string, data []byte
 // held (never resolved, no picture, or the last attempt failed).
 func (s *Store) Avatar(ctx context.Context, identity string) (contentType string, data []byte, checkedAt time.Time, ok bool, err error) {
 	var checked string
-	err = s.db.QueryRowContext(ctx, `SELECT content_type, data, checked_at FROM validator_avatars WHERE identity = ? AND status = 'ok'`, identity).Scan(&contentType, &data, &checked)
+	err = s.db.QueryRowContext(ctx, `SELECT content_type, data, checked_at FROM validator_avatars WHERE UPPER(identity) = ? AND status = 'ok'`, strings.ToUpper(identity)).Scan(&contentType, &data, &checked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, time.Time{}, false, nil
 	}

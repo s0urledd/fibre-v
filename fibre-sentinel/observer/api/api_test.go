@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -598,5 +599,61 @@ func TestAvatarRoute(t *testing.T) {
 		if r.StatusCode != 404 {
 			t.Errorf("%s: %d, want 404", p, r.StatusCode)
 		}
+	}
+}
+
+// A list that stops at its limit without saying so reads as the whole
+// answer. On /v1/probes that matters more than elsewhere: docs/verdicts.md
+// points a reader at ?at=<scheduled_at> as the evidence behind a
+// correlated-failure exclusion, and a suspect point can hold more rows than
+// the maximum limit allows. Ordering is started_at DESC and since is a lower
+// bound, so before is what makes the list walkable at all.
+func TestProbesReportTheirBoundAndCanBeWalked(t *testing.T) {
+	ts, _ := serverAndStore(t)
+	type page struct {
+		Probes []struct {
+			StartedAt string `json:"started_at"`
+		} `json:"probes"`
+		Limit      int    `json:"limit"`
+		Truncated  bool   `json:"truncated"`
+		NextBefore string `json:"next_before"`
+	}
+	var all page
+	if code := get(t, ts, "/v1/probes?limit=1000", &all); code != 200 {
+		t.Fatalf("probes: %d", code)
+	}
+	if len(all.Probes) < 2 {
+		t.Skip("the sample store has too few probes to page")
+	}
+	if all.Truncated {
+		t.Fatalf("a full page of %d rows reports truncated with limit 1000", len(all.Probes))
+	}
+
+	var first page
+	if code := get(t, ts, "/v1/probes?limit=1", &first); code != 200 {
+		t.Fatalf("probes limit=1: %d", code)
+	}
+	if len(first.Probes) != 1 || first.Limit != 1 {
+		t.Fatalf("limit=1 returned %d rows, limit field %d", len(first.Probes), first.Limit)
+	}
+	if !first.Truncated {
+		t.Fatal("a page cut short by its limit did not say so")
+	}
+	if first.NextBefore == "" {
+		t.Fatal("a truncated page carries no cursor to continue from")
+	}
+
+	var second page
+	if code := get(t, ts, "/v1/probes?limit=1&before="+url.QueryEscape(first.NextBefore), &second); code != 200 {
+		t.Fatalf("probes before: %d", code)
+	}
+	if len(second.Probes) != 1 {
+		t.Fatalf("the second page has %d rows, want 1", len(second.Probes))
+	}
+	if second.Probes[0].StartedAt == first.Probes[0].StartedAt {
+		t.Fatal("before did not advance: the second page repeats the first row")
+	}
+	if code := get(t, ts, "/v1/probes?before=not-a-time", nil); code != 400 {
+		t.Errorf("a malformed before was %d, want 400", code)
 	}
 }

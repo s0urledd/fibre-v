@@ -180,6 +180,21 @@ One sentence each, and what a reader should conclude.
   is judged whole or not at all. The window's end is the moment the verdict
   is drawn; an obligation whose `must_serve_until` is later is `pending` and
   in no rate.
+- **The last in-window reading is held to an absolute margin.** The four
+  in-window points are fractions of the publication's own window (0.12, 0.45,
+  0.72, 0.92), and the last one is additionally moved forward to sit no more
+  than 2m30s before `must_serve_until`. A fraction alone does not survive a
+  change of scale: 0.92 of a ten-minute devnet window is 48 seconds out, and
+  0.92 of mocha's four-hour `shard_retention` is nineteen minutes out. Since
+  NOT_FOUND at the grace point is TOLERATED by construction, nothing after
+  that last reading can produce a verdict, so a validator that pruned inside
+  those nineteen minutes served every probe it was given and bucketed as
+  `served` — the one failure this observer exists to catch, passed silently.
+  The margin never moves a point later than its fraction already puts it, so a
+  short window keeps its tighter reading. It cannot usefully be smaller than
+  the chain's own prune granularity: the Fibre server's prune loop runs once a
+  minute against a minute-resolution key, so a reading closer than that would
+  be accusing an operator of the clock.
 - **An obligation is judged by its newest in-window probe**, the same rule
   the per-blob reconstructability verdict uses; a `NOT_PROBED` or
   `PROBE_ERROR` row is never the newest while a real probe exists. The

@@ -247,6 +247,12 @@ func (w *statusWriter) WriteHeader(status int) {
 	}
 	w.wrote = true
 	switch {
+	case status == http.StatusNotModified || status == http.StatusPartialContent:
+		// Neither is an error, and a 304's headers update the cache entry it
+		// revalidates (RFC 9111). Forcing no-store here told every cache to
+		// throw away the avatar or export it had just been told to keep for
+		// a day, so a successful revalidation undid the caching it was meant
+		// to confirm. Whatever the 200 set stands.
 	case status < 200 || status >= 300:
 		w.Header().Set("Cache-Control", "no-store")
 	case w.Header().Get("Cache-Control") == "":
@@ -2243,7 +2249,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	// it, they are the whole answer to "am I in your list", with every measured
 	// column honestly empty.
 	irows, err := db.QueryContext(ctx, `SELECT vi.cons_address, vi.operator_address, vi.moniker, vi.identity, vi.website, vi.jailed, vi.status, vi.tokens,
-			EXISTS (SELECT 1 FROM validator_avatars a WHERE a.identity = vi.identity AND a.status = 'ok')
+			EXISTS (SELECT 1 FROM validator_avatars a WHERE UPPER(a.identity) = UPPER(vi.identity) AND a.status = 'ok')
 		FROM validator_identities vi`)
 	if err != nil {
 		return nil, err
@@ -2461,6 +2467,33 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if win.AsOf {
+		// This route builds the aggregates the network and validator lists
+		// do, four spans of them, and none of it is cached — so it was the
+		// one uncapped way to buy a full pinned computation. Rationed like
+		// the others.
+		if !s.asOf.allow(time.Now()) {
+			w.Header().Set("Retry-After", "2")
+			writeErr(w, 429, "as_of requests are limited to one every two seconds")
+			return
+		}
+		if !s.asOf.enter() {
+			w.Header().Set("Retry-After", "5")
+			writeErr(w, 429, "as_of computations already in flight; try again shortly")
+			return
+		}
+		defer s.asOf.leave()
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	// The spans beside the row are anchored on the same moment the row is:
+	// the pin when there is one, the clock otherwise. Anchoring them on the
+	// clock while the row was pinned put a rewound validator beside four
+	// present-day breakdowns of itself, under one window object naming only
+	// the pin.
+	spanEnd := now
+	if win.AsOf {
+		spanEnd = win.End
+	}
 	type span struct {
 		Window Window `json:"window"`
 		Rate   Rate   `json:"serve_rate"`
@@ -2479,9 +2512,9 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	// rows that no rate counts.
 	suspectAll := []suspectPoint{}
 	for _, name := range []string{"24h", "7d", "30d", "all"} {
-		sw := Window{Name: name, Span: windows[name], End: now}
+		sw := Window{Name: name, Span: windows[name], End: spanEnd, AsOf: win.AsOf}
 		if sw.Span > 0 {
-			sw.Start = now.Add(-sw.Span)
+			sw.Start = spanEnd.Add(-sw.Span)
 		}
 		_, ss, err := s.suspectPoints(ctx, sw)
 		if err != nil {
@@ -2531,19 +2564,29 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "validator not seen in the registry or in any probe")
 		return
 	}
-	probes, err := s.probeRows(ctx, `validator_address = ?`, 50, addr)
+	probeWhere, probeArgs := `validator_address = ?`, []any{addr}
+	if win.AsOf {
+		probeWhere += ` AND started_at <= ?`
+		probeArgs = append(probeArgs, win.endArg())
+	}
+	probes, err := s.probeRows(ctx, probeWhere, 50, probeArgs...)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
+	probes, moreProbes := trim(probes, 50)
 	out := map[string]any{
 		"window":                      win,
 		"validator":                   rows[0],
 		"windows":                     spans,
 		"recent_probes":               probes,
+		"recent_probes_truncated":     moreProbes,
 		"suspect_points":              suspectAll,
 		"serve_rate_excluded_classes": excludedFromRate,
 		"vantage":                     s.vantage,
+	}
+	if win.AsOf {
+		out["as_of_note"] = AsOfNote
 	}
 	if _, label, err := s.rolledFor(ctx, win, addr); err == nil && label != nil {
 		out["rolled_up"] = label
@@ -2554,12 +2597,16 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 // ---- blobs ----
 
 type blobRow struct {
-	PromiseHash        string       `json:"promise_hash"`
-	Commitment         string       `json:"commitment"`
-	Namespace          string       `json:"namespace"`
-	BlobSize           int64        `json:"blob_size"`
-	Signer             string       `json:"signer"`
-	SettlementHeight   int64        `json:"settlement_height"`
+	PromiseHash      string `json:"promise_hash"`
+	Commitment       string `json:"commitment"`
+	Namespace        string `json:"namespace"`
+	BlobSize         int64  `json:"blob_size"`
+	Signer           string `json:"signer"`
+	SettlementHeight int64  `json:"settlement_height"`
+	// SettlementTxIndex is the other half of this route's cursor, published
+	// so a caller paging with before_height/before_tx_index does not have to
+	// guess it.
+	SettlementTxIndex  int          `json:"settlement_tx_index"`
 	SettlementTime     string       `json:"settlement_time"`
 	CreationTimestamp  string       `json:"creation_timestamp"`
 	MustServeUntil     string       `json:"must_serve_until"`
@@ -2614,12 +2661,13 @@ type reconstruct struct {
 }
 
 func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...any) ([]blobRow, error) {
-	q := `SELECT promise_hash, commitment, namespace, blob_size, signer, settlement_height, settlement_time, creation_timestamp,
+	q := `SELECT promise_hash, commitment, namespace, blob_size, signer, settlement_height, settlement_tx_index, settlement_time, creation_timestamp,
 		must_serve_until, validators_with_rows, sigma_rows, distinct_rows, assignment_error FROM publications`
 	if where != "" {
 		q += " WHERE " + where
 	}
-	q += " ORDER BY settlement_height DESC, settlement_tx_index DESC LIMIT " + strconv.Itoa(limit)
+	// One more than asked: see probeRows. The caller trims and reports it.
+	q += " ORDER BY settlement_height DESC, settlement_tx_index DESC LIMIT " + strconv.Itoa(limit+1)
 	rows, err := s.st.DB().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -2628,7 +2676,7 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 	var out []blobRow
 	for rows.Next() {
 		var b blobRow
-		if err := rows.Scan(&b.PromiseHash, &b.Commitment, &b.Namespace, &b.BlobSize, &b.Signer, &b.SettlementHeight, &b.SettlementTime,
+		if err := rows.Scan(&b.PromiseHash, &b.Commitment, &b.Namespace, &b.BlobSize, &b.Signer, &b.SettlementHeight, &b.SettlementTxIndex, &b.SettlementTime,
 			&b.CreationTimestamp, &b.MustServeUntil, &b.ValidatorsWithRows, &b.SigmaRows, &b.DistinctRows, &b.AssignmentError); err != nil {
 			return nil, err
 		}
@@ -2948,7 +2996,15 @@ func (s *Server) handleBlobs(w http.ResponseWriter, r *http.Request) {
 	if blobs == nil {
 		blobs = []blobRow{}
 	}
-	writeJSON(w, 200, map[string]any{"vantage": s.vantage, "blobs": blobs})
+	blobs, truncated := trim(blobs, limit)
+	out := map[string]any{"vantage": s.vantage, "blobs": blobs, "limit": limit, "truncated": truncated}
+	if truncated && len(blobs) > 0 {
+		// The cursor this route already takes, filled in so a caller does not
+		// have to read the last row to build it.
+		last := blobs[len(blobs)-1]
+		out["next_before_height"], out["next_before_tx_index"] = last.SettlementHeight, last.SettlementTxIndex
+	}
+	writeJSON(w, 200, out)
 }
 
 type assignmentRow struct {
@@ -3012,12 +3068,14 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
+	probes, moreProbes := trim(probes, 1000)
 	var params struct {
 		ShardRetentionS        int64 `json:"shard_retention_s"`
 		PaymentPromiseTimeoutS int64 `json:"payment_promise_timeout_s"`
 	}
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT shard_retention_s, payment_promise_timeout_s FROM publications WHERE promise_hash = ?`, hash).Scan(&params.ShardRetentionS, &params.PaymentPromiseTimeoutS)
-	writeJSON(w, 200, map[string]any{"blob": blobs[0], "params": params, "assignments": assigns, "probes": probes, "vantage": s.vantage})
+	writeJSON(w, 200, map[string]any{"blob": blobs[0], "params": params, "assignments": assigns,
+		"probes": probes, "probes_truncated": moreProbes, "vantage": s.vantage})
 }
 
 // ---- sampling ----
@@ -3187,7 +3245,10 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 	if where != "" {
 		q += " WHERE " + where
 	}
-	q += " ORDER BY started_at DESC LIMIT " + strconv.Itoa(limit)
+	// One more than asked, so the caller can be told the bound bit rather
+	// than left to guess whether 100 rows is all of them. The extra row is
+	// trimmed by the caller that reports truncation.
+	q += " ORDER BY started_at DESC LIMIT " + strconv.Itoa(limit+1)
 	rows, err := s.st.DB().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -3261,12 +3322,44 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 	if at := q.Get("at"); at != "" {
 		conds, args = append(conds, `scheduled_at = ?`), append(args, at)
 	}
+	// before: the upper bound that makes the list walkable. The order is
+	// started_at DESC and since is a lower bound, so without this there was
+	// no parameter that could reach the rows past the limit — on the one
+	// route docs/verdicts.md points a reader at as the evidence behind an
+	// exclusion, where a suspect point can hold more rows than the maximum
+	// limit allows.
+	if before := q.Get("before"); before != "" {
+		t, err := time.Parse(time.RFC3339, before)
+		if err != nil {
+			writeErr(w, 400, "before must be RFC 3339")
+			return
+		}
+		conds, args = append(conds, `started_at < ?`), append(args, store.TS(t))
+	}
 	rows, err := s.probeRows(r.Context(), strings.Join(conds, " AND "), limit, args...)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"vantage": s.vantage, "probes": rows})
+	rows, truncated := trim(rows, limit)
+	out := map[string]any{"vantage": s.vantage, "probes": rows, "limit": limit, "truncated": truncated}
+	if truncated && len(rows) > 0 {
+		// Where to continue from: everything strictly older than the last row
+		// returned. Paired with the same filters it walks the whole selection.
+		out["next_before"] = rows[len(rows)-1].StartedAt
+	}
+	writeJSON(w, 200, out)
+}
+
+// trim cuts an over-fetched page back to the limit and says whether there was
+// more. A list that stops at its limit without saying so reads as the whole
+// answer, which on this API is the difference between "these are the rows" and
+// "these are some of the rows".
+func trim[T any](rows []T, limit int) ([]T, bool) {
+	if len(rows) > limit {
+		return rows[:limit], true
+	}
+	return rows, false
 }
 
 // parseLimit reads ?limit= with a default and a maximum; anything that is
@@ -3330,18 +3423,16 @@ func (s *Server) handleAvatar(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no such avatar")
 		return
 	}
+	// Avatar matches case-insensitively, so one lookup covers whichever
+	// spelling the chain carries and whichever an older build stored.
 	ct, data, checked, ok, err := s.st.Avatar(r.Context(), id)
 	if err != nil {
 		writeErr(w, 500, "avatar lookup failed")
 		return
 	}
 	if !ok {
-		// also try the case the chain carries, if it was stored that way
-		ct, data, checked, ok, err = s.st.Avatar(r.Context(), strings.ToLower(id))
-		if err != nil || !ok {
-			writeErr(w, 404, "no such avatar")
-			return
-		}
+		writeErr(w, 404, "no such avatar")
+		return
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Cache-Control", "public, max-age=86400")

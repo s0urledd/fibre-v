@@ -743,9 +743,10 @@ func (s *Server) handlePublisher(w http.ResponseWriter, r *http.Request) {
 	if blobs == nil {
 		blobs = []blobRow{}
 	}
+	blobs, moreBlobs := trim(blobs, 50)
 	writeJSON(w, 200, map[string]any{
 		"window": win, "publisher": rows[0], "windows": spans,
-		"recent_payments": payments, "recent_blobs": blobs,
+		"recent_payments": payments, "recent_blobs": blobs, "recent_blobs_truncated": moreBlobs,
 		"source": marketSource, "price_formula": formula, "notes": marketNotes, "vantage": s.vantage,
 	})
 }
