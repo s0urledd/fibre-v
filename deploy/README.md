@@ -117,7 +117,11 @@ user cannot write there.
 That file is what makes the sample auditable. The commitments published at
 `/v1/sampling` are SHA-256 of a per-day secret derived from it, so if the
 master is regenerated on every restart the commitments change with it and
-nobody can ever check a day's draw against them. The prober publishes each
+nobody can ever check a day's draw against them. The prober now refuses to
+start with a sampling policy that sets no `master_secret_file`, rather than
+running on a process-local secret and producing commitments that quietly
+cannot be verified; `-allow-ephemeral-sampling` overrides that, and is only
+for a test. The prober publishes each
 day's secret seven days after the day ends (`-reveal-after`), to
 `<DATA_DIR>/sampling-secrets.jsonl`; the collector serves it beside the
 day's commitment. The reveal runs with the sampling policy, so a prober

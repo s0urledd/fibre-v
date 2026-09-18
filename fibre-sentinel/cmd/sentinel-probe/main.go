@@ -49,6 +49,13 @@ func main() {
 		deadline = flag.Duration("deadline", 0, "whole-run wall-clock cap (0 = none)")
 
 		inWindow = flag.Int("in-window-probes", 4, "number of probes inside [settlement, must_serve_until]")
+		// The sampling audit rests on a master secret that outlives the
+		// process: rows carry a commitment to the day's secret and the
+		// secret is revealed later. Without a file the secret is new on
+		// every start, so the commitments already published can never be
+		// checked. Refused unless this says otherwise.
+		ephemeralSampling = flag.Bool("allow-ephemeral-sampling", false,
+			"permit a process-local sampling master secret (tests only: day commitments will not survive a restart)")
 		graceOff = flag.Duration("grace-offset", 30*time.Second, "grace probe: must_serve_until + this")
 		pruneTol = flag.Duration("prune-tolerance", 150*time.Second, "NOT_FOUND is normal until must_serve_until + this (devnet prune lag ~1m45s)")
 		postMrg  = flag.Duration("post-margin", 60*time.Second, "post probe: must_serve_until + prune-tolerance + this")
@@ -59,6 +66,7 @@ func main() {
 		lateFrac    = flag.Float64("max-lateness-fraction", 0.05, "lateness allowance as a share of each blob's own retention window, when larger than -max-lateness (0.05 is 12 min on a 4 h window); negative disables")
 		rpcTO       = flag.Duration("rpc-timeout", 15*time.Second, "per-RPC-call timeout")
 		concurrency = flag.Int("concurrency", 8, "probes in flight across all validators (never more than one per validator)")
+		inFlightMiB = flag.Int64("in-flight-mib", 512, "shard bytes in flight at once, MiB; a count of probes does not bound memory when one shard can be hundreds of MiB")
 		backfill    = flag.Duration("backfill-missed", 0, "on (re)start, write NOT_PROBED markers only for slots newer than this; 0 (default) writes one for every elapsed slot of every publication still on record, so an obligation the prober never reached is counted as unobserved rather than missing from the total")
 		retryTO     = flag.Bool("retry-transport-timeout", true, "retry a probe once when the first attempt fails with a transport timeout (slot blocking during uploads)")
 		retryDelay  = flag.Duration("retry-delay", 20*time.Second, "wait before the transport-timeout retry")
@@ -94,9 +102,18 @@ func main() {
 		// in-window points, the grace point and the post point: one request
 		// each per validator per publication
 		cfg.PointsPerPublication = float64(len(fracs) + 2)
+		// The byte side of the projection: every point but the post one,
+		// where NOT_FOUND is the expected answer and nothing is transferred.
+		cfg.DownloadsPerPublication = float64(len(fracs) + 1)
+		cfg.Sampling.AllowEphemeralSecret = *ephemeralSampling
 		p, err := policy.New(cfg)
 		if err != nil {
 			log.Fatalf("policy: %v", err)
+		}
+		if p.EphemeralSecret() {
+			log.Printf("WARNING: the sampling master secret is process-local: the day commitments stamped on every row " +
+				"and served by /v1/sampling cannot be verified after this process restarts. For anything but a test, " +
+				"point sampling.master_secret_file at a file the process can keep (deploy/README.md).")
 		}
 		p.SetLogger(log.Printf)
 		pol = p
@@ -131,6 +148,7 @@ func main() {
 		RetryTransportTimeout: *retryTO,
 		RetryDelay:            *retryDelay,
 		Concurrency:           *concurrency,
+		InFlightBytes:         *inFlightMiB << 20,
 		BackfillMissed:        *backfill,
 		RunConfig:             flagConfig(),
 	}, log)

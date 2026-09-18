@@ -519,5 +519,13 @@ func IsHeightUnavailable(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "lowest height is") ||
 		strings.Contains(s, "is not available") ||
-		strings.Contains(s, "must be less than or equal to the current blockchain height")
+		strings.Contains(s, "must be less than or equal to the current blockchain height") ||
+		// CometBFT's own wording when the validator set for a height has
+		// been pruned. It matches none of the phrases above, so without it
+		// the retry loop had no exit at all: an unbounded retry on a height
+		// the node can never serve, with nothing advancing and no gap
+		// recorded. A promise may be up to PaymentPromiseHeightWindow
+		// blocks older than the block that settles it, so any node whose
+		// state base sits between the two reaches this.
+		strings.Contains(s, "could not find validator set for height")
 }

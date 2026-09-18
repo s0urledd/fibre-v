@@ -73,6 +73,17 @@ type Config struct {
 	// connection from this vantage at a time, whatever this value is.
 	Concurrency int
 
+	// InFlightBytes bounds the shard bytes being downloaded at once, which
+	// Concurrency alone does not. DownloadShard is a unary RPC: an in-flight
+	// probe holds the whole shard as a gRPC receive buffer and again as the
+	// unmarshalled message, and the receive limit is deliberately raised to
+	// 110% of the expected shard so a large one is not refused. A shard is
+	// blob_size x total_rows / original_rows for a validator assigned every
+	// row, so eight workers against 128 MiB blobs on a small provider set is
+	// gigabytes resident with nothing anywhere to stop it. A probe larger
+	// than the whole budget still runs, alone. Zero takes the default.
+	InFlightBytes int64
+
 	// BackfillMissed bounds how far back a (re)started prober writes
 	// NOT_PROBED markers for slots it never ran. Zero, the default, is no
 	// bound: every elapsed slot of every publication the feed holds gets
@@ -126,6 +137,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Concurrency <= 0 {
 		c.Concurrency = 8
+	}
+	if c.InFlightBytes <= 0 {
+		c.InFlightBytes = defaultInFlightBytes
 	}
 	// BackfillMissed <= 0 means no horizon: every elapsed slot of every
 	// publication the feed holds gets its NOT_PROBED row, so an obligation
@@ -858,6 +872,7 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 		n        int
 		done     = map[string]int{}
 		sem      = make(chan struct{}, p.cfg.Concurrency)
+		bytesSem = newByteSem(p.cfg.InFlightBytes)
 		wg       sync.WaitGroup
 		canceled bool
 	)
@@ -867,10 +882,13 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 			break
 		}
 		sem <- struct{}{}
+		want := ShardBytes(it.job.pub.Promise.BlobSize, it.job.pub.Assignment.ProtocolParams.OriginalRows, it.target.RowCount)
+		bytesSem.acquire(want)
 		wg.Add(1)
-		go func(it work) {
+		go func(it work, want int64) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer bytesSem.release(want)
 			probedOne := p.runOne(ctx, it)
 			mu.Lock()
 			if probedOne {
@@ -878,7 +896,7 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 			}
 			done[it.key]++
 			mu.Unlock()
-		}(it)
+		}(it, want)
 	}
 	wg.Wait()
 	if !canceled && ctx.Err() == nil {
@@ -889,6 +907,52 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 		}
 	}
 	return n
+}
+
+// defaultInFlightBytes is the shard-byte ceiling: half a gibibyte of shards
+// being transferred at once, which with the receive buffer and the
+// unmarshalled copy is about a gibibyte resident at the peak.
+const defaultInFlightBytes = 512 << 20
+
+// byteSem admits work by weight as well as by count. A single item heavier
+// than the whole budget is admitted alone rather than deadlocking, which is
+// the case that matters: one validator assigned every row of a large blob.
+type byteSem struct {
+	mu    sync.Mutex
+	cond  *sync.Cond
+	limit int64
+	held  int64
+}
+
+func newByteSem(limit int64) *byteSem {
+	b := &byteSem{limit: limit}
+	b.cond = sync.NewCond(&b.mu)
+	return b
+}
+
+func (b *byteSem) acquire(nBytes int64) {
+	if nBytes <= 0 {
+		nBytes = 1
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for b.held > 0 && b.held+nBytes > b.limit {
+		b.cond.Wait()
+	}
+	b.held += nBytes
+}
+
+func (b *byteSem) release(nBytes int64) {
+	if nBytes <= 0 {
+		nBytes = 1
+	}
+	b.mu.Lock()
+	b.held -= nBytes
+	if b.held < 0 {
+		b.held = 0
+	}
+	b.mu.Unlock()
+	b.cond.Broadcast()
 }
 
 // runOne runs a single probe end to end: lateness re-check, policy gate,

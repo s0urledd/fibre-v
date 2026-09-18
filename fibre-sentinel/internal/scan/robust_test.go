@@ -126,3 +126,33 @@ func TestRetryRPC(t *testing.T) {
 		t.Fatalf("cancelled: err=%v calls=%d", err, calls)
 	}
 }
+
+// A promise may be up to PaymentPromiseHeightWindow blocks older than the
+// block that settles it, and the assignment table is built over the validator
+// set at the promise height. A node whose state base sits inside that span —
+// state-synced, or with a retention floor above it — cannot serve that set at
+// all. CometBFT's wording for it matches none of the other phrases, so the
+// retry loop had no exit: the scan stopped advancing on that block, forever,
+// with no gap recorded and nothing on the site saying so.
+func TestIsHeightUnavailable_PrunedValidatorSet(t *testing.T) {
+	for _, s := range []string{
+		"could not find validator set for height #1234",
+		"RPC error -32603 - Internal error: could not find validator set for height 987",
+		"Could Not Find Validator Set For Height #1",
+	} {
+		if !IsHeightUnavailable(errors.New(s)) {
+			t.Errorf("a pruned validator set was not read as an unavailable height: %q", s)
+		}
+	}
+	// and the phrases that must stay unrecognised, so a real defect is not
+	// quietly filed as a gap
+	for _, s := range []string{
+		"connection refused",
+		"context deadline exceeded",
+		"invalid signature on promise",
+	} {
+		if IsHeightUnavailable(errors.New(s)) {
+			t.Errorf("%q was read as an unavailable height; it is not one", s)
+		}
+	}
+}
