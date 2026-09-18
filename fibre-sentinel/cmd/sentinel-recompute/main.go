@@ -111,7 +111,8 @@ func main() {
 	var deferred, judged, amendDiffs int
 	var rowDiffs, tolFromRuns, tolFallback int
 	printed := 0
-	for _, m := range ms {
+	for i := range ms {
+		m := ms[i]
 		tol := *pruneTol
 		if tol == 0 {
 			var from string
@@ -143,6 +144,10 @@ func main() {
 			if cls, by, ok := verdict.LateShadow(m.Download.RowIndices, m.StartedAt, frontier, timeout, 5*time.Minute, cands); ok {
 				judged++
 				rc.Classification = cls
+				// Every rate reads the amended classification, so the
+				// obligation pass below must see the drawn verdict, not
+				// the deferral the prober wrote.
+				ms[i].Classification = cls
 				if a, ok := amendments[m.DedupeKey()]; ok {
 					stored = probe.Classification(a.To)
 					if a.To != string(cls) || a.ShadowedBy != by {
