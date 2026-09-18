@@ -1,24 +1,13 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Network, type Validator, type Meta, type Market, type Rate, fmtCount, fmtPct, bytes, utc, ago, tia } from "@/lib/api";
+import { useApi, type Network, type Validator, type Meta, type Market, fmtCount, fmtPct, bytes, utc, ago, tia } from "@/lib/api";
 import ValidatorTable from "@/components/ValidatorTable";
-import { Panel, Cell, type Delta } from "@/components/Panel";
+import { Panel, Cell } from "@/components/Panel";
 import { Mark } from "@/components/Verdict";
 import { boundTitle, band } from "@/components/Rate";
 
 const WINDOWS = ["24h", "7d", "30d", "all"];
-
-/** change in percentage points between two rates, when both have enough behind them */
-function ptDelta(now: Rate | null | undefined, before: Rate | null | undefined, goodWhen: "up" | "down"): Delta | null {
-  if (!now || !before || now.den === 0 || before.den === 0 || now.value === null || before.value === null) return null;
-  return { value: (now.value - before.value) * 100, goodWhen, unit: " pt", decimals: 1,
-    title: `Previous window: ${fmtPct(before)} over ${fmtCount(before)}.` };
-}
-function countDelta(now: number | undefined, before: number | undefined, goodWhen: "up" | "down", unit = ""): Delta | null {
-  if (now === undefined || before === undefined) return null;
-  return { value: now - before, goodWhen, unit, decimals: 0, title: `Previous window: ${before.toLocaleString("en-US")}${unit}.` };
-}
 
 /**
  * The overview: six network figures, then the validator table. Everything
@@ -46,7 +35,6 @@ export default function Overview() {
   const ourSide = suspect.filter((s) => !s.reason.includes("fault"));
   const ob = net?.obligations;
   const decided = !!ob && ob.rate.den > 0;
-  const prev = net?.previous;
 
   return (
     <>
@@ -89,11 +77,10 @@ export default function Overview() {
       )}
 
       <Panel title="Service" live={!!net && meta?.health === "ok"} right={net ? <>{win === "all" ? "since the first record" : `${win} window`} · <Link href="/methodology/#verdicts">methodology →</Link></> : undefined}>
-        <div className="cells four">
+        <div className="cells three">
           <Cell label="Serve rate" loading={busy}
             value={!ob || !decided ? "—" : fmtPct(ob.rate)}
             tone={!decided ? "absent" : band(ob!.rate, "serve") === "ok" ? "ok" : band(ob!.rate, "serve") === "fault" ? "fault" : undefined}
-            delta={ptDelta(ob?.rate, prev?.obligations.rate, "up")}
             sub={!net ? undefined : !decided ? (ob && ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} unobserved` : "nothing decided")
               : `${ob!.served.toLocaleString("en-US")} / ${(ob!.served + ob!.broken).toLocaleString("en-US")} kept`}
             detail={!net || !ob ? undefined : !decided ? (ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} obligations in the window, none observed serving.` : "No obligation decided in this window.")
@@ -106,7 +93,6 @@ export default function Overview() {
           <Cell label="Faults" loading={busy}
             value={!net ? "—" : faults > 0 ? faults.toLocaleString("en-US") : rated ? "0" : "—"}
             tone={faults > 0 ? "fault" : "absent"}
-            delta={countDelta(net ? faults : undefined, prev?.faults, "down")}
             sub={!net ? undefined : faults > 0 ? <><b>{ob!.broken.toLocaleString("en-US")} broken</b> · {faulted} validator{faulted === 1 ? "" : "s"}</> : rated ? "no unserved shard" : "nothing rated"}
             detail={!net ? undefined : faults > 0 ? `${faults.toLocaleString("en-US")} probe${faults === 1 ? "" : "s"} where a validator answered but did not hand over a shard it had signed for; ${ob!.broken.toLocaleString("en-US")} obligations broken across ${faulted} validator${faulted === 1 ? "" : "s"}.` : rated ? "No signed shard went unserved in this window." : "Nothing rated in this window."}
             info={<>
@@ -116,20 +102,10 @@ export default function Overview() {
           <Cell label="Reachability" loading={busy}
             value={net?.reachability_window?.den ? fmtPct(net.reachability_window) : "—"}
             tone={net?.reachability_window?.den ? undefined : "absent"}
-            delta={ptDelta(net?.reachability_window, prev?.reachability_window, "up")}
             sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} handshakes` : "no handshake yet"}
             info={<>
               <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes with every registered Fibre endpoint, from one location. Nothing is downloaded.</p>
               <p>This is not signing uptime. A validator can sign every block with its Fibre endpoint down, and the reverse.</p>
-            </>} />
-          <Cell label="Latency · p50" loading={busy}
-            value={net?.serve_latency_p50_ms != null ? net.serve_latency_p50_ms.toLocaleString("en-US") : "—"} unit={net?.serve_latency_p50_ms != null ? "ms" : undefined}
-            tone={net?.serve_latency_p50_ms != null ? undefined : "absent"}
-            delta={countDelta(net?.serve_latency_p50_ms ?? undefined, prev?.serve_latency_p50_ms ?? undefined, "down", " ms")}
-            sub={net?.serve_latency_p50_ms != null ? `p95 ${(net.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms` : "no healthy probe yet"}
-            detail={net?.serve_latency_p50_ms != null ? `Whole probe, dial to verified rows: ${net.serve_latency_p50_ms.toLocaleString("en-US")} ms typical, ${(net.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at the 95th percentile, over ${net.serve_latency_sample.toLocaleString("en-US")} healthy probes.` : undefined}
-            info={<>
-              <p>Whole probe, dial to verified rows: what a client waits for. Median over healthy probes, from one location, so part of it is our own path.</p>
             </>} />
         </div>
       </Panel>

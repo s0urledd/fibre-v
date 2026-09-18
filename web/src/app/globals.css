@@ -228,8 +228,9 @@ main { min-height: 60vh; padding-top: var(--s5); }
 .cells.five { grid-template-columns: repeat(5, 1fr); }
 .cell { background: var(--card); padding: 13px var(--s4) 12px; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
 .cells.three { grid-template-columns: repeat(3, 1fr); }
-.cells.five .cell:nth-child(5n+1), .cells.four .cell:nth-child(4n+1), .cells.three .cell:nth-child(3n+1) { border-left: 0; }
-.cells.five .cell:nth-child(-n+5), .cells.four .cell:nth-child(-n+4), .cells.three .cell:nth-child(-n+3) { border-top: 0; }
+.cells.two { grid-template-columns: repeat(2, 1fr); }
+.cells.five .cell:nth-child(5n+1), .cells.four .cell:nth-child(4n+1), .cells.three .cell:nth-child(3n+1), .cells.two .cell:nth-child(2n+1) { border-left: 0; }
+.cells.five .cell:nth-child(-n+5), .cells.four .cell:nth-child(-n+4), .cells.three .cell:nth-child(-n+3), .cells.two .cell:nth-child(-n+2) { border-top: 0; }
 .cell .label { display: flex; align-items: center; gap: var(--s1); white-space: nowrap; }
 .cell .value { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; white-space: nowrap; overflow: hidden; font-weight: 600; font-size: var(--t-big); line-height: 1.1; letter-spacing: -.015em; color: var(--text); }
 .cell .value .figure { min-width: 0; }
@@ -240,10 +241,6 @@ main { min-height: 60vh; padding-top: var(--s5); }
 .cell .value.loading .figure { color: transparent; background: var(--card-2); border-radius: 4px; }
 .cell .sub { font-family: var(--mono); font-size: var(--t-small); color: var(--text-3); margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .cell .sub b { color: var(--fault); font-weight: 600; }
-.delta { align-self: center; font-family: var(--sans); font-size: 11px; font-weight: 600; line-height: 1; padding: 3px 6px; border-radius: 4px; letter-spacing: 0; }
-.delta.good { color: var(--ok); background: var(--ok-2); }
-.delta.bad { color: var(--fault); background: var(--fault-2); }
-.delta.flat { color: var(--text-3); background: var(--wash); }
 .panel .toolbar { margin: 0; padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); }
 .panel .tablewrap { border: 0; border-radius: 0; }
 .panel > .note, .panel > .coverage { margin: var(--s3) var(--s4); }

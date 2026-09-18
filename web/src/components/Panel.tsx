@@ -26,41 +26,17 @@ export function Panel({ title, live, right, children, className }: {
   );
 }
 
-/** the change since the previous window, in the unit the figure is read in */
-export type Delta = {
-  /** signed change, already in display units (percentage points, ms, count) */
-  value: number;
-  /** what a rise means */
-  goodWhen: "up" | "down";
-  unit?: string;
-  decimals?: number;
-  title?: string;
-};
-
-function DeltaPill({ d }: { d: Delta }) {
-  const dec = d.decimals ?? 1;
-  const flat = Math.abs(d.value) < Math.pow(10, -dec) / 2;
-  const tone = flat ? "flat" : (d.value > 0) === (d.goodWhen === "up") ? "good" : "bad";
-  const sign = flat ? "" : d.value > 0 ? "+" : "−";
-  return (
-    <span className={"delta " + tone} title={d.title ?? "Change since the previous window of the same length."}>
-      {flat ? "±0" : `${sign}${Math.abs(d.value).toFixed(dec)}`}{d.unit ?? ""}
-    </span>
-  );
-}
-
 /**
- * One figure in a panel: label, figure with its unit, the change since the
- * previous window when there is one, and one line of sample underneath. The
- * sample never wraps; its longer reading is the line's tooltip.
+ * One figure in a panel: label, figure with its unit, and one line of sample
+ * underneath. The sample never wraps; its longer reading is the line's
+ * tooltip.
  */
-export function Cell({ label, value, unit, sub, detail, delta, tone, info, loading }: {
+export function Cell({ label, value, unit, sub, detail, tone, info, loading }: {
   label: string;
   value: ReactNode;
   unit?: string;
   sub?: ReactNode;
   detail?: string;
-  delta?: Delta | null;
   tone?: "ok" | "fault" | "absent";
   info?: ReactNode;
   loading?: boolean;
@@ -75,7 +51,6 @@ export function Cell({ label, value, unit, sub, detail, delta, tone, info, loadi
       <span className={vcls}>
         <span className="figure">{loading ? "0000" : value}</span>
         {unit && !loading && <span className="unit">{unit}</span>}
-        {delta && !loading && <DeltaPill d={delta} />}
       </span>
       <span className="sub" title={loading ? undefined : detail ?? (typeof sub === "string" ? sub : undefined)}>{loading || sub === undefined ? " " : sub}</span>
     </div>
