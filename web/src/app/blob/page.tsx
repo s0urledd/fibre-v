@@ -43,12 +43,12 @@ function Recon({ b }: { b: Blob }) {
       </div>
       <div className="recon-body">
         <div className="recon-figs">
-          <div className="tile">
+          <div className="cell">
             <span className="label">Rows served</span>
             <span className="value">{r.served_distinct_rows.toLocaleString("en-US")}<span className="unit">/ {total.toLocaleString("en-US")}</span></span>
             <span className="sub">{r.needed_rows.toLocaleString("en-US")} needed to rebuild</span>
           </div>
-          <div className="tile">
+          <div className="cell">
             <span className="label">Validators served</span>
             <span className="value">{r.served_by_validators}<span className="unit">/ {r.assigned_validators}</span></span>
             <span className="sub">{r.attestation_known ? `${r.served_by_attested} of ${r.attested_validators} that signed` : "signatures not recorded"}</span>

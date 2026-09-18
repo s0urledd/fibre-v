@@ -7,7 +7,8 @@ import { initialsOf } from "@/components/ValidatorTable";
 import Verdict, { Mark } from "@/components/Verdict";
 import Info from "@/components/Info";
 import Graduation from "@/components/Graduation";
-import Tile from "@/components/Tile";
+import { Panel, Cell } from "@/components/Panel";
+import { band } from "@/components/Rate";
 
 type Detail = {
   window: Window;
@@ -30,12 +31,13 @@ function identityWord(status: string): string {
   }
 }
 
-function Layer({ label, r, what, sample }: { label: string; r: Rate | null | undefined; what: React.ReactNode; sample?: string }) {
+function Layer({ label, r, what, sample, kind }: { label: string; r: Rate | null | undefined; what: React.ReactNode; sample?: string; kind?: "serve" | "reach" }) {
   const absent = !r || r.den === 0;
+  const b = kind ? band(r, kind) : "";
   return (
-    <Tile label={label} info={what}
+    <Cell label={label} info={what}
       value={absent ? "—" : fmtPct(r)}
-      tone={absent ? "absent" : undefined}
+      tone={absent ? "absent" : b === "ok" ? "ok" : b === "fault" ? "fault" : undefined}
       sub={absent ? "not observed" : (sample ?? fmtCount(r))} />
   );
 }
@@ -115,32 +117,31 @@ function Page() {
       {/* The window these four figures cover, said rather than implied. The
           serve-rate table below lists all four spans, so without this the
           reader has no way to tell which one the readings above are from. */}
-      <div className="section-head" style={{ marginTop: "var(--s5)" }}>
-        <h2 style={{ margin: 0 }}>Service</h2>
+      <div className="head-row" style={{ marginTop: "var(--s5)" }}>
         <span className="sample" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name} window</span>
-        <Info label="These five figures">
-          <p>Five figures, in the order you would debug them.</p>
-          <p>Reachability and Endorsed come from a TLS handshake with the endpoint every 5 minutes. Faults, Obligations and Throughput only cover blobs this validator signed for.</p>
-          <p>No figure has a threshold. Checks run from one location.</p>
-        </Info>
         <span className="spacer" />
         <div className="pills" role="group" aria-label="window">
           {["24h", "7d", "30d", "all"].map((w) => <button key={w} aria-pressed={win === w} onClick={() => setWin(w)}>{w}</button>)}
         </div>
       </div>
-      <div className="tiles five">
-        <Layer label="Reachability" r={v.reachability_window}
+      <Panel title={<>Service<Info label="These five figures">
+          <p>Five figures, in the order you would debug them.</p>
+          <p>Reachability and Endorsed come from a TLS handshake with the endpoint every 5 minutes. Faults, Obligations and Throughput only cover blobs this validator signed for.</p>
+          <p>No figure has a threshold. Checks run from one location.</p>
+        </Info></>} right={<>{data.window.name} window · <Link href="/methodology/#verdicts">methodology →</Link></>}>
+      <div className="cells five">
+        <Layer label="Reachability" kind="reach" r={v.reachability_window}
           sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined}
           what={<>
             <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes, from one location. Nothing is downloaded.</p>
             <p>This is not signing uptime. A validator can sign every block with its Fibre endpoint down, and the reverse.</p>
           </>} />
-        <Layer label="Endorsed" r={v.identity_rate_window}
+        <Layer label="Endorsed" kind="reach" r={v.identity_rate_window}
           what={<>
             <p>Of the handshakes that reached a certificate, how many were signed by this validator&rsquo;s consensus key. Clients refuse the rest.</p>
             <p>Handshakes that never reached a certificate are not counted here, so an outage is not reported twice.</p>
           </>} />
-        <Tile label="Faults"
+        <Cell label="Faults"
           value={faults > 0 ? <><Mark tier="fault" />{faults.toLocaleString("en-US")}</> : rated ? "0" : "—"}
           tone={faults > 0 ? "fault" : "absent"}
           sub={faults > 0 ? `of ${v.serve_rate.den.toLocaleString("en-US")} rated probes` : rated ? `${v.serve_rate.den.toLocaleString("en-US")} rated probes` : "nothing rated"}
@@ -148,9 +149,9 @@ function Page() {
             <p>The validator answered but did not hand over a shard it had signed for.</p>
             <p>The only number counted against a validator. Unreachable, unproven and unregistered are not faults.</p>
           </>} />
-        <Tile label="Obligations"
+        <Cell label="Obligations"
           value={decided ? fmtPct(o!.rate) : "—"}
-          tone={decided ? undefined : "absent"}
+          tone={!decided ? "absent" : band(o!.rate, "serve") === "ok" ? "ok" : band(o!.rate, "serve") === "fault" ? "fault" : undefined}
           sub={!o || o.total === 0 ? "none proven"
             : decided ? `${o.served.toLocaleString("en-US")} / ${(o.served + o.broken).toLocaleString("en-US")} kept`
             : `${o.total.toLocaleString("en-US")} proven, none observed`}
@@ -161,7 +162,7 @@ function Page() {
             <p>Shards this validator signed for, one observation each, judged by the last probe before the retention deadline: kept if it was handed over then, broken if any probe was a fault.</p>
             <p>Obligations never seen served and never seen broken are listed below, not in the rate.</p>
           </>} />
-        <Tile label="Throughput"
+        <Cell label="Throughput"
           value={v.serve_bytes_per_second == null ? "—" : bytesPerSecond(v.serve_bytes_per_second)}
           tone={v.serve_bytes_per_second == null ? "absent" : undefined}
           sub={v.serve_latency_p50_ms != null
@@ -175,6 +176,7 @@ function Page() {
             <p>The milliseconds underneath are the whole probe, dial to verified rows: what a client waits for.</p>
           </>} />
       </div>
+      </Panel>
 
       {data.rolled_up && (
         <p className="muted rolled">
@@ -225,10 +227,9 @@ function Page() {
           </Info>
         </p>
       )}
-      <h2>Recent probes</h2>
+      <Panel title="Recent probes" right={<>newest 50 · <a href={`/api/v1/probes?validator=${v.address}&limit=1000`}>full history</a></>} className="probes">
       <div className="tablewrap">
         <table>
-          <caption>Newest 50. Full history: <code>/v1/probes?validator={v.address}</code></caption>
           <thead><tr><th>started (UTC)</th><th>blob</th><th>point</th><th>phase</th><th>verdict</th><th>outcome</th><th className="right">rows</th><th className="right">ms</th></tr></thead>
           <tbody>
             {data.recent_probes.length === 0 && <tr><td colSpan={8} className="muted">No probes for this validator yet.</td></tr>}
@@ -269,6 +270,7 @@ function Page() {
           </tbody>
         </table>
       </div>
+      </Panel>
     </>
   );
 }
