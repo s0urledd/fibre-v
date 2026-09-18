@@ -249,7 +249,12 @@ One sentence each, and what a reader should conclude.
   the list. The host used to be back-filled from the newest probe row, which
   made the word for a jailed validator depend on whether the prober had
   restarted since it left: "down" while the prober's in-memory last-known
-  host kept being dialled, "no host" after a restart.
+  host kept being dialled, "no host" after a restart. The prober now
+  replays the collector's `registry.jsonl` on every boot and tails it from
+  then on, so the last host a validator registered survives a restart and
+  a jailed validator's remaining obligations keep being probed at it
+  (`host_source = last_known` on the row); `NOT_REGISTERED` is reserved for
+  a validator this observer never saw register a host.
 - **Throughput** (`serve_bytes_per_second`) is the median of
   `bytes_returned * 1000 / download_ms` over `HEALTHY` in-window probes that
   carry a byte count (`serve_throughput_sample`); records from before schema
@@ -346,10 +351,16 @@ what the measurement cannot separate.
   a different peer from the one whose certificate was checked, and the record
   could no longer say which endpoint it describes. The result is `UNREACHABLE`
   either way, which is outside the serve rate.
-- **Two connections per probe.** One to read the certificate, one to download.
-  A Fibre server admits a bounded number of connections, so this observer
-  occupies two slots where the reference client occupies one, and a busy
-  server is correspondingly more likely to look unreachable to it.
+- **One connection per probe.** The TLS handshake, the identity check and
+  the download share one TCP session: the identity check runs inside the
+  handshake's `VerifyConnection` callback on the connection the download
+  then uses, so the certificate a row records (`tls.peer_cert_sha256`) is
+  the one that served the rows (`tls.shared_with_download`). A Fibre server
+  admits a bounded number of connections, and this observer holds one slot,
+  as the reference client does. Rows from builds before this one opened a
+  second connection for the download and carry no `shared_with_download`;
+  on those, a second backend behind the same host:port could answer the
+  download with a different certificate from the one recorded.
 - **Shadowing needs the other promise.** `SHADOWED_SHARD` requires the
   prober to know the other promise over the same commitment. The candidate
   set is every publication the prober still holds, and it holds one until

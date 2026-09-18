@@ -168,7 +168,11 @@ type TLSResult struct {
 	CipherSuite      string `json:"cipher_suite,omitempty"`
 	PeerCertSHA256   string `json:"peer_cert_sha256,omitempty"`
 	PeerCertNotAfter string `json:"peer_cert_not_after,omitempty"`
-	Error            string `json:"error,omitempty"`
+	// SharedWithDownload: the download in this row rode this same TLS
+	// session, so the certificate above is the one that served the rows.
+	// Absent on rows from builds that opened a second connection for L4.
+	SharedWithDownload bool   `json:"shared_with_download,omitempty"`
+	Error              string `json:"error,omitempty"`
 }
 
 // SamplingDecision is the load-policy decision a row was produced under.

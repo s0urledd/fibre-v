@@ -131,6 +131,20 @@ func (r *Resolver) hostMap(ctx context.Context) (map[string]string, error) {
 	return m, nil
 }
 
+// seedLastKnown records a host this observer saw registered for a validator
+// at time at, from the durable registry (see hostRegistry). A record older
+// than what is already known is ignored: the live bonded poll and the
+// registry describe the same history, and the newer confirmation wins.
+func (r *Resolver) seedLastKnown(addrHex, host string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if k, ok := r.lastKnown[addrHex]; ok && !k.at.Before(at) {
+		return
+	}
+	r.lastKnown[addrHex] = knownHost{host: host, at: at}
+	r.evictLastKnown()
+}
+
 // evictLastKnown keeps the fallback map bounded, dropping the entries
 // confirmed longest ago first. Emptying it wholesale would throw away exactly
 // the validators that have been gone longest, which are the ones the fallback
@@ -156,6 +170,13 @@ func (r *Resolver) evictLastKnown() {
 	for i := 0; i < len(all)-maxLastKnownHosts; i++ {
 		delete(r.lastKnown, all[i].key)
 	}
+}
+
+// knownHosts is how many validators have a host on record, bonded or not.
+func (r *Resolver) knownHosts() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.lastKnown)
 }
 
 // hostFor resolves one validator's host, preferring the bonded registry and

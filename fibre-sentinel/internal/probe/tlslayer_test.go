@@ -1,0 +1,273 @@
+package probe
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/binary"
+	"math/big"
+	"net"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	fibretypes "github.com/celestiaorg/celestia-app/v10/x/fibre/types"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
+
+	tlsverify "github.com/plsgiveup/fibre/fibre-tlsverify"
+)
+
+// fibreCert builds the certificate an honest Fibre server presents: a
+// self-signed TLS certificate carrying the identity extension, the binding
+// payload endorsed by the validator's consensus key over cometbft's raw-bytes
+// envelope. It mirrors celestia-app's tlsid builder from the protocol
+// constants tlsverify exports; tlsverify.VerifyCertificate accepting the
+// result is what pins it to the golden vectors.
+func fibreCert(t *testing.T, cons ed25519.PrivateKey, chainID string, notBefore, notAfter time.Time) tls.Certificate {
+	t.Helper()
+	tlsPub, tlsPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsPubDER, err := x509.MarshalPKIXPublicKey(tlsPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notBefore, notAfter = notBefore.Truncate(time.Second), notAfter.Truncate(time.Second)
+	payload, err := asn1.Marshal(struct {
+		Version   int
+		NotBefore int64
+		NotAfter  int64
+		TLSPubKey []byte
+	}{tlsverify.BindingVersion, notBefore.Unix(), notAfter.Unix(), tlsPubDER})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signBytes := append([]byte(tlsverify.SignPrefix), payload...)
+	var msg []byte
+	for i, f := range [][]byte{[]byte(chainID), signBytes, []byte(tlsverify.SignUniqueID)} {
+		msg = binary.AppendUvarint(msg, uint64(i+1)<<3|2)
+		msg = binary.AppendUvarint(msg, uint64(len(f)))
+		msg = append(msg, f...)
+	}
+	envelope := append([]byte("COMET::RAW_BYTES::SIGN"), binary.AppendUvarint(nil, uint64(len(msg)))...)
+	envelope = append(envelope, msg...)
+	ext, err := asn1.Marshal(struct {
+		Payload   []byte
+		Signature []byte
+	}{payload, ed25519.Sign(cons, envelope)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oid asn1.ObjectIdentifier
+	for _, part := range []int{1, 3, 6, 1, 4, 1, 66463, 1, 1} {
+		oid = append(oid, part)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:    big.NewInt(1),
+		Subject:         pkix.Name{CommonName: "fibre-test"},
+		NotBefore:       notBefore,
+		NotAfter:        notAfter,
+		ExtKeyUsage:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtraExtensions: []pkix.Extension{{Id: oid, Value: ext}},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, tlsPub, tlsPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: tlsPriv, Leaf: leaf}
+}
+
+// countingListener counts the TCP connections a test server accepted: the
+// property under test is that one probe is one connection.
+type countingListener struct {
+	net.Listener
+	accepted atomic.Int32
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err == nil {
+		l.accepted.Add(1)
+	}
+	return c, err
+}
+
+type fakeFibre struct {
+	fibretypes.UnimplementedFibreServer
+	download func(context.Context, *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error)
+}
+
+func (f *fakeFibre) DownloadShard(ctx context.Context, req *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error) {
+	return f.download(ctx, req)
+}
+
+// startFibre serves a Fibre gRPC endpoint with cert and returns its
+// host:port and the listener's connection counter.
+func startFibre(t *testing.T, cert tls.Certificate, srv fibretypes.FibreServer) (string, *countingListener) {
+	t.Helper()
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln := &countingListener{Listener: raw}
+	gs := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+	})))
+	fibretypes.RegisterFibreServer(gs, srv)
+	go func() { _ = gs.Serve(ln) }()
+	t.Cleanup(gs.Stop)
+	return ln.Addr().String(), ln
+}
+
+func probeInput(host string, consPub ed25519.PublicKey) Input {
+	return Input{
+		Vantage: "t", ChainID: "test-chain", PromiseHash: "aa", MustServeUntil: time.Now().Add(time.Hour),
+		Target: Target{
+			AddressHex: "aa", Host: host, Assigned: true, Attested: true, RowCount: 4,
+			PubKey: consPub, AssignedRows: []int{0, 1, 2, 3},
+		},
+		SchedulePoint: SchedulePoint{Label: "w1", At: time.Now()},
+	}
+}
+
+func mustCoder(t *testing.T) *Coder {
+	t.Helper()
+	c, err := NewCoder(4, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestRun_OneConnectionCarriesHandshakeIdentityAndDownload(t *testing.T) {
+	consPub, consPriv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	cert := fibreCert(t, consPriv, "test-chain", now.Add(-time.Hour), now.Add(24*time.Hour))
+	if err := tlsverify.VerifyCertificate(cert.Leaf, consPub, "test-chain"); err != nil {
+		t.Fatalf("test certificate does not verify: %v", err)
+	}
+	host, ln := startFibre(t, cert, &fakeFibre{download: func(context.Context, *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error) {
+		return nil, status.Error(codes.NotFound, "shard not found")
+	}})
+
+	m := Run(context.Background(), probeInput(host, consPub), mustCoder(t), StepTimeouts{})
+	if m.Outcome != OutcomeNotFound {
+		t.Fatalf("outcome = %s (%s), want %s", m.Outcome, m.RawError, OutcomeNotFound)
+	}
+	if !m.TLS.Attempted || !m.TLS.OK || m.TLS.PeerCertSHA256 == "" || m.TLS.Version != "1.3" {
+		t.Errorf("tls step = %+v", m.TLS)
+	}
+	if !m.Identity.Attempted || !m.Identity.OK || m.Identity.ClaimedNotAfter == "" {
+		t.Errorf("identity step = %+v", m.Identity)
+	}
+	if !m.TLS.SharedWithDownload {
+		t.Error("the download must be recorded as riding the handshake's connection")
+	}
+	if !m.Download.Attempted || m.Download.RPCCode != "NotFound" {
+		t.Errorf("download = %+v", m.Download)
+	}
+	if n := ln.accepted.Load(); n != 1 {
+		t.Errorf("server accepted %d connections for one probe, want 1", n)
+	}
+}
+
+func TestRun_IdentityRefusalIsOneConnectionAndPrompt(t *testing.T) {
+	_, consPriv, _ := ed25519.GenerateKey(rand.Reader)
+	otherPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	cert := fibreCert(t, consPriv, "test-chain", now.Add(-time.Hour), now.Add(24*time.Hour))
+	host, ln := startFibre(t, cert, &fakeFibre{download: func(context.Context, *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error) {
+		t.Error("DownloadShard reached the server on a connection whose identity was refused")
+		return nil, status.Error(codes.NotFound, "")
+	}})
+
+	t0 := time.Now()
+	// the probe expects another validator's key: the server is an impostor
+	m := Run(context.Background(), probeInput(host, otherPub), mustCoder(t), StepTimeouts{})
+	if m.Outcome != OutcomeIdentityFail {
+		t.Fatalf("outcome = %s (%s), want %s", m.Outcome, m.RawError, OutcomeIdentityFail)
+	}
+	if !m.TLS.OK || m.Identity.OK || m.Identity.Reason != string(tlsverify.ReasonSignatureInvalid) || m.Identity.Stale {
+		t.Errorf("tls=%+v identity=%+v", m.TLS, m.Identity)
+	}
+	if m.Download.Attempted || m.TLS.SharedWithDownload {
+		t.Errorf("no download must be recorded after an identity refusal: %+v", m.Download)
+	}
+	if n := ln.accepted.Load(); n != 1 {
+		t.Errorf("server accepted %d connections, want 1", n)
+	}
+	// a refused handshake must abort the call, not sit out the download
+	// deadline while grpc redials a connection that is not there
+	if el := time.Since(t0); el > 5*time.Second {
+		t.Errorf("identity refusal took %s; the RPC was not aborted", el)
+	}
+}
+
+func TestRun_LapsedCertificateIsStaleNotImpostor(t *testing.T) {
+	consPub, consPriv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	cert := fibreCert(t, consPriv, "test-chain", now.Add(-48*time.Hour), now.Add(-24*time.Hour))
+	host, _ := startFibre(t, cert, &fakeFibre{})
+	m := Run(context.Background(), probeInput(host, consPub), mustCoder(t), StepTimeouts{})
+	if m.Outcome != OutcomeIdentityFail || !m.Identity.Stale || m.Identity.Reason != string(tlsverify.ReasonCertExpired) {
+		t.Fatalf("outcome=%s identity=%+v", m.Outcome, m.Identity)
+	}
+}
+
+func TestRun_ReachabilityProbeStopsAfterIdentity(t *testing.T) {
+	consPub, consPriv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	cert := fibreCert(t, consPriv, "test-chain", now.Add(-time.Hour), now.Add(24*time.Hour))
+	host, ln := startFibre(t, cert, &fakeFibre{download: func(context.Context, *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error) {
+		t.Error("a SkipDownload probe must not call DownloadShard")
+		return nil, nil
+	}})
+	in := probeInput(host, consPub)
+	in.SkipDownload = true
+	m := Run(context.Background(), in, nil, StepTimeouts{})
+	if m.Outcome != OutcomeReachable || !m.TLS.OK || !m.Identity.OK || m.TLS.SharedWithDownload {
+		t.Fatalf("outcome=%s tls=%+v identity=%+v", m.Outcome, m.TLS, m.Identity)
+	}
+	if n := ln.accepted.Load(); n != 1 {
+		t.Errorf("server accepted %d connections, want 1", n)
+	}
+}
+
+func TestRun_NoTLSIsATransportFailure(t *testing.T) {
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	go func() {
+		for {
+			c, err := raw.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
+			_ = c.Close()
+		}
+	}()
+	consPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	m := Run(context.Background(), probeInput(raw.Addr().String(), consPub), mustCoder(t), StepTimeouts{})
+	if m.Outcome != OutcomeTLSFail {
+		t.Fatalf("outcome = %s (%s), want %s", m.Outcome, m.RawError, OutcomeTLSFail)
+	}
+	if !m.TLS.Attempted || m.TLS.OK || m.TLS.Error == "" || m.Identity.Attempted || m.Download.Attempted {
+		t.Errorf("tls=%+v identity=%+v download=%+v", m.TLS, m.Identity, m.Download)
+	}
+}

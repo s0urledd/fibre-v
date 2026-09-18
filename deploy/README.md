@@ -12,7 +12,9 @@ The JSONL files are the append-only raw record; the SQLite database is
 derived from them and can be rebuilt by deleting it and restarting the
 collector. The collector's own `registry.jsonl` carries the endpoint
 history (which validator registered which host, when), the one derived
-table that has no other source. Back up the JSONL files and the database
+table that has no other source; the prober reads it too, so a validator
+that left the bonded list keeps being probed at its last registered host
+across prober restarts. Back up the JSONL files and the database
 (see "Backups"). Every process keeps a status file under `status/`, and
 `/v1/health` turns them into one answer (see "Health and alerting").
 

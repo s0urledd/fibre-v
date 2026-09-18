@@ -26,7 +26,11 @@ type Config struct {
 	RPCURL           string
 	PublicationsPath string // publications.jsonl written by the scanner
 	DataDir          string // where measurements.jsonl lives
-	Vantage          string // this prober's vantage-point name
+	// RegistryPath is the collector's registry.jsonl, the durable record of
+	// every host this observer saw a validator register. Default
+	// <DataDir>/registry.jsonl; the file is optional.
+	RegistryPath string
+	Vantage      string // this prober's vantage-point name
 
 	Schedule ScheduleConfig
 	Timeouts StepTimeouts
@@ -76,6 +80,9 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
+	if c.RegistryPath == "" {
+		c.RegistryPath = filepath.Join(c.DataDir, "registry.jsonl")
+	}
 	if c.MaxSleep <= 0 {
 		c.MaxSleep = 30 * time.Second
 	}
@@ -133,6 +140,7 @@ type Prober struct {
 	resolver *Resolver
 	store    *MeasurementStore
 	feed     *pubFeed
+	registry *hostRegistry
 	chainID  string
 
 	clockMu     sync.Mutex
@@ -174,6 +182,7 @@ func New(cfg Config, log *scan.Logger) (*Prober, error) {
 		resolver:    NewResolver(ch, cfg.HostCacheTTL),
 		store:       st,
 		feed:        newPubFeed(cfg.PublicationsPath),
+		registry:    newHostRegistry(cfg.RegistryPath),
 		coders:      map[[2]int]*Coder{},
 		complete:    map[string]bool{},
 		skippedPubs: map[string]bool{},
@@ -268,6 +277,7 @@ func (p *Prober) Run(parent context.Context) error {
 		p.pollAppVersion(ctx)
 		p.loadGaps()
 		p.pollScanned(ctx)
+		p.refreshRegistry()
 
 		if added, err := p.feed.refresh(); err != nil {
 			p.log.Fatalf("load publications: %v", err)
@@ -390,6 +400,23 @@ func (p *Prober) pollAppVersion(ctx context.Context) {
 	if p.status != nil {
 		p.status.Set("app_version", v)
 		p.status.Set("pin_stale", cur.PinStale)
+	}
+}
+
+// refreshRegistry seeds the resolver's last-known hosts from registry.jsonl
+// (see hostRegistry). Errors are logged, never fatal: the file is the
+// collector's and optional.
+func (p *Prober) refreshRegistry() {
+	applied, skipped, err := p.registry.refresh(p.resolver)
+	if err != nil {
+		p.log.Printf("registry: %v", err)
+		return
+	}
+	if applied > 0 || skipped > 0 {
+		p.log.Printf("registry: +%d host records (%d skipped), %d validators with a known host", applied, skipped, p.resolver.knownHosts())
+	}
+	if p.status != nil && (applied > 0 || skipped > 0) {
+		p.status.Set("known_hosts", p.resolver.knownHosts())
 	}
 }
 

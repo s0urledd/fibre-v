@@ -29,6 +29,7 @@ func main() {
 		rpc      = flag.String("rpc", "http://127.0.0.1:26657", "CometBFT RPC endpoint")
 		dataDir  = flag.String("data-dir", "./sentinel-data", "dir holding publications.jsonl; measurements.jsonl is written here")
 		pubsPath = flag.String("publications", "", "path to publications.jsonl (default <data-dir>/publications.jsonl)")
+		regPath  = flag.String("registry", "", "path to the collector's registry.jsonl, the durable record of each validator's last registered host (default <data-dir>/registry.jsonl; optional)")
 		vantage  = flag.String("vantage", "local", "name of this vantage point (recorded on every measurement)")
 
 		once     = flag.Bool("once", false, "probe everything currently due, then exit")
@@ -89,6 +90,7 @@ func main() {
 		Policy:           pol,
 		RPCURL:           *rpc,
 		PublicationsPath: *pubsPath,
+		RegistryPath:     *regPath,
 		DataDir:          *dataDir,
 		Vantage:          *vantage,
 		Schedule: probe.ScheduleConfig{

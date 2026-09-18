@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
@@ -25,7 +24,6 @@ import (
 	tlsverify "github.com/plsgiveup/fibre/fibre-tlsverify"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -321,14 +319,13 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 	t0 := time.Now()
 	var rawConn net.Conn
 	var terr error
-	var ip string
 	var attempts []string
 	allLocal := len(addrs) > 0
 	for _, cand := range addrs {
 		d := net.Dialer{Timeout: to.TCP}
 		c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(cand, port))
 		if err == nil {
-			rawConn, ip = c, cand
+			rawConn = c
 			allLocal = false
 			break
 		}
@@ -379,103 +376,48 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 	}
 	m.TCP.Detail += "-> " + rawConn.RemoteAddr().String()
 
-	// ---- L3a: TLS handshake (no verification here; identity is its own step) ----
-	t0 = time.Now()
-	rawCfg := &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13} //nolint:gosec // identity checked separately below
-	tlsConn := tls.Client(rawConn, rawCfg)
-	hctx, cancel := context.WithTimeout(ctx, to.TLS)
-	herr := tlsConn.HandshakeContext(hctx)
-	cancel()
-	m.TLS = TLSResult{Attempted: true, OK: herr == nil, DurationMS: sinceMS(t0)}
-	if herr != nil {
-		m.TLS.Error = herr.Error()
-		_ = tlsConn.Close()
-		m.Outcome = OutcomeTLSFail
-		m.RawError = herr.Error()
-		return m
-	}
-	st := tlsConn.ConnectionState()
-	m.TLS.Version = tlsVersionString(st.Version)
-	m.TLS.CipherSuite = tls.CipherSuiteName(st.CipherSuite)
-	var peerCert *x509.Certificate
-	if len(st.PeerCertificates) > 0 {
-		peerCert = st.PeerCertificates[0]
-	}
-	if peerCert != nil {
-		sum := sha256.Sum256(peerCert.Raw)
-		m.TLS.PeerCertSHA256 = hex.EncodeToString(sum[:])
-		m.TLS.PeerCertNotAfter = peerCert.NotAfter.UTC().Format(time.RFC3339)
-	}
-	_ = tlsConn.Close()
-
-	// ---- L3b: identity (consensus-key binding) ----
-	t0 = time.Now()
-	m.Identity = IdentityResult{Attempted: true}
-	if peerCert == nil {
-		m.Identity.Error = "peer presented no certificate"
-		m.Identity.DurationMS = sinceMS(t0)
-		m.Outcome = OutcomeIdentityFail
-		m.RawError = m.Identity.Error
-		return m
-	}
-	if claimed, ierr := tlsverify.Inspect(peerCert); ierr == nil {
-		m.Identity.ClaimedNotBefore = claimed.NotBefore.UTC().Format(time.RFC3339)
-		m.Identity.ClaimedNotAfter = claimed.NotAfter.UTC().Format(time.RFC3339)
-	}
-	// The identity check is pure computation on the peer cert; the timeout
-	// bounds it anyway so a pathological certificate cannot stall a probe.
-	verr := verifyWithin(peerCert, in.Target.PubKey, in.ChainID, to.Identity)
-	m.Identity.DurationMS = sinceMS(t0)
-	m.Identity.OK = verr == nil
-	if verr != nil {
-		if errors.Is(verr, errVerifyTimeout) {
-			// The observer ran out of CPU, not the validator out of honesty.
-			m.Identity.Reason = "observer_timeout"
-			m.Identity.Error = verr.Error()
-			m.Outcome = OutcomeProbeError
-			m.RawError = verr.Error()
+	// ---- L3: TLS handshake and identity, on the connection L4 will use ----
+	// One handshake per probe. The certificate check runs inside it (see
+	// handshake.verify), and a download rides the same connection: the
+	// certificate the row records is the one that served the rows, and the
+	// observer holds one of the server's bounded connection slots, as a
+	// client does, not two.
+	hs := newHandshake(in, to)
+	if in.SkipDownload {
+		if tc, _ := hs.run(ctx, rawConn); tc != nil {
+			_ = tc.Close()
+		} else {
+			_ = rawConn.Close()
+		}
+		m.TLS, m.Identity = hs.results()
+		if out, raw, failed := hs.failure(); failed {
+			m.Outcome, m.RawError = out, raw
 			return m
 		}
-		if reason, ok := tlsverify.ReasonOf(verr); ok {
-			m.Identity.Reason = string(reason)
-			m.Identity.Stale = identityStale(reason)
-		}
-		m.Identity.Error = verr.Error()
-		m.Outcome = OutcomeIdentityFail
-		m.RawError = verr.Error()
-		return m
-	}
-
-	if in.SkipDownload {
 		m.Outcome = OutcomeReachable
 		return m
 	}
 
-	// ---- L4: retrievability (fresh dial with the verifying TLS config) ----
-	dl := downloadAndVerify(ctx, in, coder, net.JoinHostPort(ip, port), to.downloadDeadline(in.ExpectedShardBytes))
+	// ---- L4: retrievability (the handshake runs inside the gRPC dial) ----
+	dl := downloadAndVerify(ctx, in, coder, rawConn, hs, to.downloadDeadline(in.ExpectedShardBytes))
+	m.TLS, m.Identity = hs.results()
+	if out, raw, failed := hs.failure(); failed {
+		m.Outcome, m.RawError = out, raw
+		return m
+	}
+	// A download that was refused before any dial (blob version out of
+	// range) leaves the TLS step unattempted; only a completed handshake
+	// is the session the download rode.
+	m.TLS.SharedWithDownload = m.TLS.OK
 	m.Download = dl.DownloadResult
 	m.Outcome = dl.outcome
 	if dl.rawErr != "" {
 		m.RawError = dl.rawErr
 	}
-	switch dl.outcome {
-	case OutcomeNotFound:
+	if dl.outcome == OutcomeNotFound {
 		if p, regraded := notFoundPhase(time.Now().UTC(), m.Phase, in.MustServeUntil, in.PruneTolerance); regraded {
 			m.Phase = p
 			m.PhaseNote = "not_found_at_deadline"
-		}
-	case OutcomeIdentityFail:
-		// L3 accepted a certificate a moment ago and the verifying dial for
-		// L4 refused one: a second backend behind the same host:port, or a
-		// validity edge crossed between the two connections. Without this
-		// the row said identity.ok=true beside an IDENTITY_FAIL outcome,
-		// and a lapsed certificate on this path was filed as a mismatch.
-		if m.Identity.OK {
-			m.Identity.OK = false
-			if r, ok := reasonInText(dl.rawErr); ok {
-				m.Identity.Reason = string(r)
-				m.Identity.Stale = identityStale(r)
-			}
 		}
 	}
 	return m
@@ -502,18 +444,6 @@ func notFoundPhase(now time.Time, started Phase, mustServeUntil time.Time, tol t
 	return p, p != PhaseInWindow
 }
 
-var identityReasonRe = regexp.MustCompile(`fibre tls identity \[([a-z_]+)\]`)
-
-// reasonInText recovers the tlsverify reason from an error the gRPC transport
-// has already flattened to a string.
-func reasonInText(s string) (tlsverify.Reason, bool) {
-	m := identityReasonRe.FindStringSubmatch(s)
-	if m == nil {
-		return "", false
-	}
-	return tlsverify.Reason(m[1]), true
-}
-
 // dlResult carries the raw outcome + error out of downloadAndVerify without
 // leaking them into the JSON schema.
 type dlResult struct {
@@ -533,13 +463,16 @@ var defaultMaxRecvMsgSize = celfibre.DefaultProtocolParams.MaxMessageSize()
 // requires, so an operator seeing the traffic can tell who it is and stop it.
 const userAgent = "fibre-sentinel-observer"
 
-// downloadAndVerify runs the L4 step against endpoint, the ip:port literal
-// that L2/L3 already verified, so all layers judge the same address.
+// downloadAndVerify runs the L4 step over conn, the connection L2 opened,
+// so all layers judge the same address and the same TCP session. The TLS
+// handshake and the identity check run inside the gRPC dial (probeCreds);
+// when they fail, the caller reads the verdict from hs, not from the
+// Unavailable the RPC returns.
 //
 // This is a deliberate difference from the reference client, which dials the
 // registered host string and lets grpc-go's resolver and pick_first try every
 // address (celestia-app fibre/internal/grpc/fibre_client.go). Pinning the
-// address buys a property the reference client does not need and this
+// connection buys a property the reference client does not need and this
 // observer does: every layer of a measurement describes one endpoint, so a
 // recorded TLS identity, a recorded round trip and a recorded download all
 // belong to the same peer. Letting grpc re-resolve would let the download
@@ -554,25 +487,24 @@ const userAgent = "fibre-sentinel-observer"
 // and already says the observer could not complete a conversation rather than
 // that the validator refused to serve, so the trade costs coverage of a
 // multi-address host rather than fairness to it.
-//
-// This is also the second connection of the probe: L3 opens one to read the
-// certificate and this opens another. A Fibre server admits a bounded number
-// of connections (DefaultMaxConnections, netutil.LimitListener), so the
-// observer occupies two slots where the reference client occupies one.
-// Folding the identity check into this connection's VerifyConnection callback
-// would halve that, at the cost of restructuring the per-layer timings that
-// the whole record is built from.
-func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint string, timeout time.Duration) dlResult {
+func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Conn, hs *handshake, timeout time.Duration) dlResult {
 	r := dlResult{DownloadResult: DownloadResult{Attempted: true, RowsExpected: in.Target.RowCount}}
 	t0 := time.Now()
+	// grpc closes conn once it owns it; until then, and on every early
+	// return, it is this function's to close.
+	defer conn.Close()
+	endpoint := conn.RemoteAddr().String()
+
+	dctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	recvLimit := in.MaxMessageSize
 	if recvLimit <= 0 {
 		recvLimit = defaultMaxRecvMsgSize
 	}
-	tlsCfg := tlsverify.ClientTLSConfig(in.Target.PubKey, in.ChainID)
-	conn, err := grpc.NewClient("passthrough:///"+endpoint,
-		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
+	cc, err := grpc.NewClient("passthrough:///"+endpoint,
+		grpc.WithTransportCredentials(&probeCreds{hs: hs, abort: cancel}),
+		grpc.WithContextDialer(handOff(conn)),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(recvLimit)),
 		grpc.WithUserAgent(userAgent),
 		// grpc-go consults HTTPS_PROXY even for a passthrough target, so
@@ -587,10 +519,7 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint str
 		r.outcome, r.rawErr = OutcomeRPCError, err.Error()
 		return r
 	}
-	defer conn.Close()
-
-	dctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	defer cc.Close()
 
 	if in.BlobVersion > 255 {
 		// BlobID carries a uint8. Truncating here would silently probe the
@@ -603,9 +532,14 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint str
 	}
 	dctx = metadata.AppendToOutgoingContext(dctx, "x-fibre-observer", in.Vantage)
 	blobID := celfibre.NewBlobID(uint8(in.BlobVersion), celfibre.Commitment(in.Commitment))
-	resp, err := fibretypes.NewFibreClient(conn).DownloadShard(dctx, &fibretypes.DownloadShardRequest{BlobId: blobID})
+	resp, err := fibretypes.NewFibreClient(cc).DownloadShard(dctx, &fibretypes.DownloadShardRequest{BlobId: blobID})
 	r.DurationMS = sinceMS(t0)
 	if err != nil {
+		if _, _, failed := hs.failure(); failed {
+			// The connection never got past its handshake: no request was
+			// made, and the verdict is the handshake's (Run reads it).
+			return dlResult{}
+		}
 		r.Error = err.Error()
 		r.RPCCode = rpcCodeOf(err)
 		r.outcome, r.rawErr = classifyDownloadError(err), err.Error()

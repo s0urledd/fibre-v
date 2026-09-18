@@ -10,8 +10,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	tlsverify "github.com/plsgiveup/fibre/fibre-tlsverify"
-
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 )
 
@@ -751,18 +749,5 @@ func TestNotFoundPhaseGuard(t *testing.T) {
 	}
 	if p, re := notFoundPhase(msu.Add(time.Hour), PhaseGrace, msu, tol); re || p != PhaseGrace {
 		t.Errorf("started in grace: regraded=%v phase=%s", re, p)
-	}
-}
-
-// The verifying dial's refusal carries the tlsverify reason in its text; the
-// row must keep it, and a lapsed certificate on that path is stale, not a
-// mismatch.
-func TestReasonInText(t *testing.T) {
-	r, ok := reasonInText("rpc error: code = Unavailable desc = connection error: fibre tls identity [cert_expired]: peer certificate expired")
-	if !ok || r != tlsverify.ReasonCertExpired || !identityStale(r) {
-		t.Errorf("got %q ok=%v stale=%v", r, ok, identityStale(r))
-	}
-	if _, ok := reasonInText("rpc error: code = Unavailable desc = connection refused"); ok {
-		t.Errorf("found a reason in an error that has none")
 	}
 }
