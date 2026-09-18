@@ -251,6 +251,10 @@ type DownloadResult struct {
 	// free-text error so the SERVER_ERROR / THROTTLED / NOT_FOUND split is
 	// machine-readable. Empty on success and on non-status errors.
 	RPCCode string `json:"rpc_code,omitempty"`
+	// RecvLimit is the receive bound this probe ran with, so a
+	// PROBE_ERROR from "received message larger than max" is checkable
+	// against the shard's size.
+	RecvLimit int `json:"recv_limit,omitempty"`
 	// RPC is the read method the probe called: DownloadShard today; the
 	// streaming read once upstream ships it and the prober tries both.
 	RPC string `json:"rpc,omitempty"`

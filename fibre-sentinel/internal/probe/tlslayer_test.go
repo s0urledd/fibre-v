@@ -322,3 +322,54 @@ func TestRun_SettlementHostIsProbedAsEvidenceWhenTheCurrentHostDoesNotServe(t *t
 		t.Error("a target resolved from the settlement host itself is not a change")
 	}
 }
+
+func bigShard(n int) *fibretypes.DownloadShardResponse {
+	return &fibretypes.DownloadShardResponse{Shard: &fibretypes.BlobShard{Rlcs: make([]byte, n)}}
+}
+
+// ResourceExhausted from this side's receive bound is the observer's own
+// gap, with the bound on the row; the same code from the server's send
+// bound is the validator's, a server error; neither is a throttle.
+func TestRun_SizeBoundsAreToldApartFromAThrottle(t *testing.T) {
+	consPub, consPriv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	cert := fibreCert(t, consPriv, "test-chain", now.Add(-time.Hour), now.Add(24*time.Hour))
+
+	// a shard larger than the probe's receive bound
+	host, _ := startFibre(t, cert, &fakeFibre{download: func(context.Context, *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error) {
+		return bigShard(300_000), nil
+	}})
+	in := probeInput(host, consPub)
+	in.MaxMessageSize, in.ExpectedShardBytes = 100_000, 50_000
+	m := Run(context.Background(), in, mustCoder(t), StepTimeouts{})
+	if m.Outcome != OutcomeProbeError || m.Download.RPCCode != "ResourceExhausted" || m.Download.RecvLimit != 100_000 {
+		t.Fatalf("receive bound: outcome=%s code=%s limit=%d (%s)", m.Outcome, m.Download.RPCCode, m.Download.RecvLimit, m.RawError)
+	}
+	// the expected shard size floors the bound, so the same shard is received
+	in.ExpectedShardBytes = 300_000
+	m = Run(context.Background(), in, mustCoder(t), StepTimeouts{})
+	if m.Outcome == OutcomeProbeError || m.Download.RecvLimit < 330_000 {
+		t.Fatalf("floored bound: outcome=%s limit=%d (%s)", m.Outcome, m.Download.RecvLimit, m.RawError)
+	}
+
+	// a server whose own send bound refuses the shard
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})), grpc.MaxSendMsgSize(1000))
+	fibretypes.RegisterFibreServer(gs, &fakeFibre{download: func(context.Context, *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error) {
+		return bigShard(10_000), nil
+	}})
+	go func() { _ = gs.Serve(raw) }()
+	t.Cleanup(gs.Stop)
+	m = Run(context.Background(), probeInput(raw.Addr().String(), consPub), mustCoder(t), StepTimeouts{})
+	if m.Outcome != OutcomeServerError || m.Download.RPCCode != "ResourceExhausted" {
+		t.Fatalf("send bound: outcome=%s code=%s (%s)", m.Outcome, m.Download.RPCCode, m.RawError)
+	}
+	// SERVER_ERROR in window is held out of the rate (unobserved,
+	// reachable): never a fault and never our gap
+	if m.Classification == ClassFault || m.Classification == ClassProbeError {
+		t.Fatalf("a server's send bound classified %s", m.Classification)
+	}
+}

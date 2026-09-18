@@ -590,6 +590,11 @@ func TestClassifyDownloadError_StatusCodes(t *testing.T) {
 		{status.Error(codes.Unavailable, "connection error"), OutcomeRPCUnavailable},
 		{status.Error(codes.DeadlineExceeded, "context deadline exceeded"), OutcomeRPCDeadline},
 		{status.Error(codes.ResourceExhausted, "grpc: received message larger than max (5000000 vs. 4194304)"), OutcomeProbeError},
+		{status.Error(codes.ResourceExhausted, "grpc: received message after decompression larger than max 4194304"), OutcomeProbeError},
+		// the server's own send bound refusing to deliver a shard it holds
+		// is the validator's, reached and answered: never our gap, never a
+		// throttle
+		{status.Error(codes.ResourceExhausted, "grpc: trying to send message larger than max (5000000 vs. 4194304)"), OutcomeServerError},
 		{status.Error(codes.InvalidArgument, "bad blob id"), OutcomeProbeError},
 		// a server that no longer serves the unary read (a streaming-only
 		// build) is the observer's client being behind, never a verdict

@@ -457,6 +457,23 @@ type dlResult struct {
 // verdict from either can be told apart once both are in play.
 const downloadRPCUnary = "DownloadShard"
 
+// recvLimitFor sizes the receive bound for this probe: the publication's
+// own protocol bound (or the pinned defaults), never below what this
+// validator's shard of this blob is expected to weigh plus a tenth and the
+// promise. The upstream bound is derived from the pinned MaxBlobSize; a
+// chain that raised it would otherwise turn its largest shards, the ones
+// most worth checking, into receive errors on this side.
+func recvLimitFor(in Input) int {
+	limit := in.MaxMessageSize
+	if limit <= 0 {
+		limit = defaultMaxRecvMsgSize
+	}
+	if floor := int(in.ExpectedShardBytes+in.ExpectedShardBytes/10) + celfibre.MaxPaymentPromiseSize; floor > limit {
+		limit = floor
+	}
+	return limit
+}
+
 // defaultMaxRecvMsgSize matches the reference client's receive bound
 // (fibre/internal/grpc/fibre_client.go: MaxCallRecvMsgSize(maxMsgSize) with
 // maxMsgSize = ProtocolParams.MaxMessageSize()). grpc-go's default is 4 MiB,
@@ -503,10 +520,8 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Con
 	dctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	recvLimit := in.MaxMessageSize
-	if recvLimit <= 0 {
-		recvLimit = defaultMaxRecvMsgSize
-	}
+	recvLimit := recvLimitFor(in)
+	r.RecvLimit = recvLimit
 	cc, err := grpc.NewClient("passthrough:///"+endpoint,
 		grpc.WithTransportCredentials(&probeCreds{hs: hs, abort: cancel}),
 		grpc.WithContextDialer(handOff(conn)),
@@ -713,14 +728,24 @@ func classifyDownloadError(err error) Outcome {
 		case codes.DeadlineExceeded:
 			return OutcomeRPCDeadline
 		case codes.ResourceExhausted:
-			// Two very different things share this code. The observer's own
-			// receive bound ("received message larger than max") is a probe
-			// error. Anything else is the server declining to serve this
-			// request: the storage limiter today (upload path only), the
-			// per-peer rate limiter Celestia has announced for the download
-			// path, or any limiter an operator puts in front of the port.
-			if strings.Contains(ls, "larger than max") {
+			// Three very different things share this code, told apart by the
+			// text grpc-go puts on them. The observer's own receive bound
+			// ("received message larger than max", also the after-
+			// decompression variants) is a probe error: the bound is sized
+			// from the blob (see recvLimitFor) and recorded on the row. The
+			// server's own send bound ("trying to send message larger than
+			// max", grpc.MaxSendMsgSize on its side) is the validator
+			// refusing to deliver a shard it holds: a server error, reached
+			// and answered, never the observer's gap and never a throttle.
+			// Anything else is the server declining this request: the storage
+			// limiter today (upload path only), the per-peer rate limiter
+			// Celestia has announced for the download path, or any limiter an
+			// operator puts in front of the port.
+			switch {
+			case strings.Contains(ls, "received message larger than max"), strings.Contains(ls, "after decompression larger than max"):
 				return OutcomeProbeError
+			case strings.Contains(ls, "trying to send message larger than max"):
+				return OutcomeServerError
 			}
 			return OutcomeThrottled
 		case codes.InvalidArgument:
