@@ -65,6 +65,9 @@ type Scanner struct {
 	params      *ParamHistory
 	chainID     string
 	startHeight int64 // resolved fresh-scan start (persisted across restarts)
+	// lastReconcile is the height of the last params reconcile in this
+	// process; a silent change found at the next one landed after it.
+	lastReconcile int64
 
 	// fibreInactive is set when the x/fibre module does not answer queries
 	// (the chain is on an app version before Fibre). The scanner keeps
@@ -485,16 +488,38 @@ func IsModuleInactive(err error) bool {
 // A governance proposal announces its change with an event; an upgrade
 // handler or a store migration that calls SetParams emits nothing, and
 // without this check such a change would stay invisible for the life of the
-// data dir, with every later window computed from the old retention. At six
-// second blocks this is a check every half hour.
-const paramReconcileEvery = 300
+// data dir, with every later window computed from the old retention. The
+// interval is also the most a silent change can go unnoticed: a promise
+// settled between the change and the next check carries a window computed
+// from the old params (see reconcileParams), so the check is cheap and
+// frequent: one Params query per sixty blocks.
+const paramReconcileEvery = 60
 
 // reconcileParams compares the params in state after block h with the
 // history's view of block h and, on a difference, records the live params as
 // in force from the next block, which is the earliest point the scanner can
-// vouch for. The height at which the silent change really landed is lost;
-// the log line says so.
+// vouch for and the only placement that keeps the earliest-bound rule
+// conservative for promises evaluated from here on (an earlier placement
+// would let a lengthened window stand alone as the only candidate for a
+// promise the server may have validated against the old, shorter one).
+//
+// The change really landed somewhere in (last check, h]. Publications
+// settled in that interval were recorded with the old params and are not
+// rewritten: when the window got shorter, the observer's must_serve_until
+// for them is later than the server's prune time, and a NOT_FOUND between
+// the two would be published as a fault. The log names the interval and
+// counts those publications; every validator prunes at the same moment, so
+// such a point is normally caught by the correlated-failure guard as a
+// fault suspect point, and a re-scan from the interval's start rewrites
+// nothing (the record is append-only), so the log line is the record.
 func (s *Scanner) reconcileParams(ctx context.Context, h int64) {
+	since := s.lastReconcile
+	if since == 0 {
+		// first check in this process: checks land on multiples of the
+		// interval, so the previous one was an interval ago
+		since = h - paramReconcileEvery
+	}
+	s.lastReconcile = h
 	var live fibretypes.Params
 	if err := s.retryRPC(ctx, fmt.Sprintf("params reconcile at height %d", h), func() error {
 		var err error
@@ -509,8 +534,20 @@ func (s *Scanner) reconcileParams(ctx context.Context, h int64) {
 		return
 	}
 	if s.params.add(h+1, -1, "reconcile", live) {
-		s.log.Printf("WARNING: h=%d: x/fibre params in state differ from the event history (promise_timeout=%s shard_retention=%s withdrawal_delay=%s in state); a change landed without an event, recorded as in force from height %d",
-			h, live.PaymentPromiseTimeout, live.ShardRetention, live.WithdrawalDelay, h+1)
+		direction := "unchanged"
+		if cur != nil {
+			oldW, _ := windowFrom(cur.Params, time.Time{})
+			newW, _ := windowFrom(live, time.Time{})
+			switch {
+			case newW.Before(oldW):
+				direction = "SHORTER: their recorded must_serve_until may be later than the server's prune time, and an in-window NOT_FOUND between the two would be a false fault"
+			case newW.After(oldW):
+				direction = "longer: their recorded must_serve_until is earlier than the server's prune time, which can only produce SERVED_PAST_WINDOW, never a fault"
+			}
+		}
+		n := s.store.CountSettledBetween(since+1, h)
+		s.log.Printf("WARNING: h=%d: x/fibre params in state differ from the event history (promise_timeout=%s shard_retention=%s withdrawal_delay=%s in state); a change landed without an event somewhere in heights %d-%d, recorded as in force from height %d; %d publication(s) settled in that interval were recorded with the old params and are not rewritten; the retention window is %s",
+			h, live.PaymentPromiseTimeout, live.ShardRetention, live.WithdrawalDelay, since+1, h, h+1, n, direction)
 	}
 }
 

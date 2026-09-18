@@ -346,10 +346,15 @@ func TestRun_SizeBoundsAreToldApartFromAThrottle(t *testing.T) {
 		t.Fatalf("receive bound: outcome=%s code=%s limit=%d (%s)", m.Outcome, m.Download.RPCCode, m.Download.RecvLimit, m.RawError)
 	}
 	// the expected shard size floors the bound, so the same shard is received
+	// (and then fails to parse, which is the observer's gap with the shape
+	// on the row, not the receive bound and not a fault)
 	in.ExpectedShardBytes = 300_000
 	m = Run(context.Background(), in, mustCoder(t), StepTimeouts{})
-	if m.Outcome == OutcomeProbeError || m.Download.RecvLimit < 330_000 {
-		t.Fatalf("floored bound: outcome=%s limit=%d (%s)", m.Outcome, m.Download.RecvLimit, m.RawError)
+	if m.Download.RPCCode == "ResourceExhausted" || m.Download.RecvLimit < 330_000 {
+		t.Fatalf("floored bound: outcome=%s code=%s limit=%d (%s)", m.Outcome, m.Download.RPCCode, m.Download.RecvLimit, m.RawError)
+	}
+	if m.Outcome != OutcomeProbeError || !strings.Contains(m.RawError, "shard shape") || m.Classification == ClassFault {
+		t.Fatalf("a shard this observer cannot parse: outcome=%s class=%s (%s), want PROBE_ERROR, never a fault", m.Outcome, m.Classification, m.RawError)
 	}
 
 	// a server whose own send bound refuses the shard

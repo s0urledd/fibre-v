@@ -201,7 +201,7 @@ Not TOML-visible (`toml:"-"`), compiled in: `LivenessThreshold`, `MinRowsPerVali
 
 **ShardRetention:** no local key. The server takes `shard_retention` from the chain on every upload via `ValidatePaymentPromise` (`fibre/cmd/README.md:97-101 @pin`; `fibre/internal/grpc/app_client.go:98-113`).
 
-**Connection / concurrency limits (compile-time constants, `fibre/internal/grpc/server.go:19-40, 53-86 @pin`):**
+**Connection / concurrency limits (`fibre/internal/grpc/server.go` defaults; at the current pin `fa5b523` the first two are `server_config.toml` fields `max_connections` / `max_concurrent_streams`, validated ≥ 1, per #7841 in §12a, so an operator may run other values and the observer cannot read them):**
 
 | Knob | Value |
 |---|---|

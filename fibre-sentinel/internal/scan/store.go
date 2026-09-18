@@ -32,6 +32,22 @@ type Store struct {
 	hostFile *os.File
 	seen     map[string]bool
 	paySeen  map[string]bool
+	// settled holds the settlement height of every publication appended
+	// by this process, so a silent params change can say how many records
+	// it left with a window computed from the old params.
+	settled []int64
+}
+
+// CountSettledBetween counts the publications this process appended whose
+// settlement height lies in [from, to].
+func (s *Store) CountSettledBetween(from, to int64) int {
+	n := 0
+	for _, h := range s.settled {
+		if h >= from && h <= to {
+			n++
+		}
+	}
+	return n
 }
 
 // PersistState is state.json.
@@ -276,6 +292,7 @@ func (s *Store) AppendPublication(p Publication) error {
 		return fmt.Errorf("write publication: %w", err)
 	}
 	s.seen[p.SettlementTxHash] = true
+	s.settled = append(s.settled, p.SettlementHeight)
 	return nil
 }
 

@@ -84,7 +84,11 @@ type SuspectPoint struct {
 
 // SuspectPoints applies the correlated-failure guard: over assigned
 // in-window rows started in the window, grouped by scheduled time, with
-// more than one validator probed at the point.
+// more than one validator probed at the point. "Probed" is a row that is
+// not a gap: a validator the load cap turned away, or a slot that elapsed,
+// says nothing about the point and does not dilute the share. Rows counts
+// every row at the point, gaps included, because the exclusion removes
+// them all.
 func SuspectPoints(rows []Row, w Window) []SuspectPoint {
 	type acc struct {
 		label                  string
@@ -103,6 +107,9 @@ func SuspectPoints(rows []Row, w Window) []SuspectPoint {
 			groups[k] = g
 		}
 		g.n++
+		if isGap(r.Classification) {
+			continue
+		}
 		g.vals[r.Validator] = true
 		switch r.Classification {
 		case probe.ClassUnreachable:
@@ -306,8 +313,20 @@ func LateShadow(got []uint32, probeAt, frontier time.Time, timeout, tolerance ti
 		want[int(g)]++
 	}
 	sort.Slice(cands, func(i, j int) bool { return cands[i].PromiseHash < cands[j].PromiseHash })
+	unrecorded := false
 	for _, c := range cands {
-		if c.SettlementTime.After(deadline) || c.MustServeUntil.Add(tolerance).Before(probeAt) || len(c.Rows) != len(got) {
+		if c.SettlementTime.After(deadline) || c.MustServeUntil.Add(tolerance).Before(probeAt) {
+			continue
+		}
+		if len(c.Rows) == 0 {
+			// A candidate in range whose assignment rows were never
+			// recorded (a scan without -rows) cannot be matched or ruled
+			// out; the SQL twin draws PROBE_ERROR for good, and so does
+			// this one, after the recorded candidates have had their turn.
+			unrecorded = true
+			continue
+		}
+		if len(c.Rows) != len(got) {
 			continue
 		}
 		seen := map[int]int{}
@@ -324,6 +343,9 @@ func LateShadow(got []uint32, probeAt, frontier time.Time, timeout, tolerance ti
 		if same {
 			return probe.ClassShadowedShard, c.PromiseHash, true
 		}
+	}
+	if unrecorded {
+		return probe.ClassProbeError, "", true
 	}
 	return probe.ClassUnmatchedGenuine, "", true
 }

@@ -111,6 +111,9 @@ type Server struct {
 	blobs *blobCache
 	// asOf rations pinned-window requests (see asOfLimiter).
 	asOf asOfLimiter
+	// bg counts the server's own background work (the blob-page warm-up),
+	// for Close.
+	bg sync.WaitGroup
 }
 
 // Option configures a Server before it warms its caches.
@@ -171,7 +174,9 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	// empty that page costs six queries per row, which is the one cold path
 	// left on the site. It is a single read of what /v1/blobs answers by
 	// default, discarded — the point is the cache it leaves behind.
+	s.bg.Add(1)
 	go func() {
+		defer s.bg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), snapshotTimeout)
 		defer cancel()
 		if _, err := s.blobRows(ctx, "", blobPageDefault); err != nil && log != nil {
@@ -194,6 +199,17 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/publishers", s.handlePublishers)
 	s.mux.HandleFunc("GET /v1/publishers/{addr}", s.handlePublisher)
 	return s
+}
+
+// Close waits for the server's background work (snapshot warm-ups and
+// refreshes, the blob-page warm-up) to finish, so that nothing is still
+// writing under the data directory once the caller tears it down. It does
+// not stop the HTTP side; the caller's listener does that.
+func (s *Server) Close() {
+	s.bg.Wait()
+	s.net.wait()
+	s.vals.wait()
+	s.market.wait()
 }
 
 // ServeHTTP implements http.Handler with the headers every response shares.

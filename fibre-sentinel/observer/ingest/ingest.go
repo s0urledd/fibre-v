@@ -34,6 +34,9 @@ type Result struct {
 	Line     int64 // line number after the pass
 	// LastSkipped is the error of the most recent skipped line, for the log.
 	LastSkipped string
+	// Deferred names the line the pass stopped before because its row is
+	// not in the store yet (ErrRetryLater); empty when the pass read to EOF.
+	Deferred string
 }
 
 // ErrBadRecord marks a line that cannot be decoded. A torn write (a crash
@@ -42,6 +45,20 @@ type Result struct {
 // logs it, counts it and advances past it. Store errors are never wrapped in
 // it and still stop the pass.
 var ErrBadRecord = errors.New("bad record")
+
+// ErrRetryLater marks a line whose row is not in the store yet (an
+// amendment for a probe row that has not been ingested). The pass stops
+// before it without advancing the cursor, so the next pass tries again
+// once the measurements have caught up; after retryPasses passes the line
+// is stepped over like a bad record, so a row that never arrives cannot
+// stall the file.
+var ErrRetryLater = errors.New("retry later")
+
+const retryPasses = 3
+
+// retries counts the passes on which a line has asked to be retried, by
+// file and line number.
+var retries = map[string]int{}
 
 // handler consumes one raw JSONL line and reports whether it inserted a row.
 type handler func(raw []byte) (bool, error)
@@ -105,6 +122,20 @@ func tail(st *store.Store, path string, fn handler, now time.Time) (Result, erro
 		}
 		ins, err := fn(trimmed)
 		if err != nil {
+			if errors.Is(err, ErrRetryLater) {
+				k := fmt.Sprintf("%s#%d", path, res.Line)
+				retries[k]++
+				if retries[k] < retryPasses {
+					// leave the cursor before this line; the next pass retries
+					res.Read--
+					res.Line--
+					res.Offset -= int64(len(raw))
+					res.Deferred = fmt.Sprintf("%s line %d: %v (pass %d of %d)", path, res.Line+1, err, retries[k], retryPasses)
+					return res, nil
+				}
+				delete(retries, k)
+				err = fmt.Errorf("%w: %v after %d passes", ErrBadRecord, err, retryPasses)
+			}
 			if !errors.Is(err, ErrBadRecord) {
 				return res, fmt.Errorf("%s line %d: %w", path, res.Line, err)
 			}
@@ -295,6 +326,10 @@ func Amendments(st *store.Store, path string, now time.Time) (Result, error) {
 		if a.DedupeKey == "" || a.To == "" || a.JudgedAt.IsZero() {
 			return false, fmt.Errorf("%w: amendment without key, verdict or time", ErrBadRecord)
 		}
-		return st.ApplyAmendment(a)
+		ok, err := st.ApplyAmendment(a)
+		if errors.Is(err, store.ErrNoSuchRow) {
+			return false, fmt.Errorf("%w: %v", ErrRetryLater, err)
+		}
+		return ok, err
 	}, now)
 }

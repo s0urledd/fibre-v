@@ -98,6 +98,10 @@ type snapshotCache[T any] struct {
 	mu         sync.Mutex
 	entries    map[string]*snap[T]
 	refreshing map[string]bool
+	// bg counts the background computations in flight (warm-up and
+	// refreshes), so Server.Close can wait for their files to land before
+	// the directory they write to goes away.
+	bg sync.WaitGroup
 }
 
 // persisted is the on-disk form of one snapshot.
@@ -192,7 +196,11 @@ func (c *snapshotCache[T]) get(ctx context.Context, log logf, win Window) (T, ti
 	s := c.entries[win.Name]
 	if s != nil && time.Since(s.at) >= c.ttl(win.Name) && !c.refreshing[win.Name] {
 		c.refreshing[win.Name] = true
-		go c.background(log, win)
+		c.bg.Add(1)
+		go func() {
+			defer c.bg.Done()
+			c.background(log, win)
+		}()
 	}
 	c.mu.Unlock()
 	if s != nil {
@@ -270,7 +278,9 @@ func (c *snapshotCache[T]) fill(ctx context.Context, win Window) (*snap[T], erro
 // starting four at once against a cold page cache makes each of them slower
 // than running them in turn.
 func (c *snapshotCache[T]) warm(log logf, now time.Time) {
+	c.bg.Add(1)
 	go func() {
+		defer c.bg.Done()
 		for _, name := range warmWindows {
 			c.mu.Lock()
 			busy := c.refreshing[name]
@@ -285,6 +295,10 @@ func (c *snapshotCache[T]) warm(log logf, now time.Time) {
 		}
 	}()
 }
+
+// wait blocks until every background computation in flight has finished
+// and persisted its snapshot.
+func (c *snapshotCache[T]) wait() { c.bg.Wait() }
 
 // windowFor builds the Window parseWindow would build for a name.
 func windowFor(name string, now time.Time) Window {

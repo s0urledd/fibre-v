@@ -71,8 +71,12 @@ Only `UploadShard` can return `ResourceExhausted` with a `RetryInfo` hint
 Operator-tunable knobs on the `fibre start` command are exactly four:
 `--app-grpc-address`, `--server-listen-address`, `--signer-grpc-address`,
 `--unlimited-budget` (`fibre/cmd/start_cmd.go:69-72`). There is no flag or
-TOML key for any connection or bandwidth limit
-(`fibre/server_config.go:30-79`).
+TOML key for any bandwidth limit. (Update, 18 September: at the current pin
+`fa5b523` the connection caps are `server_config.toml` fields,
+`max_connections` default 16 and `max_concurrent_streams` default 13,
+`fibre/server_config.go:40-43`, per celestia-app #7841; an operator may
+run other values and the observer cannot read them, so the policy keeps
+assuming the defaults.)
 
 ### 1.2 `DownloadShard` is whole-shard, no row subset
 

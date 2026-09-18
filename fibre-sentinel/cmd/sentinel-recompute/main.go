@@ -125,7 +125,7 @@ func main() {
 		}
 		rc := m.Recompute(tol)
 		stored := m.Classification
-		if rc.Classification == probe.ClassProbeError && m.Download.ShadowGap != "" && !strings.HasPrefix(m.Download.ShadowGap, "scan_gap") &&
+		if rc.Classification == probe.ClassProbeError && m.Download.ShadowGap != "" && !strings.HasPrefix(m.Download.ShadowGap, probe.ShadowGapScanPrefix) &&
 			(m.Outcome == probe.OutcomeWrongRows || m.Outcome == probe.OutcomePartial) && m.Download.CommitmentVerified {
 			deferred++
 			timeout := time.Duration(pubTimeout(pubs, m.PromiseHash)) * time.Second
@@ -141,7 +141,15 @@ func main() {
 					}
 				}
 			}
-			if cls, by, ok := verdict.LateShadow(m.Download.RowIndices, m.StartedAt, frontier, timeout, 5*time.Minute, cands); ok {
+			// The bound past must_serve_until a candidate's shard is taken
+			// to be on disk is the collector's -prune-tolerance, recorded
+			// on the amendment it drew; its default stands in for lines
+			// from before the field was recorded.
+			lateTol := defaultLateTolerance
+			if a, ok := amendments[m.DedupeKey()]; ok && a.PruneToleranceS > 0 {
+				lateTol = time.Duration(a.PruneToleranceS) * time.Second
+			}
+			if cls, by, ok := verdict.LateShadow(m.Download.RowIndices, m.StartedAt, frontier, timeout, lateTol, cands); ok {
 				judged++
 				rc.Classification = cls
 				// Every rate reads the amended classification, so the
@@ -347,6 +355,11 @@ func loadRuns(path string) []proberRun {
 
 // defaultPruneTolerance is sentinel-probe's -prune-tolerance default.
 const defaultPruneTolerance = 150 * time.Second
+
+// defaultLateTolerance is observer-collector's -prune-tolerance default,
+// the bound the deferred shadow verdict is drawn with; an amendment
+// records the value actually used (Amendment.PruneToleranceS).
+const defaultLateTolerance = 5 * time.Minute
 
 // toleranceFor picks the prune tolerance in force when the row was made:
 // the newest prober start at or before it from the same vantage.

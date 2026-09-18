@@ -265,10 +265,14 @@ type DownloadResult struct {
 	// "another promise answered in this one's place" is shown rather than
 	// assumed. Empty means no such promise is known to this prober.
 	ShadowedBy string `json:"shadowed_by,omitempty"`
-	// ShadowGap names a scan gap that overlaps the lifetime a shard over
-	// this commitment could have had at probe time, set when the rows are
-	// genuine but no known promise assigns them. A promise settled in that
-	// gap may own them; the observer knows it did not look, so no verdict.
+	// ShadowGap says why the shadow candidate set was incomplete at the
+	// probe, set when the rows are genuine but no known promise assigns
+	// them. It opens with ShadowGapScanPrefix when a scan gap overlaps the
+	// lifetime a shard over this commitment could have had (a promise
+	// settled in that gap may own the rows; the observer knows it did not
+	// look, so no verdict, ever), and with ShadowGapPendingPrefix when
+	// every promise that could own them settles by a known bound (the
+	// collector judges the row once the scanner has read past it).
 	ShadowGap string `json:"shadow_gap,omitempty"`
 	// BytesReturned is the row payload the server handed over: the sum of
 	// the row data bytes, proofs and the RLC vector excluded. Rows are not a
@@ -281,6 +285,14 @@ type DownloadResult struct {
 	AssignmentVerified bool   `json:"assignment_verified"` // returned indices == assigned set
 	Error              string `json:"error,omitempty"`
 }
+
+// The two openings of Download.ShadowGap. The store, the collector's late
+// judgement and sentinel-recompute all branch on them, so the prober and
+// its readers share the one spelling.
+const (
+	ShadowGapScanPrefix    = "scan_gap"
+	ShadowGapPendingPrefix = "shadow_pending"
+)
 
 // DedupeKey identifies a measurement slot: one probe per (vantage, promise,
 // validator, scheduled point).

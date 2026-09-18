@@ -137,7 +137,9 @@ func TestClassify_Taxonomy(t *testing.T) {
 		// PARTIAL: rows that verify against the commitment and are exactly
 		// another settled promise's assignment mean that promise answered
 		// in this one's place, which no validator can prevent. Verified
-		// rows with no such promise are an incomplete delivery: a fault.
+		// rows with no such promise are UNMATCHED_GENUINE: held out of the
+		// rate, never a fault, because an upload whose promise never
+		// settled can answer under hash-order serving.
 		commitmentVerified bool
 		shadowed           bool
 	}
@@ -249,10 +251,56 @@ func TestClassify_NoOutcomeReachesAnUnnamedFault(t *testing.T) {
 			}
 		}
 	}
-	// and an outcome the taxonomy has never seen must not accuse anyone
-	got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: Outcome("INVENTED")})
-	if got.CountsAgainst() {
-		t.Errorf("an unknown outcome under obligation = %s, want something that does not count against the validator", got)
+	// and an outcome the taxonomy has never seen is the observer's gap in
+	// every phase: not a verdict, for or against, and never TOLERATED or
+	// EXPECTED_GONE, which would read as "the validator behaved".
+	for _, phase := range []Phase{PhaseInWindow, PhaseGrace, PhasePost} {
+		got, _ := Classify(Evidence{Assigned: true, Attested: true, Phase: phase, Outcome: Outcome("INVENTED")})
+		if got != ClassProbeError {
+			t.Errorf("an unknown outcome in %s = %s, want %s", phase, got, ClassProbeError)
+		}
+	}
+}
+
+// The whole product of the evidence space, checked against the one
+// invariant the site rests on: FAULT is drawn only for a proven obligation
+// (assigned, attested, pin current, host registered) and only from an
+// answer that says the shard is missing in window or that the bytes do not
+// verify. Every other cell is some named class with a reason. The table
+// test above documents the interesting cells; this one closes the gaps
+// between them.
+func TestClassify_FaultOnlyFromNamedConditions(t *testing.T) {
+	phases := []Phase{PhaseInWindow, PhaseGrace, PhasePost}
+	outcomes := append(append([]Outcome(nil), AllOutcomes...), Outcome("INVENTED"))
+	classes := map[Classification]bool{}
+	for _, c := range AllClassifications {
+		classes[c] = true
+	}
+	for _, o := range outcomes {
+		for _, ph := range phases {
+			for _, assigned := range []bool{false, true} {
+				for _, attested := range []bool{false, true} {
+					for _, pin := range []bool{false, true} {
+						for _, cv := range []bool{false, true} {
+							in := Evidence{Assigned: assigned, Attested: attested, Phase: ph, Outcome: o, PinStale: pin, CommitmentVerified: cv}
+							got, reason := Classify(in)
+							if !classes[got] || reason == "" {
+								t.Errorf("Classify(%+v) = %q (%q): not a named class with a reason", in, got, reason)
+							}
+							provable := assigned && attested && !pin
+							faultAnswer := (o == OutcomeNotFound && ph == PhaseInWindow) || o == OutcomeInvalidRows ||
+								((o == OutcomeWrongRows || o == OutcomePartial) && !cv && ph != PhasePost)
+							if got == ClassFault && !(provable && faultAnswer) {
+								t.Errorf("Classify(%+v) = FAULT outside the named conditions (%s)", in, reason)
+							}
+							if provable && faultAnswer && got != ClassFault {
+								t.Errorf("Classify(%+v) = %s, want FAULT (%s)", in, got, reason)
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,8 +84,8 @@ func insertDeferred(t *testing.T, st *store.Store, pub scan.Publication, addr st
 // order, so a promise settled after the probe can own the rows it
 // returned. The prober defers; the collector judges once the scanner has
 // read past probe time + payment_promise_timeout: a match is SHADOWED_SHARD,
-// no match is FAULT, a scan gap stays PROBE_ERROR, and the row keeps the
-// verdict it was stamped with.
+// no match is UNMATCHED_GENUINE, a scan gap stays PROBE_ERROR, and the row
+// keeps the verdict it was stamped with.
 func TestLateShadowVerdicts(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
 	if err != nil {
@@ -102,7 +103,7 @@ func TestLateShadowVerdicts(t *testing.T) {
 	insertPub(t, st, "zzzz", "cc2", t0, map[string][]int{"v1": {8, 9}})
 	shadowed := insertDeferred(t, st, a, "v1", probeAt, []uint32{5, 4}, "shadow_pending: a promise uploaded before this probe may settle until "+probeAt.Add(time.Hour).Format(time.RFC3339))
 	faulty := insertDeferred(t, st, a, "v2", probeAt, []uint32{2}, "shadow_pending: …")
-	gapped := insertDeferred(t, st, a, "v3", probeAt, []uint32{9}, "scan_gap: heights 100-110 unread")
+	gapped := insertDeferred(t, st, a, "v3", probeAt, []uint32{9}, probe.ShadowGapScanPrefix+" #100-#110 (2026-09-18T09:30:00Z to 2026-09-18T09:31:00Z) overlaps the shard lifetime")
 
 	// the frontier has not reached probe time + timeout: only the scan gap
 	// is judged, permanently
@@ -133,6 +134,11 @@ func TestLateShadowVerdicts(t *testing.T) {
 	}
 	if a := byKey[gapped.DedupeKey()]; a.To != "PROBE_ERROR" {
 		t.Errorf("gapped row: %+v", a)
+	}
+	for _, a := range ams {
+		if a.PruneToleranceS != 300 {
+			t.Errorf("amendment without the tolerance it was drawn with: %+v", a)
+		}
 	}
 	applied := 0
 	for _, a := range ams {
@@ -227,5 +233,32 @@ func TestLateShadowVerdicts(t *testing.T) {
 		if d >= t0.Format("2006-01-02") {
 			t.Errorf("day %s rolled while a promise settled on it was under obligation", d)
 		}
+	}
+}
+
+// A publication with no payment_promise_timeout on record names no bound
+// by which every candidate has settled, so no frontier ever closes the
+// question; the row is a gap for good rather than a deferral that holds
+// its day's rollup and prune forever.
+func TestLateShadow_NoTimeoutOnRecordIsAPermanentGap(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
+	a := insertPub(t, st, "aaaa", "cc1", t0, map[string][]int{"v1": {0, 1}})
+	if _, err := st.DB().Exec(`UPDATE publications SET payment_promise_timeout_s = 0 WHERE promise_hash = ?`, a.PromiseHash); err != nil {
+		t.Fatal(err)
+	}
+	probeAt := t0.Add(10 * time.Minute)
+	m := insertDeferred(t, st, a, "v1", probeAt, []uint32{7}, probe.ShadowGapPendingPrefix+": a promise uploaded before this probe may settle after it (payment promise timeout not on record)")
+	ams, err := st.LateShadowVerdicts(ctx, probeAt.Add(time.Minute), t0.Add(time.Hour), 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ams) != 1 || ams[0].DedupeKey != m.DedupeKey() || ams[0].To != "PROBE_ERROR" || !strings.Contains(ams[0].Reason, "payment_promise_timeout") {
+		t.Fatalf("no timeout on record: %+v", ams)
 	}
 }

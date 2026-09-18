@@ -331,8 +331,9 @@ func httptestServer(t *testing.T, st *store.Store) *httptest.Server {
 
 func httptestServerWith(t *testing.T, st *store.Store, opts ...api.Option) *httptest.Server {
 	t.Helper()
-	ts := httptest.NewServer(api.NewWithVantage(st, api.VantageInfo{Name: "test"}, nil, opts...))
-	t.Cleanup(ts.Close)
+	srv := api.NewWithVantage(st, api.VantageInfo{Name: "test"}, nil, opts...)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() { ts.Close(); srv.Close() })
 	return ts
 }
 

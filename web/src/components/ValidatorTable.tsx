@@ -102,9 +102,10 @@ export function obligationSample(v: Validator): string | undefined {
 
 export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; notLive?: boolean }) {
   const [q, setQ] = useState("");
-  // An endpoint once registered stays on chain, so a validator whose host
-  // left the bonded list still belongs here, under the chain's word for it.
-  const registered = useMemo(() => rows.filter((v) => !!v.host || !!v.last_host), [rows]);
+  // A validator with an open Fibre endpoint: one in the bonded registry
+  // now. A closed endpoint (the validator left the bonded list) is under
+  // "All", with its last host on the row; the header counts the same set.
+  const registered = useMemo(() => rows.filter((v) => !!v.host), [rows]);
   // The three states an operator scans for, as filters beside the two sets.
   const faulting = useMemo(() => rows.filter((v) => (v.faults ?? v.classes.FAULT ?? 0) > 0), [rows]);
   const down = useMemo(() => rows.filter((v) => bonded(v) && !!v.host && v.reachable === false), [rows]);
@@ -162,9 +163,9 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
       <div className="toolbar">
         <div className="tabs" role="tablist">
           <button role="tab" aria-pressed={activeTab === "registered"} onClick={() => setTab("registered")}
-            title="Validators with a Fibre endpoint in x/valaddr.">Fibre endpoints<span className="n">{registered.length}</span></button>
+            title="Validators with an open Fibre endpoint: registered in x/valaddr and in the bonded provider list now.">Fibre endpoints<span className="n">{registered.length}</span></button>
           <button role="tab" aria-pressed={activeTab === "all"} onClick={() => setTab("all")}
-            title="Every bonded validator, whether or not it registered a Fibre endpoint.">All bonded<span className="n">{rows.length}</span></button>
+            title="Every validator on record, bonded or not, whether or not it registered a Fibre endpoint.">All<span className="n">{rows.length}</span></button>
           <button role="tab" aria-pressed={activeTab === "faulting"} onClick={() => setTab("faulting")}
             title="Validators with at least one fault in this window: answered, but did not hand over a shard they had signed for.">Faulting<span className="n">{faulting.length}</span></button>
           <button role="tab" aria-pressed={activeTab === "down"} onClick={() => setTab("down")}
