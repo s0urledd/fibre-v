@@ -54,9 +54,13 @@ devnet that wants to observe pruning in minutes sets it exactly there.
 A shard is not deleted at `must_serve_until`. The fibre server's prune loop runs
 **once a minute** (`fibre/server_prune.go`: `pruneInterval = time.Minute`) and
 the prune key is stored at **minute precision** (`store.go` `formatTimestamp`).
-So the effective deletion time is the first minute-boundary tick at or after
-`must_serve_until`, rounded up — in practice `must_serve_until + ~1 to 2
-minutes`.
+An entry is deleted on the first tick whose wall-clock minute is strictly
+greater than the minute of `pruneAt` (`PruneBefore` compares the
+`YYYYMMDDHHmm` keys), so the lag is anywhere in the open interval (0 s,
+120 s): as little as a second when `pruneAt` falls at hh:mm:59 and the tick
+lands at hh:mm+1:00, just under two minutes when it falls at hh:mm:00 and
+the tick phase is :59. Never early on the server's own clock. In practice
+`must_serve_until + ~1m45s` was measured below.
 
 Measured on the devnet (25-second probe resolution, `shard_retention` = 10m so
 `pruneAt` = `creation + 10m`):

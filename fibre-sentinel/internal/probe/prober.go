@@ -47,11 +47,20 @@ type Config struct {
 	Deadline time.Duration // whole-run wall-clock cap (0 = none)
 
 	// pacing (every wait is bounded by MaxSleep)
-	MaxSleep     time.Duration // longest sleep between cycles
-	MinSleep     time.Duration // shortest, to avoid a busy loop
-	MaxLateness  time.Duration // a slot older than this is recorded MISSED, not probed
-	RPCTimeout   time.Duration
-	HostCacheTTL time.Duration
+	MaxSleep    time.Duration // longest sleep between cycles
+	MinSleep    time.Duration // shortest, to avoid a busy loop
+	MaxLateness time.Duration // a slot older than this is recorded MISSED, not probed
+	// MaxLatenessFraction raises MaxLateness to this share of a publication's
+	// own window when that is longer: 0.05 is twelve minutes on a four-hour
+	// window. The phase is decided from the actual start, so a late probe is
+	// judged in the phase it ran in; the bound only keeps a stalled cycle
+	// from running a whole window's schedule in one burst. With a hundred
+	// validators a point, a fixed ninety seconds was shorter than the time
+	// a handful of dead endpoints (dial, TLS and retry timeouts) hold the
+	// worker pool, and the tail of every point was filed as NOT_PROBED.
+	MaxLatenessFraction float64
+	RPCTimeout          time.Duration
+	HostCacheTTL        time.Duration
 
 	// RunConfig is what this run was configured with, as the operator's
 	// flags and derived settings, recorded in runs.jsonl on start (see
@@ -65,10 +74,13 @@ type Config struct {
 	Concurrency int
 
 	// BackfillMissed bounds how far back a (re)started prober writes
-	// NOT_PROBED markers for slots it never ran. Older slots are simply left
-	// without a row: the gap is just as visible, and a fresh prober pointed at
-	// a data directory with days of history does not spend hours writing
-	// markers before its first live probe.
+	// NOT_PROBED markers for slots it never ran. Zero, the default, is no
+	// bound: every elapsed slot of every publication the feed holds gets
+	// its row, because an obligation without a row is absent from the
+	// obligation total, where it should be counted as unobserved. A
+	// positive value is for a fresh prober pointed at a data directory
+	// with days of history, which would otherwise spend its first minutes
+	// writing markers; slots behind it are left without a row.
 	BackfillMissed time.Duration
 
 	// RetryTransportTimeout re-runs a probe once when the first attempt fails
@@ -97,6 +109,12 @@ func (c Config) withDefaults() Config {
 	if c.MaxLateness <= 0 {
 		c.MaxLateness = 90 * time.Second
 	}
+	if c.MaxLatenessFraction == 0 {
+		c.MaxLatenessFraction = 0.05
+	}
+	if c.MaxLatenessFraction < 0 {
+		c.MaxLatenessFraction = 0
+	}
 	if c.RPCTimeout <= 0 {
 		c.RPCTimeout = 15 * time.Second
 	}
@@ -109,8 +127,12 @@ func (c Config) withDefaults() Config {
 	if c.Concurrency <= 0 {
 		c.Concurrency = 8
 	}
-	if c.BackfillMissed <= 0 {
-		c.BackfillMissed = time.Hour
+	// BackfillMissed <= 0 means no horizon: every elapsed slot of every
+	// publication the feed holds gets its NOT_PROBED row, so an obligation
+	// the prober never reached is counted as unobserved rather than
+	// vanishing from the total.
+	if c.BackfillMissed < 0 {
+		c.BackfillMissed = 0
 	}
 	if c.Vantage == "" {
 		c.Vantage = "local"
@@ -523,9 +545,9 @@ func shadowPending(now time.Time, pub scan.Publication, m scannedMark) string {
 	}
 	timeout := time.Duration(pub.ParamsAtPublication.PaymentPromiseTimeoutSeconds) * time.Second
 	if timeout <= 0 {
-		return "shadow_pending: a promise uploaded before this probe may settle after it (payment promise timeout not on record); " + frontier
+		return ShadowGapPendingPrefix + ": a promise uploaded before this probe may settle after it (payment promise timeout not on record); " + frontier
 	}
-	return fmt.Sprintf("shadow_pending: a promise uploaded before this probe may settle until %s and own these rows; %s",
+	return fmt.Sprintf(ShadowGapPendingPrefix+": a promise uploaded before this probe may settle until %s and own these rows; %s",
 		now.Add(timeout).UTC().Format(time.RFC3339), frontier)
 }
 
@@ -567,7 +589,7 @@ func shadowGapFor(gaps []scan.ScanGap, probeAt time.Time, lifetime time.Duration
 	for _, g := range gaps {
 		from, to := g.Spans()
 		if to.After(earliest) && !from.After(probeAt) {
-			return fmt.Sprintf("scan gap #%d-#%d (%s to %s) overlaps the shard lifetime", g.From, g.To,
+			return fmt.Sprintf(ShadowGapScanPrefix+" #%d-#%d (%s to %s) overlaps the shard lifetime", g.From, g.To,
 				from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
 		}
 	}
@@ -666,12 +688,16 @@ func (p *Prober) probeable(pub scan.Publication) bool {
 // is behind the backfill horizon: nothing will ever be recorded for them
 // again, so they can be forgotten.
 func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, missed []job, dropped []skipped, finished []string) {
-	horizon := now.Add(-p.cfg.BackfillMissed)
+	var horizon time.Time // zero: no horizon, every elapsed slot gets a row
+	if p.cfg.BackfillMissed > 0 {
+		horizon = now.Add(-p.cfg.BackfillMissed)
+	}
 	for _, pub := range pubs {
 		if !p.probeable(pub) {
 			continue
 		}
 		points := ScheduleFor(pub, p.cfg.Schedule)
+		late := p.latenessFor(pub)
 		var pending []SchedulePoint
 		started := false
 		allPast := true
@@ -709,7 +735,7 @@ func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, miss
 			switch {
 			case now.Before(pt.At):
 				future = append(future, job{pub, pt})
-			case now.Sub(pt.At) <= p.cfg.MaxLateness:
+			case now.Sub(pt.At) <= late:
 				due = append(due, job{pub, pt})
 			case pt.At.After(horizon):
 				missed = append(missed, job{pub, pt})
@@ -722,6 +748,26 @@ func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, miss
 	sort.SliceStable(future, func(i, j int) bool { return future[i].point.At.Before(future[j].point.At) })
 	sort.SliceStable(due, func(i, j int) bool { return due[i].point.At.Before(due[j].point.At) })
 	return due, future, missed, dropped, finished
+}
+
+// latenessFor is how long past its scheduled time a slot of pub may still
+// be probed: MaxLateness, or MaxLatenessFraction of the publication's own
+// window when that is longer. The phase is decided from the actual start
+// (PhaseAt), so a late probe is judged in the phase it ran in, never the
+// one it was planned for.
+func (p *Prober) latenessFor(pub scan.Publication) time.Duration {
+	late := p.cfg.MaxLateness
+	if p.cfg.MaxLatenessFraction <= 0 {
+		return late
+	}
+	window := pub.MustServeUntil.Sub(pub.SettlementTime)
+	if window <= 0 {
+		window = fallbackSpan(pub)
+	}
+	if f := time.Duration(float64(window) * p.cfg.MaxLatenessFraction); f > late {
+		late = f
+	}
+	return late
 }
 
 // work is one (publication, point, validator) probe ready to run.
@@ -853,8 +899,9 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 	ph := pub.PromiseHash
 
 	// The slot was due when planned; a long cycle must not silently probe it
-	// in a later phase. Past MaxLateness it is a gap, not a verdict.
-	if late := time.Since(j.point.At); late > p.cfg.MaxLateness {
+	// in a later phase. Past the lateness allowance it is a gap, not a
+	// verdict.
+	if late := time.Since(j.point.At); late > p.latenessFor(pub) {
 		p.recordNotProbedTarget(pub, j.point, t, fmt.Sprintf("elapsed while the cycle ran (%s late)", late.Round(time.Second)))
 		return false
 	}

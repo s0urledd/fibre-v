@@ -84,8 +84,9 @@ func TestHealthReadsStatusFiles(t *testing.T) {
 
 	time.Sleep(1200 * time.Millisecond) // the delayed status write
 
-	ts := httptest.NewServer(api.NewWithVantage(st, api.VantageInfo{Name: "test"}, nil, api.WithDataDir(dir)))
-	defer ts.Close()
+	srv := api.NewWithVantage(st, api.VantageInfo{Name: "test"}, nil, api.WithDataDir(dir))
+	ts := httptest.NewServer(srv)
+	defer func() { ts.Close(); srv.Close() }() // let the snapshot writers land before the temp dir goes
 
 	var h healthBody
 	if code := getAny(t, ts, "/v1/health", &h); code != 503 {

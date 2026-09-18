@@ -1372,7 +1372,18 @@ type Amendment struct {
 	ShadowedBy       string    `json:"shadowed_by,omitempty"`
 	JudgedAt         time.Time `json:"judged_at"`
 	ScannerFrontier  time.Time `json:"scanner_frontier"`
+	// PruneToleranceS is the collector's -prune-tolerance when the verdict
+	// was drawn (how long past must_serve_until a candidate's shard was
+	// taken to be on disk), so sentinel-recompute redraws it with the same
+	// bound rather than a constant. Zero on lines from before the field.
+	PruneToleranceS int64 `json:"prune_tolerance_s,omitempty"`
 }
+
+// ErrNoSuchRow is returned by ApplyAmendment when no probe row carries the
+// amendment's key: the row was never ingested (a line skipped as
+// undecodable, or a vantage whose file is not tailed here), which is not
+// the same as a row already amended.
+var ErrNoSuchRow = errors.New("no probe row with this key")
 
 // LateShadowVerdicts draws the deferred verdicts the scanner frontier now
 // allows. frontier is the block time of the last scanned height; a row is
@@ -1415,16 +1426,25 @@ func (s *Store) LateShadowVerdicts(ctx context.Context, frontier, now time.Time,
 		}
 		scheduled, _ := time.Parse(TimeLayout, p.scheduled)
 		a := Amendment{DedupeKey: p.key, PromiseHash: p.hash, ValidatorAddress: p.addr, ScheduledAt: scheduled, From: p.cls,
-			JudgedAt: now.UTC(), ScannerFrontier: frontier.UTC()}
-		if strings.HasPrefix(p.gap, "scan_gap") {
+			JudgedAt: now.UTC(), ScannerFrontier: frontier.UTC(), PruneToleranceS: int64(tolerance / time.Second)}
+		if strings.HasPrefix(p.gap, probe.ShadowGapScanPrefix) {
 			// A block the scanner could not read can hold the promise that
 			// owns these rows; nothing later fills it.
 			a.To, a.Reason = string(probe.ClassProbeError), "no verdict: a scan gap covers the interval the owning promise would have settled in ("+p.gap+")"
 			out = append(out, a)
 			continue
 		}
+		if p.timeoutS <= 0 {
+			// Without the promise timeout on record the bound by which
+			// every candidate has settled cannot be named, so no frontier
+			// ever closes the question; leaving the row deferred would hold
+			// its day's rollup and prune forever.
+			a.To, a.Reason = string(probe.ClassProbeError), "no verdict: the publication carries no payment_promise_timeout, so the bound by which every promise that could own these rows has settled cannot be named"
+			out = append(out, a)
+			continue
+		}
 		deadline := started.Add(time.Duration(p.timeoutS) * time.Second)
-		if p.timeoutS <= 0 || frontier.Before(deadline) {
+		if frontier.Before(deadline) {
 			continue // not every candidate is on record yet
 		}
 		var got []int
@@ -1515,6 +1535,13 @@ func (s *Store) ApplyAmendment(a Amendment) (bool, error) {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
+		var exists int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM probes WHERE dedupe_key = ?`, a.DedupeKey).Scan(&exists); err != nil {
+			return false, err
+		}
+		if exists == 0 {
+			return false, ErrNoSuchRow
+		}
 		return false, nil
 	}
 	if _, err := tx.Exec(`INSERT INTO probe_amendments (dedupe_key, from_classification, to_classification, reason, shadowed_by, judged_at, scanner_frontier)

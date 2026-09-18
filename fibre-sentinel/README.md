@@ -242,9 +242,12 @@ than counting the entries the transaction carries.
 
 Probes run on `-concurrency` (8) workers across validators, never more than
 one connection to a validator at a time (R4 section 3.5). `publications.jsonl`
-is tailed incrementally and a publication is forgotten once its whole
-schedule is older than `-backfill-missed` (1h); on a (re)start only slots
-newer than that get `NOT_PROBED` rows, older gaps are left without a row.
+is tailed incrementally and a publication is forgotten once every slot of
+its schedule has a row. On a (re)start every elapsed slot without a row gets
+a `NOT_PROBED` row, however old, so an obligation the prober never reached
+is counted as unobserved rather than missing from the obligation total;
+`-backfill-missed` (default 0, unbounded) caps how far back that goes for a
+fresh prober pointed at a data directory with days of history.
 A publication whose settlement tx failed, or whose promise names another
 chain than the RPC's, is skipped with one log line.
 
@@ -269,9 +272,12 @@ from `publications.jsonl` + `measurements.jsonl`, so a restart resumes exactly.
 Each measurement's dedupe key is `(vantage, promise_hash, validator,
 scheduled_at)`. Every wait is bounded: the loop sleeps at most `-max-sleep`
 (30s) between cycles, every probe layer has its own timeout, a schedule point
-older than `-max-lateness` is recorded `MISSED` instead of probed (the check
-is repeated right before each probe, so a slow cycle never probes a slot in
-a later phase than it was planned for), and
+older than its lateness allowance is recorded `MISSED` instead of probed
+(`-max-lateness`, 90s, raised to `-max-lateness-fraction` of the blob's own
+window when that is longer: 12 minutes on a 4-hour window, so the tail of a
+hundred-validator point is not dropped because a few dead endpoints held
+the worker pool; the phase is decided from the actual start, and the check
+is repeated right before each probe), and
 SIGINT/SIGTERM stops cleanly. `-once` probes everything currently due and exits;
 `-drain` runs until every schedule is in the past; `-deadline` caps the run.
 

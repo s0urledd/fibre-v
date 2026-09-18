@@ -172,11 +172,19 @@ func (h *ParamHistory) MustServeUntilForPromise(creation time.Time, promiseHeigh
 	msu, basis = windowFrom(at.Params, creation)
 	snap = at.ParamsJSON
 
-	// Params in force at the end of the promise-height block, plus every
-	// change that landed between there and the settlement tx.
+	// Params in force at the end of the block before the promise height,
+	// at the end of the promise-height block, plus every change that
+	// landed between there and the settlement tx. The block before is a
+	// candidate because the chain accepts a promise whose height is one
+	// above the validating node's latest (x/fibre keeper: "allow up to 1
+	// block ahead"), so a server whose node had not yet committed the
+	// promise block validated the upload against the state before it.
 	candidates := []*ParamEntry{}
-	if before := h.at(promiseHeight, int(^uint(0)>>1)); before != nil {
+	if before := h.at(promiseHeight-1, int(^uint(0)>>1)); before != nil {
 		candidates = append(candidates, before)
+	}
+	if atPromise := h.at(promiseHeight, int(^uint(0)>>1)); atPromise != nil {
+		candidates = append(candidates, atPromise)
 	}
 	for i := range h.entries {
 		e := &h.entries[i]

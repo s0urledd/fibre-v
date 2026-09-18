@@ -192,7 +192,7 @@ export default function Overview() {
       )}
 
       <Panel title={<span id="validators">Validator set</span>} className="validators"
-        right={list.length > 0 ? <>{list.length} bonded · {list.filter((v) => !!v.host).length} with a Fibre endpoint · <Link href="/blobs/">all publications →</Link></> : undefined}>
+        right={list.length > 0 ? <>{list.filter((v) => !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED")).length} bonded · {list.filter((v) => !!v.host).length} with a Fibre endpoint · <Link href="/blobs/">all publications →</Link></> : undefined}>
         {vals
           ? <ValidatorTable rows={vals.validators} notLive={notLive} />
           : <p className="muted" style={{ padding: "var(--s4)" }}>Loading validators…</p>}

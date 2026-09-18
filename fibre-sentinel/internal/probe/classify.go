@@ -165,6 +165,17 @@ const (
 	ClassUnattested Classification = "UNATTESTED"
 )
 
+// AllClassifications is every class the taxonomy can return. The product
+// test walks the whole evidence space and checks that every cell lands on
+// one of these with a reason, so a new class or a new default arm cannot
+// go unnoticed.
+var AllClassifications = []Classification{
+	ClassHealthy, ClassFault, ClassUnreachable, ClassNotRegistered, ClassShadowedShard, ClassUnmatchedGenuine,
+	ClassIdentityExpired, ClassIdentityMismatch, ClassServerError, ClassThrottled, ClassTolerated, ClassExpectedGone,
+	ClassExpectedUnassigned, ClassServedPastWindow, ClassServingUnassigned, ClassUnreachablePostWindow,
+	ClassProbeError, ClassNotProbed, ClassUnattested,
+}
+
 // CountsAgainst reports whether a class is held against the validator. Exactly
 // one class is, and every rate in the API is built from this predicate rather
 // than from a list repeated at each call site.
@@ -223,9 +234,11 @@ type Evidence struct {
 	// Shadowed: another settled promise over the same commitment assigns
 	// this validator exactly the row set it returned. Only then is
 	// "answered from a different promise, which it has no way to avoid" a
-	// finding rather than a guess; without it, verified rows that are not
-	// this promise's assignment are a fault, and the row carries the
-	// indices so anyone can check.
+	// finding rather than a guess. Without it, verified rows that are not
+	// this promise's assignment are UNMATCHED_GENUINE (held out of the
+	// rate, never a fault: an upload whose promise never settled can
+	// answer under hash-order serving), and the row carries the indices
+	// so anyone can check.
 	Shadowed bool
 	// ShadowUncertain: no known promise assigns the returned rows, but a
 	// scan gap overlaps the interval in which a promise whose shard could
@@ -318,9 +331,9 @@ func Classify(in Evidence) (Classification, string) {
 	// not this promise's assignment, and another settled promise over the
 	// same blob assigns exactly those rows. The validator is answering from
 	// that promise and has no way to tell the two apart, in any phase.
-	// Never a fault. Without a matching promise the same wire result is an
-	// incomplete or wrong delivery of this shard and falls through to the
-	// phase arms below.
+	// Never a fault. Without a matching promise the same wire result falls
+	// through to the phase arms below, where genuine rows no promise
+	// assigns are UNMATCHED_GENUINE, held out of the rate.
 	if (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified && in.Shadowed {
 		return ClassShadowedShard, "returned rows of this blob that verify against the commitment and are exactly another settled promise's assignment for this validator; DownloadShard is addressed by commitment alone, so that promise answers in this one's place"
 	}
@@ -376,7 +389,10 @@ func Classify(in Evidence) (Classification, string) {
 		case o.reachFailure():
 			return ClassTolerated, "unreachable within prune-lag tolerance"
 		default:
-			return ClassTolerated, "post-deadline, within tolerance"
+			// An outcome the taxonomy does not name is the observer's gap
+			// in every phase: "we have not taught the observer about this"
+			// is not evidence, for or against.
+			return ClassProbeError, "unrecognised outcome " + string(o) + " in the grace phase; no verdict"
 		}
 
 	default: // PhasePost
@@ -402,7 +418,7 @@ func Classify(in Evidence) (Classification, string) {
 		case o.reachFailure():
 			return ClassUnreachablePostWindow, "unreachable after the obligation ended"
 		default:
-			return ClassExpectedGone, "post-window"
+			return ClassProbeError, "unrecognised outcome " + string(o) + " after the window; no verdict"
 		}
 	}
 }

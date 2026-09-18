@@ -49,11 +49,12 @@ every push.
 # fibre-tlsverify — 21 golden vectors (1 valid + 20 typed failures), byte-exact envelope
 cd fibre-tlsverify && go test -race ./...
 
-# fibre-assign — 21 unit tests, then ~890 scenarios bit-identical to celestia-app
+# fibre-assign — 29 unit tests, then ~890 scenarios bit-identical to celestia-app
 cd fibre-assign         && go test -race ./...
 cd fibre-assign/reftest && go test ./...
 
-# fibre-sentinel — 96 unit tests, including the verdict taxonomy table
+# fibre-sentinel — 140+ unit tests, including the verdict taxonomy table and the
+#   full evidence-space product (FAULT only from the named conditions)
 cd fibre-sentinel && go test ./...
 
 # fibre-sentinel — full devnet run with fault injection: 60 measurements, 0 misclassifications

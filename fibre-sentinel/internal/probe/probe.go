@@ -568,8 +568,15 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Con
 
 	proofs, rlcv, perr := parseShard(resp.Shard, coder.originalRows)
 	if perr != nil {
+		// A response this observer cannot even parse is not evidence about
+		// the shard: the RLC length is checked against the observer's own
+		// protocol params, and an empty or nil message is a wire or proto
+		// mismatch as readily as a server defect. INVALID_ROWS, which is a
+		// fault in every phase, is reserved for rows that fail the
+		// commitment check below; a shape error is the observer's gap,
+		// with the raw reason on the row.
 		r.Error = "parse: " + perr.Error()
-		r.outcome, r.rawErr = OutcomeInvalidRows, perr.Error()
+		r.outcome, r.rawErr = OutcomeProbeError, "shard shape: "+perr.Error()
 		return r
 	}
 	r.RowsReturned = len(proofs)

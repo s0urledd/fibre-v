@@ -55,10 +55,11 @@ func main() {
 
 		unassigned  = flag.Bool("probe-unassigned", false, "also probe validators not assigned the shard (their NOT_FOUND is the baseline)")
 		maxSleep    = flag.Duration("max-sleep", 30*time.Second, "longest sleep between cycles")
-		maxLateness = flag.Duration("max-lateness", 90*time.Second, "a schedule point older than this is recorded MISSED instead of probed")
+		maxLateness = flag.Duration("max-lateness", 90*time.Second, "a schedule point older than this is recorded MISSED instead of probed (raised to -max-lateness-fraction of the blob's window when that is longer)")
+		lateFrac    = flag.Float64("max-lateness-fraction", 0.05, "lateness allowance as a share of each blob's own retention window, when larger than -max-lateness (0.05 is 12 min on a 4 h window); negative disables")
 		rpcTO       = flag.Duration("rpc-timeout", 15*time.Second, "per-RPC-call timeout")
 		concurrency = flag.Int("concurrency", 8, "probes in flight across all validators (never more than one per validator)")
-		backfill    = flag.Duration("backfill-missed", time.Hour, "on (re)start, write NOT_PROBED markers only for slots newer than this; older gaps are left without a row")
+		backfill    = flag.Duration("backfill-missed", 0, "on (re)start, write NOT_PROBED markers only for slots newer than this; 0 (default) writes one for every elapsed slot of every publication still on record, so an obligation the prober never reached is counted as unobserved rather than missing from the total")
 		retryTO     = flag.Bool("retry-transport-timeout", true, "retry a probe once when the first attempt fails with a transport timeout (slot blocking during uploads)")
 		retryDelay  = flag.Duration("retry-delay", 20*time.Second, "wait before the transport-timeout retry")
 		dnsTO       = flag.Duration("dns-timeout", 5*time.Second, "")
@@ -118,13 +119,14 @@ func main() {
 		Timeouts: probe.StepTimeouts{
 			DNS: *dnsTO, TCP: *tcpTO, TLS: *tlsTO, Download: *dlTO,
 		},
-		IncludeUnassigned: *unassigned,
-		Once:              *once,
-		Drain:             *drain,
-		Deadline:          *deadline,
-		MaxSleep:          *maxSleep,
-		MaxLateness:       *maxLateness,
-		RPCTimeout:        *rpcTO,
+		IncludeUnassigned:   *unassigned,
+		Once:                *once,
+		Drain:               *drain,
+		Deadline:            *deadline,
+		MaxSleep:            *maxSleep,
+		MaxLateness:         *maxLateness,
+		MaxLatenessFraction: *lateFrac,
+		RPCTimeout:          *rpcTO,
 
 		RetryTransportTimeout: *retryTO,
 		RetryDelay:            *retryDelay,

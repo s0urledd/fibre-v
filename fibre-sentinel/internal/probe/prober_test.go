@@ -112,6 +112,46 @@ func TestPlan_BackfillHorizon(t *testing.T) {
 	}
 }
 
+// With no backfill horizon (the default) every elapsed slot gets a
+// NOT_PROBED row, however old, so an obligation the prober never reached is
+// counted as unobserved instead of vanishing from the obligation total.
+func TestPlan_NoHorizonBackfillsEverySlot(t *testing.T) {
+	p := testProber(t)
+	p.cfg.BackfillMissed = 0
+	now := time.Now().UTC()
+	old := pub(now.Add(-30*time.Hour), now.Add(-26*time.Hour))
+	old.Promise.ChainID = "chain-1"
+	due, _, missed, _, finished := p.plan([]scan.Publication{old}, now)
+	if len(finished) != 0 {
+		t.Fatalf("a publication with unrecorded slots must not be finished: %v", finished)
+	}
+	if len(due) != 0 || len(missed) != len(ScheduleFor(old, p.cfg.Schedule)) {
+		t.Fatalf("every elapsed slot should be missed: due=%d missed=%d", len(due), len(missed))
+	}
+}
+
+// The lateness allowance follows the blob's own window: ninety seconds on
+// a ten-minute devnet window, a share of the window on a four-hour one, so
+// a point of a hundred validators is not filed NOT_PROBED at its tail
+// because a few dead endpoints held the worker pool.
+func TestLatenessFor_FollowsTheWindow(t *testing.T) {
+	p := testProber(t)
+	p.cfg.MaxLateness, p.cfg.MaxLatenessFraction = 90*time.Second, 0.05
+	now := time.Now().UTC()
+	short := pub(now, now.Add(10*time.Minute))
+	if got := p.latenessFor(short); got != 90*time.Second {
+		t.Fatalf("10 min window: %s, want 90s", got)
+	}
+	long := pub(now, now.Add(4*time.Hour))
+	if got := p.latenessFor(long); got != 12*time.Minute {
+		t.Fatalf("4 h window: %s, want 12m", got)
+	}
+	p.cfg.MaxLatenessFraction = 0
+	if got := p.latenessFor(long); got != 90*time.Second {
+		t.Fatalf("fraction off: %s, want 90s", got)
+	}
+}
+
 // Publications from another chain or with a failed settlement tx are never probed.
 func TestPlan_SkipsForeignAndFailed(t *testing.T) {
 	p := testProber(t)

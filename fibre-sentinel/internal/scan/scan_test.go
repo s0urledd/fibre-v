@@ -361,6 +361,36 @@ func TestMustServeUntilForPromise_ChangeThatRevertsInsideTheInterval(t *testing.
 	}
 }
 
+// The chain accepts a promise whose height is one above the validating
+// node's latest, so a server one block behind validated the upload against
+// the state before the promise block. A change that landed in the promise
+// block itself is therefore inside the interval, and the earliest bound
+// over both states is the one no server could have undershot.
+func TestMustServeUntilForPromise_ChangeInThePromiseBlock(t *testing.T) {
+	creation := time.Unix(1700000000, 0).UTC()
+	h := NewParamHistory(100, params(10*time.Minute, time.Hour, 13*time.Hour))
+	// shortened in block 300 itself; the promise names height 300
+	h.AddFinalizeEvent(300, params(10*time.Minute, 30*time.Minute, 13*time.Hour))
+	msu, _, basis, amb, ok := h.MustServeUntilForPromise(creation, 300, 320, 0)
+	if !ok || !amb {
+		t.Fatalf("a change in the promise block must be ambiguous: amb=%v ok=%v", amb, ok)
+	}
+	if !msu.Equal(creation.Add(30 * time.Minute)) {
+		t.Fatalf("msu=%s, want creation+30m", msu)
+	}
+	if !strings.Contains(basis, "AMBIGUOUS") {
+		t.Fatalf("basis: %q", basis)
+	}
+	// and the other direction: lengthened in the promise block, the old,
+	// shorter window is the bound
+	h2 := NewParamHistory(100, params(10*time.Minute, 30*time.Minute, 13*time.Hour))
+	h2.AddFinalizeEvent(300, params(10*time.Minute, time.Hour, 13*time.Hour))
+	msu, _, _, amb, _ = h2.MustServeUntilForPromise(creation, 300, 320, 0)
+	if !amb || !msu.Equal(creation.Add(30*time.Minute)) {
+		t.Fatalf("lengthened in the promise block: msu=%s amb=%v, want creation+30m ambiguous", msu, amb)
+	}
+}
+
 // The consensus address the staking module implies must be the same
 // identifier every probe row and assignment already uses. If the derivation
 // drifts, validator names silently stop joining and every row loses its

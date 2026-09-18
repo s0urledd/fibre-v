@@ -69,3 +69,53 @@ func TestPartialLineAndTruncation(t *testing.T) {
 		t.Fatalf("cursor not at EOF after rewrite: %+v", r)
 	}
 }
+
+// An amendment whose probe row is not in the store yet is not stepped over:
+// the pass stops before it and the next passes retry, so a measurements
+// file that is merely behind does not lose its late verdict; a row that
+// never arrives is skipped after a bounded number of passes, so it cannot
+// stall the file either.
+func TestAmendmentForAMissingRowIsRetriedThenSkipped(t *testing.T) {
+	st := openStore(t)
+	dir := t.TempDir()
+	mpath, apath := filepath.Join(dir, "measurements.jsonl"), filepath.Join(dir, "amendments.jsonl")
+	amend := `{"dedupe_key":"t|aa|bb|2026-09-02T23:14:02Z","promise_hash":"aa","validator_address":"bb","scheduled_at":"2026-09-02T23:14:02Z","from":"PROBE_ERROR","to":"UNMATCHED_GENUINE","reason":"test","judged_at":"2026-09-03T01:00:00Z","scanner_frontier":"2026-09-03T00:59:00Z"}`
+	os.WriteFile(apath, []byte(amend+"\n"), 0o644)
+	r, err := ingest.Amendments(st, apath, time.Now())
+	if err != nil || r.Deferred == "" || r.Line != 0 {
+		t.Fatalf("first pass without the row: %+v err=%v, want deferred with the cursor held", r, err)
+	}
+	// the row arrives; the retried amendment applies
+	os.WriteFile(mpath, []byte(good+"\n"), 0o644)
+	if _, err := ingest.Measurements(st, mpath, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	r, err = ingest.Amendments(st, apath, time.Now())
+	if err != nil || r.Inserted != 1 || r.Deferred != "" || r.Line != 1 {
+		t.Fatalf("second pass with the row: %+v err=%v", r, err)
+	}
+	var cls string
+	if err := st.DB().QueryRow(`SELECT classification FROM probes WHERE dedupe_key = ?`, "t|aa|bb|2026-09-02T23:14:02Z").Scan(&cls); err != nil || cls != "UNMATCHED_GENUINE" {
+		t.Fatalf("classification after the retried amendment = %q err=%v", cls, err)
+	}
+
+	// a row that never arrives: retried a bounded number of passes, then skipped
+	orphan := strings.Replace(amend, `"t|aa|bb|2026-09-02T23:14:02Z"`, `"t|zz|bb|2026-09-02T23:14:02Z"`, 1)
+	f, _ := os.OpenFile(apath, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString(orphan + "\n")
+	f.Close()
+	skipped := false
+	for i := 0; i < 5; i++ {
+		r, err = ingest.Amendments(st, apath, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Skipped == 1 {
+			skipped = true
+			break
+		}
+	}
+	if !skipped || r.Line != 2 {
+		t.Fatalf("an orphan amendment must be skipped after bounded retries: %+v", r)
+	}
+}
