@@ -124,12 +124,12 @@ function Page() {
           {["24h", "7d", "30d", "all"].map((w) => <button key={w} aria-pressed={win === w} onClick={() => setWin(w)}>{w}</button>)}
         </div>
       </div>
-      <Panel title={<>Service<Info label="These five figures">
-          <p>Five figures, in the order you would debug them.</p>
-          <p>Reachability and Endorsed come from a TLS handshake with the endpoint every 5 minutes. Faults, Obligations and Throughput only cover blobs this validator signed for.</p>
+      <Panel title={<>Service<Info label="These four figures">
+          <p>Four figures, in the order you would debug them.</p>
+          <p>Reachability and Endorsed come from a TLS handshake with the endpoint every 5 minutes. Faults and Obligations only cover blobs this validator signed for.</p>
           <p>No figure has a threshold. Checks run from one location.</p>
         </Info></>} right={<>{data.window.name} window · <Link href="/methodology/#verdicts">methodology →</Link></>}>
-      <div className="cells five">
+      <div className="cells four">
         <Layer label="Reachability" kind="reach" r={v.reachability_window}
           sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined}
           what={<>
@@ -162,18 +162,25 @@ function Page() {
             <p>Shards this validator signed for, one observation each, judged by the last probe before the retention deadline: kept if it was handed over then, broken if any probe was a fault.</p>
             <p>Obligations never seen served and never seen broken are listed below, not in the rate.</p>
           </>} />
+      </div>
+      </Panel>
+
+      <Panel title="Speed" right="download step and whole probe, from one location">
+      <div className="cells two">
         <Cell label="Throughput"
           value={v.serve_bytes_per_second == null ? "—" : bytesPerSecond(v.serve_bytes_per_second)}
           tone={v.serve_bytes_per_second == null ? "absent" : undefined}
-          sub={v.serve_latency_p50_ms != null
-            ? `p50 ${v.serve_latency_p50_ms.toLocaleString("en-US")} ms · p95 ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms`
-            : "not observed"}
-          detail={v.serve_latency_p50_ms != null
-            ? `Whole probe, dial to verified rows: ${v.serve_latency_p50_ms.toLocaleString("en-US")} ms typical, ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms at the 95th percentile.`
-            : undefined}
+          sub={v.serve_bytes_per_second == null ? "not observed" : `median over ${v.serve_throughput_sample.toLocaleString("en-US")} healthy probes`}
           info={<>
             <p>Bytes handed over per second during the download itself, median over {v.serve_throughput_sample.toLocaleString("en-US")} healthy probes. Connecting and checking the certificate are not in it.</p>
-            <p>The milliseconds underneath are the whole probe, dial to verified rows: what a client waits for.</p>
+          </>} />
+        <Cell label="Latency"
+          value={v.serve_latency_p50_ms != null ? v.serve_latency_p50_ms.toLocaleString("en-US") : "—"} unit={v.serve_latency_p50_ms != null ? "ms" : undefined}
+          tone={v.serve_latency_p50_ms != null ? undefined : "absent"}
+          sub={v.serve_latency_p50_ms != null ? `p50 · p95 ${(v.serve_latency_p95_ms ?? 0).toLocaleString("en-US")} ms · ${v.serve_latency_sample.toLocaleString("en-US")} probes` : "not observed"}
+          info={<>
+            <p>The whole probe, dial to verified rows: what a client waits for. Median over healthy probes, with the 95th percentile beside it.</p>
+            <p>Measured from one location, so part of every figure is our own path.</p>
           </>} />
       </div>
       </Panel>
