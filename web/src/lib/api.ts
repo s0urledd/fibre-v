@@ -153,13 +153,31 @@ export type Network = {
   serve_latency_sample: number;
 };
 
-/** the most correlated failure in the window: likely ours, not theirs */
+/** one schedule point the observer does not trust itself at */
+export type SuspectPoint = {
+  at: string;
+  label: string;
+  validators: number;
+  unreachable: Rate;
+  fault: Rate;
+  /** "unreachable", "fault" or "unreachable,fault" */
+  reason: string;
+};
+
+/**
+ * Correlated failures in the window: likely ours, not theirs. Every probe at
+ * a suspect point is left out of every rate, bucket and fault count.
+ */
 export type VantageHealth = {
   worst_point: Rate;
   at?: string;
   label?: string;
   correlated: boolean;
   threshold: number;
+  fault_threshold: number;
+  min_validators: number;
+  suspect: SuspectPoint[];
+  suspect_rows: number;
 };
 
 export type Reconstructable = {
@@ -198,6 +216,8 @@ export type Obligations = {
   unobserved_unreachable: number;
   /** ... and we never attempted the download (backoff, budget, a missed slot) */
   unobserved_not_probed: number;
+  /** the retention window has not ended: no verdict yet, outside the rate */
+  pending: number;
   /** served / (served + broken) */
   rate: Rate;
 };
@@ -307,6 +327,13 @@ export type Probe = {
   raw_error?: string;
   retry_first_outcome?: string;
   clock_offset_ms?: number;
+  /** the evidence behind the verdict, on rows that carry it (schema 9 and later) */
+  row_indices?: number[];
+  rows_sha256?: string;
+  rpc_code?: string;
+  shadowed_by?: string;
+  observer_build?: string;
+  app_version?: number;
 };
 
 // Below this many rated probes a percentage is noise dressed as a

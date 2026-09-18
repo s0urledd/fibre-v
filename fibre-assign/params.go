@@ -15,6 +15,10 @@ import (
 const (
 	PinnedCelestiaAppVersion = "v10"
 	PinnedCelestiaAppCommit  = "fa5b523b7e3b2b83bd16bc072a45cbd3819fa369"
+	// PinnedCelestiaAppMajor is PinnedCelestiaAppVersion as the number the
+	// chain reports in abci_info app_version. A chain above it may assign
+	// rows differently from this package.
+	PinnedCelestiaAppMajor uint64 = 10
 )
 
 // Fraction is a rational number. It matches cometbft/libs/math.Fraction: both

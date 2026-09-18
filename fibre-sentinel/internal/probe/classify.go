@@ -203,15 +203,27 @@ type Evidence struct {
 	// Outcome is what happened on the wire.
 	Outcome Outcome
 	// CommitmentVerified: the rows that came back are genuine rows of this
-	// blob. With WRONG_ROWS or PARTIAL this is the whole question: rows that
-	// verify against the commitment but carry the wrong indices mean the
-	// validator answered from a different promise over the same blob, which
-	// it has no way to avoid. Rows that do not verify mean corrupt data.
+	// blob. With WRONG_ROWS or PARTIAL it is half the question: rows that do
+	// not verify are corrupt data; rows that verify but carry the wrong
+	// indices are either another promise's shard (Shadowed) or an incomplete
+	// delivery of this one.
 	CommitmentVerified bool
+	// Shadowed: another settled promise over the same commitment assigns
+	// this validator exactly the row set it returned. Only then is
+	// "answered from a different promise, which it has no way to avoid" a
+	// finding rather than a guess; without it, verified rows that are not
+	// this promise's assignment are a fault, and the row carries the
+	// indices so anyone can check.
+	Shadowed bool
 	// IdentityStale: the certificate is endorsed by the right consensus key
 	// but its signed validity window has lapsed or not yet started. Only
 	// meaningful when Outcome is IDENTITY_FAIL.
 	IdentityStale bool
+	// PinStale: the chain's app version is above the celestia-app major the
+	// assignment constants are pinned to. Which rows this validator owes
+	// may then be computed wrongly, so nothing that depends on assignment
+	// is judged; the row is an observer gap, never a verdict.
+	PinStale bool
 }
 
 // Classify applies the taxonomy.
@@ -252,6 +264,15 @@ func Classify(in Evidence) (Classification, string) {
 		return ClassNotRegistered, "no Fibre host registered for this validator at the time of the probe, so nobody could fetch its rows"
 	}
 
+	// A stale assignment pin is the observer's problem: after a chain
+	// upgrade this build may assign rows the chain does not, and every
+	// NOT_FOUND or WRONG_ROWS it then produces would be a false accusation
+	// of the whole set at once. Identity and registry above are still
+	// judged, because neither depends on assignment.
+	if in.PinStale {
+		return ClassProbeError, "assignment pin stale: the chain runs an app version above the pinned celestia-app major, so which rows this validator owes cannot be computed by this build; no retention verdict"
+	}
+
 	if in.Assigned && !in.Attested && !in.AttestationUnknown {
 		// No verified signature over this promise, so nothing proves this
 		// validator was ever sent the shard. Serving it anyway proves it has
@@ -277,11 +298,14 @@ func Classify(in Evidence) (Classification, string) {
 	}
 
 	// Rows came back and verify against the commitment, but their indices are
-	// not this promise's assignment. The validator is answering from another
-	// promise over the same blob and has no way to tell them apart, in any
-	// phase. Never a fault.
-	if (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified {
-		return ClassShadowedShard, "returned rows of this blob that verify against the commitment but are not the indices this promise assigns; DownloadShard is addressed by commitment alone, so another promise over the same blob answers in its place"
+	// not this promise's assignment, and another settled promise over the
+	// same blob assigns exactly those rows. The validator is answering from
+	// that promise and has no way to tell the two apart, in any phase.
+	// Never a fault. Without a matching promise the same wire result is an
+	// incomplete or wrong delivery of this shard and falls through to the
+	// phase arms below.
+	if (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified && in.Shadowed {
+		return ClassShadowedShard, "returned rows of this blob that verify against the commitment and are exactly another settled promise's assignment for this validator; DownloadShard is addressed by commitment alone, so that promise answers in this one's place"
 	}
 
 	// assigned and attested validator.
@@ -294,6 +318,8 @@ func Classify(in Evidence) (Classification, string) {
 			return ClassFault, "assigned shard not found while under retention obligation"
 		case o == OutcomeInvalidRows:
 			return ClassFault, "returned bytes that do not verify against the blob commitment"
+		case (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified:
+			return ClassFault, "returned genuine rows of this blob, but not the set this promise assigns, and no other settled promise over this commitment assigns them: an incomplete or wrong delivery of the shard while under obligation"
 		case o == OutcomeWrongRows || o == OutcomePartial:
 			return ClassFault, "returned rows that verify against neither the commitment nor this promise's assignment"
 		case o == OutcomeServerError:
@@ -315,6 +341,8 @@ func Classify(in Evidence) (Classification, string) {
 			return ClassTolerated, "NOT_FOUND within prune-lag tolerance after must_serve_until"
 		case o == OutcomeInvalidRows:
 			return ClassFault, "returned bytes that do not verify against the blob commitment"
+		case (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified:
+			return ClassFault, "returned genuine rows of this blob, but not the set this promise assigns, and no other settled promise over this commitment assigns them: an incomplete or wrong delivery of the shard"
 		case o == OutcomeWrongRows || o == OutcomePartial:
 			return ClassFault, "returned rows that verify against neither the commitment nor this promise's assignment"
 		case o == OutcomeServerError:

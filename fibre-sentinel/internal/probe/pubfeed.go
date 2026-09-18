@@ -29,10 +29,36 @@ type pubFeed struct {
 
 	pubs  map[string]scan.Publication // by promise hash
 	order []string                    // hashes in file order
+	// byCommit indexes live publications by blob commitment: two promises
+	// over the same blob share a shard on every validator, which is what
+	// makes SHADOWED_SHARD a finding rather than a guess.
+	byCommit map[string][]string
 }
 
 func newPubFeed(path string) *pubFeed {
-	return &pubFeed{path: path, pubs: map[string]scan.Publication{}}
+	return &pubFeed{path: path, pubs: map[string]scan.Publication{}, byCommit: map[string][]string{}}
+}
+
+// shadowersFor lists the other live promises over the same commitment and
+// the rows each assigns to addr. Empty when this promise is the only one.
+func (f *pubFeed) shadowersFor(hash, commitment, addr string) []ShadowCandidate {
+	var out []ShadowCandidate
+	for _, h := range f.byCommit[commitment] {
+		if h == hash {
+			continue
+		}
+		p, ok := f.pubs[h]
+		if !ok {
+			continue
+		}
+		for _, v := range p.Assignment.Validators {
+			if v.Address == addr && len(v.Rows) > 0 {
+				out = append(out, ShadowCandidate{PromiseHash: h, Rows: v.Rows})
+				break
+			}
+		}
+	}
+	return out
 }
 
 // refresh reads new complete records. It returns how many were added. If the
@@ -51,6 +77,7 @@ func (f *pubFeed) refresh() (int, error) {
 		f.offset, f.line = 0, 0
 		f.pubs = map[string]scan.Publication{}
 		f.order = nil
+		f.byCommit = map[string][]string{}
 	}
 	if _, err := fh.Seek(f.offset, io.SeekStart); err != nil {
 		return 0, err
@@ -80,6 +107,7 @@ func (f *pubFeed) refresh() (int, error) {
 		}
 		if _, dup := f.pubs[p.PromiseHash]; !dup {
 			f.order = append(f.order, p.PromiseHash)
+			f.byCommit[p.Promise.Commitment] = append(f.byCommit[p.Promise.Commitment], p.PromiseHash)
 			added++
 		}
 		f.pubs[p.PromiseHash] = p
@@ -92,12 +120,23 @@ func (f *pubFeed) forget(hash string) {
 	if _, ok := f.pubs[hash]; !ok {
 		return
 	}
+	c := f.pubs[hash].Promise.Commitment
 	delete(f.pubs, hash)
 	for j, h := range f.order {
 		if h == hash {
 			f.order = append(f.order[:j], f.order[j+1:]...)
 			break
 		}
+	}
+	hs := f.byCommit[c]
+	for j, h := range hs {
+		if h == hash {
+			f.byCommit[c] = append(hs[:j], hs[j+1:]...)
+			break
+		}
+	}
+	if len(f.byCommit[c]) == 0 {
+		delete(f.byCommit, c)
 	}
 }
 

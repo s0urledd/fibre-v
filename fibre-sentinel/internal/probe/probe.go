@@ -150,6 +150,51 @@ type Input struct {
 	// reachability heartbeat and by the probe policy's backoff, where the
 	// expensive DownloadShard would only repeat a transport failure.
 	SkipDownload bool
+
+	// Shadowers are the other settled promises over this commitment this
+	// prober knows, with the rows each assigns to this validator. Rows that
+	// verify against the commitment but are not this promise's assignment
+	// are SHADOWED_SHARD only when they are exactly one of these sets.
+	Shadowers []ShadowCandidate
+
+	// Observer is the build and chain state stamped on the row (see
+	// ObserverInfo). Zero value means "not stamped".
+	Observer ObserverInfo
+}
+
+// ShadowCandidate is another promise over the same commitment and the rows
+// it assigns to the validator being probed.
+type ShadowCandidate struct {
+	PromiseHash string
+	Rows        []int
+}
+
+// shadowedBy returns the candidate whose assignment is exactly the returned
+// index set, or "" when none is.
+func shadowedBy(idx []uint32, cands []ShadowCandidate) string {
+	if len(idx) == 0 {
+		return ""
+	}
+	got := make(map[uint32]bool, len(idx))
+	for _, i := range idx {
+		got[i] = true
+	}
+	for _, c := range cands {
+		if len(c.Rows) != len(got) {
+			continue
+		}
+		match := true
+		for _, r := range c.Rows {
+			if !got[uint32(r)] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return c.PromiseHash
+		}
+	}
+	return ""
 }
 
 // Run executes one layered probe and returns a fully-populated Measurement.
@@ -182,6 +227,10 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		ClockOffsetMS:      in.ClockOffsetMS,
 		LatenessMS:         now.Sub(in.SchedulePoint.At).Milliseconds(),
 	}
+	if in.Observer != (ObserverInfo{}) {
+		o := in.Observer
+		m.Observer = &o
+	}
 	defer func() {
 		m.FinishedAt = time.Now().UTC()
 		m.TotalDurationMS = m.FinishedAt.Sub(m.StartedAt).Milliseconds()
@@ -204,7 +253,9 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 			Phase:              m.Phase,
 			Outcome:            m.Outcome,
 			CommitmentVerified: m.Download.CommitmentVerified,
+			Shadowed:           m.Download.ShadowedBy != "",
 			IdentityStale:      m.Identity.Stale,
+			PinStale:           m.Observer != nil && m.Observer.PinStale,
 		})
 	}()
 
@@ -550,6 +601,7 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint str
 	r.DurationMS = sinceMS(t0)
 	if err != nil {
 		r.Error = err.Error()
+		r.RPCCode = rpcCodeOf(err)
 		r.outcome, r.rawErr = classifyDownloadError(err), err.Error()
 		return r
 	}
@@ -561,9 +613,14 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint str
 		return r
 	}
 	r.RowsReturned = len(proofs)
-	for _, p := range proofs {
+	digest := sha256.New()
+	r.RowIndices = make([]uint32, len(proofs))
+	for i, p := range proofs {
 		r.BytesReturned += int64(len(p.Row))
+		r.RowIndices[i] = uint32(p.Index)
+		digest.Write(p.Row)
 	}
+	r.RowsSHA256 = hex.EncodeToString(digest.Sum(nil))
 
 	rec, rerr := coder.c.NewReconstructor(rsema1d.Commitment(in.Commitment))
 	if rerr != nil {
@@ -585,6 +642,7 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, endpoint str
 	sm := assign.ShardMap{in.Target.Address: in.Target.AssignedRows}
 	if verr := sm.Verify(in.Target.Address, idx); verr != nil {
 		r.Error = "assignment verify: " + verr.Error()
+		r.ShadowedBy = shadowedBy(idx, in.Shadowers)
 		if len(proofs) < in.Target.RowCount {
 			r.outcome, r.rawErr = OutcomePartial, verr.Error()
 		} else {
@@ -675,6 +733,15 @@ func classifyDialError(err error) Outcome {
 // classifyDownloadError maps an L4 error to an outcome by its gRPC status
 // code first, so that "the observer gave up" (deadline, our own limits) is
 // never recorded as a verdict about the validator.
+// rpcCodeOf is the canonical name of a gRPC status error's code, or "" for
+// anything that is not a status error.
+func rpcCodeOf(err error) string {
+	if st, ok := status.FromError(err); ok && err != nil {
+		return st.Code().String()
+	}
+	return ""
+}
+
 func classifyDownloadError(err error) Outcome {
 	if err == nil {
 		return OutcomeServedOK

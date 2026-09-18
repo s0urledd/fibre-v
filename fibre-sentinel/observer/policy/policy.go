@@ -32,7 +32,10 @@ import (
 // Config is the on-disk policy (YAML). Zero values take the defaults from
 // R4 section 3.5.
 type Config struct {
-	Capacity struct {
+	// PointsPerPublication is how many probes one publication costs a
+	// validator: set by the prober from its schedule, not from the file.
+	PointsPerPublication float64 `yaml:"-"`
+	Capacity             struct {
 		FloorRows         int   `yaml:"floor_rows"`          // rows of the smallest validator the capacity model is stated for (148)
 		FloorValidatorBps int64 `yaml:"floor_validator_bps"` // assumed serving capacity of a floor validator, bits per second (0.65 Gbps, UNVERIFIED)
 		ScaleWithRows     bool  `yaml:"scale_with_rows"`     // cap(rows) = cap(floor) * rows / floor_rows
@@ -303,12 +306,20 @@ func (p *Policy) observe(pub scan.Publication, now time.Time) {
 	p.recentPubs[pub.PromiseHash] = pl
 }
 
-// pointsPerPublication is how many probes one admitted publication costs a
-// single validator: the in-window points plus the grace point. It mirrors the
-// prober's default schedule; an operator who widens that schedule must widen
-// this with it, or the sampler will admit more work than the request cap can
-// carry.
-const pointsPerPublication = 5.0
+// defaultPointsPerPublication is how many probes one admitted publication
+// costs a single validator when the caller does not say: the four default
+// in-window points, the grace point and the post point. The prober passes
+// its real schedule length through Config.PointsPerPublication so the two
+// cannot drift apart.
+const defaultPointsPerPublication = 6.0
+
+// pointsPerPublication is the schedule length the sampler budgets for.
+func (c Config) pointsPerPublication() float64 {
+	if c.PointsPerPublication > 0 {
+		return c.PointsPerPublication
+	}
+	return defaultPointsPerPublication
+}
 
 // projectedP computes the admission probability from the trailing lookback:
 // p = min(1, cap/projected) over EVERY cap BeforeProbe enforces, not just the
@@ -371,7 +382,7 @@ func (p *Policy) projectedP(now time.Time) (float64, string) {
 	// whole retention window, so the rate that matters is how many
 	// publications land per minute, not how many bytes they carry.
 	if rpm := p.cfg.Caps.PerValidator.RequestsPerMinute; rpm > 0 && len(addrs) > 0 {
-		perMinute := float64(len(p.recentPubs)) * pointsPerPublication * (float64(time.Minute) / float64(lookback))
+		perMinute := float64(len(p.recentPubs)) * p.cfg.pointsPerPublication() * (float64(time.Minute) / float64(lookback))
 		tighten(int64(rpm), perMinute, "validator_requests_per_minute")
 	}
 	return prob, binding

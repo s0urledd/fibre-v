@@ -761,11 +761,21 @@ func serveRate(c classCounts) Rate {
 //	               handed nothing over; it never completed TLS; or this
 //	               observer never attempted the download (backoff, budget,
 //	               a slot that elapsed)
+//	pending        the retention window has not ended, so the newest probe
+//	               is not the last one; no verdict yet
 //
 // Only served and broken enter the rate. The rest is published beside it so a
-// reader can see how many obligations the rate does not speak for. Every
-// figure covers obligations the settled promise proves: an unattested one is
-// nothing to keep or break.
+// reader can see how many obligations the rate does not speak for.
+//
+// The population is obligations the settled promise proves (attested = 1):
+// an unattested one is nothing to keep or break, and a record from before
+// signatures were verified (attested NULL) is not evidence either way, so it
+// is outside this count and reported under attestation.unknown. An
+// obligation belongs to a window by its publication's settlement time, not
+// by each probe's time, so an obligation is judged whole or not at all: a
+// window cut through the middle of one would decide it on half its probes.
+// The window's end is the moment the verdict is drawn (as_of); an obligation
+// whose must_serve_until is later than that is pending.
 type obligationStats struct {
 	Total                 int64 `json:"total"`
 	Served                int64 `json:"served"`
@@ -775,6 +785,7 @@ type obligationStats struct {
 	UnobservedReachable   int64 `json:"unobserved_reachable"`
 	UnobservedUnreachable int64 `json:"unobserved_unreachable"`
 	UnobservedNotProbed   int64 `json:"unobserved_not_probed"`
+	Pending               int64 `json:"pending"`
 	// Rate is served / (served + broken).
 	Rate Rate `json:"rate"`
 }
@@ -784,37 +795,52 @@ type obligationStats struct {
 // and what the other probes saw. A gap row (NOT_PROBED, PROBE_ERROR) never
 // becomes the newest probe while a real one exists, so a slot this observer
 // missed does not turn a served obligation into an unobserved one.
+//
+// Arguments, in order: as_of (pending cut), window start (settlement_time),
+// then whatever the caller appends (suspect points, a validator filter).
 const obligationBuckets = `SELECT validator_address, promise_hash,
 			SUM(classification = 'FAULT')   AS faults,
 			SUM(classification = 'HEALTHY') AS healthy,
 			SUM(classification NOT IN ('NOT_PROBED','PROBE_ERROR'))                AS attempted,
 			SUM(classification NOT IN ('NOT_PROBED','PROBE_ERROR') AND tls_ok = 1) AS reached,
-			COALESCE(MAX(CASE WHEN rn = 1 THEN classification END), '')          AS last_cls
+			COALESCE(MAX(CASE WHEN rn = 1 THEN classification END), '')          AS last_cls,
+			MAX(must_serve_until > ?)                                            AS pending
 		FROM (
-			SELECT validator_address, promise_hash, classification, tls_ok,
-			       ROW_NUMBER() OVER (PARTITION BY validator_address, promise_hash
-			                          ORDER BY (classification IN ('NOT_PROBED','PROBE_ERROR')), scheduled_at DESC, started_at DESC) AS rn
-			FROM probes WHERE COALESCE(attested, 1) = 1 AND `
+			SELECT pr.validator_address, pr.promise_hash, pr.classification, pr.tls_ok, pr.must_serve_until,
+			       ROW_NUMBER() OVER (PARTITION BY pr.validator_address, pr.promise_hash
+			                          ORDER BY (pr.classification IN ('NOT_PROBED','PROBE_ERROR')), pr.scheduled_at DESC, pr.started_at DESC) AS rn
+			FROM probes pr JOIN publications pb ON pb.promise_hash = pr.promise_hash
+			WHERE pb.settlement_time >= ? AND pr.assigned = 1 AND pr.phase = 'in_window' AND pr.attested = 1`
 
 const obligationSums = `COUNT(*),
-			COALESCE(SUM(faults > 0), 0),
-			COALESCE(SUM(faults = 0 AND last_cls = 'HEALTHY'), 0),
-			COALESCE(SUM(faults = 0 AND last_cls <> 'HEALTHY' AND healthy > 0), 0),
-			COALESCE(SUM(faults = 0 AND healthy = 0 AND reached > 0), 0),
-			COALESCE(SUM(faults = 0 AND healthy = 0 AND reached = 0 AND attempted > 0), 0),
-			COALESCE(SUM(faults = 0 AND healthy = 0 AND attempted = 0), 0)`
+			COALESCE(SUM(NOT pending AND faults > 0), 0),
+			COALESCE(SUM(NOT pending AND faults = 0 AND last_cls = 'HEALTHY'), 0),
+			COALESCE(SUM(NOT pending AND faults = 0 AND last_cls <> 'HEALTHY' AND healthy > 0), 0),
+			COALESCE(SUM(NOT pending AND faults = 0 AND healthy = 0 AND reached > 0), 0),
+			COALESCE(SUM(NOT pending AND faults = 0 AND healthy = 0 AND reached = 0 AND attempted > 0), 0),
+			COALESCE(SUM(NOT pending AND faults = 0 AND healthy = 0 AND attempted = 0), 0),
+			COALESCE(SUM(pending), 0)`
 
 func (o *obligationStats) finish() {
 	o.Unobserved = o.UnobservedReachable + o.UnobservedUnreachable + o.UnobservedNotProbed
 	o.Rate = rate(o.Served, o.Served+o.Broken)
 }
 
-// obligationsWhere reduces the probes matching where to obligation buckets.
-func (s *Server) obligationsWhere(ctx context.Context, where string, args ...any) (obligationStats, error) {
+// obligationArgs is the argument list obligationBuckets expects: as_of, the
+// window start, the suspect points, then the caller's own.
+func obligationArgs(win Window, ss suspectSet, extra ...any) []any {
+	args := []any{store.TS(win.End), win.startArg()}
+	args = append(args, ss.args...)
+	return append(args, extra...)
+}
+
+// obligationsWhere reduces the window's proven obligations to buckets. extra
+// is appended to the WHERE clause (a validator filter), its arguments last.
+func (s *Server) obligationsWhere(ctx context.Context, win Window, ss suspectSet, extra string, extraArgs ...any) (obligationStats, error) {
 	var o obligationStats
-	err := s.st.DB().QueryRowContext(ctx, `SELECT `+obligationSums+` FROM (`+obligationBuckets+where+`)
-			GROUP BY validator_address, promise_hash)`, args...).
-		Scan(&o.Total, &o.Broken, &o.Served, &o.EndUnobserved, &o.UnobservedReachable, &o.UnobservedUnreachable, &o.UnobservedNotProbed)
+	err := s.st.DB().QueryRowContext(ctx, `SELECT `+obligationSums+` FROM (`+obligationBuckets+ss.clause("pr.scheduled_at")+extra+`)
+			GROUP BY validator_address, promise_hash)`, obligationArgs(win, ss, extraArgs...)...).
+		Scan(&o.Total, &o.Broken, &o.Served, &o.EndUnobserved, &o.UnobservedReachable, &o.UnobservedUnreachable, &o.UnobservedNotProbed, &o.Pending)
 	if err != nil {
 		return obligationStats{}, err
 	}
@@ -823,9 +849,9 @@ func (s *Server) obligationsWhere(ctx context.Context, where string, args ...any
 }
 
 // obligationsByValidator is obligationsWhere grouped by validator.
-func (s *Server) obligationsByValidator(ctx context.Context, where string, args ...any) (map[string]obligationStats, error) {
-	rows, err := s.st.DB().QueryContext(ctx, `SELECT validator_address, `+obligationSums+` FROM (`+obligationBuckets+where+`)
-			GROUP BY validator_address, promise_hash) GROUP BY validator_address`, args...)
+func (s *Server) obligationsByValidator(ctx context.Context, win Window, ss suspectSet, extra string, extraArgs ...any) (map[string]obligationStats, error) {
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT validator_address, `+obligationSums+` FROM (`+obligationBuckets+ss.clause("pr.scheduled_at")+extra+`)
+			GROUP BY validator_address, promise_hash) GROUP BY validator_address`, obligationArgs(win, ss, extraArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -834,7 +860,7 @@ func (s *Server) obligationsByValidator(ctx context.Context, where string, args 
 	for rows.Next() {
 		var addr string
 		var o obligationStats
-		if err := rows.Scan(&addr, &o.Total, &o.Broken, &o.Served, &o.EndUnobserved, &o.UnobservedReachable, &o.UnobservedUnreachable, &o.UnobservedNotProbed); err != nil {
+		if err := rows.Scan(&addr, &o.Total, &o.Broken, &o.Served, &o.EndUnobserved, &o.UnobservedReachable, &o.UnobservedUnreachable, &o.UnobservedNotProbed, &o.Pending); err != nil {
 			return nil, err
 		}
 		o.finish()
@@ -843,7 +869,8 @@ func (s *Server) obligationsByValidator(ctx context.Context, where string, args 
 	return out, rows.Err()
 }
 
-// vantageHealth reports the most correlated failure the window contains.
+// vantageHealth reports the correlated failures the window contains, and
+// which schedule points every rate leaves out because of them.
 type vantageHealth struct {
 	// WorstPoint is the fraction unreachable at the worst schedule point.
 	WorstPoint Rate `json:"worst_point"`
@@ -854,47 +881,123 @@ type vantageHealth struct {
 	// below, which is the observer saying it does not trust its own reading
 	// at that point.
 	Correlated bool `json:"correlated"`
-	// Threshold is published so the judgement is not a hidden constant.
-	Threshold float64 `json:"threshold"`
+	// Threshold and FaultThreshold are published so the judgement is not a
+	// hidden constant.
+	Threshold      float64 `json:"threshold"`
+	FaultThreshold float64 `json:"fault_threshold"`
+	// MinValidators is the floor on how many validators must share the
+	// failure before a share means anything: one of two is half.
+	MinValidators int64 `json:"min_validators"`
+	// Suspect lists every schedule point in the window at which the share
+	// of validators unreachable, or the share faulting, reached its
+	// threshold. Every probe row at those points is left out of the serve
+	// rate, the obligation buckets, the per-point breakdown and the fault
+	// count: validators fail independently and one observer's network, or
+	// one observer's stale assignment, does not. SuspectRows is how many
+	// rows that removed.
+	Suspect     []suspectPoint `json:"suspect"`
+	SuspectRows int64          `json:"suspect_rows"`
 }
 
-// correlatedUnreachableThreshold: above this share of the validators probed at
-// one schedule point being unreachable, the likeliest explanation is this
-// observer's own network rather than that many independent operators.
-const correlatedUnreachableThreshold = 0.5
+// suspectPoint is one schedule point the observer does not trust itself at.
+type suspectPoint struct {
+	At          string `json:"at"`
+	Label       string `json:"label"`
+	Validators  int64  `json:"validators"`
+	Unreachable Rate   `json:"unreachable"`
+	Fault       Rate   `json:"fault"`
+	// Reason is "unreachable", "fault" or "unreachable,fault".
+	Reason string `json:"reason"`
+}
 
-// worstCorrelatedPoint finds the schedule point in the window with the highest
-// share of distinct validators unreachable at once.
-func (s *Server) worstCorrelatedPoint(ctx context.Context, win Window) (vantageHealth, error) {
-	out := vantageHealth{Threshold: correlatedUnreachableThreshold}
+// suspectSet is the SQL side of vantageHealth.Suspect: the clause that drops
+// those points from a population query, and its arguments.
+type suspectSet struct {
+	points []suspectPoint
+	args   []any
+}
+
+// clause is " AND <col> NOT IN (?, ...)" or "" when nothing is suspect.
+func (ss suspectSet) clause(col string) string {
+	if len(ss.args) == 0 {
+		return ""
+	}
+	return " AND " + col + " NOT IN (?" + strings.Repeat(", ?", len(ss.args)-1) + ")"
+}
+
+// correlatedUnreachableThreshold: at or above this share of the validators
+// probed at one schedule point being unreachable, the likeliest explanation
+// is this observer's own network rather than that many independent
+// operators. correlatedFaultThreshold is the same judgement for faults: half
+// the set losing data at the same minute is not a finding about the set, it
+// is a finding about the observer (a stale assignment pin, a broken coder).
+//
+// correlatedMinValidators is the floor under which a share is not a signal:
+// one validator of two failing is half the set and an ordinary Tuesday.
+const (
+	correlatedUnreachableThreshold = 0.5
+	correlatedFaultThreshold       = 0.5
+	correlatedMinValidators        = 3
+)
+
+// suspectPoints finds every schedule point in the window at which the share
+// of distinct validators unreachable, or faulting, reached its threshold,
+// among points where more than one validator was probed. The points are
+// judged over the whole set at that minute, so the same point is suspect on
+// every page and for every validator.
+func (s *Server) suspectPoints(ctx context.Context, win Window) (vantageHealth, suspectSet, error) {
+	out := vantageHealth{Threshold: correlatedUnreachableThreshold, FaultThreshold: correlatedFaultThreshold,
+		MinValidators: correlatedMinValidators, Suspect: []suspectPoint{}}
+	var ss suspectSet
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT scheduled_at, schedule_label,
 			COUNT(DISTINCT CASE WHEN classification = 'UNREACHABLE' THEN validator_address END),
-			COUNT(DISTINCT validator_address)
+			COUNT(DISTINCT CASE WHEN classification = 'FAULT' THEN validator_address END),
+			COUNT(DISTINCT validator_address), COUNT(*)
 		FROM probes
 		WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'
-		GROUP BY scheduled_at HAVING COUNT(DISTINCT validator_address) > 1`, win.startArg())
+		GROUP BY scheduled_at HAVING COUNT(DISTINCT validator_address) > 1
+		ORDER BY scheduled_at`, win.startArg())
 	if err != nil {
-		return out, err
+		return out, ss, err
 	}
 	defer rows.Close()
 	var best float64
 	for rows.Next() {
 		var at, label string
-		var bad, all int64
-		if err := rows.Scan(&at, &label, &bad, &all); err != nil {
-			return out, err
+		var bad, faulted, all, n int64
+		if err := rows.Scan(&at, &label, &bad, &faulted, &all, &n); err != nil {
+			return out, ss, err
 		}
 		if all == 0 {
 			continue
 		}
-		if f := float64(bad) / float64(all); f > best || out.At == "" {
-			best = f
+		fu, ff := float64(bad)/float64(all), float64(faulted)/float64(all)
+		if fu > best || out.At == "" {
+			best = fu
 			out.WorstPoint = rate(bad, all)
 			out.At, out.Label = at, label
 		}
+		reason := ""
+		if fu >= correlatedUnreachableThreshold && bad >= correlatedMinValidators {
+			reason = "unreachable"
+		}
+		if ff >= correlatedFaultThreshold && faulted >= correlatedMinValidators {
+			if reason != "" {
+				reason += ","
+			}
+			reason += "fault"
+		}
+		if reason == "" {
+			continue
+		}
+		out.Suspect = append(out.Suspect, suspectPoint{At: at, Label: label, Validators: all,
+			Unreachable: rate(bad, all), Fault: rate(faulted, all), Reason: reason})
+		out.SuspectRows += n
+		ss.args = append(ss.args, at)
 	}
-	out.Correlated = out.WorstPoint.Den > 0 && best >= correlatedUnreachableThreshold
-	return out, rows.Err()
+	out.Correlated = out.WorstPoint.Den > 0 && best >= correlatedUnreachableThreshold && out.WorstPoint.Num >= correlatedMinValidators
+	ss.points = out.Suspect
+	return out, ss, rows.Err()
 }
 
 // byPoint breaks a rate down by schedule point. The four in-window points are
@@ -1031,18 +1134,27 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM endpoints WHERE closed_at IS NULL`).Scan(&resp.RegisteredEndpoints)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT validator_address) FROM probes WHERE started_at >= ?`, win.startArg()).Scan(&resp.ValidatorsProbed)
 
-	classes, total, err := s.classCountsWhere(ctx, `started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg())
+	// The points this observer does not trust itself at come first: every
+	// population below leaves them out.
+	vh, ss, err := s.suspectPoints(ctx, win)
+	if err != nil {
+		return nil, err
+	}
+	resp.VantageHealth = vh
+	pop := `started_at >= ? AND assigned = 1 AND phase = 'in_window'` + ss.clause("scheduled_at")
+	popArgs := append([]any{win.startArg()}, ss.args...)
+
+	classes, total, err := s.classCountsWhere(ctx, pop, popArgs...)
 	if err != nil {
 		return nil, err
 	}
 	resp.Classes = classes
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND assigned = 1 AND classification = 'FAULT'`, win.startArg()).Scan(&resp.Faults)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at"), popArgs...).Scan(&resp.Faults)
 	resp.ServeRate = serveRate(classes)
 	resp.Coverage = coverage(classes)
 	resp.HeldOut = heldOut(classes)
 	resp.ExcludedClasses = excludedFromRate
-	if resp.Obligations, err = s.obligationsWhere(ctx,
-		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
+	if resp.Obligations, err = s.obligationsWhere(ctx, win, ss, ""); err != nil {
 		return nil, err
 	}
 	resp.ByObligation = resp.Obligations.Rate
@@ -1067,11 +1179,7 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		grows.Close()
 	}
 
-	if resp.VantageHealth, err = s.worstCorrelatedPoint(ctx, win); err != nil {
-		return nil, err
-	}
-	if resp.ByPoint, err = s.rateByPoint(ctx,
-		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg()); err != nil {
+	if resp.ByPoint, err = s.rateByPoint(ctx, pop, popArgs...); err != nil {
 		return nil, err
 	}
 	if resp.LatencyP50, resp.LatencyP95, resp.LatencySample, err = s.latencyWhere(ctx,
@@ -1369,6 +1477,14 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		}
 		return append(base, only)
 	}
+	// The points the observer does not trust itself at, left out of every
+	// per-validator population below exactly as they are network-wide.
+	_, ss, err := s.suspectPoints(ctx, win)
+	if err != nil {
+		return nil, err
+	}
+	sus := ss.clause("scheduled_at")
+	winArgs := append([]any{win.startArg()}, ss.args...)
 	byAddr := map[string]*validatorRow{}
 	get := func(addr string) *validatorRow {
 		v, ok := byAddr[addr]
@@ -1482,8 +1598,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		return nil, err
 	}
 	frows, err := db.QueryContext(ctx, `SELECT validator_address, COUNT(*) FROM probes
-		WHERE started_at >= ? AND assigned = 1 AND classification = 'FAULT'`+vfilter("validator_address")+`
-		GROUP BY validator_address`, vargs(win.startArg())...)
+		WHERE started_at >= ? AND assigned = 1 AND classification = 'FAULT'`+sus+vfilter("validator_address")+`
+		GROUP BY validator_address`, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1502,8 +1618,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	}
 	// classes per validator in window
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, classification, COUNT(*) FROM probes
-		WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
-		GROUP BY validator_address, classification`, vargs(win.startArg())...)
+		WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
+		GROUP BY validator_address, classification`, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1526,9 +1642,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, schedule_label,
 			COALESCE(SUM(CASE WHEN classification = 'HEALTHY' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
+		FROM probes WHERE started_at >= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address, schedule_label
-		ORDER BY validator_address, schedule_label`, vargs(win.startArg())...)
+		ORDER BY validator_address, schedule_label`, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1805,8 +1921,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	}
 
 	// one observation per (validator, blob): see obligationStats.
-	byObligation, err := s.obligationsByValidator(ctx,
-		`started_at >= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address"), vargs(win.startArg())...)
+	byObligation, err := s.obligationsByValidator(ctx, win, ss, vfilter("pr.validator_address"), vargs()...)
 	if err != nil {
 		return nil, err
 	}
@@ -1922,17 +2037,29 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		Classes      classCounts      `json:"classes"`
 	}
 	var spans []span
+	// The suspect points over all time, so the recent-probes list can mark
+	// rows that no rate counts.
+	suspectAll := []suspectPoint{}
 	for _, name := range []string{"24h", "7d", "30d", "all"} {
 		sw := Window{Name: name, Span: windows[name], End: now}
 		if sw.Span > 0 {
 			sw.Start = now.Add(-sw.Span)
 		}
-		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND assigned = 1 AND phase = 'in_window'`, addr, sw.startArg())
+		_, ss, err := s.suspectPoints(ctx, sw)
 		if err != nil {
 			s.writeInternal(w, r.URL.Path, err)
 			return
 		}
-		obl, err := s.obligationsWhere(ctx, `validator_address = ? AND started_at >= ? AND assigned = 1 AND phase = 'in_window'`, addr, sw.startArg())
+		if sw.Name == "all" {
+			suspectAll = ss.points
+		}
+		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND assigned = 1 AND phase = 'in_window'`+ss.clause("scheduled_at"),
+			append([]any{addr, sw.startArg()}, ss.args...)...)
+		if err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		obl, err := s.obligationsWhere(ctx, sw, ss, ` AND pr.validator_address = ?`, addr)
 		if err != nil {
 			s.writeInternal(w, r.URL.Path, err)
 			return
@@ -1961,6 +2088,7 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		"validator":                   rows[0],
 		"windows":                     spans,
 		"recent_probes":               probes,
+		"suspect_points":              suspectAll,
 		"serve_rate_excluded_classes": excludedFromRate,
 		"vantage":                     s.vantage,
 	})
@@ -2529,12 +2657,24 @@ type probeRow struct {
 	// see "the first try timed out" rather than only the final verdict.
 	RetryFirstOutcome string `json:"retry_first_outcome,omitempty"`
 	ClockOffsetMS     int64  `json:"clock_offset_ms,omitempty"`
+	// The evidence behind the verdict, when the row carries it (rows from
+	// before schema 9 do not): the row indices returned, a digest of the
+	// returned payload, the gRPC status code, the promise whose shard
+	// answered instead, and the observer build and chain app version the
+	// classification was made under.
+	RowIndices    []uint32 `json:"row_indices,omitempty"`
+	RowsSHA256    string   `json:"rows_sha256,omitempty"`
+	RPCCode       string   `json:"rpc_code,omitempty"`
+	ShadowedBy    string   `json:"shadowed_by,omitempty"`
+	ObserverBuild string   `json:"observer_build,omitempty"`
+	AppVersion    int64    `json:"app_version,omitempty"`
 }
 
 func (s *Server) probeRows(ctx context.Context, where string, limit int, args ...any) ([]probeRow, error) {
 	q := `SELECT vantage, promise_hash, validator_address, validator_host, assigned, attested, assigned_row_count, schedule_label, scheduled_at,
 		started_at, phase, outcome, classification, classification_reason, rows_returned, rows_expected, total_duration_ms, tls_ok, identity_ok, raw_error,
-		COALESCE(json_extract(raw_json, '$.retry.first_outcome'), ''), COALESCE(json_extract(raw_json, '$.clock_offset_ms'), 0)
+		COALESCE(json_extract(raw_json, '$.retry.first_outcome'), ''), COALESCE(json_extract(raw_json, '$.clock_offset_ms'), 0),
+		COALESCE(row_indices, ''), COALESCE(rows_sha256, ''), COALESCE(rpc_code, ''), COALESCE(shadowed_by, ''), COALESCE(observer_build, ''), COALESCE(app_version, 0)
 		FROM probes`
 	if where != "" {
 		q += " WHERE " + where
@@ -2550,10 +2690,15 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 		var p probeRow
 		var assigned, tls, id int
 		var att sql.NullInt64
+		var idxJSON string
 		if err := rows.Scan(&p.Vantage, &p.PromiseHash, &p.ValidatorAddress, &p.ValidatorHost, &assigned, &att, &p.AssignedRowCount, &p.ScheduleLabel,
 			&p.ScheduledAt, &p.StartedAt, &p.Phase, &p.Outcome, &p.Classification, &p.Reason, &p.RowsReturned, &p.RowsExpected,
-			&p.TotalDurationMS, &tls, &id, &p.RawError, &p.RetryFirstOutcome, &p.ClockOffsetMS); err != nil {
+			&p.TotalDurationMS, &tls, &id, &p.RawError, &p.RetryFirstOutcome, &p.ClockOffsetMS,
+			&idxJSON, &p.RowsSHA256, &p.RPCCode, &p.ShadowedBy, &p.ObserverBuild, &p.AppVersion); err != nil {
 			return nil, err
+		}
+		if idxJSON != "" {
+			_ = json.Unmarshal([]byte(idxJSON), &p.RowIndices)
 		}
 		p.Assigned, p.TLSOK, p.IdentityOK = assigned == 1, tls == 1, id == 1
 		if att.Valid {

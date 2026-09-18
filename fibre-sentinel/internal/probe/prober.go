@@ -1,10 +1,13 @@
 package probe
 
 import (
+	"runtime/debug"
+
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	assign "github.com/plsgiveup/fibre/fibre-assign"
 	"sort"
 	"strings"
 	"sync"
@@ -108,9 +111,13 @@ func (c Config) withDefaults() Config {
 type Prober struct {
 	status *status.Writer
 
-	cfg      Config
-	log      *scan.Logger
-	chain    *scan.Chain
+	cfg   Config
+	log   *scan.Logger
+	chain *scan.Chain
+	// observer is stamped on every row: the build, the assignment pin, and
+	// the chain's app version as last polled. pinMu guards the version.
+	observer ObserverInfo
+	pinMu    sync.Mutex
 	resolver *Resolver
 	store    *MeasurementStore
 	feed     *pubFeed
@@ -148,6 +155,7 @@ func New(cfg Config, log *scan.Logger) (*Prober, error) {
 		return nil, err
 	}
 	return &Prober{
+		observer:    ObserverInfo{Build: buildRevision(), AssignPin: assign.PinnedCelestiaAppCommit},
 		cfg:         cfg,
 		log:         log,
 		chain:       ch,
@@ -230,6 +238,7 @@ func (p *Prober) Run(parent context.Context) error {
 	}
 	p.chainID = id
 	p.measureClock(ctx)
+	p.pollAppVersion(ctx)
 	p.log.Printf("prober up: vantage=%s chain_id=%s tip=%d rpc=%s pubs=%s data=%s concurrency=%d",
 		p.cfg.Vantage, id, tip, p.cfg.RPCURL, p.cfg.PublicationsPath, p.store.Path(), p.cfg.Concurrency)
 
@@ -244,6 +253,7 @@ func (p *Prober) Run(parent context.Context) error {
 		}
 
 		p.measureClock(ctx)
+		p.pollAppVersion(ctx)
 
 		if added, err := p.feed.refresh(); err != nil {
 			p.log.Fatalf("load publications: %v", err)
@@ -342,6 +352,38 @@ func (p *Prober) measureClock(ctx context.Context) {
 	if abs(offset) > clockSkewWarn && abs(prev) <= clockSkewWarn {
 		p.log.Printf("WARNING: observer clock is %s from the chain's latest block time; phase boundaries are seconds wide, check NTP", offset.Round(time.Second))
 	}
+}
+
+// pollAppVersion reads the chain's app version and marks the assignment pin
+// stale when the chain has moved above the pinned celestia-app major. A poll
+// that fails keeps the previous reading: "unknown" must not flip verdicts
+// either way.
+func (p *Prober) pollAppVersion(ctx context.Context) {
+	v, err := p.chain.AppVersion(ctx)
+	if err != nil {
+		p.log.Printf("app version: %v (keeping previous reading)", err)
+		return
+	}
+	p.pinMu.Lock()
+	prev := p.observer
+	p.observer.AppVersion = v
+	p.observer.PinStale = v > assign.PinnedCelestiaAppMajor
+	cur := p.observer
+	p.pinMu.Unlock()
+	if cur.PinStale && !prev.PinStale {
+		p.log.Printf("WARNING: chain app version %d is above the pinned celestia-app major %d; probes are recorded as PROBE_ERROR (assignment pin stale) until this build is re-pinned", v, assign.PinnedCelestiaAppMajor)
+	}
+	if p.status != nil {
+		p.status.Set("app_version", v)
+		p.status.Set("pin_stale", cur.PinStale)
+	}
+}
+
+// observerInfo is the stamp for the next row.
+func (p *Prober) observerInfo() ObserverInfo {
+	p.pinMu.Lock()
+	defer p.pinMu.Unlock()
+	return p.observer
 }
 
 func (p *Prober) clockOffsetMS() int64 {
@@ -646,6 +688,8 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 		ExpectedShardBytes: ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, t.RowCount),
 		MaxMessageSize:     maxMessageSizeFor(pub.Assignment.ProtocolParams),
 		ClockOffsetMS:      p.clockOffsetMS(),
+		Shadowers:          p.feed.shadowersFor(ph, pub.Promise.Commitment, t.AddressHex),
+		Observer:           p.observerInfo(),
 	}
 
 	lock := p.validatorLock(t.AddressHex)
@@ -886,4 +930,33 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// buildRevision is the VCS revision the binary was built from, "-dirty" when
+// the tree had local changes, or "unknown". It is stamped on every row so a
+// classification can be traced to the code that made it.
+func buildRevision() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	rev, dirty := "", false
+	for _, kv := range bi.Settings {
+		switch kv.Key {
+		case "vcs.revision":
+			rev = kv.Value
+		case "vcs.modified":
+			dirty = kv.Value == "true"
+		}
+	}
+	if rev == "" {
+		return "unknown"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if dirty {
+		rev += "-dirty"
+	}
+	return rev
 }

@@ -112,8 +112,11 @@ on top of the modules above. The research that precedes it lives in `docs/`:
 | `docs/adr/0001-observer-architecture.md` | the architecture decision for collector, prober, store, API and web |
 | `docs/verdicts.md` | the verdict taxonomy the dashboard is allowed to use |
 
-This repository is a fork of [plsgiveup/fibre](https://github.com/plsgiveup/fibre)
-(Huginn Tech). Code changes are meant to flow back upstream as pull requests.
+This repository is Huginn Tech's fork of
+[plsgiveup/fibre](https://github.com/plsgiveup/fibre), which Huginn Tech
+also wrote; the Go module paths keep the upstream name because a module
+path is an identifier, not an attribution. Code changes are meant to flow
+back upstream as pull requests.
 
 ## License
 
