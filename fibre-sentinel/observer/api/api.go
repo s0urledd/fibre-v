@@ -8,6 +8,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/keybase"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/rollup"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/verdict"
@@ -194,6 +196,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/sampling", s.handleSampling)
 	s.mux.HandleFunc("GET /v1/exports", s.handleExports)
 	s.mux.HandleFunc("GET /v1/exports/{name}", s.handleExportFile)
+	s.mux.HandleFunc("GET /v1/avatars/{identity}", s.handleAvatar)
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/market", s.handleMarket)
 	s.mux.HandleFunc("GET /v1/publishers", s.handlePublishers)
@@ -1542,7 +1545,12 @@ type validatorRow struct {
 	// "identity": on this row that word already means the TLS consensus-key
 	// binding this observer checks, and the two are unrelated.
 	KeybaseIdentity string `json:"keybase_identity,omitempty"`
-	Website         string `json:"website,omitempty"`
+	// AvatarURL is where this API serves the Keybase picture behind
+	// KeybaseIdentity, once the collector has fetched it; absent until then
+	// and for validators without one. Served from the store, so a reader
+	// never contacts Keybase.
+	AvatarURL string `json:"avatar_url,omitempty"`
+	Website   string `json:"website,omitempty"`
 	// Jailed and BondStatus are the chain's own words about the validator,
 	// unlike everything else on this row, which this observer measured. A
 	// jailed validator still owes the shards it signed for, so these are
@@ -2135,15 +2143,16 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	// rows are a subset of what the assignment table produces anyway. Before
 	// it, they are the whole answer to "am I in your list", with every measured
 	// column honestly empty.
-	irows, err := db.QueryContext(ctx, `SELECT cons_address, operator_address, moniker, identity, website, jailed, status, tokens
-		FROM validator_identities`)
+	irows, err := db.QueryContext(ctx, `SELECT vi.cons_address, vi.operator_address, vi.moniker, vi.identity, vi.website, vi.jailed, vi.status, vi.tokens,
+			EXISTS (SELECT 1 FROM validator_avatars a WHERE a.identity = vi.identity AND a.status = 'ok')
+		FROM validator_identities vi`)
 	if err != nil {
 		return nil, err
 	}
 	for irows.Next() {
 		var addr, op, moniker, identity, website, status, tokens string
-		var jailed int
-		if err := irows.Scan(&addr, &op, &moniker, &identity, &website, &jailed, &status, &tokens); err != nil {
+		var jailed, hasAvatar int
+		if err := irows.Scan(&addr, &op, &moniker, &identity, &website, &jailed, &status, &tokens, &hasAvatar); err != nil {
 			irows.Close()
 			return nil, err
 		}
@@ -2159,6 +2168,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			v = get(hexAddr)
 		}
 		v.Moniker, v.Operator, v.KeybaseIdentity, v.Website = moniker, op, identity, website
+		if hasAvatar == 1 {
+			v.AvatarURL = "/v1/avatars/" + strings.ToUpper(identity)
+		}
 		v.Jailed, v.BondStatus = jailed == 1, status
 		// Voting power from the staking module, only where no assignment has
 		// given one. After activation the assignment's figure wins: it is the
@@ -3188,6 +3200,34 @@ func (s *Server) handleExports(w http.ResponseWriter, r *http.Request) {
 // handleExportFile serves one export or its digest sidecar. Names are
 // checked against the export name pattern, so nothing else under the
 // directory is reachable.
+// handleAvatar serves the Keybase picture the collector holds for an
+// identity, from the store: the site's img-src stays 'self' and a reader
+// never fetches from Keybase's CDN. A day of caching matches the
+// collector's refresh.
+func (s *Server) handleAvatar(w http.ResponseWriter, r *http.Request) {
+	id := strings.ToUpper(r.PathValue("identity"))
+	if !keybase.ValidIdentity(id) {
+		writeErr(w, 404, "no such avatar")
+		return
+	}
+	ct, data, checked, ok, err := s.st.Avatar(r.Context(), id)
+	if err != nil {
+		writeErr(w, 500, "avatar lookup failed")
+		return
+	}
+	if !ok {
+		// also try the case the chain carries, if it was stored that way
+		ct, data, checked, ok, err = s.st.Avatar(r.Context(), strings.ToLower(id))
+		if err != nil || !ok {
+			writeErr(w, 404, "no such avatar")
+			return
+		}
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeContent(w, r, "", checked, bytes.NewReader(data))
+}
+
 func (s *Server) handleExportFile(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	dir := s.exportsDir()

@@ -364,8 +364,20 @@ and flags to, the revealed sampling secrets from
 `amendments.jsonl`, the collector's own log of them (replayed before
 anything is re-judged, so a rebuild never draws a verdict twice). What a rebuild does **not** bring back, because
 it has no JSONL source: the collector's own run row, the escrow balances
-and validator identities (re-polled within minutes), and the chain-side
-`meta` keys (re-polled at once). Litestream's copy is the backup for those.
+and validator identities (re-polled within minutes), the validators'
+Keybase pictures (re-fetched within the hour, see below), and the
+chain-side `meta` keys (re-polled at once). Litestream's copy is the backup
+for those.
+
+**Validator pictures.** The identity a validator sets in the staking module
+is a Keybase key suffix. The collector resolves it through Keybase's public
+lookup and keeps the picture in the store (`-avatars-every`, hourly;
+`-avatar-max-age`, a day), one lookup per identity, spaced out; the API
+serves it at `/v1/avatars/<identity>` and the site shows it in place of the
+initials. Readers never contact Keybase or its CDN, so the site's `img-src`
+stays `'self'`. An identity that is not a sixteen-character suffix, or that
+Keybase has no picture for, is never looked up again before the max age.
+`-avatars-every 0` turns the lookup off.
 
 **Restore the database** from litestream: stop `fibre-collector@mocha` and
 `fibre-api@mocha` (each holds the WAL), then

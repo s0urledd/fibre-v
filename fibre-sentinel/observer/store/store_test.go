@@ -268,3 +268,47 @@ func TestEndpointEventsReplay(t *testing.T) {
 		t.Fatalf("current after replay: %+v %v", cur, err)
 	}
 }
+
+// A validator's Keybase picture is held per identity, refreshed after the
+// max age, and only a picture that is actually held is served.
+func TestAvatars(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	ids := []scan.ValidatorIdentity{
+		{ConsAddressHex: "aa", Moniker: "with picture", Identity: "D27EE330254D4F6A", Status: "BOND_STATUS_BONDED"},
+		{ConsAddressHex: "bb", Moniker: "same keybase", Identity: "D27EE330254D4F6A", Status: "BOND_STATUS_BONDED"},
+		{ConsAddressHex: "cc", Moniker: "no identity", Identity: "", Status: "BOND_STATUS_BONDED"},
+		{ConsAddressHex: "dd", Moniker: "a name, not a suffix", Identity: "huginn.tech", Status: "BOND_STATUS_BONDED"},
+	}
+	if _, err := st.UpsertValidatorIdentities(ids, now); err != nil {
+		t.Fatal(err)
+	}
+	due, err := st.AvatarsDue(ctx, now, 24*time.Hour, 100)
+	if err != nil || len(due) != 1 || due[0] != "D27EE330254D4F6A" {
+		t.Fatalf("due = %v (%v), want the one well-formed suffix once", due, err)
+	}
+	if err := st.PutAvatar("D27EE330254D4F6A", "ok", "https://x/pic.jpg", "image/jpeg", []byte("jpeg"), now); err != nil {
+		t.Fatal(err)
+	}
+	if due, _ := st.AvatarsDue(ctx, now.Add(time.Hour), 24*time.Hour, 100); len(due) != 0 {
+		t.Fatalf("freshly resolved identity due again: %v", due)
+	}
+	if due, _ := st.AvatarsDue(ctx, now.Add(25*time.Hour), 24*time.Hour, 100); len(due) != 1 {
+		t.Fatalf("stale identity not due: %v", due)
+	}
+	ct, data, checked, ok, err := st.Avatar(ctx, "D27EE330254D4F6A")
+	if err != nil || !ok || ct != "image/jpeg" || string(data) != "jpeg" || !checked.Equal(now) {
+		t.Fatalf("avatar = %q %q %s ok=%v err=%v", ct, data, checked, ok, err)
+	}
+	if err := st.PutAvatar("D27EE330254D4F6A", "none", "", "", nil, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, _ := st.Avatar(ctx, "D27EE330254D4F6A"); ok {
+		t.Fatal("a picture Keybase no longer has is still served")
+	}
+}

@@ -3,6 +3,7 @@ package api_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -565,5 +566,37 @@ func TestBlobsPaginationKeepsSameHeightRows(t *testing.T) {
 	}
 	if code := get(t, ts, "/v1/blobs?before_height=10&before_tx_index=-1", nil); code != 400 {
 		t.Error("negative before_tx_index should be 400")
+	}
+}
+
+// The avatar route serves only a picture the collector holds, by identity,
+// with a day of caching; anything else is a 404 in the API's own shape.
+func TestAvatarRoute(t *testing.T) {
+	ts, st := serverAndStore(t)
+	now := time.Now()
+	if _, err := st.UpsertValidatorIdentities([]scan.ValidatorIdentity{{ConsAddressHex: "aa", Moniker: "x", Identity: "D27EE330254D4F6A", Status: "BOND_STATUS_BONDED"}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutAvatar("D27EE330254D4F6A", "ok", "https://x/pic.jpg", "image/jpeg", []byte("jpegbytes"), now); err != nil {
+		t.Fatal(err)
+	}
+	r, err := http.Get(ts.URL + "/v1/avatars/d27ee330254d4f6a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	if r.StatusCode != 200 || r.Header.Get("Content-Type") != "image/jpeg" || string(body) != "jpegbytes" || !strings.Contains(r.Header.Get("Cache-Control"), "max-age=86400") {
+		t.Fatalf("avatar: %d %q %q %q", r.StatusCode, r.Header.Get("Content-Type"), r.Header.Get("Cache-Control"), body)
+	}
+	for _, p := range []string{"/v1/avatars/0000000000000000", "/v1/avatars/huginn", "/v1/avatars/"} {
+		r, err := http.Get(ts.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		if r.StatusCode != 404 {
+			t.Errorf("%s: %d, want 404", p, r.StatusCode)
+		}
 	}
 }

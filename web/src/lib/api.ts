@@ -241,6 +241,8 @@ export type Validator = {
   moniker?: string;
   operator_address?: string;
   keybase_identity?: string;
+  /** the API path of the Keybase picture behind keybase_identity, once the collector fetched it */
+  avatar_url?: string;
   website?: string;
   /** the chain's own words about the validator, unlike everything we measure */
   jailed: boolean;
