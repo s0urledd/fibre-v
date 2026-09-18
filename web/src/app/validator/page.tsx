@@ -3,7 +3,7 @@ import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useApi, type Validator, type Probe, type Window, type Rate, fmtPct, fmtCount, utc, ago, shortHex, bytesPerSecond } from "@/lib/api";
-import { initialsOf } from "@/components/ValidatorTable";
+import { Avatar } from "@/components/ValidatorTable";
 import Verdict, { Mark } from "@/components/Verdict";
 import Info from "@/components/Info";
 import Graduation from "@/components/Graduation";
@@ -65,7 +65,7 @@ function Page() {
       <section className="card">
         <div className="card-head">
           <span className="who">
-            <span className="avatar" aria-hidden="true">{initialsOf(v.moniker, v.address)}</span>
+            <Avatar v={v} />
             <span>
               <h1 style={{ margin: 0 }}>{v.moniker || <span className="mono">{v.cons_address || v.address}</span>}</h1>
               {v.moniker && <span className="addr mono faint">{v.cons_address || v.address}</span>}

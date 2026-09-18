@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 14
+const SchemaVersion = 15
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -392,6 +392,25 @@ var migrations = []migration{
 				source        TEXT NOT NULL,
 				time          TEXT NOT NULL,
 				PRIMARY KEY (cons_address, from_height, from_tx_index)
+			)`,
+		},
+	},
+	{
+		version: 15,
+		note:    "validator_avatars: the Keybase picture behind a validator's identity field, fetched once by the collector and served by the API",
+		stmts: []string{
+			// Keyed by the identity (key suffix) rather than the validator:
+			// several validators can share one operator's Keybase, and the
+			// picture belongs to the identity. status is ok (picture held),
+			// none (Keybase knows no picture for it), or error (the last
+			// attempt failed; retried after the max age like the others).
+			`CREATE TABLE IF NOT EXISTS validator_avatars (
+				identity     TEXT PRIMARY KEY,
+				url          TEXT NOT NULL DEFAULT '',
+				content_type TEXT NOT NULL DEFAULT '',
+				data         BLOB,
+				status       TEXT NOT NULL DEFAULT '',
+				checked_at   TEXT NOT NULL
 			)`,
 		},
 	},
@@ -1254,6 +1273,56 @@ func (s *Store) UpsertValidatorIdentities(ids []scan.ValidatorIdentity, now time
 		n++
 	}
 	return n, tx.Commit()
+}
+
+// AvatarsDue lists the Keybase identities of known validators whose picture
+// has never been resolved or was last checked before now - maxAge, at most
+// limit of them, oldest check first. Only well-formed key suffixes are
+// candidates; a moniker or URL in the identity field is never looked up.
+func (s *Store) AvatarsDue(ctx context.Context, now time.Time, maxAge time.Duration, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT vi.identity, COALESCE(a.checked_at, '')
+		FROM validator_identities vi LEFT JOIN validator_avatars a ON a.identity = vi.identity
+		WHERE length(vi.identity) = 16 AND (a.checked_at IS NULL OR a.checked_at < ?)
+		ORDER BY COALESCE(a.checked_at, '') ASC LIMIT ?`, ts(now.Add(-maxAge)), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id, checked string
+		if err := rows.Scan(&id, &checked); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// PutAvatar records the result of one resolution: the picture (status ok),
+// its absence (none) or a failed attempt (error, with the reason in url).
+func (s *Store) PutAvatar(identity, status, url, contentType string, data []byte, now time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO validator_avatars (identity, url, content_type, data, status, checked_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(identity) DO UPDATE SET url = excluded.url, content_type = excluded.content_type,
+			data = excluded.data, status = excluded.status, checked_at = excluded.checked_at`,
+		identity, url, contentType, data, status, ts(now))
+	return err
+}
+
+// Avatar returns the picture held for an identity; ok is false when none is
+// held (never resolved, no picture, or the last attempt failed).
+func (s *Store) Avatar(ctx context.Context, identity string) (contentType string, data []byte, checkedAt time.Time, ok bool, err error) {
+	var checked string
+	err = s.db.QueryRowContext(ctx, `SELECT content_type, data, checked_at FROM validator_avatars WHERE identity = ? AND status = 'ok'`, identity).Scan(&contentType, &data, &checked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, time.Time{}, false, nil
+	}
+	if err != nil {
+		return "", nil, time.Time{}, false, err
+	}
+	checkedAt, _ = time.Parse(TimeLayout, checked)
+	return contentType, data, checkedAt, len(data) > 0, nil
 }
 
 // Endpoint is one open or closed endpoint-history row.

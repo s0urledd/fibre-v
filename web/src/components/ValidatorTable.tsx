@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type Validator, type Rate, shortBech, ago, held, utc, bytesPerSecond, MIN_RATED, enoughToRank } from "@/lib/api";
+import { type Validator, type Rate, shortBech, ago, held, utc, bytesPerSecond, MIN_RATED, enoughToRank, API_BASE } from "@/lib/api";
 import RateCell from "./Rate";
 import { Count } from "./Verdict";
 import Info from "./Info";
@@ -84,6 +84,17 @@ export function initialsOf(moniker: string | undefined, address: string): string
     return parts[0][0] + parts[1][0];
   }
   return tail ? (m[0] + tail[0]).slice(0, 3) : m.slice(0, 2);
+}
+
+/** The validator's badge: the Keybase picture its operator set, served by
+ *  our own API once the collector fetched it; initials until then, and
+ *  again if the image fails to load. */
+export function Avatar({ v }: { v: Validator }) {
+  const [broken, setBroken] = useState(false);
+  if (v.avatar_url && !broken) {
+    return <img className="avatar" src={API_BASE + v.avatar_url} alt="" width={26} height={26} loading="lazy" decoding="async" onError={() => setBroken(true)} />;
+  }
+  return <span className="avatar" aria-hidden="true">{initialsOf(v.moniker, v.address)}</span>;
 }
 
 /** the sample line under an obligation rate: kept of decided, then what the
@@ -218,7 +229,7 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                   <td className="rank">{i + 1}</td>
                   <td className="col-pin">
                     <span className="who">
-                      <span className="avatar" aria-hidden="true">{initialsOf(v.moniker, v.address)}</span>
+                      <Avatar v={v} />
                       <span>
                         <Link className="name" href={`/validator/?addr=${v.address}`}>
                           {v.moniker || (v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 8) + "…" + v.address.slice(-6))}

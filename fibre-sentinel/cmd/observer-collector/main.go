@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/keybase"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/rollup"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
@@ -59,6 +61,8 @@ func main() {
 		retainRJ  = flag.Duration("retain-raw-json", rollup.Default().RetainRawJSON, "keep a row's raw_json (the bulk of it) this long; every typed column stays (0 = keep forever)")
 		rollAfter = flag.Duration("rollup-after", rollup.Default().RollupAfter, "compute a day's obligation and probe rollups this long after the day ends; must clear every retention window (0 = never roll up, so never prune)")
 		retEvery  = flag.Duration("retention-every", time.Hour, "how often the retention pass runs")
+		avEvery   = flag.Duration("avatars-every", time.Hour, "how often to look for validator Keybase pictures to fetch or refresh (0 = never)")
+		avMaxAge  = flag.Duration("avatar-max-age", 24*time.Hour, "re-resolve a validator's Keybase picture after this long")
 	)
 	flag.Parse()
 
@@ -439,9 +443,60 @@ func main() {
 		return
 	}
 
+	// Validator pictures: the identity field on chain is a Keybase key
+	// suffix, and the picture behind it is fetched here, once a day per
+	// identity, into the store, so the site can show it without a reader
+	// ever contacting Keybase. Sequential and spaced, because Keybase is
+	// somebody else's API and the whole set is a hundred lookups a day.
+	kb := keybase.New()
+	resolveAvatars := func(now time.Time) {
+		due, err := st.AvatarsDue(ctx, now, *avMaxAge, 200)
+		if err != nil {
+			log.Printf("avatars: %v", err)
+			return
+		}
+		got, none, failed := 0, 0, 0
+		for i, id := range due {
+			if ctx.Err() != nil {
+				return
+			}
+			if i > 0 {
+				time.Sleep(300 * time.Millisecond)
+			}
+			u, err := kb.Lookup(ctx, id)
+			switch {
+			case errors.Is(err, keybase.ErrNoPicture):
+				none++
+				_ = st.PutAvatar(id, "none", "", "", nil, time.Now())
+				continue
+			case err != nil:
+				failed++
+				_ = st.PutAvatar(id, "error", err.Error(), "", nil, time.Now())
+				continue
+			}
+			ct, data, err := kb.Fetch(ctx, u)
+			if err != nil {
+				failed++
+				_ = st.PutAvatar(id, "error", u+": "+err.Error(), "", nil, time.Now())
+				continue
+			}
+			if err := st.PutAvatar(id, "ok", u, ct, data, time.Now()); err != nil {
+				log.Printf("avatars: store %s: %v", id, err)
+				continue
+			}
+			got++
+		}
+		if len(due) > 0 {
+			log.Printf("avatars: %d identities checked: %d pictures, %d without one, %d failed", len(due), got, none, failed)
+		}
+	}
+	if *avEvery > 0 {
+		resolveAvatars(time.Now())
+	}
+
 	tick := time.NewTicker(*interval)
 	defer tick.Stop()
-	lastEP := time.Now()
+	lastEP, lastAV := time.Now(), time.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -454,6 +509,10 @@ func main() {
 			pass(poll)
 			if poll {
 				lastEP = time.Now()
+			}
+			if *avEvery > 0 && time.Since(lastAV) >= *avEvery {
+				resolveAvatars(time.Now())
+				lastAV = time.Now()
 			}
 		}
 	}

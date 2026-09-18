@@ -314,6 +314,7 @@ tbody tr:hover .col-pin { background: color-mix(in srgb, var(--card) 96%, var(--
   width: 26px; height: 26px; border-radius: 6px; flex: none; display: inline-flex; align-items: center; justify-content: center;
   font: 600 11px/1 var(--mono); color: var(--text-2); background: var(--wash); border: 1px solid var(--line); text-transform: uppercase;
 }
+img.avatar { object-fit: cover; display: inline-block; }
 .who .name { display: block; color: var(--text); font-weight: 600; font-size: var(--t-table); }
 .who .name:hover { text-decoration: underline; }
 .who .addr { display: block; font-family: var(--mono); font-size: var(--t-label); color: var(--text-3); }
