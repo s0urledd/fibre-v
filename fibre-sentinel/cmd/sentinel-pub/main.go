@@ -20,6 +20,10 @@
 //	                   promise's signer is charged, the submitter gets nothing.
 //	-withdraw UTIA     broadcast MsgRequestWithdrawal; the payout lands in a
 //	                   begin-block after withdrawal_delay.
+//	-show FILE         print the promise hash and fields of a file written by
+//	                   -abandon, without touching the chain. The hash is the
+//	                   store key a validator serves the commitment under, so
+//	                   it says which of two uploads of one commitment answers.
 //
 // -key-file keeps the run's key across invocations, so the account that
 // abandoned a promise can be the one that withdraws, and a different one can
@@ -58,6 +62,7 @@ import (
 // proto bytes, plus the fields a human wants to see before submitting.
 type abandonedPromise struct {
 	Publisher     string    `json:"publisher"`
+	PromiseHash   string    `json:"promise_hash"`
 	Commitment    string    `json:"commitment"`
 	Namespace     string    `json:"namespace"`
 	BlobSize      uint32    `json:"blob_size"`
@@ -95,8 +100,16 @@ func main() {
 		promiseOut = flag.String("promise-out", "", "where -abandon writes the promise (default abandoned-<commitment8>.json in the current directory)")
 		timeoutF   = flag.String("timeout", "", "broadcast MsgPaymentPromiseTimeout for the promise file(s) written by -abandon (comma-separated)")
 		withdraw   = flag.Int64("withdraw", 0, "broadcast MsgRequestWithdrawal for this many utia and exit")
+		showF      = flag.String("show", "", "print the promise hash of the promise file(s) written by -abandon (comma-separated) and exit")
 	)
 	flag.Parse()
+
+	if *showF != "" {
+		for _, f := range strings.Split(*showF, ",") {
+			showPromise(strings.TrimSpace(f))
+		}
+		return
+	}
 
 	if *home == "" {
 		dn := os.Getenv("FIBRE_DEVNET_HOME")
@@ -208,11 +221,14 @@ func main() {
 			}
 		}
 
+		promiseHash, err := sp.Hash()
+		must(err, "promise hash")
+
 		if *abandon {
 			raw, err := promiseProto.Marshal()
 			must(err, "marshal promise")
 			rec := abandonedPromise{
-				Publisher: addr.String(), Commitment: hex.EncodeToString(sp.Commitment[:]), Namespace: hex.EncodeToString(ns.Bytes()),
+				Publisher: addr.String(), PromiseHash: hex.EncodeToString(promiseHash), Commitment: hex.EncodeToString(sp.Commitment[:]), Namespace: hex.EncodeToString(ns.Bytes()),
 				BlobSize: sp.UploadSize, CreationTime: sp.CreationTimestamp.UTC(), PromiseHeight: int64(sp.Height),
 				Signatures: signed, PromiseProto: hex.EncodeToString(raw),
 			}
@@ -225,8 +241,8 @@ func main() {
 			}
 			b, _ := json.MarshalIndent(rec, "", "  ")
 			must(os.WriteFile(out, append(b, '\n'), 0o644), "write promise")
-			fmt.Printf("PUB| #%d ABANDONED promise_height=%d commitment=%s size=%d sigs=%d/%d creation=%s -> %s (timeout submittable after creation + payment_promise_timeout)\n",
-				i, sp.Height, rec.Commitment, sp.UploadSize, signed, len(sp.ValidatorSignatures), rec.CreationTime.Format(time.RFC3339), out)
+			fmt.Printf("PUB| #%d ABANDONED promise_height=%d promise_hash=%s commitment=%s size=%d sigs=%d/%d creation=%s -> %s (timeout submittable after creation + payment_promise_timeout)\n",
+				i, sp.Height, rec.PromiseHash, rec.Commitment, sp.UploadSize, signed, len(sp.ValidatorSignatures), rec.CreationTime.Format(time.RFC3339), out)
 		} else {
 			msg := &fibretypes.MsgPayForFibre{
 				Signer:              addr.String(),
@@ -240,8 +256,8 @@ func main() {
 			}
 			tr, err := txc.ConfirmTx(ctx, br.TxHash)
 			must(err, fmt.Sprintf("confirm PayForFibre %d", i))
-			fmt.Printf("PUB| #%d PUBLISHED promise_height=%d commitment=%s blob_v%d size=%d sigs=%d/%d creation=%s settle_height=%d settle_tx=%s fee=%dutia dur=%s\n",
-				i, sp.Height, hex.EncodeToString(sp.Commitment[:]), sp.BlobVersion, sp.UploadSize, signed, len(sp.ValidatorSignatures),
+			fmt.Printf("PUB| #%d PUBLISHED promise_height=%d promise_hash=%s commitment=%s blob_v%d size=%d sigs=%d/%d creation=%s settle_height=%d settle_tx=%s fee=%dutia dur=%s\n",
+				i, sp.Height, hex.EncodeToString(promiseHash), hex.EncodeToString(sp.Commitment[:]), sp.BlobVersion, sp.UploadSize, signed, len(sp.ValidatorSignatures),
 				sp.CreationTimestamp.UTC().Format(time.RFC3339Nano), tr.Height, br.TxHash, fibretypes.EstimateGasForPayForFibre(sp.UploadSize), time.Since(t0).Round(time.Millisecond))
 		}
 
@@ -309,6 +325,28 @@ func submitTimeout(ctx context.Context, txc *user.TxClient, signer sdk.AccAddres
 	}
 	fmt.Printf("PUB| TIMED OUT commitment=%s publisher=%s charged=%dutia processor=%s tx=%s @ h%d\n",
 		rec.Commitment, rec.Publisher, fibretypes.EstimateGasForPayForFibre(rec.BlobSize), signer, resp.TxHash, resp.Height)
+}
+
+// showPromise prints what -abandon wrote, with the promise hash recomputed
+// from the proto bytes so a file from a build that did not record it still
+// answers. Validators key the shard store by (commitment, promise hash) and
+// serve a commitment from the lowest hash that has a readable shard, so the
+// hash decides which of two uploads of one commitment a probe sees.
+func showPromise(file string) {
+	b, err := os.ReadFile(file)
+	must(err, "read "+file)
+	var rec abandonedPromise
+	must(json.Unmarshal(b, &rec), "parse "+file)
+	raw, err := hex.DecodeString(rec.PromiseProto)
+	must(err, "promise hex")
+	var pp fibretypes.PaymentPromise
+	must(pp.Unmarshal(raw), "promise proto")
+	var internal celfibre.PaymentPromise
+	must(internal.FromProto(&pp), "promise from proto")
+	h, err := internal.Hash()
+	must(err, "promise hash")
+	fmt.Printf("PUB| %s promise_hash=%s commitment=%s promise_height=%d creation=%s publisher=%s sigs=%d\n",
+		file, hex.EncodeToString(h), rec.Commitment, rec.PromiseHeight, rec.CreationTime.Format(time.RFC3339), rec.Publisher, rec.Signatures)
 }
 
 func leftPad(b []byte, n int) []byte {
