@@ -42,6 +42,13 @@ func TestLookupAndFetch(t *testing.T) {
 		case r.URL.Path == "/page.html":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte("<html>"))
+		case r.URL.Path == "/pic.svg":
+			// An image, and also a document that runs script. Served back
+			// from this API's own origin it would run in it.
+			w.Header().Set("Content-Type", "image/svg+xml")
+			_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>`))
+		case r.URL.Path == "/away.jpg":
+			http.Redirect(w, r, "https://example.invalid/pic.jpg", http.StatusFound)
 		default:
 			http.NotFound(w, r)
 		}
@@ -50,7 +57,12 @@ func TestLookupAndFetch(t *testing.T) {
 	// the picture URL the lookup hands back must be https to be accepted;
 	// the test server is http, so hand the fetch the plain URL directly
 	picURL = strings.Replace(srv.URL, "http://", "https://", 1) + "/pic.jpg"
-	c := &Client{HTTP: srv.Client(), Base: srv.URL}
+	host := strings.TrimPrefix(srv.URL, "http://")
+	if i := strings.LastIndex(host, ":"); i > 0 {
+		host = host[:i]
+	}
+	c := &Client{HTTP: srv.Client(), Base: srv.URL,
+		PictureHosts: map[string]bool{host: true}, AllowInsecurePictures: true}
 	ctx := context.Background()
 
 	got, err := c.Lookup(ctx, "D27EE330254D4F6A")
@@ -82,5 +94,22 @@ func TestLookupAndFetch(t *testing.T) {
 	}
 	if _, _, err := c.Fetch(ctx, srv.URL+"/missing.jpg"); err == nil {
 		t.Fatal("a 404 was accepted")
+	}
+	// An SVG is an image and is not inert: it must not be held, and so can
+	// never be served back from this API's origin.
+	if _, _, err := c.Fetch(ctx, srv.URL+"/pic.svg"); err == nil {
+		t.Fatal("an SVG avatar was accepted")
+	} else if !strings.Contains(err.Error(), "svg") {
+		t.Fatalf("the refusal does not name the type: %v", err)
+	}
+	// A redirect off the picture hosts is refused, not followed.
+	if _, _, err := c.Fetch(ctx, srv.URL+"/away.jpg"); err == nil {
+		t.Fatal("a redirect to another host was followed")
+	}
+	// And a client with the production host set will not fetch from here at
+	// all, whatever a lookup response says.
+	prod := &Client{HTTP: srv.Client(), Base: srv.URL}
+	if _, _, err := prod.Fetch(ctx, srv.URL+"/pic.jpg"); err == nil {
+		t.Fatal("the default client fetched a picture from a host Keybase does not serve from")
 	}
 }

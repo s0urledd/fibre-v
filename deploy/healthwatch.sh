@@ -65,9 +65,18 @@ if [ "$notify" = 1 ]; then
   if [ -n "$webhook" ]; then
     msg="Fibre observer [$name] $now: $summary"
     if [ "$now" = "ok" ] && [ -n "$prev_state" ]; then msg="Fibre observer [$name] recovered: $summary"; fi
-    payload=$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps({"content": sys.stdin.read()[:1900], "text": sys.stdin.read()[:1900]}))' 2>/dev/null \
+    # Read stdin once. Reading it twice in one dict literal left "text"
+    # empty, because Python evaluates the values in order and the first read
+    # exhausts it: Discord reads "content" and worked, Slack reads "text",
+    # rejected the empty payload with a 400, and curl without --fail exited 0
+    # — so the alert was never delivered and the log said nothing.
+    payload=$(printf '%s' "$msg" | python3 -c 'import json,sys; m=sys.stdin.read()[:1900]; print(json.dumps({"content": m, "text": m}))' 2>/dev/null \
       || printf '{"content":"%s"}' "$msg")
-    curl -sS -m 20 -X POST -H 'content-type: application/json' -d "$payload" "$webhook" >/dev/null || echo "healthwatch: webhook post failed" >&2
+    # --fail-with-body so a rejected post is an error here rather than a
+    # silence. The point of this script is that somebody hears about it.
+    if ! out=$(curl -sS --fail-with-body -m 20 -X POST -H 'content-type: application/json' -d "$payload" "$webhook" 2>&1); then
+      echo "healthwatch: webhook post failed: $out" >&2
+    fi
   fi
 fi
 [ "$now" = "ok" ]

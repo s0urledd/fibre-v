@@ -371,3 +371,55 @@ func TestCheckpointWALTruncatesTheLog(t *testing.T) {
 	// holding one open on this pool would only deadlock the test against
 	// itself.
 }
+
+// The retention pass deletes rows; SQLite moves those pages to its free list
+// and never shrinks the file on its own. deploy/README.md tells an operator
+// that pruning is the answer to a full disk, so it has to return something
+// they can see. auto_vacuum(incremental) is set at creation — it cannot be
+// turned on later without a full VACUUM — and the collector releases pages
+// after a prune.
+func TestReclaimSpaceReturnsFreedPages(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	var mode int
+	if err := st.DB().QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != 2 {
+		t.Fatalf("auto_vacuum = %d, want 2 (incremental); it cannot be set after the first table exists", mode)
+	}
+
+	for i := 0; i < 4000; i++ {
+		if _, err := st.DB().ExecContext(ctx,
+			`INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?)`,
+			"k"+strconv.Itoa(i), strings.Repeat("x", 400), "2026-09-18T00:00:00.000000000Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.DB().ExecContext(ctx, `DELETE FROM meta WHERE key LIKE 'k%'`); err != nil {
+		t.Fatal(err)
+	}
+	var free int64
+	if err := st.DB().QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&free); err != nil {
+		t.Fatal(err)
+	}
+	if free == 0 {
+		t.Skip("the delete freed no pages on this build")
+	}
+	freed, err := st.ReclaimSpace(ctx, 20000)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if freed == 0 {
+		t.Fatalf("%d pages on the free list and none was returned", free)
+	}
+	// And it is idempotent: nothing left to give back is not an error.
+	if again, err := st.ReclaimSpace(ctx, 20000); err != nil || again != 0 {
+		t.Fatalf("second reclaim freed %d, err %v", again, err)
+	}
+}

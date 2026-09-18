@@ -476,7 +476,17 @@ type Store struct {
 func Open(path string) (*Store, error) {
 	dsn := path
 	if path != ":memory:" {
-		dsn = "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
+		// auto_vacuum(incremental) has to be set before the first table is
+		// created; on an existing file it takes a full VACUUM, which is why
+		// it is here and not in a migration. Without it the retention pass
+		// deletes rows and returns nothing to the operating system: the
+		// pages go on SQLite's free list and observer.db never shrinks, so
+		// the pruning deploy/README.md presents as the answer to a full disk
+		// reclaims none of it. Incremental rather than full because a
+		// blocking VACUUM of a multi-gigabyte database is not something to
+		// run behind a live API; the collector releases pages after a prune
+		// (Store.ReclaimSpace).
+		dsn = "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=auto_vacuum(incremental)"
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -1391,6 +1401,35 @@ type Endpoint struct {
 	LastSeenAt           string
 	LastSeenHeight       int64
 	ClosedAt             *string
+}
+
+// ReclaimSpace returns pages freed by the retention pass to the operating
+// system, up to a bounded number so the call cannot stall a live database.
+//
+// It is a no-op on a database created before auto_vacuum was set, which
+// cannot free pages incrementally at all; the count returned is then zero and
+// the caller says nothing. freed is the number of pages released.
+func (s *Store) ReclaimSpace(ctx context.Context, maxPages int) (freed int64, err error) {
+	if maxPages <= 0 {
+		maxPages = 2000
+	}
+	var before, after int64
+	if err := s.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&before); err != nil {
+		return 0, err
+	}
+	if before == 0 {
+		return 0, nil
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA incremental_vacuum(%d)", maxPages)); err != nil {
+		return 0, err
+	}
+	if err := s.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&after); err != nil {
+		return 0, err
+	}
+	if before <= after {
+		return 0, nil
+	}
+	return before - after, nil
 }
 
 // CheckpointWAL copies the write-ahead log back into the database and, when

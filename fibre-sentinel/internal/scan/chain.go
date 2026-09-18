@@ -73,13 +73,25 @@ func (c *Chain) ctx(parent context.Context) (context.Context, context.CancelFunc
 
 // Status returns (chainID, latestHeight).
 func (c *Chain) Status(parent context.Context) (string, int64, error) {
+	id, h, _, err := c.StatusAt(parent)
+	return id, h, err
+}
+
+// StatusAt is Status with the tip's block time, which is the only thing that
+// says whether the chain is still moving. A halted chain, a node stuck
+// mid-sync and a public endpoint that fell behind all keep answering /status
+// with a height that does not change, and every check drawn from that same
+// node then reads as healthy: the scanner is parked waiting for a height
+// rather than failing, so it reports nothing, and the lag between the
+// scanner and the tip is zero because both are the same stopped number.
+func (c *Chain) StatusAt(parent context.Context) (string, int64, time.Time, error) {
 	ctx, cancel := c.ctx(parent)
 	defer cancel()
 	s, err := c.rpc.Status(ctx)
 	if err != nil {
-		return "", 0, fmt.Errorf("status: %w", err)
+		return "", 0, time.Time{}, fmt.Errorf("status: %w", err)
 	}
-	return s.NodeInfo.Network, s.SyncInfo.LatestBlockHeight, nil
+	return s.NodeInfo.Network, s.SyncInfo.LatestBlockHeight, s.SyncInfo.LatestBlockTime.UTC(), nil
 }
 
 // AppVersion is the application version the chain is currently running, from

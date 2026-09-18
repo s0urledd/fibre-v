@@ -652,6 +652,22 @@ func (s *Server) handlePublishers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// Uncached and, on a pinned window, unbounded work: the same ration as
+	// every other route that computes an aggregate on demand.
+	if win.AsOf {
+		if !s.asOf.allow(time.Now()) {
+			w.Header().Set("Retry-After", "2")
+			writeErr(w, 429, "as_of requests are limited to one every two seconds")
+			return
+		}
+		if !s.asOf.enter() {
+			w.Header().Set("Retry-After", "5")
+			writeErr(w, 429, "as_of computations already in flight; try again shortly")
+			return
+		}
+		defer s.asOf.leave()
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	rows, err := s.publisherRows(r.Context(), win, "")
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
@@ -678,6 +694,20 @@ func (s *Server) handlePublisher(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if win.AsOf {
+		if !s.asOf.allow(now) {
+			w.Header().Set("Retry-After", "2")
+			writeErr(w, 429, "as_of requests are limited to one every two seconds")
+			return
+		}
+		if !s.asOf.enter() {
+			w.Header().Set("Retry-After", "5")
+			writeErr(w, 429, "as_of computations already in flight; try again shortly")
+			return
+		}
+		defer s.asOf.leave()
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	rows, err := s.publisherRows(ctx, win, addr)
 	if err != nil {

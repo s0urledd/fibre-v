@@ -222,9 +222,35 @@ func (s *Server) Close() {
 // ServeHTTP implements http.Handler with the headers every response shares.
 // Only successful responses are cacheable: a 400 or a 404 held for 15 seconds
 // by a proxy outlives the mistake that caused it.
+// writeDeadlineFor is how long a route may take to write its answer. It is
+// per route, because one number cannot fit all of them: an export is a
+// tarball of a whole day's records and a pinned window is a full aggregate
+// computed on demand, measured at 23 seconds on an 80-validator fixture,
+// while every other route answers from a snapshot in under a millisecond and
+// should not be allowed to hang.
+func writeDeadlineFor(path string) time.Duration {
+	switch {
+	case strings.HasPrefix(path, "/v1/exports/"):
+		return 30 * time.Minute
+	case strings.HasPrefix(path, "/v1/avatars/"):
+		return 30 * time.Second
+	default:
+		return 5 * time.Minute
+	}
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// The server's own WriteTimeout is off (cmd/observer-api), because a
+	// single one truncated the two answers that are legitimately slow: a
+	// day's export tarball and a pinned-window aggregate. The bound is set
+	// here instead, by route. A deadline that cannot be set (an older
+	// ResponseWriter, a test recorder) is not an error: the handler's own
+	// context still bounds the work.
+	if rc := http.NewResponseController(w); rc != nil {
+		_ = rc.SetWriteDeadline(time.Now().Add(writeDeadlineFor(r.URL.Path)))
+	}
 	rec := &statusWriter{ResponseWriter: w}
 	s.mux.ServeHTTP(rec, r)
 }
@@ -3461,7 +3487,16 @@ func (s *Server) handleAvatar(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no such avatar")
 		return
 	}
+	// Re-checked here, not trusted from the row: this is served from the
+	// API's own origin, and an active type (image/svg+xml is an image) would
+	// run in it. A row written by an older build, or by a build with a wider
+	// list, must not decide that.
+	if !keybase.InertType(ct) {
+		writeErr(w, 404, "no such avatar")
+		return
+	}
 	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Disposition", "inline; filename=avatar")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeContent(w, r, "", checked, bytes.NewReader(data))
 }

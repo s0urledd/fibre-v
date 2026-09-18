@@ -13,6 +13,7 @@ import (
 	assign "github.com/plsgiveup/fibre/fibre-assign"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
 
 // Liveness of the observer itself, read straight from the status files the
@@ -39,6 +40,16 @@ const failingAfter = 10 * time.Minute
 // is twenty minutes.
 const scannerLagBlocks = 200
 
+// chainStaleAfter is how old the chain's newest block may be before health
+// fails. Every other check here is drawn from the same RPC node the observer
+// reads, so a node whose height stops advancing — a consensus halt, a node
+// stuck mid-sync, a public endpoint that fell behind — looks exactly like a
+// quiet network: the scanner is parked waiting for a height rather than
+// failing, and the lag between it and the tip is zero because both are the
+// same stopped number. The tip's own clock is the one thing that says which
+// it is. Mocha's blocks are seconds apart; ten minutes is a long silence.
+const chainStaleAfter = 10 * time.Minute
+
 // diskFloor is the free share of the data disk below which health fails.
 const diskFloor = 0.05
 
@@ -64,6 +75,20 @@ type componentStatus struct {
 	Vantage     string         `json:"vantage,omitempty"`
 	Version     string         `json:"version,omitempty"`
 	PID         int            `json:"pid,omitempty"`
+}
+
+// chainTipTime is the block time of the chain's newest block, as the
+// collector last saw it. Absent before the collector's first status poll.
+func (s *Server) chainTipTime(ctx context.Context) (time.Time, bool) {
+	var v string
+	if err := s.st.DB().QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'chain_tip_time'`).Scan(&v); err != nil || v == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(store.TimeLayout, v)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // healthCheck is one row of /v1/health.
@@ -211,6 +236,11 @@ func (s *Server) health(ctx context.Context, now time.Time) healthResponse {
 		lag := chainH - scannerH
 		checks = append(checks, healthCheck{"scanner_lag", lag <= scannerLagBlocks,
 			fmt.Sprintf("scanner at %d, chain at %d (%d blocks behind)", scannerH, chainH, lag)})
+	}
+	if tip, ok := s.chainTipTime(ctx); ok {
+		age := now.Sub(tip)
+		checks = append(checks, healthCheck{"chain_liveness", age <= chainStaleAfter,
+			fmt.Sprintf("newest block %s old (%s)", age.Round(time.Second), tip.UTC().Format(time.RFC3339))})
 	}
 	if disk != nil {
 		checks = append(checks, healthCheck{"disk", disk.FreeShare >= diskFloor,

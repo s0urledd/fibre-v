@@ -95,7 +95,14 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		// No single WriteTimeout: it applied to /v1/exports/<name>, a tarball
+		// of a whole day's records, and to the pinned-window aggregates the
+		// code itself measures at 23 seconds — neither is a 30-second-sized
+		// answer, and both were being truncated mid-body. The handler sets a
+		// deadline per route instead (api.writeDeadlineFor), so the slow two
+		// get the time they need and nothing else gets to hang.
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
