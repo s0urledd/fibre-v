@@ -15,8 +15,8 @@ export const metadata: Metadata = {
 };
 
 // Applies a saved theme before the first paint so a dark-mode reader never
-// sees a light flash. "system" stores nothing and leaves the choice to the OS.
-const themeBoot = `try{var t=localStorage.getItem("theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}`;
+// sees a light flash; with nothing saved, the system preference is the start.
+const themeBoot = `try{var t=localStorage.getItem("theme");if(t!=="light"&&t!=="dark")t=window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t}catch(e){}`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
