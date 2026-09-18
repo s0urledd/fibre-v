@@ -120,7 +120,9 @@ master is regenerated on every restart the commitments change with it and
 nobody can ever check a day's draw against them. The prober publishes each
 day's secret seven days after the day ends (`-reveal-after`), to
 `<DATA_DIR>/sampling-secrets.jsonl`; the collector serves it beside the
-day's commitment. Only the day secrets are ever revealed, never the master. It is also the reason the
+day's commitment. The reveal runs with the sampling policy, so a prober
+started without `-policy` (probe everything) has nothing to reveal and
+writes no file. Only the day secrets are ever revealed, never the master. It is also the reason the
 sample is unpredictable: a publisher who learned the master in advance could
 work out which of its blobs would be probed, so do not put it anywhere the
 publishers can read, and do not include it in a backup that leaves the host.

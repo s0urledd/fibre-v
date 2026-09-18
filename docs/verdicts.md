@@ -465,9 +465,16 @@ what the measurement cannot separate.
   pruned only after it is rolled, whole days at a time, oldest first, so
   the record is never thinner than the rollup behind it. From the first
   prune on, the "all" window is the rollup for every day before `raw_from`
-  plus the raw rows from `raw_from` on, and the answer carries
+  plus the raw record from `raw_from` on, and the answer carries
   `rolled_up` (`raw_from`, the days folded in, and which figures rest on
-  the rollup); the 24h, 7d and 30d windows never touch it. Figures the
+  the rollup); the 24h, 7d and 30d windows never touch it. The two parts
+  partition cleanly because they cut along the same lines the rollup was
+  computed on: obligations by the day their promise settled (raw counts
+  those settled from `raw_from` on), rows by the day they started (raw
+  counts those started from `raw_from` on). A promise settled late on a
+  rolled day may still have rows that started on a retained day; those
+  rows stay until their own day is pruned and count in the row figures,
+  while the obligation they belong to is the rollup's alone. Figures the
   rollup does not hold, latency percentiles, the by-point breakdown,
   attestation and throughput, cover the raw record only, and the label
   says so. A pinned `as_of` before `raw_from` takes whole rolled days up
