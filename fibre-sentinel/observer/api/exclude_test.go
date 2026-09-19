@@ -1,0 +1,166 @@
+package api_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
+)
+
+// selfAddrs are the four validators the exclusion fixture writes: one clean
+// verdict of each kind the buckets separate. Hex, because that is what the
+// store holds and what ?exclude= parses.
+var selfAddrs = map[string]string{
+	"kept":      strings.Repeat("a1", 20),
+	"broke":     strings.Repeat("b2", 20),
+	"earlyonly": strings.Repeat("c3", 20),
+	"silent":    strings.Repeat("d4", 20),
+}
+
+func excludeFixture(t *testing.T) *httptest.Server {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	now := time.Now().UTC().Truncate(time.Second)
+	created, msu := now.Add(-2*time.Hour), now.Add(-30*time.Minute)
+	// At no point does half the set fault or go unreachable, so the
+	// correlated-failure guard stays out of this and every figure below is
+	// the buckets' own arithmetic.
+	insertProbeSet(t, st, "ex1", created, msu, map[string][]wire{
+		selfAddrs["kept"]:      {ok, ok, ok, ok},
+		selfAddrs["broke"]:     {ok, ok, ok, gone},
+		selfAddrs["earlyonly"]: {ok, err500, err500, err500},
+		selfAddrs["silent"]:    {refused, refused, refused, refused},
+	}, false)
+	return httptestServer(t, st)
+}
+
+type netFigures struct {
+	Obligations   obligationsJSON          `json:"obligations"`
+	Faults        int64                    `json:"faults"`
+	ProbeCount    int64                    `json:"probe_count"`
+	ServeRate     struct{ Num, Den int64 } `json:"serve_rate"`
+	Excluded      []string                 `json:"excluded"`
+	ExcludeNote   string                   `json:"exclude_note"`
+	VantageHealth struct {
+		Suspect []struct{ Label string } `json:"suspect"`
+	} `json:"vantage_health"`
+}
+
+// R0 decision 4: this observer's own operator runs a validator on the network
+// it measures. The answer is not to hide that row but to let a reader
+// recompute the headline figures without it, so `?exclude=` is a filter on
+// the request and never a setting on the deployment.
+func TestExcludeRecomputesTheHeadlineWithoutAValidator(t *testing.T) {
+	ts := excludeFixture(t)
+
+	var all netFigures
+	if code := get(t, ts, "/v1/network?window=all", &all); code != 200 {
+		t.Fatalf("network: %d", code)
+	}
+	o := all.Obligations
+	if o.Total != 4 || o.Served != 1 || o.Broken != 1 || o.EndUnobserved != 1 || o.UnobservedUnreachable != 1 {
+		t.Fatalf("fixture: obligations = %+v, want one of each of the four shapes", o)
+	}
+	if all.Faults != 1 {
+		t.Fatalf("fixture: faults = %d, want 1", all.Faults)
+	}
+	if all.Excluded != nil || all.ExcludeNote != "" {
+		t.Errorf("an unfiltered answer must not claim an exclusion: %v %q", all.Excluded, all.ExcludeNote)
+	}
+
+	// Take the one broken obligation out. Every figure drawn from a
+	// per-validator population moves with it, and nothing else does.
+	var less netFigures
+	if code := get(t, ts, "/v1/network?window=all&exclude="+selfAddrs["broke"], &less); code != 200 {
+		t.Fatalf("exclude: %d", code)
+	}
+	l := less.Obligations
+	if l.Total != 3 || l.Served != 1 || l.Broken != 0 || l.EndUnobserved != 1 || l.UnobservedUnreachable != 1 {
+		t.Errorf("excluded obligations = %+v, want the same three shapes without the broken one", l)
+	}
+	if l.Rate.Num != 1 || l.Rate.Den != 1 {
+		t.Errorf("excluded rate = %d/%d, want 1/1", l.Rate.Num, l.Rate.Den)
+	}
+	if less.Faults != 0 {
+		t.Errorf("excluded faults = %d, want 0: the only fault was that validator's", less.Faults)
+	}
+	if less.ProbeCount != all.ProbeCount-4 {
+		t.Errorf("excluded probe_count = %d, want %d: four probe rows left with it", less.ProbeCount, all.ProbeCount-4)
+	}
+	if len(less.Excluded) != 1 || less.Excluded[0] != selfAddrs["broke"] {
+		t.Errorf("excluded = %v, want the address that was asked for", less.Excluded)
+	}
+	if less.ExcludeNote == "" {
+		t.Error("a filtered answer must say it is filtered, so the figure cannot be quoted as the headline")
+	}
+
+	// And the shared snapshot is untouched: one reader's filter is not
+	// everyone's headline. This is the bug class a pinned window had before
+	// it was given its own path.
+	var again netFigures
+	if code := get(t, ts, "/v1/network?window=all", &again); code != 200 {
+		t.Fatalf("network after exclude: %d", code)
+	}
+	if again.Obligations != all.Obligations || again.Faults != all.Faults {
+		t.Errorf("the cached summary was poisoned by a filtered request: %+v (%d faults), want %+v (%d)",
+			again.Obligations, again.Faults, all.Obligations, all.Faults)
+	}
+	if again.Excluded != nil {
+		t.Errorf("the unfiltered answer came back claiming an exclusion: %v", again.Excluded)
+	}
+}
+
+// A filtered answer is computed per request, so it must not be stored by a
+// cache in front of this API either.
+func TestExcludeIsNotCacheable(t *testing.T) {
+	ts := excludeFixture(t)
+	resp, err := http.Get(ts.URL + "/v1/network?window=all&exclude=" + selfAddrs["broke"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+// The parameter takes what the rest of the API takes, refuses what it cannot
+// resolve to a validator, and is bounded: it answers "recompute without the
+// people who run this site", not "carve any subset out and quote the result".
+func TestExcludeRejectsWhatItCannotResolve(t *testing.T) {
+	ts := excludeFixture(t)
+	for _, q := range []string{
+		"&exclude=not-an-address",
+		"&exclude=" + strings.Repeat("zz", 20),
+		"&exclude=" + strings.Join([]string{
+			strings.Repeat("01", 20), strings.Repeat("02", 20), strings.Repeat("03", 20),
+			strings.Repeat("04", 20), strings.Repeat("05", 20), strings.Repeat("06", 20),
+			strings.Repeat("07", 20), strings.Repeat("08", 20), strings.Repeat("09", 20),
+		}, ","),
+	} {
+		if code := get(t, ts, "/v1/network?window=all"+q, nil); code != 400 {
+			t.Errorf("%s: %d, want 400", q, code)
+		}
+	}
+	// Repeated and comma-separated forms both work, and a duplicate is not
+	// counted twice.
+	var f netFigures
+	q := "/v1/network?window=all&exclude=" + selfAddrs["broke"] + "," + selfAddrs["broke"] + "&exclude=" + selfAddrs["silent"]
+	if code := get(t, ts, q, &f); code != 200 {
+		t.Fatalf("%s: %d", q, code)
+	}
+	if len(f.Excluded) != 2 {
+		t.Errorf("excluded = %v, want the two distinct addresses", f.Excluded)
+	}
+	if f.Obligations.Total != 2 {
+		t.Errorf("obligations total = %d, want 2", f.Obligations.Total)
+	}
+}

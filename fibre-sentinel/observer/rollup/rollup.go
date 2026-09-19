@@ -659,6 +659,51 @@ type RolledProbes struct {
 	UnknownAtt int64
 }
 
+// Without returns a copy with the named validators taken out of every total,
+// recomputed from the per-validator rows this already carries rather than
+// from a second query. The API's `?exclude=` has to reach the rolled days as
+// well as the raw ones, or the "all" window would answer half the question:
+// excluded from the last thirty days, counted for every day before them.
+//
+// Days is left as it was. It counts the days rolled up, not anyone's rows.
+func (r *Rolled) Without(addrs []string) *Rolled {
+	if r == nil || len(addrs) == 0 {
+		return r
+	}
+	drop := make(map[string]bool, len(addrs))
+	for _, a := range addrs {
+		drop[a] = true
+	}
+	out := &Rolled{Days: r.Days, ObligationsByVal: map[string]Obligations{},
+		ProbesByVal: map[string]*RolledProbes{}, Classes: map[string]int64{}}
+	for a, o := range r.ObligationsByVal {
+		if drop[a] {
+			continue
+		}
+		out.ObligationsByVal[a] = o
+		out.Obligations.Add(o)
+	}
+	for a, p := range r.ProbesByVal {
+		if drop[a] {
+			continue
+		}
+		out.ProbesByVal[a] = p
+		out.Probes += p.Probes
+		out.Gaps += p.Gaps
+		out.Faults += p.Faults
+		out.Beats += p.Beats
+		out.BeatsUp += p.BeatsUp
+		out.IdentityUp += p.IdentityUp
+		out.Attested += p.Attested
+		out.Unattested += p.Unattested
+		out.UnknownAtt += p.UnknownAtt
+		for c, n := range p.Classes {
+			out.Classes[c] += n
+		}
+	}
+	return out
+}
+
 // Load reads the rollups for days before `before` (a UTC day). only, when
 // set, restricts to one validator.
 func Load(ctx context.Context, db *sql.DB, before time.Time, only string) (*Rolled, error) {

@@ -653,6 +653,29 @@ pieces needed to re-run that function are published:
   and the answer says so (`as_of_note`). Pinned answers bypass the
   snapshot cache and are rationed (a burst of four, then one every two
   seconds; `429` with `Retry-After` past that).
+- **The headline without us.** The people who run this observer run a
+  validator on the network it measures. Nothing about that row is filtered,
+  excluded or adjusted — it is produced by the same code from the same
+  record as every other — but a reader should not have to take that on
+  trust, so `?exclude=<address>` on `/v1/network` recomputes the summary
+  without named validators. It takes either address form, repeated or
+  comma-separated, up to eight, and every per-validator population moves
+  with it: the class counts, the faults, the obligations, attestation
+  coverage, latency, both reachability figures, the probe and gap counts,
+  the per-point rate, the previous window the deltas compare against, and
+  the rolled-up days behind the "all" window. The answer echoes what it
+  excluded (`excluded`, `exclude_note`), bypasses the snapshot cache and is
+  rationed like a pinned window, so one reader's filter can never become
+  everyone's headline.
+
+  Two figures stay whole, and the note says so. The correlated-failure
+  guard is a statement about this observer's own minute rather than about
+  any validator, so dropping one from the share would change which points
+  this observer distrusts itself at. Reconstructability asks whether a blob
+  could still be rebuilt from the rows that came back, and removing a
+  validator's rows lowers that for real — "the network without you" is not
+  the network's actual recoverability, and printing it as such would
+  understate the thing the figure exists to measure.
 - **The sampling draw.** Not every publication is probed. A vantage has a
   finite budget — bytes per hour and per day, globally and per validator —
   and when the projected load exceeds it the observer probes a random
