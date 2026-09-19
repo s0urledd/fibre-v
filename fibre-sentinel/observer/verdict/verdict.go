@@ -28,6 +28,43 @@ const (
 	MinValidators        = 3
 )
 
+// EndSegmentDivisor cuts the tail off a retention window: the final
+// 1/EndSegmentDivisor of it, which is where a reading has to fall before an
+// obligation counts as served.
+//
+// An obligation is a promise to hold a shard until must_serve_until, so the
+// only reading that speaks to the whole promise is one taken near its end. A
+// HEALTHY probe at the first schedule point says the shard was there minutes
+// after settlement; it says nothing about the hours that follow, which are
+// the part an early prune would take. Crediting it as served is what made the
+// serve rate rise while this observer was down: the obligation kept its early
+// verdict and every later slot was a gap, or — past the prober's backfill
+// horizon — never written at all.
+//
+// So served needs a HEALTHY reading in the last quarter of the window. The
+// published schedule puts its last in-window point at 92% of the window
+// (internal/probe/schedule.go), so a validator that answers the last probe
+// clears this with room; one this observer could not reach at the end does
+// not, and lands in end_unobserved, which is published beside the rate and
+// outside it.
+//
+// The cut is deliberately expressed against the promise's own settlement
+// time and must_serve_until — both on the record, both in every export —
+// rather than against the prober's schedule config, so a third party can
+// redraw the same line from the rows alone and a later change to the
+// fractions cannot move a verdict already published.
+//
+// It can only move an obligation out of served, never into broken: the worst
+// this observer's blindness can now do to an operator is decline to vouch
+// for them, and the figure that says how often that happened is printed
+// beside the rate.
+const EndSegmentDivisor = 4.0
+
+// EndSegment is the first moment of that tail for one promise.
+func EndSegment(settled, mustServeUntil time.Time) time.Time {
+	return mustServeUntil.Add(-time.Duration(float64(mustServeUntil.Sub(settled)) / EndSegmentDivisor))
+}
+
 // Row is what the rules need from one probe row.
 type Row struct {
 	PromiseHash    string
@@ -195,9 +232,9 @@ func ComputeObligations(rows []Row, settled map[string]time.Time, w Window, susp
 	}
 	type key struct{ validator, promise string }
 	type obl struct {
-		faults, healthy, attempted, reached int64
-		pending                             bool
-		last                                *Row
+		faults, healthy, lateHealthy, attempted, reached int64
+		pending                                          bool
+		last                                             *Row
 	}
 	obls := map[key]*obl{}
 	for i := range rows {
@@ -220,6 +257,9 @@ func ComputeObligations(rows []Row, settled map[string]time.Time, w Window, susp
 			o.faults++
 		case probe.ClassHealthy:
 			o.healthy++
+			if !r.ScheduledAt.Before(EndSegment(st, r.MustServeUntil)) {
+				o.lateHealthy++
+			}
 		}
 		if !isGap(r.Classification) {
 			o.attempted++
@@ -247,7 +287,7 @@ func ComputeObligations(rows []Row, settled map[string]time.Time, w Window, susp
 			b.Pending = 1
 		case o.faults > 0:
 			b.Broken = 1
-		case last == probe.ClassHealthy:
+		case last == probe.ClassHealthy && o.lateHealthy > 0:
 			b.Served = 1
 		case o.healthy > 0:
 			b.EndUnobserved = 1

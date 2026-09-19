@@ -42,8 +42,14 @@ go work init ./fibre-tlsverify ./fibre-assign ./fibre-assign/reftest ./fibre-sen
 ## Verify everything
 
 Each claim is one command, reproducible from a clean checkout. CI
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all of them on
-every push.
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the three test
+blocks below on every push — with `go vet`, `-race` and `-shuffle=on` where
+the module allows it — alongside `gofmt`, the shell and Python syntax checks,
+`shellcheck` and the web build. The last two blocks are not in CI and are not
+claimed to be: the devnet run needs a `celestia-app` and `fibre` build on
+PATH and about fourteen minutes, and the recompute needs a record or an
+export to read. They are here so that anyone can run them, which is the
+point; `make verify` runs everything CI does.
 
 ```bash
 # fibre-tlsverify — 21 golden vectors (1 valid + 20 typed failures), byte-exact envelope
@@ -77,12 +83,12 @@ The product built on the modules above lives in `fibre-sentinel/observer/`,
 | `sentinel-probe -policy` | the R4 load policy (`observer/policy`): deterministic per-blob sampling, per-validator and global byte and request caps, backoff that never adds requests |
 | `observer-heartbeat` | dials every registered endpoint every 5 minutes (DNS, TCP, TLS, identity, no download) |
 | `observer-api` | read-only JSON under `/v1/`; every rate carries its numerator and denominator |
-| `web/` | static Next.js export: network overview, validator detail, blob detail, methodology, about, API |
+| `web/` | static Next.js export: network overview, validator table and detail, blob list and detail, publishers, methodology |
 | `deploy/` | systemd units, Caddyfile, docker-compose, litestream config |
 
 Run everything on a chain from a clean checkout: see `deploy/README.md`.
-`make verify` runs every test and the web build; `make build` produces the
-binaries and the site.
+`make verify` runs the unit tests, the syntax checks and the web build, which
+is what CI runs; `make build` produces the binaries and the site.
 
 ## Pinned upstream
 

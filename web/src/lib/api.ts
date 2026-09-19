@@ -141,7 +141,7 @@ export type Network = {
   attestation: Attestation;
   probe_count: number;
   classes: ClassCounts;
-  faults?: number; // FAULT of an assigned shard in any phase; the rate is in-window only
+  faults?: number; // probes: FAULT of an assigned shard in any phase. obligations.broken is the per-obligation count, and the one shown beside a validator's name
   publications: number;
   publication_bytes: number;
   reconstructable: Reconstructable;
@@ -214,11 +214,11 @@ export type Reconstructable = {
  */
 export type Obligations = {
   total: number;
-  /** newest probe healthy, no fault anywhere */
+  /** newest probe healthy, no fault anywhere, and one healthy reading taken in the last quarter of the retention window */
   served: number;
   /** any probe a fault */
   broken: number;
-  /** served earlier, newest probe produced no verdict */
+  /** healthy at some point, but no reading that speaks for the end of the window */
   end_unobserved: number;
   /** never seen serving, never faulted */
   unobserved: number;
@@ -279,7 +279,7 @@ export type Validator = {
   attestation: Attestation;
   probe_count: number;
   classes: ClassCounts;
-  faults?: number; // FAULT of an assigned shard in any phase; the rate is in-window only
+  faults?: number; // probes: FAULT of an assigned shard in any phase. obligations.broken is the per-obligation count, and the one shown beside a validator's name
   assigned_rows_last: number;
   expected_load_band: string;
   /** this validator's serve rate per schedule point: early vs late retention */

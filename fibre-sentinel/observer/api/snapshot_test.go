@@ -24,7 +24,9 @@ func newSnapshotServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { st.Close() })
 	s := &Server{st: st, vantage: "test"}
-	s.net = newSnapshotCache("network", s.computeNetwork)
+	s.net = newSnapshotCache("network", func(ctx context.Context, win Window) (*networkResponse, error) {
+		return s.computeNetwork(ctx, win, excludeSet{}, nil)
+	})
 	return s
 }
 
@@ -173,7 +175,7 @@ func TestSnapshotPersistsAcrossProcesses(t *testing.T) {
 	calls := 0
 	c2 := newSnapshotCache("network", func(ctx context.Context, w Window) (*networkResponse, error) {
 		calls++
-		return s.computeNetwork(ctx, w)
+		return s.computeNetwork(ctx, w, excludeSet{}, nil)
 	})
 	c2.persistTo(dir, nil)
 	v, at, _, err := c2.get(context.Background(), nil, win)

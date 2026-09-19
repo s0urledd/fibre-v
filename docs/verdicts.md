@@ -147,7 +147,7 @@ One sentence each, and what a reader should conclude.
 | classification | when | conclude |
 |---|---|---|
 | `HEALTHY` | assigned validator returned `SERVED_OK` in window or in grace | the validator kept its promise at this point in time |
-| `FAULT` | an identity-verified endpoint, for a shard the chain proves it stored, **said it has no such shard** (`NOT_FOUND` in window) or **returned bytes that do not verify against the commitment** (`INVALID_ROWS`, any phase). A third arm, rows outside this promise's assignment that verify against nothing (`WRONG_ROWS`/`PARTIAL` without `commitment_verified`, in window or grace), exists in the code as a guard but cannot be produced by the prober, which files rows that fail the commitment as `INVALID_ROWS` | the validator broke its retention promise; this is the only class that counts against a validator. Two conditions, each reproducible by anyone who repeats the probe. A response the observer cannot parse at all (an empty shard, an RLC vector whose length does not match the observer's own protocol params) is the observer's gap (`PROBE_ERROR`, `shard shape:` on the row), never `INVALID_ROWS`: the commitment check is the only thing that turns bytes into a fault. One margin: a `NOT_FOUND` whose answer arrives within 30 s of `must_serve_until` is graded as grace (`TOLERATED`) and the row says `phase_note: not_found_at_deadline`, because the server prunes on a minute tick against its own clock and the RPC reaches it tens of seconds after the probe's phase was fixed. The fault count on the overview and per validator counts every phase; the serve rate's population is in-window only |
+| `FAULT` | an identity-verified endpoint, for a shard the chain proves it stored, **said it has no such shard** (`NOT_FOUND` in window) or **returned bytes that do not verify against the commitment** (`INVALID_ROWS`, any phase). A third arm, rows outside this promise's assignment that verify against nothing (`WRONG_ROWS`/`PARTIAL` without `commitment_verified`, in window or grace), exists in the code as a guard but cannot be produced by the prober, which files rows that fail the commitment as `INVALID_ROWS` | the validator did not serve a shard the chain records it as obliged to hold, at a moment inside that obligation. That is what the row says, and it is the most it says: `x/fibre` calls this parameter a *minimum local retention* — upstream's own words are "the minimum local duration validators keep uploaded shards" (`x/fibre/types/params.go`) and "the on-chain local retention floor for uploaded shards" (`celestia/fibre/v1/query.proto`) — and the chain neither checks it nor penalises missing it. "Broke its promise" is a heavier sentence than the protocol supports; this row is the observation, not a verdict about intent. It is still the only class that counts against a validator here. Two conditions, each reproducible by anyone who repeats the probe. A response the observer cannot parse at all (an empty shard, an RLC vector whose length does not match the observer's own protocol params) is the observer's gap (`PROBE_ERROR`, `shard shape:` on the row), never `INVALID_ROWS`: the commitment check is the only thing that turns bytes into a fault. One margin: a `NOT_FOUND` whose answer arrives within 30 s of `must_serve_until` is graded as grace (`TOLERATED`) and the row says `phase_note: not_found_at_deadline`, because the server prunes on a minute tick against its own clock and the RPC reaches it tens of seconds after the probe's phase was fixed. The fault count beside a validator's name on the overview and on its own page is `obligations.broken`: one per shard signed for and not handed over, the same population the serve rate is drawn from. The probe-level count — every `FAULT` row of an assigned shard, in any phase, which is several rows per shard and also covers faults past the deadline, where there is no obligation to break — is `faults` in the API, and on the site it is on the tooltip and the detail line rather than in the number. The serve rate's population is in-window only |
 | `UNREACHABLE` | assigned and attested, in window, and the observer could not complete a conversation at all: `DNS_FAIL`, `TCP_REFUSED`, `TCP_TIMEOUT`, `TCP_UNREACHABLE`, `TLS_HANDSHAKE_FAIL`, `RPC_UNAVAILABLE`, `RPC_ERROR` | we could not get to it. From one vantage that is not distinguishable from a route, firewall or peering problem on the observer's own path, so it is published in full beside the serve rate and kept out of it |
 | `NOT_REGISTERED` | assigned validator with no Fibre host in `x/valaddr` at the time of the probe (`NO_REGISTERED_HOST`) | a registry state, not a refusal. Jailing and unbonding remove a provider from `AllBondedFibreProviders` while the chain keeps the entry: it is garbage-collected only once the validator is gone from staking state, or jailed and unbonded for longer than the unbonding time plus seven days |
 | `SHADOWED_SHARD` | assigned validator returned rows that **verify against the blob commitment**, are not this promise's assignment (`WRONG_ROWS` or `PARTIAL` with `commitment_verified`), and are **exactly the row set another settled promise over the same commitment assigns to this validator** (`shadowed_by` names it) | that promise answered in this one's place. `DownloadShard` is addressed by the commitment alone; the Fibre store keeps every promise's shard side by side (`Put` "stored independently without deduplication") and `Get(commitment)` returns the first readable one in promise-hash order, so the validator has no way to tell the two apart. Never a fault. Without a matching promise the same wire result is `UNMATCHED_GENUINE`, and that verdict is drawn late (see "Deferred verdicts"): the order is by hash, not by time, so a promise settled after the probe can be the one that answered |
@@ -231,14 +231,23 @@ One sentence each, and what a reader should conclude.
   the chain's own prune granularity: the Fibre server's prune loop runs once a
   minute against a minute-resolution key, so a reading closer than that would
   be accusing an operator of the clock.
-- **An obligation is judged by its newest in-window probe**, the same rule
-  the per-blob reconstructability verdict uses; a `NOT_PROBED` or
-  `PROBE_ERROR` row is never the newest while a real probe exists. The
-  buckets:
-  - `served` — newest probe `HEALTHY`, no `FAULT` anywhere;
+- **An obligation is served only if this observer saw the shard near the end
+  of the window the promise covers.** The newest in-window probe decides the
+  verdict, the same rule the per-blob reconstructability verdict uses, and a
+  `NOT_PROBED` or `PROBE_ERROR` row is never the newest while a real probe
+  exists — but a newest probe taken at 12% of the window is not evidence
+  about the other 88%, so it is not enough on its own. The buckets:
+  - `served` — newest probe `HEALTHY`, no `FAULT` anywhere, **and** one of
+    the `HEALTHY` readings taken in the last quarter of the retention
+    window. The quarter is measured from the promise's own `settlement_time`
+    and `must_serve_until`, both in every export, so anyone can redraw the
+    line from the rows; the probe schedule puts its last in-window point at
+    92% of the window, so a validator that answers it clears the cut with
+    room to spare;
   - `broken` — any probe `FAULT`;
-  - `end_unobserved` — a `HEALTHY` probe earlier, but the newest probe
-    produced no verdict;
+  - `end_unobserved` — a `HEALTHY` probe, but none that speaks for the end
+    of the window: either the newest probe produced no verdict, or every
+    reading was taken too early to say the shard survived;
   - `unobserved` — no `HEALTHY` and no `FAULT` at all, split by what the
     probes did see: `unobserved_reachable` (at least one download attempt
     with `tls_ok = 1`: the endpoint completed a handshake and answered with
@@ -247,15 +256,37 @@ One sentence each, and what a reader should conclude.
     completed TLS), `unobserved_not_probed` (no attempt: backoff, a load
     cap, a slot that elapsed).
 
-  Only `served` and `broken` enter the rate. The old rule, "kept when no
+  Only `served` and `broken` enter the rate. The first rule, "kept when no
   probe of it faulted", let a validator that served at the first point and
   answered 500 at the next three count as fully kept — the profile of a
   server that pruned early, which is the finding this observer exists to
-  make. Under the new rule that obligation is `end_unobserved`, and a
-  validator that never hands anything over is `unobserved_reachable`: not a
+  make. That obligation is `end_unobserved`, and a validator that never
+  hands anything over is `unobserved_reachable`: not a
   fault, but not a clean record either, and counted on its own line beside
   the rate. The split uses each probe row's own `tls_ok`, not the heartbeat,
   because the probe made its own handshake at the moment that matters.
+
+  The end-of-window requirement closes the same hole from the other side,
+  and it is this observer's own failure mode rather than a validator's. When
+  this site is down inside a retention window, the obligation keeps whatever
+  verdict it had before the outage and the remaining slots are recorded as
+  gaps — or, once the outage outruns the prober's backfill horizon, are never
+  written at all. Under the earlier rule an obligation seen `HEALTHY` once
+  and then never again published as **kept**, so the serve rate *rose* while
+  nobody was watching, and an operator was credited for hours this observer
+  did not see. Those obligations are now `end_unobserved`: they leave the
+  rate rather than pad it.
+
+  `served` and `broken` are deliberately not symmetric. A `FAULT` is
+  conclusive from a single reading — the shard was gone at that minute. A
+  serve is a claim about a whole window, so it needs a reading near the end
+  of one. The consequence is worth stating rather than burying: while this
+  observer is blind, the obligations it can still judge are enriched for
+  faults, because a fault takes less evidence than a serve does. What it
+  cannot do is invent one. Nothing in this rule can move an obligation into
+  `broken`; the worst this observer's own downtime can do to an operator is
+  decline to vouch for them, and the count of times that happened is printed
+  beside the rate.
 - Below **20** rated observations the percentage is printed without a gauge
   and the validator is not ranked by it in either direction (it sorts with
   the rows that have no rate at all). This holds for every ranked figure on
@@ -446,6 +477,25 @@ These are properties of how the observer measures, not of any validator. They
 are written down because a reader comparing two validators deserves to know
 what the measurement cannot separate.
 
+- **A power cut can look exactly like an early prune.** The Fibre server
+  writes the shard file first and then commits the metadata that makes it
+  discoverable — the promise record, the `/shard/` marker and the prune index
+  — in one pebble batch with `pebbledb.NoSync` (celestia-app
+  `fibre/store.go`). NoSync hands the batch to the operating system without
+  waiting for it to reach the disk, so a power loss between the file's rename
+  and that flush leaves the shard on disk with no marker pointing at it.
+  `Get(commitment)` iterates markers, finds none, and the server answers
+  `NotFound` for data it still physically holds; upstream's own `Get` doc
+  names "crash leftover or pebble.NoSync power loss" as an expected case and
+  cleans up the opposite kind of orphan inline. From outside, that is
+  indistinguishable from a server that pruned early: the same wire answer, the
+  same row, the same `FAULT`. This observer records the fault, because the
+  obligation was not met at that moment and that is all the class asserts —
+  it is not evidence that an operator deleted anything. The shape to look for
+  is faults clustering at one moment across many promises for one validator,
+  which is a machine event rather than a retention policy; the rows carry the
+  time and the promise hashes, so an operator can point at it on the dispute
+  route and the amendment is on the record beside the original.
 - **One address per probe.** Every resolved address is tried at the TCP layer
   and the first that connects is the endpoint every later layer talks to. If
   that address accepts TCP and then fails at the RPC layer, the probe does not
@@ -603,6 +653,29 @@ pieces needed to re-run that function are published:
   and the answer says so (`as_of_note`). Pinned answers bypass the
   snapshot cache and are rationed (a burst of four, then one every two
   seconds; `429` with `Retry-After` past that).
+- **The headline without us.** The people who run this observer run a
+  validator on the network it measures. Nothing about that row is filtered,
+  excluded or adjusted — it is produced by the same code from the same
+  record as every other — but a reader should not have to take that on
+  trust, so `?exclude=<address>` on `/v1/network` recomputes the summary
+  without named validators. It takes either address form, repeated or
+  comma-separated, up to eight, and every per-validator population moves
+  with it: the class counts, the faults, the obligations, attestation
+  coverage, latency, both reachability figures, the probe and gap counts,
+  the per-point rate, the previous window the deltas compare against, and
+  the rolled-up days behind the "all" window. The answer echoes what it
+  excluded (`excluded`, `exclude_note`), bypasses the snapshot cache and is
+  rationed like a pinned window, so one reader's filter can never become
+  everyone's headline.
+
+  Two figures stay whole, and the note says so. The correlated-failure
+  guard is a statement about this observer's own minute rather than about
+  any validator, so dropping one from the share would change which points
+  this observer distrusts itself at. Reconstructability asks whether a blob
+  could still be rebuilt from the rows that came back, and removing a
+  validator's rows lowers that for real — "the network without you" is not
+  the network's actual recoverability, and printing it as such would
+  understate the thing the figure exists to measure.
 - **The sampling draw.** Not every publication is probed. A vantage has a
   finite budget — bytes per hour and per day, globally and per validator —
   and when the projected load exceeds it the observer probes a random

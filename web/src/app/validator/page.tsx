@@ -55,10 +55,14 @@ function Page() {
   const points = v.serve_rate_by_point ?? [];
   const o = v.obligations;
   const decided = !!o && o.rate.den > 0;
-  // Two different counts, kept apart. `faults` is every FAULT of an assigned
-  // shard in any phase; the serve rate's denominator is HEALTHY + FAULT over
-  // in-window probes only. Printing one over the other read "2 of 0" whenever
-  // a fault fell outside the window.
+  // Three counts of the same events, kept apart. `broken` is obligations: one
+  // per shard this validator signed for and did not hand over, and the number
+  // this page puts beside its name. `faults` is every FAULT probe of an
+  // assigned shard in any phase, which the schedule makes several times
+  // larger for the same shard; `inWindowFaults` is the in-window part of it,
+  // and the serve rate's denominator is HEALTHY + FAULT over those. Printing
+  // one over the other read "2 of 0" whenever a fault fell outside the window.
+  const broken = o?.broken ?? 0;
   const faults = v.faults ?? v.classes?.FAULT ?? 0;
   const inWindowFaults = v.classes?.FAULT ?? 0;
   const rated = (v.serve_rate?.den ?? 0) > 0;
@@ -147,17 +151,21 @@ function Page() {
             <p>Handshakes that never reached a certificate are not counted here, so an outage is not reported twice.</p>
           </>} />
         <Cell label="Faults"
-          value={faults > 0 ? <><Mark tier="fault" />{faults.toLocaleString("en-US")}</> : rated ? "0" : "—"}
-          tone={faults > 0 ? "fault" : "absent"}
-          sub={faults > 0
-            ? (inWindowFaults === faults
-              ? `of ${v.serve_rate.den.toLocaleString("en-US")} rated probes`
-              : `${inWindowFaults.toLocaleString("en-US")} of ${v.serve_rate.den.toLocaleString("en-US")} rated probes, the rest past the deadline`)
+          value={broken > 0 ? <><Mark tier="fault" />{broken.toLocaleString("en-US")}</> : faults > 0 ? "0" : rated ? "0" : "—"}
+          tone={broken > 0 ? "fault" : "absent"}
+          sub={broken > 0
+            ? `obligation${broken === 1 ? "" : "s"} broken, over ${faults.toLocaleString("en-US")} fault probe${faults === 1 ? "" : "s"}`
+            : faults > 0 ? `${faults.toLocaleString("en-US")} fault probe${faults === 1 ? "" : "s"}, none under a proven obligation`
             : rated ? `${v.serve_rate.den.toLocaleString("en-US")} rated probes` : "nothing rated"}
+          detail={broken > 0
+            ? `${broken.toLocaleString("en-US")} shard${broken === 1 ? "" : "s"} this validator signed for and did not hand over. The ${faults.toLocaleString("en-US")} fault probe${faults === 1 ? "" : "s"} behind that number are the readings: the schedule visits each shard several times in window${inWindowFaults === faults ? "" : `, and ${(faults - inWindowFaults).toLocaleString("en-US")} of them fell past the deadline, where there is no obligation to break`}. The serve rate is drawn from ${v.serve_rate.den.toLocaleString("en-US")} rated in-window probes.`
+            : faults > 0 ? `${faults.toLocaleString("en-US")} fault probe${faults === 1 ? "" : "s"}, none of them inside a retention window this validator was proven to be under, so no obligation is counted broken.`
+            : undefined}
           info={<>
             <p>The validator answered but did not hand over a shard it had signed for.</p>
+            <p>Counted <strong>per obligation</strong>: one per shard broken, the same population the serve rate is drawn from. The probe readings behind it are several per shard and are on the detail line, not in this number.</p>
             <p>The only number counted against a validator. Unreachable, unproven and unregistered are not faults.</p>
-            <p>The rated probes beside it are the in-window ones the serve rate is drawn from. A fault can also be recorded after the deadline, when a shard that is gone comes back wrong; those are in the count and not in that denominator.</p>
+            <p>A fault can also be recorded after the deadline, when a shard that is gone comes back wrong. There is no obligation to break there, so it is a fault probe and not a broken obligation.</p>
           </>} />
         <Cell label="Obligations"
           value={decided ? fmtPct(o!.rate) : "—"}
@@ -197,7 +205,7 @@ function Page() {
         <p className="coverage">
           {o.total.toLocaleString("en-US")} proven obligation{o.total === 1 ? "" : "s"} in this window:
           {" "}{o.served.toLocaleString("en-US")} kept, {o.broken.toLocaleString("en-US")} broken
-          {o.end_unobserved > 0 && <>, {o.end_unobserved.toLocaleString("en-US")} served early with no verdict at the end</>}
+          {o.end_unobserved > 0 && <>, {o.end_unobserved.toLocaleString("en-US")} served early with no reading at the end of the window</>}
           {o.pending > 0 && <>, {o.pending.toLocaleString("en-US")} still inside the retention window</>}
           {o.unobserved > 0 && <>, <strong>{o.unobserved.toLocaleString("en-US")} never observed serving</strong>
             {" "}({[o.unobserved_reachable > 0 && `${o.unobserved_reachable} reachable, nothing handed over`,

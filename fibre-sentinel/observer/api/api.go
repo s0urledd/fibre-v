@@ -156,7 +156,12 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	for _, o := range opts {
 		o(s)
 	}
-	s.net = newSnapshotCache("network", s.computeNetwork)
+	// The cached summary is the unfiltered one. A `?exclude=` answer is
+	// computed per request and never stored here: writing it into the shared
+	// snapshot would publish one reader's filter as everyone's headline.
+	s.net = newSnapshotCache("network", func(ctx context.Context, win Window) (*networkResponse, error) {
+		return s.computeNetwork(ctx, win, excludeSet{}, nil)
+	})
 	s.market = newSnapshotCache("market", s.computeMarket)
 	s.vals = newSnapshotCache("validators", func(ctx context.Context, win Window) (validatorSnapshot, error) {
 		rows, err := s.validatorRows(ctx, win, "")
@@ -775,9 +780,13 @@ type networkResponse struct {
 	ComputedAt             string `json:"computed_at,omitempty"`
 	ComputeMs              int64  `json:"compute_ms,omitempty"`
 	ObservedFromOneVantage bool   `json:"observed_from_one_location"`
-	RegisteredEndpoints    int64  `json:"registered_endpoints"`
-	ValidatorsProbed       int64  `json:"validators_probed"`
-	Reachability           Rate   `json:"reachability"` // endpoints whose latest heartbeat or probe reached TLS
+	// Excluded and ExcludeNote are set when a reader asked for figures
+	// without named validators (?exclude=); see excludeSet.
+	Excluded            []string `json:"excluded,omitempty"`
+	ExcludeNote         string   `json:"exclude_note,omitempty"`
+	RegisteredEndpoints int64    `json:"registered_endpoints"`
+	ValidatorsProbed    int64    `json:"validators_probed"`
+	Reachability        Rate     `json:"reachability"` // endpoints whose latest heartbeat or probe reached TLS
 	// ReachabilityWindow is every reachability heartbeat in the window that
 	// completed TLS, over every heartbeat sent. Reachability above is a census
 	// of the endpoints right now; this is how the whole window went, which is
@@ -994,9 +1003,13 @@ func serveRate(c classCounts) Rate {
 // answered 500 at the next three count as fully kept: that is the profile of
 // a server that pruned early, and the one this observer exists to notice.
 //
-//	served         newest probe HEALTHY, no fault anywhere
+//	served         newest probe HEALTHY, no fault anywhere, and one of the
+//	               HEALTHY readings taken in the tail of the retention window
+//	               (verdict.EndSegmentDivisor)
 //	broken         any probe FAULT
-//	end_unobserved served earlier, but the newest probe produced no verdict
+//	end_unobserved a HEALTHY probe, but not one that speaks for the end of
+//	               the window: the newest probe produced no verdict, or every
+//	               reading was taken too early to say the shard survived
 //	unobserved     never seen serving, and never faulted, split by what the
 //	               probes did see: the endpoint completed TLS and still
 //	               handed nothing over; it never completed TLS; or this
@@ -1007,6 +1020,17 @@ func serveRate(c classCounts) Rate {
 //
 // Only served and broken enter the rate. The rest is published beside it so a
 // reader can see how many obligations the rate does not speak for.
+//
+// The two are not symmetric, and the asymmetry is the point. A FAULT is
+// conclusive from a single reading: the shard was gone at that minute. A
+// serve is a claim about a window, so it needs a reading near the end of one.
+// An obligation this observer watched early and then lost sight of is
+// therefore end_unobserved rather than served — it leaves the rate instead of
+// padding it, which is why an outage here lowers the number of obligations
+// the rate speaks for instead of raising the rate. The direction of the
+// remaining bias is worth stating plainly: while this observer is blind, the
+// obligations it can still judge are enriched for faults, because faults need
+// less evidence than serves do.
 //
 // The population is obligations the settled promise proves (attested = 1):
 // an unattested one is nothing to keep or break, and a record from before
@@ -1164,6 +1188,107 @@ func (ss suspectSet) clause(col string) string {
 	return " AND " + col + " NOT IN (?" + strings.Repeat(", ?", len(ss.args)-1) + ")"
 }
 
+// excludeSet is the validator exclusion a reader asks for with `?exclude=`.
+//
+// This observer's own operator runs a validator on the network it measures,
+// which is a conflict a reader should be able to check rather than take on
+// trust. R0 decision 4 asked for the check to be a query filter: leave the
+// validator in the tables, and let anyone recompute the headline figures
+// without it. So nothing is excluded by default, the exclusion is asked for
+// per request rather than configured on the deployment, and what a request
+// excluded is echoed in its answer.
+//
+// It applies to every per-validator measurement population: the class counts,
+// the faults, the obligations, attestation coverage, latency, both
+// reachability figures, the probe and gap counts, the per-point rate, and the
+// previous window the deltas compare against.
+//
+// Two figures it deliberately leaves whole, because excluding a validator
+// from either would answer a different question than the one asked:
+//
+//   - the correlated-failure guard (vantage_health.suspect), which is a
+//     statement about this observer's own minute rather than about any
+//     validator: dropping one from the share would change which points this
+//     observer distrusts itself at;
+//   - reconstructability, which asks whether a blob could still be rebuilt
+//     from the rows that came back. Removing a validator's rows lowers that
+//     for real, so "the network without you" is not the network's actual
+//     recoverability, and printing it as such would understate the thing the
+//     figure exists to measure.
+//
+// Both are said in the response (exclude_note) rather than left to be
+// discovered.
+type excludeSet struct{ addrs []any }
+
+func (e excludeSet) on() bool { return len(e.addrs) > 0 }
+
+// has reports whether one validator is excluded, for the few figures reduced
+// in Go rather than in SQL.
+func (e excludeSet) has(addr string) bool {
+	for _, a := range e.addrs {
+		if a == addr {
+			return true
+		}
+	}
+	return false
+}
+
+// clause is " AND <col> NOT IN (?, ...)" or "" when nothing is excluded.
+func (e excludeSet) clause(col string) string {
+	if len(e.addrs) == 0 {
+		return ""
+	}
+	return " AND " + col + " NOT IN (?" + strings.Repeat(", ?", len(e.addrs)-1) + ")"
+}
+
+// args appends the exclusion's arguments after base, matching clause being
+// appended last in every query that carries it.
+func (e excludeSet) args(base ...any) []any {
+	if len(e.addrs) == 0 {
+		return base
+	}
+	return append(append([]any{}, base...), e.addrs...)
+}
+
+// ExcludeNote is what the response says about a filtered answer, so a figure
+// cannot be quoted as this observer's headline without the qualifier.
+const ExcludeNote = "Figures exclude the validators named in `excluded`. The correlated-failure guard and reconstructability are computed over the whole set, because excluding a validator from either would answer a different question."
+
+// parseExclude reads `?exclude=`, which may be repeated or comma-separated,
+// and takes either form of address the rest of the API takes.
+func parseExclude(r *http.Request) (excludeSet, []string, error) {
+	var ex excludeSet
+	var names []string
+	seen := map[string]bool{}
+	for _, raw := range r.URL.Query()["exclude"] {
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			addr, err := parseAddr(part)
+			if err != nil {
+				return excludeSet{}, nil, fmt.Errorf("exclude %q: address must be 40 hex chars or celestiavalcons1...", part)
+			}
+			if seen[addr] {
+				continue
+			}
+			seen[addr] = true
+			ex.addrs = append(ex.addrs, addr)
+			names = append(names, addr)
+		}
+	}
+	if len(ex.addrs) > maxExclude {
+		return excludeSet{}, nil, fmt.Errorf("exclude takes at most %d validators", maxExclude)
+	}
+	return ex, names, nil
+}
+
+// maxExclude bounds the filter. It exists to answer "recompute without the
+// people who run this site", not to let a caller carve an arbitrary subset
+// out of the network and quote the result as this observer's figure.
+const maxExclude = 8
+
 // correlatedUnreachableThreshold: at or above this share of the validators
 // probed at one schedule point being unreachable, the likeliest explanation
 // is this observer's own network rather than that many independent
@@ -1318,22 +1443,30 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if win.AsOf {
-		// A pinned window is computed on demand, uncached and rationed: by
-		// arrivals (allow) and by work in flight (enter).
+	ex, excluded, err := parseExclude(r)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if win.AsOf || ex.on() {
+		// A pinned window, or one a reader asked to recompute without named
+		// validators, is computed on demand, uncached and rationed: by
+		// arrivals (allow) and by work in flight (enter). Neither may reach
+		// the shared snapshot — one reader's filter is not everyone's
+		// headline, and the cache is keyed by window alone.
 		if !s.asOf.allow(time.Now()) {
 			w.Header().Set("Retry-After", "2")
-			writeErr(w, 429, "as_of requests are limited to one every two seconds")
+			writeErr(w, 429, "as_of and exclude requests are limited to one every two seconds")
 			return
 		}
 		if !s.asOf.enter() {
 			w.Header().Set("Retry-After", "5")
-			writeErr(w, 429, "as_of computations already in flight; try again shortly")
+			writeErr(w, 429, "uncached computations already in flight; try again shortly")
 			return
 		}
 		defer s.asOf.leave()
 		t0 := time.Now()
-		resp, err := s.computeNetwork(r.Context(), win)
+		resp, err := s.computeNetwork(r.Context(), win, ex, excluded)
 		if err != nil {
 			s.writeInternal(w, r.URL.Path, err)
 			return
@@ -1378,7 +1511,7 @@ type previousWindow struct {
 	LatencyP50   *int64          `json:"serve_latency_p50_ms"`
 }
 
-func (s *Server) previousWindow(ctx context.Context, win Window) (*previousWindow, error) {
+func (s *Server) previousWindow(ctx context.Context, win Window, ex excludeSet) (*previousWindow, error) {
 	if win.Span <= 0 || win.AsOf {
 		return nil, nil
 	}
@@ -1388,12 +1521,12 @@ func (s *Server) previousWindow(ctx context.Context, win Window) (*previousWindo
 		return nil, err
 	}
 	p := &previousWindow{Window: prev}
-	if p.Obligations, err = s.obligationsWhere(ctx, prev, ss, ""); err != nil {
+	if p.Obligations, err = s.obligationsWhere(ctx, prev, ss, ex.clause("pr.validator_address"), ex.addrs...); err != nil {
 		return nil, err
 	}
 	db := s.st.DB()
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at"),
-		append([]any{prev.startArg(), prev.endArg()}, ss.args...)...).Scan(&p.Faults); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at")+ex.clause("validator_address"),
+		ex.args(append([]any{prev.startArg(), prev.endArg()}, ss.args...)...)...).Scan(&p.Faults); err != nil {
 		return nil, err
 	}
 	var beats, beatsUp int64
@@ -1410,11 +1543,16 @@ func (s *Server) previousWindow(ctx context.Context, win Window) (*previousWindo
 	return p, nil
 }
 
-func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkResponse, error) {
+func (s *Server) computeNetwork(ctx context.Context, win Window, ex excludeSet, excluded []string) (*networkResponse, error) {
 	db := s.st.DB()
 	var resp networkResponse
 	resp.Window, resp.Vantage = win, s.vantage
 	resp.ObservedFromOneVantage = s.vantageCount(ctx) == 1
+	if ex.on() {
+		resp.Excluded, resp.ExcludeNote = excluded, ExcludeNote
+	}
+	// Appended last in every population below, so its arguments go last too.
+	exv := ex.clause("validator_address")
 
 	if win.AsOf {
 		resp.AsOfNote = AsOfNote
@@ -1422,7 +1560,8 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	} else {
 		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM endpoints WHERE closed_at IS NULL`).Scan(&resp.RegisteredEndpoints)
 	}
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT validator_address) FROM probes WHERE started_at >= ? AND started_at <= ?`, win.startArg(), win.endArg()).Scan(&resp.ValidatorsProbed)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT validator_address) FROM probes WHERE started_at >= ? AND started_at <= ?`+exv,
+		ex.args(win.startArg(), win.endArg())...).Scan(&resp.ValidatorsProbed)
 
 	// The points this observer does not trust itself at come first: every
 	// population below leaves them out.
@@ -1431,20 +1570,20 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		return nil, err
 	}
 	resp.VantageHealth = vh
-	pop := `started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'` + ss.clause("scheduled_at")
-	popArgs := append([]any{win.startArg(), win.endArg()}, ss.args...)
+	pop := `started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'` + ss.clause("scheduled_at") + exv
+	popArgs := ex.args(append([]any{win.startArg(), win.endArg()}, ss.args...)...)
 
 	classes, total, err := s.classCountsWhere(ctx, pop, popArgs...)
 	if err != nil {
 		return nil, err
 	}
 	resp.Classes = classes
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at"), popArgs...).Scan(&resp.Faults)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at")+exv, popArgs...).Scan(&resp.Faults)
 	resp.ServeRate = serveRate(classes)
 	resp.Coverage = coverage(classes)
 	resp.HeldOut = heldOut(classes)
 	resp.ExcludedClasses = excludedFromRate
-	if resp.Obligations, err = s.obligationsWhere(ctx, win, ss, ""); err != nil {
+	if resp.Obligations, err = s.obligationsWhere(ctx, win, ss, ex.clause("pr.validator_address"), ex.addrs...); err != nil {
 		return nil, err
 	}
 	resp.ByObligation = resp.Obligations.Rate
@@ -1457,15 +1596,15 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	// gap for anyone reconciling the response against itself, which is
 	// exactly what a reader checking this observer's arithmetic does.
 	if resp.Attestation, err = s.attestationWhere(ctx,
-		`started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+ss.clause("scheduled_at"), popArgs...); err != nil {
+		`started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+ss.clause("scheduled_at")+exv, popArgs...); err != nil {
 		return nil, err
 	}
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ?`, win.startArg(), win.endArg()).Scan(&resp.ProbeCount)
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`, win.startArg(), win.endArg()).Scan(&resp.Gaps)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ?`+exv, ex.args(win.startArg(), win.endArg())...).Scan(&resp.ProbeCount)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`+exv, ex.args(win.startArg(), win.endArg())...).Scan(&resp.Gaps)
 	resp.GapsByOutcome = map[string]int64{}
 	if grows, gerr := db.QueryContext(ctx,
-		`SELECT outcome, COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND classification IN ('NOT_PROBED','PROBE_ERROR') GROUP BY outcome`,
-		win.startArg(), win.endArg()); gerr == nil {
+		`SELECT outcome, COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`+exv+` GROUP BY outcome`,
+		ex.args(win.startArg(), win.endArg())...); gerr == nil {
 		for grows.Next() {
 			var o string
 			var n int64
@@ -1480,7 +1619,7 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		return nil, err
 	}
 	if resp.LatencyP50, resp.LatencyP95, resp.LatencySample, err = s.latencyWhere(ctx,
-		`started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`, win.startArg(), win.endArg()); err != nil {
+		`started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+exv, ex.args(win.startArg(), win.endArg())...); err != nil {
 		return nil, err
 	}
 
@@ -1503,7 +1642,7 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	}
 	var reachable, census int64
 	for a, v := range reach {
-		if !registered[a] {
+		if !registered[a] || ex.has(a) {
 			continue
 		}
 		census++
@@ -1516,7 +1655,8 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	var beats, beatsUp int64
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*),
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0)
-		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR'`, win.startArg(), win.endArg()).Scan(&beats, &beatsUp); err != nil {
+		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR'`+exv,
+		ex.args(win.startArg(), win.endArg())...).Scan(&beats, &beatsUp); err != nil {
 		return nil, err
 	}
 	resp.ReachabilityWindow = rate(beatsUp, beats)
@@ -1535,6 +1675,7 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 	if err != nil {
 		return nil, err
 	}
+	rolled = rolled.Without(excluded)
 	if rolled != nil {
 		resp.RolledUp = label
 		for c, n := range rolled.Classes {
@@ -1563,7 +1704,7 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		for a := range rolled.ProbesByVal {
 			seen[a] = true
 		}
-		if vrows, err := db.QueryContext(ctx, `SELECT DISTINCT validator_address FROM probes WHERE started_at >= ? AND started_at <= ?`, win.startArg(), win.endArg()); err == nil {
+		if vrows, err := db.QueryContext(ctx, `SELECT DISTINCT validator_address FROM probes WHERE started_at >= ? AND started_at <= ?`+exv, ex.args(win.startArg(), win.endArg())...); err == nil {
 			for vrows.Next() {
 				var a string
 				if vrows.Scan(&a) == nil {
@@ -1574,7 +1715,7 @@ func (s *Server) computeNetwork(ctx context.Context, win Window) (*networkRespon
 		}
 		resp.ValidatorsProbed = int64(len(seen))
 	}
-	if resp.Previous, err = s.previousWindow(ctx, win); err != nil {
+	if resp.Previous, err = s.previousWindow(ctx, win, ex); err != nil {
 		return nil, err
 	}
 	return &resp, nil

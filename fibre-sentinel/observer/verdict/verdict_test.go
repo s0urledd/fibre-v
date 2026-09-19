@@ -60,3 +60,77 @@ func TestLateShadow_UnrecordedCandidateIsAGap(t *testing.T) {
 		t.Fatalf("unrecorded candidate outside the lifetime: %s ok=%v, want UNMATCHED_GENUINE", cls, ok)
 	}
 }
+
+// An observer outage inside a retention window produces one shape in the
+// record: a HEALTHY reading early, then gaps — or, past the prober's backfill
+// horizon, no rows at all after the healthy one. Reading either as a kept
+// promise credits an operator for hours nobody watched, and raises the serve
+// rate exactly while this observer is blind. Both are end_unobserved: the
+// shard was there when we looked, and we did not look at the end.
+func TestObligationServedNeedsAReadingAtTheEndOfTheWindow(t *testing.T) {
+	settled := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	msu := settled.Add(4 * time.Hour)
+	w := Window{All: true, End: msu.Add(time.Hour)}
+	set := map[string]time.Time{"p": settled}
+
+	// the prober's in-window fractions
+	at := func(f float64) time.Time {
+		return settled.Add(time.Duration(float64(msu.Sub(settled)) * f))
+	}
+	obl := func(v string, f float64, cls probe.Classification) Row {
+		return Row{PromiseHash: "p", Validator: v, ScheduleLabel: "w", ScheduledAt: at(f), StartedAt: at(f),
+			MustServeUntil: msu, Assigned: true, Attested: true, Phase: probe.PhaseInWindow,
+			Classification: cls, TLSOK: cls != probe.ClassNotProbed}
+	}
+	H, G := probe.ClassHealthy, probe.ClassNotProbed
+	rows := []Row{
+		// answered at every point, last one included: vouched for
+		obl("whole", 0.12, H), obl("whole", 0.45, H), obl("whole", 0.72, H), obl("whole", 0.92, H),
+		// healthy early, then the observer went down and backfilled gaps
+		obl("gaps", 0.12, H), obl("gaps", 0.45, G), obl("gaps", 0.72, G), obl("gaps", 0.92, G),
+		// healthy early and nothing after: the outage outran the backfill
+		// horizon, so the later slots were never written at all
+		obl("silent", 0.12, H),
+		// only the last point was missed
+		obl("lastgap", 0.12, H), obl("lastgap", 0.45, H), obl("lastgap", 0.72, H), obl("lastgap", 0.92, G),
+	}
+	_, by := ComputeObligations(rows, set, w, nil)
+	for _, c := range []struct {
+		validator string
+		want      Obligations
+	}{
+		{"whole", Obligations{Total: 1, Served: 1}},
+		{"gaps", Obligations{Total: 1, EndUnobserved: 1}},
+		{"silent", Obligations{Total: 1, EndUnobserved: 1}},
+		{"lastgap", Obligations{Total: 1, EndUnobserved: 1}},
+	} {
+		if got := by[c.validator]; got != c.want {
+			t.Errorf("%s: %+v, want %+v", c.validator, got, c.want)
+		}
+	}
+	// The rate speaks for one obligation, not four. Nothing here is a fault:
+	// this observer's blindness can withhold credit, never accuse.
+	net, _ := ComputeObligations(rows, set, w, nil)
+	if net.Broken != 0 {
+		t.Errorf("broken = %d, want 0: a missing reading is not a fault", net.Broken)
+	}
+	if n, d := net.Served, net.Served+net.Broken; n != 1 || d != 1 {
+		t.Errorf("rate = %d/%d, want 1/1 over four obligations", n, d)
+	}
+}
+
+// EndSegment cuts the window at the same place the SQL does, and only ever
+// inside it.
+func TestEndSegmentIsTheTailOfTheWindow(t *testing.T) {
+	settled := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	msu := settled.Add(4 * time.Hour)
+	got := EndSegment(settled, msu)
+	if want := settled.Add(3 * time.Hour); !got.Equal(want) {
+		t.Errorf("EndSegment = %v, want %v (the last quarter of a four-hour window)", got, want)
+	}
+	// the published schedule's last in-window point clears it
+	last := settled.Add(time.Duration(float64(msu.Sub(settled)) * 0.92))
+	if last.Before(got) {
+		t.Errorf("the schedule's last in-window point (%v) falls before the end segment (%v), so nothing would ever be served", last, got)
+	}
+}

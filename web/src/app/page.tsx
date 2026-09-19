@@ -23,9 +23,15 @@ export default function Overview() {
 
   const notLive = !!(meta?.app_version && !meta.fibre_active);
   const noPubs = !!meta && meta.counts.Publications === 0;
-  const faults = net?.faults ?? net?.classes?.FAULT ?? 0;
+  // Two counts of the same events, kept apart. `broken` is obligations: one
+  // per shard a validator signed for and did not hand over. `faultProbes` is
+  // probe rows, which the schedule makes about four times larger for the same
+  // shard, and which also counts faults outside a retention window, where
+  // there is no obligation to break. The headline is the obligation count:
+  // the probe count reads as an accusation four times the size of the finding.
+  const faultProbes = net?.faults ?? net?.classes?.FAULT ?? 0;
   const list = vals?.validators ?? [];
-  const faulted = list.filter((v) => (v.faults ?? v.classes.FAULT ?? 0) > 0).length;
+  const faulted = list.filter((v) => (v.obligations?.broken ?? 0) > 0).length;
   const busy = loading && !net;
 
   const sr = net?.serve_rate;
@@ -91,12 +97,16 @@ export default function Overview() {
               <p><Link href="/methodology/#verdicts">How a probe is judged</Link></p>
             </>} />
           <Cell label="Faults" loading={busy}
-            value={!net ? "—" : faults > 0 ? faults.toLocaleString("en-US") : rated ? "0" : "—"}
-            tone={faults > 0 ? "fault" : "absent"}
-            sub={!net ? undefined : faults > 0 ? <><b>{ob!.broken.toLocaleString("en-US")} broken</b> · {faulted} validator{faulted === 1 ? "" : "s"}</> : rated ? "no unserved shard" : "nothing rated"}
-            detail={!net ? undefined : faults > 0 ? `${faults.toLocaleString("en-US")} probe${faults === 1 ? "" : "s"} where a validator answered but did not hand over a shard it had signed for; ${ob!.broken.toLocaleString("en-US")} obligations broken across ${faulted} validator${faulted === 1 ? "" : "s"}.` : rated ? "No signed shard went unserved in this window." : "Nothing rated in this window."}
+            value={!net || !ob ? "—" : ob.broken > 0 ? ob.broken.toLocaleString("en-US") : rated ? "0" : "—"}
+            tone={ob && ob.broken > 0 ? "fault" : "absent"}
+            sub={!net || !ob ? undefined : ob.broken > 0 ? <><b>obligation{ob.broken === 1 ? "" : "s"} broken</b> · {faulted} validator{faulted === 1 ? "" : "s"}</> : rated ? "no unserved shard" : "nothing rated"}
+            detail={!net || !ob ? undefined : ob.broken > 0
+              ? `${ob.broken.toLocaleString("en-US")} obligation${ob.broken === 1 ? "" : "s"} broken across ${faulted} validator${faulted === 1 ? "" : "s"}: a shard the chain proves the validator signed for, and did not hand over. Behind them are ${faultProbes.toLocaleString("en-US")} fault probe${faultProbes === 1 ? "" : "s"} — the schedule visits each shard four times, so the probe count is not four times the finding.`
+              : faultProbes > 0 ? `No obligation broken. ${faultProbes.toLocaleString("en-US")} fault probe${faultProbes === 1 ? "" : "s"} fell outside a retention window a validator was proven to be under, so none of them breaks an obligation.`
+              : rated ? "No signed shard went unserved in this window." : "Nothing rated in this window."}
             info={<>
               <p>The validator answered but did not hand over a shard it had signed for.</p>
+              <p>Counted <strong>per obligation</strong>, one per shard broken. The probe count behind it is larger by roughly the number of times the schedule visits each shard, and it is in the API and on the tile&rsquo;s detail line rather than in this number: a four-figure count beside an operator&rsquo;s name is an accusation four times the size of the finding.</p>
               <p>This is the only number counted against a validator.</p>
             </>} />
           <Cell label="Reachability" loading={busy}

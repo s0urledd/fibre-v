@@ -3,11 +3,14 @@ package rollup_test
 import (
 	"context"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/rollup"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/verdict"
 )
 
 func openStore(t *testing.T) *store.Store {
@@ -90,5 +93,19 @@ func TestLoad_RepeatedDailyClassMapIsNotCollapsed(t *testing.T) {
 	}
 	if one.Probes != 8 || one.Classes["FAULT"] != 0 || len(one.ProbesByVal) != 1 {
 		t.Fatalf("only=v1 gave probes=%d classes=%v vals=%d", one.Probes, one.Classes, len(one.ProbesByVal))
+	}
+}
+
+// The obligation SQL is a constant, so verdict.EndSegmentDivisor is spelled
+// into it by hand. If the Go constant moves and the query does not, the SQL
+// and its Go twin would cut the retention window at two different places and
+// publish two different serve rates from the same rows — the one divergence
+// sentinel-recompute exists to catch, arriving as a silent disagreement
+// between two implementations that are supposed to be one.
+func TestTheSQLAndTheGoTwinCutTheWindowAtTheSamePoint(t *testing.T) {
+	want := "/ " + strconv.FormatFloat(verdict.EndSegmentDivisor, 'f', 1, 64)
+	if !strings.Contains(rollup.ObligationBuckets, want) {
+		t.Fatalf("verdict.EndSegmentDivisor is %v, so the obligation SQL must divide by %q; it does not:\n%s",
+			verdict.EndSegmentDivisor, want, rollup.ObligationBuckets)
 	}
 }

@@ -30,6 +30,15 @@ import (
 // the row lower bound, then any suspect-point exclusion and caller filter
 // appended to the WHERE.
 //
+// late_healthy is the count of HEALTHY readings in the tail of the promise's
+// own retention window (verdict.EndSegmentDivisor). Served needs one: an
+// early HEALTHY probe says the shard was there minutes after settlement, not
+// that it survived the hours the promise covers, and treating it as a kept
+// promise is what let this observer's own downtime raise a validator's serve
+// rate. The cut is drawn from pb.settlement_time and pr.must_serve_until, so
+// it is reproducible from the exported rows and does not move when the
+// prober's schedule changes.
+//
 // The row lower bound is not a filter on the answer; it is what keeps the
 // cost proportional to the window. With only an upper bound on pr.started_at
 // the planner drives the join from probes and walks every in-window assigned
@@ -44,17 +53,24 @@ import (
 const ObligationBuckets = `SELECT validator_address, promise_hash,
 			SUM(classification = 'FAULT')   AS faults,
 			SUM(classification = 'HEALTHY') AS healthy,
+			SUM(classification = 'HEALTHY' AND julianday(scheduled_at) >=
+			    julianday(must_serve_until) - (julianday(must_serve_until) - julianday(settlement_time)) / 4.0) AS late_healthy,
 			SUM(classification NOT IN ('NOT_PROBED','PROBE_ERROR'))                AS attempted,
 			SUM(classification NOT IN ('NOT_PROBED','PROBE_ERROR') AND tls_ok = 1) AS reached,
 			COALESCE(MAX(CASE WHEN rn = 1 THEN classification END), '')          AS last_cls,
 			MAX(must_serve_until > ?)                                            AS pending
 		FROM (
 			SELECT pr.validator_address, pr.promise_hash, pr.classification, pr.tls_ok, pr.must_serve_until,
+			       pr.scheduled_at, pb.settlement_time,
 			       ROW_NUMBER() OVER (PARTITION BY pr.validator_address, pr.promise_hash
 			                          ORDER BY (pr.classification IN ('NOT_PROBED','PROBE_ERROR')), pr.scheduled_at DESC, pr.started_at DESC) AS rn
 			FROM probes pr JOIN publications pb ON pb.promise_hash = pr.promise_hash
 			WHERE pb.settlement_time >= ? AND pb.settlement_time <= ? AND pr.started_at <= ? AND pr.started_at >= ?
 			  AND pr.assigned = 1 AND pr.phase = 'in_window' AND pr.attested = 1`
+
+// The 4.0 in that SUM is verdict.EndSegmentDivisor, spelled out because a
+// query fragment is a constant; a test in this package holds the two to the
+// same number.
 
 // RowLowerBound is the probe-row lower bound that goes with a settlement
 // window start: the start less an hour of clock-skew margin, or the zero
@@ -72,10 +88,16 @@ func RowLowerBound(settlementStart string) string {
 // order Obligations' fields are scanned: total, broken, served,
 // end_unobserved, unobserved_reachable, unobserved_unreachable,
 // unobserved_not_probed, pending.
+//
+// served and end_unobserved partition the obligations that have a HEALTHY
+// reading and no fault: served when the newest verdict is HEALTHY and one of
+// those readings falls in the tail of the window, end_unobserved otherwise —
+// the shard was there when this observer looked, and this observer did not
+// look at the end.
 const ObligationSums = `COUNT(*),
 			COALESCE(SUM(NOT pending AND faults > 0), 0),
-			COALESCE(SUM(NOT pending AND faults = 0 AND last_cls = 'HEALTHY'), 0),
-			COALESCE(SUM(NOT pending AND faults = 0 AND last_cls <> 'HEALTHY' AND healthy > 0), 0),
+			COALESCE(SUM(NOT pending AND faults = 0 AND last_cls = 'HEALTHY' AND late_healthy > 0), 0),
+			COALESCE(SUM(NOT pending AND faults = 0 AND healthy > 0 AND NOT (last_cls = 'HEALTHY' AND late_healthy > 0)), 0),
 			COALESCE(SUM(NOT pending AND faults = 0 AND healthy = 0 AND reached > 0), 0),
 			COALESCE(SUM(NOT pending AND faults = 0 AND healthy = 0 AND reached = 0 AND attempted > 0), 0),
 			COALESCE(SUM(NOT pending AND faults = 0 AND healthy = 0 AND attempted = 0), 0),
@@ -635,6 +657,51 @@ type RolledProbes struct {
 	Attested   int64
 	Unattested int64
 	UnknownAtt int64
+}
+
+// Without returns a copy with the named validators taken out of every total,
+// recomputed from the per-validator rows this already carries rather than
+// from a second query. The API's `?exclude=` has to reach the rolled days as
+// well as the raw ones, or the "all" window would answer half the question:
+// excluded from the last thirty days, counted for every day before them.
+//
+// Days is left as it was. It counts the days rolled up, not anyone's rows.
+func (r *Rolled) Without(addrs []string) *Rolled {
+	if r == nil || len(addrs) == 0 {
+		return r
+	}
+	drop := make(map[string]bool, len(addrs))
+	for _, a := range addrs {
+		drop[a] = true
+	}
+	out := &Rolled{Days: r.Days, ObligationsByVal: map[string]Obligations{},
+		ProbesByVal: map[string]*RolledProbes{}, Classes: map[string]int64{}}
+	for a, o := range r.ObligationsByVal {
+		if drop[a] {
+			continue
+		}
+		out.ObligationsByVal[a] = o
+		out.Obligations.Add(o)
+	}
+	for a, p := range r.ProbesByVal {
+		if drop[a] {
+			continue
+		}
+		out.ProbesByVal[a] = p
+		out.Probes += p.Probes
+		out.Gaps += p.Gaps
+		out.Faults += p.Faults
+		out.Beats += p.Beats
+		out.BeatsUp += p.BeatsUp
+		out.IdentityUp += p.IdentityUp
+		out.Attested += p.Attested
+		out.Unattested += p.Unattested
+		out.UnknownAtt += p.UnknownAtt
+		for c, n := range p.Classes {
+			out.Classes[c] += n
+		}
+	}
+	return out
 }
 
 // Load reads the rollups for days before `before` (a UTC day). only, when
