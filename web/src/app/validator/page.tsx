@@ -197,7 +197,7 @@ function Page() {
         <p className="coverage">
           {o.total.toLocaleString("en-US")} proven obligation{o.total === 1 ? "" : "s"} in this window:
           {" "}{o.served.toLocaleString("en-US")} kept, {o.broken.toLocaleString("en-US")} broken
-          {o.end_unobserved > 0 && <>, {o.end_unobserved.toLocaleString("en-US")} served early with no verdict at the end</>}
+          {o.end_unobserved > 0 && <>, {o.end_unobserved.toLocaleString("en-US")} served early with no reading at the end of the window</>}
           {o.pending > 0 && <>, {o.pending.toLocaleString("en-US")} still inside the retention window</>}
           {o.unobserved > 0 && <>, <strong>{o.unobserved.toLocaleString("en-US")} never observed serving</strong>
             {" "}({[o.unobserved_reachable > 0 && `${o.unobserved_reachable} reachable, nothing handed over`,

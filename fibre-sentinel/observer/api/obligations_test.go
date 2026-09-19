@@ -74,13 +74,16 @@ func obligationsFixture(t *testing.T) *httptest.Server {
 		"unreach": {refused, refused, refused, refused},
 		"reach":   {err500, err500, err500, err500},
 		"backoff": {skipped, skipped, skipped, skipped},
-		"gaplast": {ok, ok, ok, skipped}, // a gap at the last point must not undo three served probes
+		// Three served probes and then nothing at the last point: the shape
+		// this observer's own downtime produces. It used to publish as
+		// served, so the serve rate rose while the observer was blind.
+		"gaplast": {ok, ok, ok, skipped},
 		"unatt":   {gone, gone, gone, gone},
 	}
 	points := []string{"w1", "w2", "w3", "w4"}
 	for addr, ws := range profile {
 		for i, w := range ws {
-			at := created.Add(time.Duration(i+1) * time.Minute)
+			at := inWindowPoint(created, msu, i)
 			attested := addr != "unatt"
 			class, reason := probe.Classify(probe.Evidence{
 				Assigned: true, Attested: attested, Phase: probe.PhaseInWindow, Outcome: w.outcome,
@@ -131,6 +134,24 @@ func obligationsFixture(t *testing.T) *httptest.Server {
 	return ts
 }
 
+// inWindowFractions are the prober's in-window schedule fractions
+// (internal/probe/schedule.go). A fixture that puts its four probes in the
+// first four minutes of a ninety-minute window is not testing the rule that
+// decides served, which turns on whether a reading fell near the deadline.
+var inWindowFractions = []float64{0.12, 0.45, 0.72, 0.92}
+
+// inWindowPoint is where the i-th in-window probe of a promise falls.
+func inWindowPoint(created, msu time.Time, i int) time.Time {
+	return created.Add(time.Duration(float64(msu.Sub(created)) * inWindowFractions[i])).Truncate(time.Second)
+}
+
+// afterPoint is a moment between the i-th in-window probe and the next, for
+// pinning a window mid-schedule.
+func afterPoint(created, msu time.Time, i int) time.Time {
+	a, b := inWindowPoint(created, msu, i), inWindowPoint(created, msu, i+1)
+	return a.Add(b.Sub(a) / 2)
+}
+
 // wire is what one probe saw.
 type wire struct {
 	outcome probe.Outcome
@@ -179,7 +200,7 @@ func insertProbeSet(t *testing.T, st *store.Store, hash string, created, msu tim
 	points := []string{"w1", "w2", "w3", "w4"}
 	for addr, ws := range profile {
 		for i, w := range ws {
-			at := created.Add(time.Duration(i+1) * time.Minute)
+			at := inWindowPoint(created, msu, i)
 			class, reason := probe.Classify(probe.Evidence{Assigned: true, Attested: true, Phase: probe.PhaseInWindow, Outcome: w.outcome})
 			m := probe.Measurement{
 				SchemaVersion: probe.AttestationSchemaVersion, Vantage: "test",
@@ -206,7 +227,13 @@ func insertProbeSet(t *testing.T, st *store.Store, hash string, created, msu tim
 	}
 }
 
-func TestObligationsAreJudgedByTheNewestProbe(t *testing.T) {
+// An obligation is served only when this observer saw the shard near the end
+// of the window the promise covers. The fixture's "gaplast" validator is the
+// case that matters: three HEALTHY readings and then a gap at the last point,
+// which is what an observer outage looks like from inside the record. Reading
+// that as a kept promise made the serve rate rise while this observer was
+// down, and credited an operator for hours nobody watched.
+func TestAnObligationIsServedOnlyWhenTheEndOfItsWindowWasObserved(t *testing.T) {
 	ts := obligationsFixture(t)
 
 	var net struct {
@@ -242,15 +269,15 @@ func TestObligationsAreJudgedByTheNewestProbe(t *testing.T) {
 	if net.Faults != 1 {
 		t.Errorf("faults = %d, want 1: the sixteen at suspect points are the observer's, not the validators'", net.Faults)
 	}
-	if o.Served != 2 || o.Broken != 1 || o.EndUnobserved != 1 {
-		t.Errorf("served/broken/end_unobserved = %d/%d/%d, want 2/1/1", o.Served, o.Broken, o.EndUnobserved)
+	if o.Served != 1 || o.Broken != 1 || o.EndUnobserved != 2 {
+		t.Errorf("served/broken/end_unobserved = %d/%d/%d, want 1/1/2: only the validator answering at the last point is vouched for", o.Served, o.Broken, o.EndUnobserved)
 	}
 	if o.Unobserved != 3 || o.UnobservedReachable != 1 || o.UnobservedUnreachable != 1 || o.UnobservedNotProbed != 1 {
 		t.Errorf("unobserved = %d (reachable %d, unreachable %d, not probed %d), want 3 (1, 1, 1)",
 			o.Unobserved, o.UnobservedReachable, o.UnobservedUnreachable, o.UnobservedNotProbed)
 	}
-	if o.Rate.Num != 2 || o.Rate.Den != 3 {
-		t.Errorf("obligation rate = %d/%d, want 2/3: only served and broken enter it", o.Rate.Num, o.Rate.Den)
+	if o.Rate.Num != 1 || o.Rate.Den != 2 {
+		t.Errorf("obligation rate = %d/%d, want 1/2: only served and broken enter it", o.Rate.Num, o.Rate.Den)
 	}
 	if net.ByObl != o.Rate {
 		t.Errorf("serve_rate_by_obligation %+v must repeat obligations.rate %+v", net.ByObl, o.Rate)
@@ -282,7 +309,7 @@ func TestObligationsAreJudgedByTheNewestProbe(t *testing.T) {
 		"unreach": {Total: 1, Unobserved: 1, UnobservedUnreachable: 1},
 		"reach":   {Total: 1, Unobserved: 1, UnobservedReachable: 1},
 		"backoff": {Total: 1, Unobserved: 1, UnobservedNotProbed: 1},
-		"gaplast": {Total: 1, Served: 1},
+		"gaplast": {Total: 1, EndUnobserved: 1},
 		"unatt":   {},
 	}
 	for addr, w := range want {

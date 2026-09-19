@@ -69,12 +69,14 @@ func TestRollupAndPruneKeepTheAllWindow(t *testing.T) {
 	insertProbeSet(t, st, "old2", old.Add(2*time.Hour), old.Add(3*time.Hour), map[string][]wire{
 		"served": {refused, ok}, "endun": {refused, ok}, "broken": {refused, ok}, "unreach": {ok, ok},
 	}, false)
-	// a publication settled two minutes before the end of the last day the
+	// a publication settled eight minutes before the end of the last day the
 	// prune will take, probed into the first retained day: its obligations
 	// belong to the rolled day (settlement day) while three of its rows
 	// start on a raw day. The rollup counts it once; the raw part must not
-	// count it again.
-	seam := now.Add(-31 * 24 * time.Hour).Truncate(24 * time.Hour).Add(23*time.Hour + 58*time.Minute)
+	// count it again. Eight minutes, because the first in-window probe of a
+	// thirty-minute window falls 3.6 minutes in and has to land on the day
+	// being pruned for the seam to be a seam.
+	seam := now.Add(-31 * 24 * time.Hour).Truncate(24 * time.Hour).Add(23*time.Hour + 52*time.Minute)
 	insertProbeSet(t, st, "seam", seam, seam.Add(30*time.Minute), map[string][]wire{
 		"served": {ok, ok, ok, ok}, "broken": {ok, gone, ok, ok}, hexAddr: {ok, ok, ok, ok},
 	}, false)

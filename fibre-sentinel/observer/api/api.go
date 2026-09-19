@@ -994,9 +994,13 @@ func serveRate(c classCounts) Rate {
 // answered 500 at the next three count as fully kept: that is the profile of
 // a server that pruned early, and the one this observer exists to notice.
 //
-//	served         newest probe HEALTHY, no fault anywhere
+//	served         newest probe HEALTHY, no fault anywhere, and one of the
+//	               HEALTHY readings taken in the tail of the retention window
+//	               (verdict.EndSegmentDivisor)
 //	broken         any probe FAULT
-//	end_unobserved served earlier, but the newest probe produced no verdict
+//	end_unobserved a HEALTHY probe, but not one that speaks for the end of
+//	               the window: the newest probe produced no verdict, or every
+//	               reading was taken too early to say the shard survived
 //	unobserved     never seen serving, and never faulted, split by what the
 //	               probes did see: the endpoint completed TLS and still
 //	               handed nothing over; it never completed TLS; or this
@@ -1007,6 +1011,17 @@ func serveRate(c classCounts) Rate {
 //
 // Only served and broken enter the rate. The rest is published beside it so a
 // reader can see how many obligations the rate does not speak for.
+//
+// The two are not symmetric, and the asymmetry is the point. A FAULT is
+// conclusive from a single reading: the shard was gone at that minute. A
+// serve is a claim about a window, so it needs a reading near the end of one.
+// An obligation this observer watched early and then lost sight of is
+// therefore end_unobserved rather than served — it leaves the rate instead of
+// padding it, which is why an outage here lowers the number of obligations
+// the rate speaks for instead of raising the rate. The direction of the
+// remaining bias is worth stating plainly: while this observer is blind, the
+// obligations it can still judge are enriched for faults, because faults need
+// less evidence than serves do.
 //
 // The population is obligations the settled promise proves (attested = 1):
 // an unattested one is nothing to keep or break, and a record from before

@@ -231,14 +231,23 @@ One sentence each, and what a reader should conclude.
   the chain's own prune granularity: the Fibre server's prune loop runs once a
   minute against a minute-resolution key, so a reading closer than that would
   be accusing an operator of the clock.
-- **An obligation is judged by its newest in-window probe**, the same rule
-  the per-blob reconstructability verdict uses; a `NOT_PROBED` or
-  `PROBE_ERROR` row is never the newest while a real probe exists. The
-  buckets:
-  - `served` — newest probe `HEALTHY`, no `FAULT` anywhere;
+- **An obligation is served only if this observer saw the shard near the end
+  of the window the promise covers.** The newest in-window probe decides the
+  verdict, the same rule the per-blob reconstructability verdict uses, and a
+  `NOT_PROBED` or `PROBE_ERROR` row is never the newest while a real probe
+  exists — but a newest probe taken at 12% of the window is not evidence
+  about the other 88%, so it is not enough on its own. The buckets:
+  - `served` — newest probe `HEALTHY`, no `FAULT` anywhere, **and** one of
+    the `HEALTHY` readings taken in the last quarter of the retention
+    window. The quarter is measured from the promise's own `settlement_time`
+    and `must_serve_until`, both in every export, so anyone can redraw the
+    line from the rows; the probe schedule puts its last in-window point at
+    92% of the window, so a validator that answers it clears the cut with
+    room to spare;
   - `broken` — any probe `FAULT`;
-  - `end_unobserved` — a `HEALTHY` probe earlier, but the newest probe
-    produced no verdict;
+  - `end_unobserved` — a `HEALTHY` probe, but none that speaks for the end
+    of the window: either the newest probe produced no verdict, or every
+    reading was taken too early to say the shard survived;
   - `unobserved` — no `HEALTHY` and no `FAULT` at all, split by what the
     probes did see: `unobserved_reachable` (at least one download attempt
     with `tls_ok = 1`: the endpoint completed a handshake and answered with
@@ -247,15 +256,37 @@ One sentence each, and what a reader should conclude.
     completed TLS), `unobserved_not_probed` (no attempt: backoff, a load
     cap, a slot that elapsed).
 
-  Only `served` and `broken` enter the rate. The old rule, "kept when no
+  Only `served` and `broken` enter the rate. The first rule, "kept when no
   probe of it faulted", let a validator that served at the first point and
   answered 500 at the next three count as fully kept — the profile of a
   server that pruned early, which is the finding this observer exists to
-  make. Under the new rule that obligation is `end_unobserved`, and a
-  validator that never hands anything over is `unobserved_reachable`: not a
+  make. That obligation is `end_unobserved`, and a validator that never
+  hands anything over is `unobserved_reachable`: not a
   fault, but not a clean record either, and counted on its own line beside
   the rate. The split uses each probe row's own `tls_ok`, not the heartbeat,
   because the probe made its own handshake at the moment that matters.
+
+  The end-of-window requirement closes the same hole from the other side,
+  and it is this observer's own failure mode rather than a validator's. When
+  this site is down inside a retention window, the obligation keeps whatever
+  verdict it had before the outage and the remaining slots are recorded as
+  gaps — or, once the outage outruns the prober's backfill horizon, are never
+  written at all. Under the earlier rule an obligation seen `HEALTHY` once
+  and then never again published as **kept**, so the serve rate *rose* while
+  nobody was watching, and an operator was credited for hours this observer
+  did not see. Those obligations are now `end_unobserved`: they leave the
+  rate rather than pad it.
+
+  `served` and `broken` are deliberately not symmetric. A `FAULT` is
+  conclusive from a single reading — the shard was gone at that minute. A
+  serve is a claim about a whole window, so it needs a reading near the end
+  of one. The consequence is worth stating rather than burying: while this
+  observer is blind, the obligations it can still judge are enriched for
+  faults, because a fault takes less evidence than a serve does. What it
+  cannot do is invent one. Nothing in this rule can move an obligation into
+  `broken`; the worst this observer's own downtime can do to an operator is
+  decline to vouch for them, and the count of times that happened is printed
+  beside the rate.
 - Below **20** rated observations the percentage is printed without a gauge
   and the validator is not ranked by it in either direction (it sorts with
   the rows that have no rate at all). This holds for every ranked figure on

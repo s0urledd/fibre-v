@@ -47,10 +47,10 @@ func TestAsOfPinsTheWindow(t *testing.T) {
 		ProbeCount  int64           `json:"probe_count"`
 		Obligations obligationsJSON `json:"obligations"`
 	}
-	// pinned between w2 (created+2m) and w3 (created+3m): two rows per
-	// validator, every obligation still pending
+	// pinned between w2 and w3: two rows per validator, every obligation
+	// still pending
 	var pinned resp
-	at := created.Add(150 * time.Second).Format(time.RFC3339)
+	at := afterPoint(created, msu, 1).Format(time.RFC3339)
 	if code := get(t, ts, "/v1/network?window=24h&as_of="+at, &pinned); code != 200 {
 		t.Fatalf("as_of: %d", code)
 	}
