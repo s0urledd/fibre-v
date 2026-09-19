@@ -31,8 +31,6 @@ import (
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
 
-const version = "0.1.0"
-
 func main() {
 	var (
 		rpc       = flag.String("rpc", "http://127.0.0.1:26657", "CometBFT RPC endpoint (endpoint registry polls)")
@@ -123,6 +121,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The commit this binary was built from, not a hand-maintained constant.
+	// It goes into runs.jsonl, which is how a verifier ties a row in the
+	// export to the code that produced it: every other component already
+	// stamps the revision, and this one wrote "0.1.0" — a string that has
+	// never changed and identifies nothing. The same value already went into
+	// the export manifest from this very file, so one process was publishing
+	// two different answers to "what built this".
+	version := status.BuildRevision()
 	runID, err := st.StartRun("collector", *vantage, version, time.Now())
 	if err != nil {
 		log.Fatalf("start run: %v", err)
