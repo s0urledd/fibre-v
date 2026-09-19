@@ -122,6 +122,7 @@ on top of the modules above. The research that precedes it lives in `docs/`:
 | `docs/research/R0-open-decisions.md` | decisions only the owners can make |
 | `docs/adr/0001-observer-architecture.md` | the architecture decision for collector, prober, store, API and web |
 | `docs/verdicts.md` | the verdict taxonomy the dashboard is allowed to use |
+| `docs/SYSTEM.md` | the running system: what each process owns, how a block becomes a published number, the schema, the invariants, and what the measurement cannot do |
 
 This repository is Huginn Tech's fork of
 [plsgiveup/fibre](https://github.com/plsgiveup/fibre), which Huginn Tech
