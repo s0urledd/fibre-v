@@ -28,6 +28,13 @@ sentinel-data/
 __pycache__/
 *.pyc
 
+# promises sentinel-pub -abandon writes, by default into the directory it was
+# run from. Two of them from a devnet run left the working tree dirty on the
+# live vantage, and Go stamps that into every binary built there: the build
+# revision goes onto every probe row and into runs.jsonl, so a "-dirty" build
+# is a published row nobody can tie back to a commit.
+abandoned-*.json
+
 # stray binaries from "go build ./cmd/<name>/" run at the module root
 fibre-sentinel/observer-api
 fibre-sentinel/observer-collector
