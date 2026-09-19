@@ -649,11 +649,17 @@ pieces needed to re-run that function are published:
   `Classify` are the prober's own conclusions: `assigned` and `attested`,
   the pair that turns an in-window NOT_FOUND into a FAULT rather than an
   UNATTESTED. Replaying those would check the taxonomy against itself, so
-  the tool checks them against `publications.jsonl` instead — the chain's
-  own assignment table and the signature verification recorded beside it —
-  and reports any drift under its own `assign|` line. A row claiming an
-  assignment for a promise the record does not carry is counted there too:
-  its verdict rests on a claim nothing in the export can check.
+  the tool checks them against `publications.jsonl` instead — the assignment
+  this observer computed at scan time from the validator set at the promise
+  height, and the signature verification recorded beside it — and reports any
+  drift under its own `assign|` line. The chain stores no assignment table:
+  `x/fibre` neither computes nor keeps one, and every party derives the same
+  table independently from the validator set (upstream `fibre/validator/set.go`).
+  So this check catches a drift between the scanner and the prober; it is
+  not a check against an on-chain answer, because there is no on-chain
+  answer to check against. A row claiming an assignment for a promise the
+  record does not carry is counted there too: its verdict rests on a claim
+  nothing in the export can check.
 - **What an export has to contain.** Every tarball carries `state.json`
   beside the day's lines, with its own digest in the manifest. It is not a
   record file but a snapshot, and the tool needs all four things in it: the
