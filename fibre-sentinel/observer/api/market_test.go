@@ -363,3 +363,52 @@ func TestLoadPublisherLabels(t *testing.T) {
 		t.Fatal("a label-less entry must be rejected")
 	}
 }
+
+// ?as_of= on the market route: pinned, honoured in both directions, and
+// never written into the shared snapshot. The cache is keyed on the
+// window's name alone, so handing it a pinned window filed a month-old
+// answer under "30d" and served it to every later reader, on disk too.
+func TestMarketAsOfIsPinnedAndLeavesTheSnapshotAlone(t *testing.T) {
+	ts, _ := marketServer(t, nil)
+	fetch := func(q string) (settlements int64, fees int64, asOf bool, end time.Time) {
+		t.Helper()
+		var m struct {
+			Settlements int64 `json:"settlements"`
+			Fees        int64 `json:"fees_settled_utia"`
+			Window      struct {
+				AsOf bool      `json:"as_of"`
+				End  time.Time `json:"end"`
+			} `json:"window"`
+		}
+		if code := get(t, ts, q, &m); code != 200 {
+			t.Fatalf("%s: HTTP %d", q, code)
+		}
+		return m.Settlements, m.Fees, m.Window.AsOf, m.Window.End
+	}
+
+	// Live: the two settlements from two hours ago and the one from ten days ago.
+	live, liveFees, asOf, _ := fetch("/v1/market?window=30d")
+	if live != 3 || asOf {
+		t.Fatalf("live 30d: settlements=%d as_of=%v, want 3/false", live, asOf)
+	}
+
+	// Pinned five days back: only the ten-day-old settlement is in range.
+	pin := time.Now().UTC().Add(-5 * 24 * time.Hour).Truncate(time.Second)
+	n, fees, asOf, end := fetch("/v1/market?window=30d&as_of=" + pin.Format(time.RFC3339))
+	if !asOf {
+		t.Fatal("a pinned request was answered with an unpinned window")
+	}
+	if !end.Equal(pin) {
+		t.Fatalf("window end = %s, want the pin %s", end, pin)
+	}
+	if n != 1 || fees != 695_000 {
+		t.Fatalf("pinned 30d: settlements=%d fees=%d, want 1/695000 (payments after the pin must be excluded)", n, fees)
+	}
+
+	// The live answer is unchanged: the pinned one was never stored.
+	after, afterFees, asOf, _ := fetch("/v1/market?window=30d")
+	if after != live || afterFees != liveFees || asOf {
+		t.Fatalf("after one pinned request the live answer became settlements=%d fees=%d as_of=%v, want %d/%d/false",
+			after, afterFees, asOf, live, liveFees)
+	}
+}

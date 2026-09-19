@@ -300,3 +300,59 @@ func TestInWindowFractions(t *testing.T) {
 		t.Fatalf("zero MinSpacing should default, got %s", c.MinSpacing)
 	}
 }
+
+// Concurrency is a count of probes, which says nothing about memory:
+// DownloadShard is unary, so one in-flight probe holds the whole shard twice,
+// and a validator assigned every row of a large blob holds hundreds of MiB.
+// The byte budget is what keeps eight of those from being resident at once,
+// and it must never deadlock on an item bigger than itself.
+func TestByteSemBoundsInFlightBytes(t *testing.T) {
+	const limit = 100
+	b := newByteSem(limit)
+
+	// Under the limit, several at once.
+	b.acquire(40)
+	b.acquire(40)
+	third := make(chan struct{})
+	go func() { b.acquire(40); close(third) }()
+	select {
+	case <-third:
+		t.Fatal("a third item was admitted past the budget")
+	case <-time.After(50 * time.Millisecond):
+	}
+	b.release(40)
+	select {
+	case <-third:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the waiter was not woken when room was freed")
+	}
+	b.release(40)
+	b.release(40)
+
+	// An item heavier than the whole budget runs alone rather than waiting
+	// for room that can never exist.
+	done := make(chan struct{})
+	go func() { b.acquire(limit * 10); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("an item larger than the budget deadlocked")
+	}
+	b.release(limit * 10)
+
+	// And it did hold the budget while it ran: the next item waits.
+	b.acquire(limit * 10)
+	after := make(chan struct{})
+	go func() { b.acquire(1); close(after) }()
+	select {
+	case <-after:
+		t.Fatal("an item was admitted beside one that had taken the whole budget")
+	case <-time.After(50 * time.Millisecond):
+	}
+	b.release(limit * 10)
+	select {
+	case <-after:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the waiter was not woken")
+	}
+}

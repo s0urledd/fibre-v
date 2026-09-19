@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -222,8 +223,19 @@ func main() {
 		if err := ingest.State(st, *statePath, now); err != nil {
 			log.Printf("state: %v", err)
 		}
+		// Every ingest failure used to be a log line and nothing else, while
+		// the collector's OK flag was set by the unrelated chain-status poll
+		// — so a collector that could read the tip and could not read a
+		// single file reported itself healthy, and the site went on serving
+		// the last figures with nothing saying the record had stopped
+		// reaching it.
+		var passErrs []string
+		fail := func(what string, err error) {
+			log.Printf("%s: %v", what, err)
+			passErrs = append(passErrs, fmt.Sprintf("%s: %v", what, err))
+		}
 		if r, err := ingest.Publications(st, *pubsPath, now); err != nil {
-			log.Printf("publications: %v", err)
+			fail("publications", err)
 		} else {
 			if r.Inserted > 0 {
 				log.Printf("publications: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
@@ -233,7 +245,7 @@ func main() {
 			}
 		}
 		if r, err := ingest.Measurements(st, *measPath, now); err != nil {
-			log.Printf("measurements: %v", err)
+			fail("measurements", err)
 		} else {
 			if r.Inserted > 0 {
 				log.Printf("measurements: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
@@ -243,7 +255,7 @@ func main() {
 			}
 		}
 		if r, err := ingest.Reachability(st, *reachPath, now); err != nil {
-			log.Printf("reachability: %v", err)
+			fail("reachability", err)
 		} else {
 			if r.Inserted > 0 {
 				log.Printf("reachability: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
@@ -253,12 +265,12 @@ func main() {
 			}
 		}
 		if r, err := ingest.Registry(st, *regPath, now); err != nil {
-			log.Printf("registry: %v", err)
+			fail("registry", err)
 		} else if r.Inserted > 0 {
 			log.Printf("registry: +%d endpoint event(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
 		if r, err := ingest.Payments(st, *payPath, now); err != nil {
-			log.Printf("payments: %v", err)
+			fail("payments", err)
 		} else {
 			if r.Inserted > 0 {
 				log.Printf("payments: +%d (read %d, line %d)", r.Inserted, r.Read, r.Line)
@@ -268,24 +280,33 @@ func main() {
 			}
 		}
 		if r, err := ingest.Runs(st, *runsPath, now); err != nil {
-			log.Printf("runs: %v", err)
+			fail("runs", err)
 		} else if r.Inserted > 0 {
 			log.Printf("runs: +%d run event(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
 		if r, err := ingest.SamplingSecrets(st, *secPath, now); err != nil {
-			log.Printf("sampling secrets: %v", err)
+			fail("sampling secrets", err)
 		} else if r.Inserted > 0 {
 			log.Printf("sampling secrets: +%d day(s) revealed (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
 		if r, err := ingest.HostEvents(st, *hostsPath, now); err != nil {
-			log.Printf("host history: %v", err)
+			fail("host history", err)
 		} else if r.Inserted > 0 {
 			log.Printf("host history: +%d registration(s) (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
 		if r, err := ingest.Amendments(st, *amendPath, now); err != nil {
-			log.Printf("amendments: %v", err)
+			fail("amendments", err)
 		} else if r.Inserted > 0 {
 			log.Printf("amendments: +%d late verdict(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		// Copy the write-ahead log back and truncate it while nothing is
+		// reading. A pass that ingested a backlog can leave hundreds of
+		// megabytes of WAL behind otherwise, and SQLite will not reset it on
+		// its own while the API holds a snapshot.
+		if busy, inLog, done, err := st.CheckpointWAL(ctx); err != nil {
+			log.Printf("wal checkpoint: %v", err)
+		} else if !busy && done > 0 && inLog > 2000 {
+			log.Printf("wal checkpoint: %d of %d frame(s) written back and the log truncated", done, inLog)
 		}
 		judgeLate(now)
 		if *retEvery > 0 && time.Since(lastRetention) >= *retEvery {
@@ -307,6 +328,15 @@ func main() {
 				if len(rep.PrunedDays) > 0 {
 					log.Printf("retention: pruned %d row(s) of %d day(s) through %s", rep.PrunedRows, len(rep.PrunedDays), rep.PrunedDays[len(rep.PrunedDays)-1])
 					live.Set("raw_from", rep.PrunedDays[len(rep.PrunedDays)-1])
+					// Give the pages back. A DELETE moves them to SQLite's
+					// free list and the file never shrinks on its own, so
+					// the pruning the operator was told to rely on when a
+					// disk fills would have reclaimed nothing they could see.
+					if freed, err := st.ReclaimSpace(ctx, 20000); err != nil {
+						log.Printf("retention: reclaim: %v", err)
+					} else if freed > 0 {
+						log.Printf("retention: %d page(s) returned to the filesystem", freed)
+					}
 				}
 			}
 		}
@@ -370,11 +400,11 @@ func main() {
 				_ = st.SetMeta("fibre_active", active, now)
 				_ = st.SetMeta("fibre_app_version", itoa(scan.FibreAppVersion), now)
 			}
-			chainID, height, err := chain.Status(ctx)
+			chainID, height, tipTime, err := chain.StatusAt(ctx)
 			if err != nil {
 				log.Printf("endpoints: status: %v", err)
 				live.Error(fmt.Sprintf("chain status: %v", err))
-			} else {
+			} else if len(passErrs) == 0 {
 				live.OK()
 				live.Progress(height)
 				// The chain's own identity and tip, recorded here rather than
@@ -386,6 +416,13 @@ func main() {
 				// progress as our own.
 				_ = st.SetMeta("chain_id", chainID, now)
 				_ = st.SetMeta("chain_height", itoa(height), now)
+				// The tip's own clock, so /v1/health can tell a chain that is
+				// running from one that stopped. Everything else here is
+				// drawn from the same node, and a node whose height stands
+				// still looks identical to a network at rest.
+				if !tipTime.IsZero() {
+					_ = st.SetMeta("chain_tip_time", store.TS(tipTime), now)
+				}
 
 				if provs, err := chain.BondedFibreProviders(ctx); err != nil {
 					// Before v10 the module does not exist; that is a normal
@@ -424,6 +461,12 @@ func main() {
 				log.Printf("validator identities: %d of %d stored", n, len(ids))
 				_ = st.SetMeta("validator_identities", itoa(int64(n)), now)
 			}
+		}
+		// A pass that failed to ingest says so on the status file, which is
+		// what /v1/health reads. Named last so it is not overwritten by the
+		// chain-status poll's OK.
+		if len(passErrs) > 0 {
+			live.Error("ingest: " + strings.Join(passErrs, "; "))
 		}
 		if err := st.Heartbeat(runID, time.Now()); err != nil {
 			log.Printf("heartbeat: %v", err)

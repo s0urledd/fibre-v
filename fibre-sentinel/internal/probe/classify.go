@@ -34,7 +34,15 @@ const (
 	OutcomeRPCDeadline Outcome = "RPC_DEADLINE"
 	// OutcomeNoHost: the validator has no fibre host registered in x/valaddr,
 	// so nobody can fetch its rows.
-	OutcomeNoHost     Outcome = "NO_REGISTERED_HOST"
+	OutcomeNoHost Outcome = "NO_REGISTERED_HOST"
+	// OutcomeBadHost: the registered host is an address this observer will
+	// not connect to — loopback, a private or link-local range, or the
+	// unspecified address. The chain validates only the host:port shape, so
+	// any of those can be registered, and a public observer that dialled
+	// them would be a port scanner and a DNS resolver driven from the chain,
+	// publishing the result. Nothing was attempted, so it is no more a
+	// statement about the shard than NO_REGISTERED_HOST is.
+	OutcomeBadHost    Outcome = "UNROUTABLE_HOST"
 	OutcomeRPCError   Outcome = "RPC_ERROR"   // some other gRPC error
 	OutcomeProbeError Outcome = "PROBE_ERROR" // the probe itself failed (bug / config), not the target
 	OutcomeMissed     Outcome = "MISSED"      // scheduled point elapsed before the prober could run it
@@ -47,7 +55,7 @@ var AllOutcomes = []Outcome{
 	OutcomeServedOK, OutcomeNotFound, OutcomeWrongRows, OutcomeInvalidRows, OutcomePartial,
 	OutcomeDNSFail, OutcomeTCPRefused, OutcomeTCPTimeout, OutcomeTCPUnreachable, OutcomeTLSFail,
 	OutcomeIdentityFail, OutcomeRPCUnavailable, OutcomeServerError, OutcomeThrottled, OutcomeRPCDeadline,
-	OutcomeNoHost, OutcomeRPCError, OutcomeProbeError, OutcomeMissed, OutcomeReachable,
+	OutcomeNoHost, OutcomeBadHost, OutcomeRPCError, OutcomeProbeError, OutcomeMissed, OutcomeReachable,
 }
 
 // Classification is the Sentinel's verdict on one measurement, given the probe
@@ -249,6 +257,13 @@ type Evidence struct {
 	// but its signed validity window has lapsed or not yet started. Only
 	// meaningful when Outcome is IDENTITY_FAIL.
 	IdentityStale bool
+	// RowsSubsetOfOwn: the returned indices are all ones this promise
+	// assigns this validator, and fewer than it owes. Still held out of the
+	// rate — the validator signs after writing whatever it received, so a
+	// short shard may be the publisher's doing — but the row says so, rather
+	// than citing hash-order serving, which cannot produce a part of this
+	// promise's own assignment.
+	RowsSubsetOfOwn bool
 	// PinStale: the chain's app version is above the celestia-app major the
 	// assignment constants are pinned to. Which rows this validator owes
 	// may then be computed wrongly, so nothing that depends on assignment
@@ -293,6 +308,16 @@ func Classify(in Evidence) (Classification, string) {
 		}
 		return ClassNotRegistered, "no Fibre host registered for this validator at the time of the probe, so nobody could fetch its rows"
 	}
+	// An unroutable registered host is the same kind of statement: the
+	// endpoint as published cannot be reached from the public internet, by
+	// this observer or by anyone. No connection was made, so there is
+	// nothing to hold against the shard.
+	if o == OutcomeBadHost {
+		if !in.Assigned {
+			return ClassExpectedUnassigned, "validator not assigned this shard, and its registered Fibre host is not a public address"
+		}
+		return ClassNotRegistered, "the registered Fibre host is not a public address, so no client on the internet could fetch its rows; this observer does not connect to it"
+	}
 
 	// A stale assignment pin is the observer's problem: after a chain
 	// upgrade this build may assign rows the chain does not, and every
@@ -323,7 +348,10 @@ func Classify(in Evidence) (Classification, string) {
 		case o.reachFailure() || o == OutcomeServerError || o == OutcomeThrottled:
 			return ClassExpectedUnassigned, "validator not assigned this shard; reachability not required"
 		default:
-			return ClassExpectedUnassigned, "validator not assigned this shard"
+			// An outcome the taxonomy does not know says nothing, not even
+			// that nothing was expected. The in-window arm below reads the
+			// same case the same way.
+			return ClassProbeError, "unrecognised probe outcome; no retention verdict"
 		}
 	}
 
@@ -355,6 +383,8 @@ func Classify(in Evidence) (Classification, string) {
 			return ClassFault, "assigned shard not found while under retention obligation"
 		case o == OutcomeInvalidRows:
 			return ClassFault, "returned bytes that do not verify against the blob commitment"
+		case (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified && in.RowsSubsetOfOwn:
+			return ClassUnmatchedGenuine, "returned genuine rows of this blob that this promise does assign this validator, but fewer than it owes; the shard on disk is short, which the validator signed for after writing whatever it received, so this observer cannot tell a validator that lost rows from a publisher that uploaded them incomplete: held out of the rate, counted beside it, indices on the row"
 		case (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified:
 			return ClassUnmatchedGenuine, "returned genuine rows of this blob, but not the set this promise assigns, and no settled promise over this commitment assigns them; the store serves the first shard by promise-hash order and a shard uploaded for a promise that never settled is never on chain, so this is not an accusation the evidence supports: held out of the rate, counted beside it, indices on the row"
 		case o == OutcomeWrongRows || o == OutcomePartial:
@@ -378,6 +408,8 @@ func Classify(in Evidence) (Classification, string) {
 			return ClassTolerated, "NOT_FOUND within prune-lag tolerance after must_serve_until"
 		case o == OutcomeInvalidRows:
 			return ClassFault, "returned bytes that do not verify against the blob commitment"
+		case (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified && in.RowsSubsetOfOwn:
+			return ClassUnmatchedGenuine, "returned genuine rows of this blob that this promise does assign this validator, but fewer than it owes; a short shard is not an accusation this observer can make, since the validator signed for whatever it received: held out of the rate, indices on the row"
 		case (o == OutcomeWrongRows || o == OutcomePartial) && in.CommitmentVerified:
 			return ClassUnmatchedGenuine, "returned genuine rows of this blob, but not the set this promise assigns, and no settled promise over this commitment assigns them; not an accusation the evidence supports under hash-order serving: held out of the rate, indices on the row"
 		case o == OutcomeWrongRows || o == OutcomePartial:

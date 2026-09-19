@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Network, type Validator, type Meta, type Market, fmtCount, fmtPct, bytes, utc, ago, tia } from "@/lib/api";
+import { useApi, type Network, type Validator, type Meta, type Market, fmtCount, fmtPct, bytes, utc, ago, tia, API_BASE } from "@/lib/api";
 import ValidatorTable from "@/components/ValidatorTable";
 import { Panel, Cell } from "@/components/Panel";
 import { Mark } from "@/components/Verdict";
@@ -18,7 +18,7 @@ export default function Overview() {
   const [win, setWin] = useState("24h");
   const { data: meta } = useApi<Meta>("/v1/meta");
   const { data: net, error: netErr, loading } = useApi<Network>(`/v1/network?window=${win}`);
-  const { data: vals } = useApi<{ validators: Validator[] }>(`/v1/validators?window=${win}`);
+  const { data: vals, error: valsErr } = useApi<{ validators: Validator[] }>(`/v1/validators?window=${win}`);
   const { data: market } = useApi<Market>(`/v1/market?window=${win}`);
 
   const notLive = !!(meta?.app_version && !meta.fibre_active);
@@ -126,8 +126,8 @@ export default function Overview() {
             </>} />
           <Cell label="Endpoints" loading={busy}
             value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
-            sub={net ? `${net.reachability.num} answering now · ${net.validators_probed} probed` : undefined}
-            detail={net ? `${net.registered_endpoints.toLocaleString("en-US")} registered Fibre endpoints; ${net.reachability.num} answering the latest handshake; ${net.validators_probed} probed in this window.` : undefined} />
+            sub={net ? (net.reachability.den ? `${fmtCount(net.reachability)} answering now · ${net.validators_probed} probed` : `no handshake yet · ${net.validators_probed} probed`) : undefined}
+            detail={net ? `${net.registered_endpoints.toLocaleString("en-US")} registered Fibre endpoints; ${net.reachability.den ? `${fmtCount(net.reachability)} of them answering the latest handshake` : "none has answered a handshake yet"}; ${net.validators_probed} probed in this window.` : undefined} />
           <Cell label="Fees settled" loading={busy}
             value={market ? tia(market.fees_settled_utia, { unit: false }) : "—"} unit={market ? "TIA" : undefined}
             tone={market && market.settlements === 0 ? "absent" : undefined}
@@ -179,13 +179,15 @@ export default function Overview() {
       )}
       {net && incidents.length > 0 && (
         <div className="note hold">
-          <span className="label">Network incident: {incidents.length} probe point{incidents.length === 1 ? "" : "s"} where half the set faulted at once</span>
+          <span className="label">Network incident: {incidents.length} probe point{incidents.length === 1 ? "" : "s"} where half the validators asked faulted at once</span>
           <p>
             {incidents.slice(0, 4).map((s, i) => (
-              <span key={s.at}>{i > 0 ? "; " : ""}{utc(s.at)} ({s.label}): {fmtCount(s.fault)} validators faulted <a href={`/api/v1/probes?at=${encodeURIComponent(s.at)}&limit=1000`}>rows</a></span>
+              <span key={s.at}>{i > 0 ? "; " : ""}{utc(s.at)} ({s.label}): {fmtCount(s.fault)} of the validators asked faulted <a href={`${API_BASE}/v1/probes?at=${encodeURIComponent(s.at)}&limit=1000`}>rows</a></span>
             ))}
             {incidents.length > 4 ? `; and ${incidents.length - 4} more` : ""}.
-            {" "}This observer&rsquo;s assignment pin matched the chain at the time, so these faults are not an observer error;
+            {" "}The share is over the validators this observer actually asked at that point, not over the whole set:
+            one it never reached says nothing about the point and is not in the denominator.
+            This observer&rsquo;s assignment pin matched the chain at the time, so these faults are not an observer error;
             operators losing data at the same minute points at the network, a release, or the observer&rsquo;s coder. No validator&rsquo;s rate counts these points; the rows are kept and linked.
           </p>
         </div>
@@ -194,8 +196,15 @@ export default function Overview() {
       <Panel title={<span id="validators">Validator set</span>} className="validators"
         right={list.length > 0 ? <>{list.filter((v) => !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED")).length} bonded · {list.filter((v) => !!v.host).length} with a Fibre endpoint · <Link href="/blobs/">all publications →</Link></> : undefined}>
         {vals
-          ? <ValidatorTable rows={vals.validators} notLive={notLive} />
-          : <p className="muted" style={{ padding: "var(--s4)" }}>Loading validators…</p>}
+          ? <>
+              {valsErr && <p className="muted" style={{ padding: "var(--s4) var(--s4) 0" }}>
+                The last refresh of this table did not reach the API ({valsErr}). The rows below are the ones it last answered with.
+              </p>}
+              <ValidatorTable rows={vals.validators} notLive={notLive} />
+            </>
+          : valsErr
+            ? <p className="muted" style={{ padding: "var(--s4)" }}>The validator list could not be read from the API ({valsErr}).</p>
+            : <p className="muted" style={{ padding: "var(--s4)" }}>Loading validators…</p>}
       </Panel>
     </>
   );

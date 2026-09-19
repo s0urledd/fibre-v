@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/bits"
 	"net"
 	"runtime"
 	"strings"
@@ -95,6 +96,7 @@ func (t StepTimeouts) downloadDeadline(expectedBytes int64) time.Duration {
 type Coder struct {
 	c            *rsema1d.Coder
 	originalRows int
+	totalRows    int
 }
 
 // NewCoder builds a verifier for a blob-v0 K/N split.
@@ -107,7 +109,7 @@ func NewCoder(originalRows, totalRows int) (*Coder, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Coder{c: c, originalRows: originalRows}, nil
+	return &Coder{c: c, originalRows: originalRows, totalRows: totalRows}, nil
 }
 
 // Input is everything one probe needs about the publication + target.
@@ -122,6 +124,13 @@ type Input struct {
 	ValidatorSetHeight int64
 
 	Target Target
+
+	// AllowUnroutableHost dials an address this observer otherwise refuses:
+	// loopback, a private or link-local range. Tests and a local devnet
+	// only. A public vantage must leave it false, because the registered
+	// host is whatever a validator put on chain and connecting to it would
+	// make this observer a port scanner driven from the chain.
+	AllowUnroutableHost bool
 
 	SchedulePoint  SchedulePoint
 	PruneTolerance time.Duration // grace/post boundary; phase is computed from the actual start time
@@ -258,6 +267,7 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 			CommitmentVerified: m.Download.CommitmentVerified,
 			Shadowed:           m.Download.ShadowedBy != "",
 			ShadowUncertain:    m.Download.ShadowedBy == "" && m.Download.ShadowGap != "",
+			RowsSubsetOfOwn:    m.Download.RowsSubsetOfAssignment,
 			IdentityStale:      m.Identity.Stale,
 			PinStale:           m.Observer != nil && m.Observer.PinStale,
 		})
@@ -293,6 +303,19 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 	// ---- L1: DNS ----
 	var addrs []string
 	if pip := net.ParseIP(host); pip != nil {
+		if !routableIP(pip) && !in.AllowUnroutableHost {
+			// Registered as a literal address this observer will not dial.
+			// The chain checks only the host:port shape, so loopback and the
+			// private ranges register as readily as anything else, and a
+			// public observer that connected would be a port scanner driven
+			// from the chain — publishing the address it reached and the
+			// exact error. Recorded as what the validator published, with no
+			// connection attempted.
+			m.DNS = StepResult{Attempted: false, OK: false, Detail: "literal IP " + host, Error: addrClass(pip) + " address"}
+			m.Outcome = OutcomeBadHost
+			m.RawError = "registered host " + in.Target.Host + " is a " + addrClass(pip) + " address; not dialled"
+			return m
+		}
 		m.DNS = StepResult{Attempted: false, OK: true, Detail: "literal IP " + host}
 		addrs = []string{host}
 	} else {
@@ -307,8 +330,24 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 			m.RawError = derr.Error()
 			return m
 		}
-		addrs = orderAddrs(got)
+		// The same test after resolution: a name under the operator's control
+		// can point anywhere, and that is the shape this has to stop.
+		routable, dropped := got, []string(nil)
+		if !in.AllowUnroutableHost {
+			routable, dropped = splitRoutable(got)
+		}
+		addrs = orderAddrs(routable)
 		m.DNS.Detail = strings.Join(addrs, ",")
+		if len(addrs) == 0 {
+			m.DNS.OK = false
+			m.DNS.Error = "resolves only to " + strings.Join(dropped, ",")
+			m.Outcome = OutcomeBadHost
+			m.RawError = "registered host " + in.Target.Host + " resolves only to addresses this observer does not dial (" + strings.Join(dropped, ",") + ")"
+			return m
+		}
+		if len(dropped) > 0 {
+			m.DNS.Detail += " (not dialled: " + strings.Join(dropped, ",") + ")"
+		}
 	}
 
 	// ---- L2: TCP ----
@@ -463,16 +502,42 @@ const downloadRPCUnary = "DownloadShard"
 // promise. The upstream bound is derived from the pinned MaxBlobSize; a
 // chain that raised it would otherwise turn its largest shards, the ones
 // most worth checking, into receive errors on this side.
+// recvLimitFor is what this probe may receive: what the shard should weigh,
+// with a tenth for framing and room for the promise, and never less than
+// grpc-go would need for the smallest real answer.
+//
+// It used to start from the protocol maximum and take the expected size only
+// as a floor, so every probe — of a 1 KiB blob as readily as a 128 MiB one —
+// would accept the protocol's whole 132 MiB from an endpoint whose address a
+// validator puts on chain. That also defeated the in-flight byte budget in
+// the prober, which reserves what the shard should weigh: the ceiling it
+// exists to impose was not the one being enforced. The bound is the
+// expectation now, and the protocol maximum only when there is no expectation
+// to work from.
+//
+// Tightening it cannot produce a false accusation. A refusal on this side is
+// already read as the observer's own gap, not the validator's: see
+// classifyDownloadError and TestRun_SizeBoundsAreToldApartFromAThrottle.
 func recvLimitFor(in Input) int {
-	limit := in.MaxMessageSize
-	if limit <= 0 {
-		limit = defaultMaxRecvMsgSize
+	if in.ExpectedShardBytes > 0 {
+		limit := int(in.ExpectedShardBytes+in.ExpectedShardBytes/10) + celfibre.MaxPaymentPromiseSize
+		if limit < minRecvMsgSize {
+			limit = minRecvMsgSize
+		}
+		return limit
 	}
-	if floor := int(in.ExpectedShardBytes+in.ExpectedShardBytes/10) + celfibre.MaxPaymentPromiseSize; floor > limit {
-		limit = floor
+	if in.MaxMessageSize > 0 {
+		return in.MaxMessageSize
 	}
-	return limit
+	return defaultMaxRecvMsgSize
 }
+
+// minRecvMsgSize keeps a tiny blob's bound above the fixed cost of an answer
+// so a correct server is never refused on arithmetic: the promise is already
+// counted in full, and a mebibyte of slack covers the RLC vector, the merkle
+// proofs and gRPC's framing many times over for any shard small enough to
+// reach this floor.
+const minRecvMsgSize = celfibre.MaxPaymentPromiseSize + (1 << 20)
 
 // defaultMaxRecvMsgSize matches the reference client's receive bound
 // (fibre/internal/grpc/fibre_client.go: MaxCallRecvMsgSize(maxMsgSize) with
@@ -566,7 +631,7 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Con
 		return r
 	}
 
-	proofs, rlcv, perr := parseShard(resp.Shard, coder.originalRows)
+	proofs, rlcv, perr := parseShard(resp.Shard, coder.originalRows, coder.totalRows)
 	if perr != nil {
 		// A response this observer cannot even parse is not evidence about
 		// the shard: the RLC length is checked against the observer's own
@@ -615,6 +680,7 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Con
 		}
 		if len(proofs) < in.Target.RowCount {
 			r.outcome, r.rawErr = OutcomePartial, verr.Error()
+			r.RowsSubsetOfAssignment = subsetOf(idx, in.Target.AssignedRows)
 		} else {
 			r.outcome, r.rawErr = OutcomeWrongRows, verr.Error()
 		}
@@ -627,7 +693,28 @@ func downloadAndVerify(ctx context.Context, in Input, coder *Coder, conn net.Con
 }
 
 // parseShard mirrors fibre.parseShard (unexported).
-func parseShard(shard *fibretypes.BlobShard, originalRows int) ([]*rsema1d.RowProof, rlc.Vector, error) {
+// subsetOf reports whether every index returned is one this promise assigns
+// this validator. With fewer rows than it owes, that is a short shard of this
+// promise, not another promise's shard answering in its place.
+func subsetOf(got []uint32, assigned []int) bool {
+	if len(got) == 0 || len(assigned) == 0 {
+		return false
+	}
+	owned := make(map[uint32]struct{}, len(assigned))
+	for _, r := range assigned {
+		if r >= 0 {
+			owned[uint32(r)] = struct{}{}
+		}
+	}
+	for _, g := range got {
+		if _, ok := owned[g]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func parseShard(shard *fibretypes.BlobShard, originalRows, totalRows int) ([]*rsema1d.RowProof, rlc.Vector, error) {
 	if shard == nil {
 		return nil, nil, errors.New("nil shard")
 	}
@@ -635,10 +722,39 @@ func parseShard(shard *fibretypes.BlobShard, originalRows int) ([]*rsema1d.RowPr
 	if len(rows) == 0 {
 		return nil, nil, errors.New("no rows")
 	}
+	// Two of the verifier's shape checks are re-done here, before the rows
+	// reach it, because they are the two that depend on this observer's own
+	// idea of the code parameters rather than on the response: the row index
+	// is checked against K+N, and the proof depth against bits.Len(K+N)-1.
+	// The verifier returns both as ordinary errors, and downloadAndVerify
+	// reads any error from it as INVALID_ROWS, which is a fault in every
+	// phase. So if this observer's K or N ever drifted from the chain's —
+	// a governance change it scanned late, a blob version it mapped wrong —
+	// every honest validator on the network would be recorded as faulting
+	// at once. A disagreement about the parameters is the observer's gap,
+	// and it is named as one; the verifier is then left with the errors
+	// that a server alone can cause.
+	// No shard of this blob can carry more rows than the code has. Without
+	// this the count was unbounded: a server could answer with the same legal
+	// index millions of times, and every one of them was written to
+	// RowIndices — on the measurement, in measurements.jsonl, in the probes
+	// table, on /v1/probes and in the daily export — before any verification
+	// ran. A shape error like the two below, so it is this observer's gap and
+	// never a statement about the validator.
+	if len(rows) > totalRows {
+		return nil, nil, fmt.Errorf("%d rows returned, more than the %d this blob has", len(rows), totalRows)
+	}
+	proofDepth := bits.Len(uint(totalRows)) - 1
 	proofs := make([]*rsema1d.RowProof, len(rows))
 	for i, rw := range rows {
 		if rw == nil {
 			return nil, nil, fmt.Errorf("nil row %d", i)
+		}
+		if idx := int(rw.Index); idx < 0 || idx >= totalRows {
+			return nil, nil, fmt.Errorf("row index %d outside this observer's code parameters [0, %d)", idx, totalRows)
+		}
+		if got := len(rw.Proof); got != proofDepth {
+			return nil, nil, fmt.Errorf("row %d proof depth %d, this observer expects %d for %d rows", rw.Index, got, proofDepth, totalRows)
 		}
 		proofs[i] = &rsema1d.RowProof{Index: int(rw.Index), Row: rw.Data, RowProof: rw.Proof}
 	}
@@ -651,6 +767,51 @@ func parseShard(shard *fibretypes.BlobShard, originalRows int) ([]*rsema1d.RowPr
 		return nil, nil, err
 	}
 	return proofs, v, nil
+}
+
+// routableIP reports whether this observer will open a connection to an
+// address. Global unicast only: loopback, the private and link-local ranges,
+// the unspecified address and multicast are all things a validator can put
+// on chain and none of them is an endpoint a client could fetch from.
+func routableIP(ip net.IP) bool {
+	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast()
+}
+
+// addrClass names why an address was not dialled, for the row.
+func addrClass(ip net.IP) string {
+	switch {
+	case ip.IsLoopback():
+		return "loopback"
+	case ip.IsPrivate():
+		return "private"
+	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast():
+		return "link-local"
+	case ip.IsUnspecified():
+		return "unspecified"
+	case ip.IsMulticast():
+		return "multicast"
+	default:
+		return "non-routable"
+	}
+}
+
+// splitRoutable divides resolved addresses into the ones this observer will
+// dial and the ones it will not, keeping both so the row says what the name
+// resolved to rather than hiding it.
+func splitRoutable(got []string) (routable, dropped []string) {
+	for _, a := range got {
+		ip := net.ParseIP(a)
+		if ip == nil {
+			dropped = append(dropped, a)
+			continue
+		}
+		if routableIP(ip) {
+			routable = append(routable, a)
+		} else {
+			dropped = append(dropped, a+" ("+addrClass(ip)+")")
+		}
+	}
+	return routable, dropped
 }
 
 // localDialFault reports the dial failures that are the observer's own: the

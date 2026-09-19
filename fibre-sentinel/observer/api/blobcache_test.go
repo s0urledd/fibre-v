@@ -167,3 +167,45 @@ func TestCachedBlobVerdictFollowsLateProbes(t *testing.T) {
 		t.Errorf("classes = %v, want two HEALTHY", third.Classes)
 	}
 }
+
+// The store is not immutable: ApplyAmendment rewrites a probe row's
+// classification in place when a deferred shadow verdict settles. That
+// changes neither the number of probe rows nor the highest rowid, so a
+// fingerprint built from those two alone could not see it, and the cached
+// page went on publishing the pre-amendment tally beside the amended rows
+// on the same page — the document contradicting itself about a named
+// validator. On mocha this is the ordinary path, not an edge case: every
+// shadow_pending row is filed PROBE_ERROR and amended later.
+func TestCachedBlobVerdictFollowsAnAmendment(t *testing.T) {
+	ts, st, hash, point := closedBlob(t)
+
+	first := blobList(t, ts)
+	if !first.Recon.WindowOver {
+		t.Fatal("the fixture's window has not closed, so nothing would be cached")
+	}
+	if first.Classes["HEALTHY"] != 1 {
+		t.Fatalf("first read classes = %v, want one HEALTHY", first.Classes)
+	}
+
+	// The scanner's frontier passes the promise timeout and the deferred
+	// verdict settles: the row is rewritten, no row is added.
+	ok, err := st.ApplyAmendment(store.Amendment{
+		DedupeKey:        probe.Measurement{Vantage: "test", PromiseHash: hash, ValidatorAddress: "v1", ScheduledAt: point}.DedupeKey(),
+		PromiseHash:      hash,
+		ValidatorAddress: "v1",
+		ScheduledAt:      point,
+		From:             string(probe.ClassHealthy),
+		To:               string(probe.ClassUnmatchedGenuine),
+		Reason:           "no candidate in range",
+		JudgedAt:         point.Add(2 * time.Hour),
+		ScannerFrontier:  point.Add(2 * time.Hour),
+	})
+	if err != nil || !ok {
+		t.Fatalf("amend: ok=%v err=%v", ok, err)
+	}
+
+	second := blobList(t, ts)
+	if second.Classes["HEALTHY"] != 0 || second.Classes[string(probe.ClassUnmatchedGenuine)] != 1 {
+		t.Fatalf("after the amendment classes = %v, want the amended class only — the cache did not notice the rewrite", second.Classes)
+	}
+}

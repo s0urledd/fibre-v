@@ -249,16 +249,21 @@ func perMiB(fees, bytes int64) *float64 {
 func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse, error) {
 	db := s.st.DB()
 	r := &marketResponse{Window: win, Vantage: s.vantage, Source: marketSource, PriceFormula: formula, Notes: marketNotes}
-	start := win.startArg()
+	// Both bounds, on every query below. Without the upper one a pinned
+	// window answered with the payments that arrived after the pin while
+	// the response's own window said otherwise, so ?as_of= on this route
+	// was not reproducible and not honest. Unpinned, End is the moment the
+	// query was planned, so the bound admits everything the store holds.
+	start, end := win.startArg(), win.endArg()
 
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(amount_utia),0), COALESCE(SUM(blob_size),0), COUNT(DISTINCT publisher)
-		FROM payments WHERE kind = 'settlement' AND time >= ?`, start).
+		FROM payments WHERE kind = 'settlement' AND time >= ? AND time <= ?`, start, end).
 		Scan(&r.Settlements, &r.FeesSettledUtia, &r.Bytes, &r.PublishersActive); err != nil {
 		return nil, fmt.Errorf("settlements: %w", err)
 	}
 	r.PaidPerMiBUtia = perMiB(r.FeesSettledUtia, r.Bytes)
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(amount_utia),0), COUNT(DISTINCT processor)
-		FROM payments WHERE kind = 'timeout' AND time >= ?`, start).
+		FROM payments WHERE kind = 'timeout' AND time >= ? AND time <= ?`, start, end).
 		Scan(&r.Timeouts, &r.TimedOutUtia, &r.TimeoutProcessors); err != nil {
 		return nil, fmt.Errorf("timeouts: %w", err)
 	}
@@ -266,7 +271,7 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 	for kind, dst := range map[string]*sum{
 		"deposit": &r.Deposits, "withdrawal_request": &r.WithdrawalsRequested, "withdrawal_executed": &r.WithdrawalsExecuted,
 	} {
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(amount_utia),0) FROM payments WHERE kind = ? AND time >= ?`, kind, start).
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(amount_utia),0) FROM payments WHERE kind = ? AND time >= ? AND time <= ?`, kind, start, end).
 			Scan(&dst.Count, &dst.Utia); err != nil {
 			return nil, fmt.Errorf("%s: %w", kind, err)
 		}
@@ -284,8 +289,8 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 			SUM(CASE WHEN kind = 'settlement' THEN 1 ELSE 0 END),
 			SUM(CASE WHEN kind = 'timeout' THEN 1 ELSE 0 END),
 			COALESCE(SUM(CASE WHEN kind = 'timeout' THEN amount_utia END), 0)
-		FROM payments WHERE kind IN ('settlement','timeout') AND time >= ?
-		GROUP BY day ORDER BY day`, start)
+		FROM payments WHERE kind IN ('settlement','timeout') AND time >= ? AND time <= ?
+		GROUP BY day ORDER BY day`, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("daily: %w", err)
 	}
@@ -306,8 +311,8 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 	// Top publishers by fees, the rest folded into one bucket so the
 	// breakdown always sums to the window.
 	prow, err := db.QueryContext(ctx, `SELECT publisher, COUNT(*), COALESCE(SUM(amount_utia),0), COALESCE(SUM(blob_size),0)
-		FROM payments WHERE kind = 'settlement' AND time >= ?
-		GROUP BY publisher ORDER BY SUM(amount_utia) DESC, publisher`, start)
+		FROM payments WHERE kind = 'settlement' AND time >= ? AND time <= ?
+		GROUP BY publisher ORDER BY SUM(amount_utia) DESC, publisher`, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("top: %w", err)
 	}
@@ -357,8 +362,8 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 		top[p.Publisher] = true
 	}
 	drow, err := db.QueryContext(ctx, `SELECT substr(time, 1, 10) AS day, publisher, COUNT(*), COALESCE(SUM(amount_utia),0), COALESCE(SUM(blob_size),0)
-		FROM payments WHERE kind = 'settlement' AND time >= ?
-		GROUP BY day, publisher ORDER BY day, publisher`, start)
+		FROM payments WHERE kind = 'settlement' AND time >= ? AND time <= ?
+		GROUP BY day, publisher ORDER BY day, publisher`, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("daily by publisher: %w", err)
 	}
@@ -406,7 +411,7 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 // withdrawal in the window (only narrows to one address).
 func (s *Server) publisherRows(ctx context.Context, win Window, only string) ([]publisherRow, error) {
 	db := s.st.DB()
-	start := win.startArg()
+	start, end := win.startArg(), win.endArg()
 	filter, args := "", []any{start}
 	if only != "" {
 		filter = " AND p.publisher = ?"
@@ -414,26 +419,31 @@ func (s *Server) publisherRows(ctx context.Context, win Window, only string) ([]
 	}
 	var totalFees, totalBytes int64
 	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(amount_utia),0), COALESCE(SUM(blob_size),0)
-		FROM payments WHERE kind = 'settlement' AND time >= ?`, start).Scan(&totalFees, &totalBytes); err != nil {
+		FROM payments WHERE kind = 'settlement' AND time >= ? AND time <= ?`, start, end).Scan(&totalFees, &totalBytes); err != nil {
 		return nil, err
 	}
+	// `in` is the window test each aggregate is gated on; MIN/MAX(p.time)
+	// stay unbounded on purpose, because first_seen and last_seen are facts
+	// about the publisher rather than about the window.
+	const in = "p.time >= ? AND p.time <= ?"
 	rows, err := db.QueryContext(ctx, `SELECT p.publisher,
-			SUM(CASE WHEN p.kind = 'settlement' AND p.time >= ? THEN 1 ELSE 0 END),
-			COALESCE(SUM(CASE WHEN p.kind = 'settlement' AND p.time >= ? THEN p.blob_size END), 0),
-			COALESCE(SUM(CASE WHEN p.kind = 'settlement' AND p.time >= ? THEN p.amount_utia END), 0),
-			COALESCE(MAX(CASE WHEN p.kind = 'settlement' AND p.time >= ? THEN p.blob_size END), 0),
-			SUM(CASE WHEN p.kind = 'timeout' AND p.time >= ? THEN 1 ELSE 0 END),
-			COALESCE(SUM(CASE WHEN p.kind = 'timeout' AND p.time >= ? THEN p.amount_utia END), 0),
+			SUM(CASE WHEN p.kind = 'settlement' AND `+in+` THEN 1 ELSE 0 END),
+			COALESCE(SUM(CASE WHEN p.kind = 'settlement' AND `+in+` THEN p.blob_size END), 0),
+			COALESCE(SUM(CASE WHEN p.kind = 'settlement' AND `+in+` THEN p.amount_utia END), 0),
+			COALESCE(MAX(CASE WHEN p.kind = 'settlement' AND `+in+` THEN p.blob_size END), 0),
+			SUM(CASE WHEN p.kind = 'timeout' AND `+in+` THEN 1 ELSE 0 END),
+			COALESCE(SUM(CASE WHEN p.kind = 'timeout' AND `+in+` THEN p.amount_utia END), 0),
 			MIN(p.time), MAX(p.time),
-			SUM(CASE WHEN p.time >= ? THEN 1 ELSE 0 END),
+			SUM(CASE WHEN `+in+` THEN 1 ELSE 0 END),
 			e.found, e.balance_utia, e.available_utia, e.height, e.updated_at
 		FROM payments p
 		LEFT JOIN escrow_accounts e ON e.publisher = p.publisher
 		WHERE 1 = 1`+filter+`
 		GROUP BY p.publisher
-		HAVING SUM(CASE WHEN p.time >= ? THEN 1 ELSE 0 END) > 0
+		HAVING SUM(CASE WHEN `+in+` THEN 1 ELSE 0 END) > 0
 		ORDER BY 4 DESC, 3 DESC, p.publisher`,
-		append([]any{start, start, start, start, start, start, start}, append(args[1:], start)...)...)
+		append([]any{start, end, start, end, start, end, start, end, start, end, start, end, start, end},
+			append(args[1:], start, end)...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -562,7 +572,7 @@ func (s *Server) chargesFor(ctx context.Context, hashes []string) (map[string]*b
 // (same bytes, different prefix) can be matched to it.
 func (s *Server) timeoutsByAccount(ctx context.Context, win Window) (map[string]int64, error) {
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT processor, COUNT(*) FROM payments
-		WHERE kind = 'timeout' AND time >= ? AND processor != '' GROUP BY processor`, win.startArg())
+		WHERE kind = 'timeout' AND time >= ? AND time <= ? AND processor != '' GROUP BY processor`, win.startArg(), win.endArg())
 	if err != nil {
 		return nil, err
 	}
@@ -599,6 +609,33 @@ func (s *Server) handleMarket(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if win.AsOf {
+		// As on /v1/network: computed on demand, rationed, and never
+		// stored. The snapshot cache is keyed on the window's name alone,
+		// so handing it a pinned window would file an answer about last
+		// month under "24h" and serve it to everyone, on disk too.
+		if !s.asOf.allow(time.Now()) {
+			w.Header().Set("Retry-After", "2")
+			writeErr(w, 429, "as_of requests are limited to one every two seconds")
+			return
+		}
+		if !s.asOf.enter() {
+			w.Header().Set("Retry-After", "5")
+			writeErr(w, 429, "as_of computations already in flight; try again shortly")
+			return
+		}
+		defer s.asOf.leave()
+		t0 := time.Now()
+		resp, err := s.computeMarket(r.Context(), win)
+		if err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		resp.ComputedAt, resp.ComputeMs = t0.UTC().Format(time.RFC3339Nano), time.Since(t0).Milliseconds()
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, 200, resp)
+		return
+	}
 	resp, at, ms, err := s.market.get(r.Context(), s.logf(), win)
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
@@ -614,6 +651,22 @@ func (s *Server) handlePublishers(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	// Uncached and, on a pinned window, unbounded work: the same ration as
+	// every other route that computes an aggregate on demand.
+	if win.AsOf {
+		if !s.asOf.allow(time.Now()) {
+			w.Header().Set("Retry-After", "2")
+			writeErr(w, 429, "as_of requests are limited to one every two seconds")
+			return
+		}
+		if !s.asOf.enter() {
+			w.Header().Set("Retry-After", "5")
+			writeErr(w, 429, "as_of computations already in flight; try again shortly")
+			return
+		}
+		defer s.asOf.leave()
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	rows, err := s.publisherRows(r.Context(), win, "")
 	if err != nil {
@@ -641,6 +694,20 @@ func (s *Server) handlePublisher(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if win.AsOf {
+		if !s.asOf.allow(now) {
+			w.Header().Set("Retry-After", "2")
+			writeErr(w, 429, "as_of requests are limited to one every two seconds")
+			return
+		}
+		if !s.asOf.enter() {
+			w.Header().Set("Retry-After", "5")
+			writeErr(w, 429, "as_of computations already in flight; try again shortly")
+			return
+		}
+		defer s.asOf.leave()
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	rows, err := s.publisherRows(ctx, win, addr)
 	if err != nil {
@@ -706,9 +773,10 @@ func (s *Server) handlePublisher(w http.ResponseWriter, r *http.Request) {
 	if blobs == nil {
 		blobs = []blobRow{}
 	}
+	blobs, moreBlobs := trim(blobs, 50)
 	writeJSON(w, 200, map[string]any{
 		"window": win, "publisher": rows[0], "windows": spans,
-		"recent_payments": payments, "recent_blobs": blobs,
+		"recent_payments": payments, "recent_blobs": blobs, "recent_blobs_truncated": moreBlobs,
 		"source": marketSource, "price_formula": formula, "notes": marketNotes, "vantage": s.vantage,
 	})
 }

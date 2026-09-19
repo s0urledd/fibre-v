@@ -102,9 +102,21 @@ At each height it does two things.
 
 **1. Tracks fibre params.** `EventUpdateFibreParams` carries a full `Params`
 snapshot. The scanner keeps an ordered history keyed by `(height, tx index)`,
-seeded once by an ABCI query of `Query/Params` at the start height. Nothing is
-hard-coded — `must_serve_until` for a publication uses the params in effect at
-the exact point it settled, including a param change earlier in the same block.
+seeded once by an ABCI query of `Query/Params` at the start height, and
+re-read from state every 60 blocks so a change that arrived without an event
+is still caught. Nothing is hard-coded.
+
+`must_serve_until` is **not** taken from the params at the settlement point.
+The server reads the params when the shard is uploaded, which happens
+somewhere between the promise height and the settlement tx, so the scanner
+evaluates every params entry in force anywhere in `[promise height - 1,
+settlement]` and records the **earliest** bound, setting
+`must_serve_until_ambiguous` when they do not all agree. The earliest bound is
+the one no server could have undershot, so a longer window on the server can
+only produce `SERVED_PAST_WINDOW` or `EXPECTED_GONE`, never a fault. Taking
+the settlement point's params instead would compute a later deadline, which is
+the accusing direction. docs/verdicts.md states the rule in full; an operator
+checking a FAULT should compute the deadline that way.
 
 **2. Records publications.** For each single-message `MsgPayForFibre` (the shape
 consensus enforces, detected with `x/fibre/types.TryParseFibreTx`) it persists:
@@ -115,7 +127,8 @@ consensus enforces, detected with `x/fibre/types.TryParseFibreTx`) it persists:
 | `promise_hash` | `fibre.PaymentPromise.Hash()` — the on-chain identity |
 | `settlement_height` / `settlement_time` / `settlement_tx_hash` / `_tx_index` / `_tx_code` | the block + tx |
 | `params_at_publication` | param history at `(settlement_height, tx_index)` |
-| `must_serve_until` | `creation_timestamp + max(payment_promise_timeout, shard_retention)` |
+| `must_serve_until` | `creation_timestamp + max(payment_promise_timeout, shard_retention)`, over the **earliest** params in force in `[promise height - 1, settlement]` |
+| `must_serve_until_ambiguous` | set when those params did not all agree, so the deadline is a bound rather than a value |
 | `assignment` | `fibre-assign` shard table over the validator set at the **promise height** |
 
 ```

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	celfibre "github.com/celestiaorg/celestia-app/v10/fibre"
@@ -73,6 +74,24 @@ type Config struct {
 	// connection from this vantage at a time, whatever this value is.
 	Concurrency int
 
+	// AllowUnroutableHosts dials a registered host that resolves to loopback
+	// or a private range. A local devnet needs it; a public vantage must not
+	// have it, because the host is whatever a validator put on chain and
+	// dialling it would make this observer a port scanner and a DNS resolver
+	// driven from the chain, publishing what it found.
+	AllowUnroutableHosts bool
+
+	// InFlightBytes bounds the shard bytes being downloaded at once, which
+	// Concurrency alone does not. DownloadShard is a unary RPC: an in-flight
+	// probe holds the whole shard as a gRPC receive buffer and again as the
+	// unmarshalled message, and the receive limit is deliberately raised to
+	// 110% of the expected shard so a large one is not refused. A shard is
+	// blob_size x total_rows / original_rows for a validator assigned every
+	// row, so eight workers against 128 MiB blobs on a small provider set is
+	// gigabytes resident with nothing anywhere to stop it. A probe larger
+	// than the whole budget still runs, alone. Zero takes the default.
+	InFlightBytes int64
+
 	// BackfillMissed bounds how far back a (re)started prober writes
 	// NOT_PROBED markers for slots it never ran. Zero, the default, is no
 	// bound: every elapsed slot of every publication the feed holds gets
@@ -126,6 +145,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Concurrency <= 0 {
 		c.Concurrency = 8
+	}
+	if c.InFlightBytes <= 0 {
+		c.InFlightBytes = defaultInFlightBytes
 	}
 	// BackfillMissed <= 0 means no horizon: every elapsed slot of every
 	// publication the feed holds gets its NOT_PROBED row, so an obligation
@@ -182,6 +204,11 @@ type Prober struct {
 	// so a sweep that runs out of time does not drop the same validators each
 	// cycle.
 	sweep uint64
+	// cycleErrs counts the failures recorded in the cycle now running, so
+	// the end of the cycle can tell an OK cycle from one that merely
+	// finished. Reset at the top of each cycle; written from the probe
+	// goroutines, so atomic.
+	cycleErrs atomic.Int64
 	// skippedPubs are publications logged once as not probeable (wrong chain,
 	// failed settlement tx).
 	skippedPubs map[string]bool
@@ -293,6 +320,8 @@ func (p *Prober) Run(parent context.Context) error {
 
 	probed := 0
 	for {
+		// A fresh cycle starts with no failures against it.
+		p.cycleErrs.Store(0)
 		if err := ctx.Err(); err != nil {
 			if errors.Is(err, context.Canceled) {
 				p.log.Printf("stopped (signal): %d probes this run", probed)
@@ -340,9 +369,16 @@ func (p *Prober) Run(parent context.Context) error {
 		if len(due) > 0 {
 			probed += p.runDue(ctx, due)
 		}
-		// A cycle that got this far read the feed and planned; the chain
-		// side is reported by measureClock and the resolver as they fail.
-		st.OK()
+		// Only a cycle in which nothing failed is an OK cycle. Marking every
+		// cycle OK here overwrote the errors the cycle had just recorded —
+		// the chain being unreachable, targets that would not resolve — so
+		// /v1/health could never say the prober was failing, only that it was
+		// dead. The prober is the process whose output becomes a public
+		// statement about an operator; a silent degradation in it is the one
+		// this observer can least afford.
+		if p.cycleErrs.Load() == 0 {
+			st.OK()
+		}
 		st.Set("probes_this_run", probed)
 		st.Set("publications_live", len(p.feed.pubs))
 		st.Set("clock_offset_ms", p.clockOffsetMS())
@@ -393,7 +429,7 @@ func (p *Prober) measureClock(ctx context.Context) {
 	if err != nil {
 		p.log.Printf("clock check: %v (keeping previous offset)", err)
 		if p.status != nil {
-			p.status.Error(fmt.Sprintf("chain unreachable: %v", err))
+			p.fail(fmt.Sprintf("chain unreachable: %v", err))
 		}
 		return
 	}
@@ -755,17 +791,36 @@ func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, miss
 // window when that is longer. The phase is decided from the actual start
 // (PhaseAt), so a late probe is judged in the phase it ran in, never the
 // one it was planned for.
+//
+// An in-window slot is additionally never allowed to run past
+// must_serve_until. The allowance is a fraction of the publication's own
+// window — twelve minutes on mocha's four hours — and the last in-window
+// point sits 2m30s before the deadline, so without this the reading that
+// exists to catch an early prune could run nine minutes after the obligation
+// ended, where NOT_FOUND is TOLERATED by construction. The whole schedule
+// change that moved that point to the deadline would then have bought
+// nothing whenever the prober was busy. A slot that cannot run in time is
+// recorded NOT_PROBED instead: an obligation nobody observed is unobserved,
+// which is a figure this observer publishes, and not `served`.
 func (p *Prober) latenessFor(pub scan.Publication) time.Duration {
+	return p.latenessAt(pub, SchedulePoint{})
+}
+
+func (p *Prober) latenessAt(pub scan.Publication, pt SchedulePoint) time.Duration {
 	late := p.cfg.MaxLateness
-	if p.cfg.MaxLatenessFraction <= 0 {
-		return late
+	if p.cfg.MaxLatenessFraction > 0 {
+		window := pub.MustServeUntil.Sub(pub.SettlementTime)
+		if window <= 0 {
+			window = fallbackSpan(pub)
+		}
+		if f := time.Duration(float64(window) * p.cfg.MaxLatenessFraction); f > late {
+			late = f
+		}
 	}
-	window := pub.MustServeUntil.Sub(pub.SettlementTime)
-	if window <= 0 {
-		window = fallbackSpan(pub)
-	}
-	if f := time.Duration(float64(window) * p.cfg.MaxLatenessFraction); f > late {
-		late = f
+	if pt.Phase == PhaseInWindow && !pt.At.IsZero() {
+		if room := pub.MustServeUntil.Sub(pt.At); room > 0 && room < late {
+			late = room
+		}
 	}
 	return late
 }
@@ -805,9 +860,7 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 		targets, err := p.resolver.TargetsFor(ctx, pub, p.cfg.IncludeUnassigned)
 		if err != nil {
 			p.log.Printf("resolve targets for %s: %v (retry next cycle)", short(ph), err)
-			if p.status != nil {
-				p.status.Error(fmt.Sprintf("resolve targets: %v", err))
-			}
+			p.fail(fmt.Sprintf("resolve targets: %v", err))
 			continue
 		}
 		coder, cerr := p.coderFor(pub.Assignment.ProtocolParams.OriginalRows, pub.Assignment.ProtocolParams.TotalRows)
@@ -858,6 +911,7 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 		n        int
 		done     = map[string]int{}
 		sem      = make(chan struct{}, p.cfg.Concurrency)
+		bytesSem = newByteSem(p.cfg.InFlightBytes)
 		wg       sync.WaitGroup
 		canceled bool
 	)
@@ -867,10 +921,19 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 			break
 		}
 		sem <- struct{}{}
+		// Charged what the probe may actually receive, not what the shard
+		// should weigh: the two were different, and the budget was keeping
+		// the wrong one.
+		want := int64(recvLimitFor(Input{
+			ExpectedShardBytes: ShardBytes(it.job.pub.Promise.BlobSize, it.job.pub.Assignment.ProtocolParams.OriginalRows, it.target.RowCount),
+			MaxMessageSize:     maxMessageSizeFor(it.job.pub.Assignment.ProtocolParams),
+		}))
+		bytesSem.acquire(want)
 		wg.Add(1)
-		go func(it work) {
+		go func(it work, want int64) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer bytesSem.release(want)
 			probedOne := p.runOne(ctx, it)
 			mu.Lock()
 			if probedOne {
@@ -878,7 +941,7 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 			}
 			done[it.key]++
 			mu.Unlock()
-		}(it)
+		}(it, want)
 	}
 	wg.Wait()
 	if !canceled && ctx.Err() == nil {
@@ -891,6 +954,62 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 	return n
 }
 
+// defaultInFlightBytes is the shard-byte ceiling: half a gibibyte of shards
+// being transferred at once, which with the receive buffer and the
+// unmarshalled copy is about a gibibyte resident at the peak.
+const defaultInFlightBytes = 512 << 20
+
+// byteSem admits work by weight as well as by count. A single item heavier
+// than the whole budget is admitted alone rather than deadlocking, which is
+// the case that matters: one validator assigned every row of a large blob.
+type byteSem struct {
+	mu    sync.Mutex
+	cond  *sync.Cond
+	limit int64
+	held  int64
+}
+
+func newByteSem(limit int64) *byteSem {
+	b := &byteSem{limit: limit}
+	b.cond = sync.NewCond(&b.mu)
+	return b
+}
+
+func (b *byteSem) acquire(nBytes int64) {
+	if nBytes <= 0 {
+		nBytes = 1
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for b.held > 0 && b.held+nBytes > b.limit {
+		b.cond.Wait()
+	}
+	b.held += nBytes
+}
+
+func (b *byteSem) release(nBytes int64) {
+	if nBytes <= 0 {
+		nBytes = 1
+	}
+	b.mu.Lock()
+	b.held -= nBytes
+	if b.held < 0 {
+		b.held = 0
+	}
+	b.mu.Unlock()
+	b.cond.Broadcast()
+}
+
+// fail records a cycle error: on the status file, where /v1/health reads it,
+// and on the cycle's own counter, so the end of the cycle does not report OK
+// over it. Safe from any goroutine.
+func (p *Prober) fail(msg string) {
+	p.cycleErrs.Add(1)
+	if p.status != nil {
+		p.status.Error(msg)
+	}
+}
+
 // runOne runs a single probe end to end: lateness re-check, policy gate,
 // per-validator serialisation, the probe itself, the optional retry, and the
 // record. It reports whether a network probe was carried out.
@@ -901,8 +1020,13 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 	// The slot was due when planned; a long cycle must not silently probe it
 	// in a later phase. Past the lateness allowance it is a gap, not a
 	// verdict.
-	if late := time.Since(j.point.At); late > p.latenessFor(pub) {
-		p.recordNotProbedTarget(pub, j.point, t, fmt.Sprintf("elapsed while the cycle ran (%s late)", late.Round(time.Second)))
+	if allowed := p.latenessAt(pub, j.point); time.Since(j.point.At) > allowed {
+		late := time.Since(j.point.At)
+		reason := fmt.Sprintf("elapsed while the cycle ran (%s late)", late.Round(time.Second))
+		if j.point.Phase == PhaseInWindow && !time.Now().Before(pub.MustServeUntil) {
+			reason = fmt.Sprintf("elapsed while the cycle ran (%s late); the obligation ended before this reading could be taken, so it is unobserved rather than judged in a later phase", late.Round(time.Second))
+		}
+		p.recordNotProbedTarget(pub, j.point, t, reason)
 		return false
 	}
 	skipDL := false
@@ -915,24 +1039,25 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 		skipDL = skip
 	}
 	in := Input{
-		Vantage:            p.cfg.Vantage,
-		ChainID:            p.chainID,
-		PromiseHash:        ph,
-		Commitment:         it.commitment,
-		CommitmentHex:      pub.Promise.Commitment,
-		BlobVersion:        pub.Promise.BlobVersion,
-		MustServeUntil:     pub.MustServeUntil,
-		ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
-		Target:             t,
-		SchedulePoint:      j.point,
-		PruneTolerance:     p.schedCfg().PruneTolerance,
-		SkipDownload:       skipDL,
-		ExpectedShardBytes: ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, t.RowCount),
-		MaxMessageSize:     maxMessageSizeFor(pub.Assignment.ProtocolParams),
-		ClockOffsetMS:      p.clockOffsetMS(),
-		Shadowers:          p.feed.shadowersFor(ph, pub.Promise.Commitment, t.AddressHex),
-		ShadowGap:          p.shadowBlindness(pub),
-		Observer:           p.observerInfo(),
+		Vantage:             p.cfg.Vantage,
+		ChainID:             p.chainID,
+		PromiseHash:         ph,
+		Commitment:          it.commitment,
+		CommitmentHex:       pub.Promise.Commitment,
+		BlobVersion:         pub.Promise.BlobVersion,
+		MustServeUntil:      pub.MustServeUntil,
+		ValidatorSetHeight:  pub.Assignment.ValidatorSetHeight,
+		Target:              t,
+		AllowUnroutableHost: p.cfg.AllowUnroutableHosts,
+		SchedulePoint:       j.point,
+		PruneTolerance:      p.schedCfg().PruneTolerance,
+		SkipDownload:        skipDL,
+		ExpectedShardBytes:  ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, t.RowCount),
+		MaxMessageSize:      maxMessageSizeFor(pub.Assignment.ProtocolParams),
+		ClockOffsetMS:       p.clockOffsetMS(),
+		Shadowers:           p.feed.shadowersFor(ph, pub.Promise.Commitment, t.AddressHex),
+		ShadowGap:           p.shadowBlindness(pub),
+		Observer:            p.observerInfo(),
 	}
 
 	lock := p.validatorLock(t.AddressHex)
@@ -1015,6 +1140,12 @@ func (p *Prober) recordNotProbed(ctx context.Context, j job, reason string) {
 				Assigned:   v.RowCount > 0,
 				Attested:   v.Attested,
 				RowCount:   v.RowCount,
+				// A record from before signature verification says nothing
+				// about attestation, and "says nothing" must not be stored
+				// as "did not attest": the store writes NULL for the first
+				// and 0 for the second, and 0 puts the row outside the
+				// obligation population instead of into the unknown count.
+				AttestationUnknown: !pub.HasAttestation(),
 			}, reason+"; targets could not be resolved: "+err.Error())
 		}
 		p.complete[key] = true
@@ -1037,8 +1168,9 @@ func (p *Prober) recordNotProbedTarget(pub scan.Publication, pt SchedulePoint, t
 		BlobVersion: pub.Promise.BlobVersion, MustServeUntil: pub.MustServeUntil,
 		ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
 		ValidatorAddress:   t.AddressHex, ValidatorHost: t.Host, HostSource: t.HostSource,
-		Assigned: t.Assigned, Attested: t.Attested, AssignedRowCount: t.RowCount,
-		ScheduleLabel: pt.Label, ScheduledAt: pt.At.UTC(),
+		Assigned: t.Assigned, Attested: t.Attested, AttestationUnknown: t.AttestationUnknown,
+		AssignedRowCount: t.RowCount,
+		ScheduleLabel:    pt.Label, ScheduledAt: pt.At.UTC(),
 		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
 		Phase: PhaseAt(pt.At, pub, p.cfg.Schedule), Outcome: OutcomeMissed,
 		Classification: ClassNotProbed, ClassificationReason: reason,

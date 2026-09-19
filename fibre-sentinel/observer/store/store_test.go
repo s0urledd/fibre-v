@@ -2,7 +2,10 @@ package store_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -310,5 +313,113 @@ func TestAvatars(t *testing.T) {
 	}
 	if _, _, _, ok, _ := st.Avatar(ctx, "D27EE330254D4F6A"); ok {
 		t.Fatal("a picture Keybase no longer has is still served")
+	}
+}
+
+// SQLite's auto-checkpoint copies WAL pages back but never resets the file,
+// and cannot reset one while a reader holds a snapshot. The API holds one
+// through every snapshot refresh, so a batch ingest left the -wal at its
+// high-water mark for good — on the same volume as the database, counted by
+// the health check's disk threshold.
+func TestCheckpointWALTruncatesTheLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	for i := 0; i < 3000; i++ {
+		if _, err := st.DB().ExecContext(ctx,
+			`INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+			"k"+strconv.Itoa(i), strings.Repeat("x", 200), "2026-09-18T00:00:00.000000000Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wal := path + "-wal"
+	before := int64(0)
+	if fi, err := os.Stat(wal); err == nil {
+		before = fi.Size()
+	}
+	if before == 0 {
+		t.Skip("no write-ahead log on this build")
+	}
+
+	busy, _, _, err := st.CheckpointWAL(ctx)
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if busy {
+		t.Fatal("checkpoint reported busy with no reader open")
+	}
+	// The frame counts depend on whether SQLite's own auto-checkpoint got
+	// there first, which is timing. What has to hold is the file: the log is
+	// reset, which is the thing the auto-checkpoint never does.
+	after := int64(0)
+	if fi, err := os.Stat(wal); err == nil {
+		after = fi.Size()
+	}
+	if after >= before {
+		t.Fatalf("the log was %d bytes and is %d after the checkpoint", before, after)
+	}
+
+	// A reader in the way makes it a no-op rather than an error, which the
+	// caller treats as "try again next pass". That path is not exercised
+	// here: the readers it guards against are in the API process, and
+	// holding one open on this pool would only deadlock the test against
+	// itself.
+}
+
+// The retention pass deletes rows; SQLite moves those pages to its free list
+// and never shrinks the file on its own. deploy/README.md tells an operator
+// that pruning is the answer to a full disk, so it has to return something
+// they can see. auto_vacuum(incremental) is set at creation — it cannot be
+// turned on later without a full VACUUM — and the collector releases pages
+// after a prune.
+func TestReclaimSpaceReturnsFreedPages(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	var mode int
+	if err := st.DB().QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != 2 {
+		t.Fatalf("auto_vacuum = %d, want 2 (incremental); it cannot be set after the first table exists", mode)
+	}
+
+	for i := 0; i < 4000; i++ {
+		if _, err := st.DB().ExecContext(ctx,
+			`INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?)`,
+			"k"+strconv.Itoa(i), strings.Repeat("x", 400), "2026-09-18T00:00:00.000000000Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.DB().ExecContext(ctx, `DELETE FROM meta WHERE key LIKE 'k%'`); err != nil {
+		t.Fatal(err)
+	}
+	var free int64
+	if err := st.DB().QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&free); err != nil {
+		t.Fatal(err)
+	}
+	if free == 0 {
+		t.Skip("the delete freed no pages on this build")
+	}
+	freed, err := st.ReclaimSpace(ctx, 20000)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if freed == 0 {
+		t.Fatalf("%d pages on the free list and none was returned", free)
+	}
+	// And it is idempotent: nothing left to give back is not an error.
+	if again, err := st.ReclaimSpace(ctx, 20000); err != nil || again != 0 {
+		t.Fatalf("second reclaim freed %d, err %v", again, err)
 	}
 }

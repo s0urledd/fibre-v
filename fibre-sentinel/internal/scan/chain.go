@@ -73,13 +73,25 @@ func (c *Chain) ctx(parent context.Context) (context.Context, context.CancelFunc
 
 // Status returns (chainID, latestHeight).
 func (c *Chain) Status(parent context.Context) (string, int64, error) {
+	id, h, _, err := c.StatusAt(parent)
+	return id, h, err
+}
+
+// StatusAt is Status with the tip's block time, which is the only thing that
+// says whether the chain is still moving. A halted chain, a node stuck
+// mid-sync and a public endpoint that fell behind all keep answering /status
+// with a height that does not change, and every check drawn from that same
+// node then reads as healthy: the scanner is parked waiting for a height
+// rather than failing, so it reports nothing, and the lag between the
+// scanner and the tip is zero because both are the same stopped number.
+func (c *Chain) StatusAt(parent context.Context) (string, int64, time.Time, error) {
 	ctx, cancel := c.ctx(parent)
 	defer cancel()
 	s, err := c.rpc.Status(ctx)
 	if err != nil {
-		return "", 0, fmt.Errorf("status: %w", err)
+		return "", 0, time.Time{}, fmt.Errorf("status: %w", err)
 	}
-	return s.NodeInfo.Network, s.SyncInfo.LatestBlockHeight, nil
+	return s.NodeInfo.Network, s.SyncInfo.LatestBlockHeight, s.SyncInfo.LatestBlockTime.UTC(), nil
 }
 
 // AppVersion is the application version the chain is currently running, from
@@ -519,5 +531,13 @@ func IsHeightUnavailable(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "lowest height is") ||
 		strings.Contains(s, "is not available") ||
-		strings.Contains(s, "must be less than or equal to the current blockchain height")
+		strings.Contains(s, "must be less than or equal to the current blockchain height") ||
+		// CometBFT's own wording when the validator set for a height has
+		// been pruned. It matches none of the phrases above, so without it
+		// the retry loop had no exit at all: an unbounded retry on a height
+		// the node can never serve, with nothing advancing and no gap
+		// recorded. A promise may be up to PaymentPromiseHeightWindow
+		// blocks older than the block that settles it, so any node whose
+		// state base sits between the two reaches this.
+		strings.Contains(s, "could not find validator set for height")
 }

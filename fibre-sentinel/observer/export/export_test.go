@@ -174,3 +174,106 @@ func TestNamePattern(t *testing.T) {
 		}
 	}
 }
+
+// Builds advance one calendar day at a time up to yesterday, so a line dated
+// years ahead — a forward clock step on the vantage — was a stop the export
+// could never pass. That file's offset froze and every later export shipped an
+// empty member for it: no error, no log line, nothing in the manifest but
+// lines: 0, while the record went on growing behind it. For a product whose
+// claim is that the export is the record, a file that silently stops
+// exporting is the worst shape the failure could take.
+func TestBuilder_ForwardClockStepDoesNotFreezeAFile(t *testing.T) {
+	data := t.TempDir()
+	dir := filepath.Join(data, "exports")
+	meas := filepath.Join(data, "measurements.jsonl")
+	body := line("started_at", "2026-09-10T10:00:00Z", "a") +
+		line("started_at", "2099-01-01T00:00:00Z", "clock-jump") +
+		line("started_at", "2026-09-10T10:00:01Z", "b") +
+		line("started_at", "2026-09-11T10:00:00Z", "c")
+	if err := os.WriteFile(meas, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b := &Builder{DataDir: data, Dir: dir, Vantage: "v", Build: "x", Hour: 3}
+	seen := map[string]bool{}
+	skewed := int64(0)
+	for _, now := range []time.Time{
+		time.Date(2026, 9, 11, 3, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 12, 3, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 13, 3, 0, 0, 0, time.UTC),
+	} {
+		built, err := b.Run(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range built {
+			m := readTar(t, filepath.Join(dir, name))
+			for _, id := range []string{"a", "b", "c", "clock-jump"} {
+				if strings.Contains(string(m["measurements.jsonl"]), `"`+id+`"`) {
+					if seen[id] {
+						t.Errorf("%s appears in more than one export", id)
+					}
+					seen[id] = true
+				}
+			}
+			var man Manifest
+			if err := json.Unmarshal(m["manifest.json"], &man); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range man.Files {
+				if f.Name == "measurements.jsonl" {
+					skewed += f.SkewedLines
+				}
+			}
+		}
+	}
+	for _, id := range []string{"a", "b", "c", "clock-jump"} {
+		if !seen[id] {
+			t.Errorf("%q is in the record but in no export: the file stopped exporting", id)
+		}
+	}
+	if skewed != 1 {
+		t.Errorf("manifests report %d skewed lines, want 1: the clock step must be named, not hidden", skewed)
+	}
+	// And the offset reached the end of the file.
+	st, err := b.loadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Offsets["measurements.jsonl"] != int64(len(body)) {
+		t.Errorf("offset stopped at %d of %d bytes", st.Offsets["measurements.jsonl"], len(body))
+	}
+}
+
+// Every export carries the scanner state, because sentinel-recompute redraws
+// verdicts with the scan gaps, the param history and the host seed that live
+// in it. Without it a late shadow verdict the record defers on a gap is
+// redrawn as a decided one, and the tool reports a difference where the
+// observer was honestly blind.
+func TestBuilder_CarriesTheScannerState(t *testing.T) {
+	data := t.TempDir()
+	dir := filepath.Join(data, "exports")
+	if err := os.WriteFile(filepath.Join(data, "measurements.jsonl"),
+		[]byte(line("started_at", "2026-09-10T10:00:00Z", "a")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"chain_id":"mocha-4","last_scanned_height":12,"gaps":[{"from":5,"to":6}]}`
+	if err := os.WriteFile(filepath.Join(data, StateFile), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b := &Builder{DataDir: data, Dir: dir, Vantage: "v", Build: "x", Hour: 3}
+	built, err := b.Run(time.Date(2026, 9, 11, 3, 0, 0, 0, time.UTC))
+	if err != nil || len(built) == 0 {
+		t.Fatalf("built %v, err %v", built, err)
+	}
+	m := readTar(t, filepath.Join(dir, built[0]))
+	if got := string(m[StateFile]); got != state {
+		t.Fatalf("state member = %q, want the file as it stands", got)
+	}
+	var man Manifest
+	if err := json.Unmarshal(m["manifest.json"], &man); err != nil {
+		t.Fatal(err)
+	}
+	if man.State == nil || man.State.SHA256 == "" || man.State.Bytes != int64(len(state)) {
+		t.Fatalf("the manifest does not attest the state: %+v", man.State)
+	}
+}

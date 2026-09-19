@@ -95,12 +95,33 @@ func tail(st *store.Store, path string, fn handler, now time.Time) (Result, erro
 
 	r := bufio.NewReaderSize(f, 1<<20)
 	res := Result{Offset: offset, Line: line}
+	// The cursor was written after every line: a second tiny transaction per
+	// record, on top of the insert's own. In WAL mode each of those dirties
+	// scattered pages across the table and its indexes and writes them all as
+	// frames, and the auto-checkpoint can copy pages back but cannot reset
+	// the WAL while any reader holds a snapshot — which, during an API
+	// snapshot refresh, is much of the time. A day of measurements ingested
+	// in one pass grew the -wal to about a gigabyte and left it there.
+	//
+	// Writing it every cursorEvery lines is safe for the same reason
+	// restarting mid-file is: every insert is idempotent on its natural key,
+	// so a cursor behind the real position re-reads lines that are already
+	// there and inserts nothing. It is never ahead.
+	since := 0
+	flush := func() error {
+		if since == 0 {
+			return nil
+		}
+		since = 0
+		return st.SetCursor(path, res.Offset, res.Line, now)
+	}
 	for {
 		raw, err := r.ReadBytes('\n')
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break // partial trailing line stays unread until it is complete
 			}
+			_ = flush()
 			return res, err
 		}
 		trimmed := bytes.TrimSpace(raw)
@@ -112,9 +133,7 @@ func tail(st *store.Store, path string, fn handler, now time.Time) (Result, erro
 			// undecodable line rather than stalling the file forever.
 			res.Skipped++
 			res.LastSkipped = fmt.Sprintf("%s line %d: record longer than %d bytes", path, res.Line, maxLine)
-			if err := st.SetCursor(path, res.Offset, res.Line, now); err != nil {
-				return res, err
-			}
+			since++
 			continue
 		}
 		if len(trimmed) == 0 {
@@ -131,12 +150,16 @@ func tail(st *store.Store, path string, fn handler, now time.Time) (Result, erro
 					res.Line--
 					res.Offset -= int64(len(raw))
 					res.Deferred = fmt.Sprintf("%s line %d: %v (pass %d of %d)", path, res.Line+1, err, retries[k], retryPasses)
+					if ferr := flush(); ferr != nil {
+						return res, ferr
+					}
 					return res, nil
 				}
 				delete(retries, k)
 				err = fmt.Errorf("%w: %v after %d passes", ErrBadRecord, err, retryPasses)
 			}
 			if !errors.Is(err, ErrBadRecord) {
+				_ = flush()
 				return res, fmt.Errorf("%s line %d: %w", path, res.Line, err)
 			}
 			res.Skipped++
@@ -144,12 +167,22 @@ func tail(st *store.Store, path string, fn handler, now time.Time) (Result, erro
 		} else if ins {
 			res.Inserted++
 		}
-		if err := st.SetCursor(path, res.Offset, res.Line, now); err != nil {
-			return res, err
+		if since++; since >= cursorEvery {
+			if err := flush(); err != nil {
+				return res, err
+			}
 		}
+	}
+	if err := flush(); err != nil {
+		return res, err
 	}
 	return res, nil
 }
+
+// cursorEvery is how many lines are read between cursor writes. A crash
+// between them re-reads at most this many records, all of which insert
+// nothing the second time.
+const cursorEvery = 500
 
 // Publications ingests publications.jsonl.
 func Publications(st *store.Store, path string, now time.Time) (Result, error) {

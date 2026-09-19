@@ -141,6 +141,8 @@ func probeInput(host string, consPub ed25519.PublicKey) Input {
 			PubKey: consPub, AssignedRows: []int{0, 1, 2, 3},
 		},
 		SchedulePoint: SchedulePoint{Label: "w1", At: time.Now()},
+		// The test servers are on loopback, which a public vantage refuses.
+		AllowUnroutableHost: true,
 	}
 }
 
@@ -336,22 +338,37 @@ func TestRun_SizeBoundsAreToldApartFromAThrottle(t *testing.T) {
 	cert := fibreCert(t, consPriv, "test-chain", now.Add(-time.Hour), now.Add(24*time.Hour))
 
 	// a shard larger than the probe's receive bound
+	// Larger than the floor a tiny blob's bound cannot go below, so the
+	// refusal below is the bound doing its job and not arithmetic.
+	const shardBytes = 3 << 20
 	host, _ := startFibre(t, cert, &fakeFibre{download: func(context.Context, *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error) {
-		return bigShard(300_000), nil
+		return bigShard(shardBytes), nil
 	}})
 	in := probeInput(host, consPub)
-	in.MaxMessageSize, in.ExpectedShardBytes = 100_000, 50_000
+	// The bound is what this blob's shard should weigh, not the protocol's
+	// maximum: a probe of a small blob must not stand ready to accept a
+	// hundred-odd megabytes from an address a validator put on chain.
+	in.MaxMessageSize, in.ExpectedShardBytes = 100_000_000, shardBytes
 	m := Run(context.Background(), in, mustCoder(t), StepTimeouts{})
-	if m.Outcome != OutcomeProbeError || m.Download.RPCCode != "ResourceExhausted" || m.Download.RecvLimit != 100_000 {
+	if m.Download.RecvLimit >= in.MaxMessageSize {
+		t.Fatalf("the bound is the protocol maximum (%d), not this shard's size", m.Download.RecvLimit)
+	}
+	// A shard past that bound is refused here, and a refusal on this side is
+	// the observer's own gap, never the validator's.
+	in.ExpectedShardBytes = 50_000
+	m = Run(context.Background(), in, mustCoder(t), StepTimeouts{})
+	if m.Outcome != OutcomeProbeError || m.Download.RPCCode != "ResourceExhausted" {
 		t.Fatalf("receive bound: outcome=%s code=%s limit=%d (%s)", m.Outcome, m.Download.RPCCode, m.Download.RecvLimit, m.RawError)
 	}
-	// the expected shard size floors the bound, so the same shard is received
-	// (and then fails to parse, which is the observer's gap with the shape
-	// on the row, not the receive bound and not a fault)
-	in.ExpectedShardBytes = 300_000
+	if m.Classification == ClassFault {
+		t.Fatalf("this observer's own receive bound was recorded as a fault (%s)", m.RawError)
+	}
+	// With room for it, the same shard is received, and then fails to parse:
+	// still the observer's gap, with the shape on the row.
+	in.ExpectedShardBytes = shardBytes
 	m = Run(context.Background(), in, mustCoder(t), StepTimeouts{})
-	if m.Download.RPCCode == "ResourceExhausted" || m.Download.RecvLimit < 330_000 {
-		t.Fatalf("floored bound: outcome=%s code=%s limit=%d (%s)", m.Outcome, m.Download.RPCCode, m.Download.RecvLimit, m.RawError)
+	if m.Download.RPCCode == "ResourceExhausted" {
+		t.Fatalf("a shard well inside the bound was refused: limit=%d (%s)", m.Download.RecvLimit, m.RawError)
 	}
 	if m.Outcome != OutcomeProbeError || !strings.Contains(m.RawError, "shard shape") || m.Classification == ClassFault {
 		t.Fatalf("a shard this observer cannot parse: outcome=%s class=%s (%s), want PROBE_ERROR, never a fault", m.Outcome, m.Classification, m.RawError)
@@ -376,5 +393,46 @@ func TestRun_SizeBoundsAreToldApartFromAThrottle(t *testing.T) {
 	// reachable): never a fault and never our gap
 	if m.Classification == ClassFault || m.Classification == ClassProbeError {
 		t.Fatalf("a server's send bound classified %s", m.Classification)
+	}
+}
+
+// The registered host is whatever a validator put on chain, and the chain
+// checks only the host:port shape. A public observer that dialled a loopback
+// or private address would be a port scanner and a DNS resolver driven from
+// the chain, publishing the address it reached and the exact error. Nothing
+// is dialled, and the row says what was registered without holding it against
+// the shard.
+func TestRun_UnroutableRegisteredHostIsNotDialled(t *testing.T) {
+	consPub, consPriv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now()
+	cert := fibreCert(t, consPriv, "test-chain", now.Add(-time.Hour), now.Add(24*time.Hour))
+	host, _ := startFibre(t, cert, &fakeFibre{download: func(context.Context, *fibretypes.DownloadShardRequest) (*fibretypes.DownloadShardResponse, error) {
+		return bigShard(64), nil
+	}})
+
+	for _, addr := range []string{"127.0.0.1:9000", "10.0.0.5:443", "192.168.1.1:443", "169.254.1.1:443", "[::1]:443", "0.0.0.0:443"} {
+		in := probeInput(addr, consPub)
+		in.AllowUnroutableHost = false
+		m := Run(context.Background(), in, mustCoder(t), StepTimeouts{})
+		if m.Outcome != OutcomeBadHost {
+			t.Errorf("%s: outcome=%s, want %s", addr, m.Outcome, OutcomeBadHost)
+			continue
+		}
+		if m.TCP.Attempted {
+			t.Errorf("%s: a connection was attempted", addr)
+		}
+		cls, reason := Classify(Evidence{Assigned: true, Attested: true, Phase: PhaseInWindow, Outcome: m.Outcome})
+		if cls == ClassFault {
+			t.Errorf("%s: recorded as a fault (%s)", addr, reason)
+		}
+		if cls != ClassNotRegistered {
+			t.Errorf("%s: class=%s, want %s", addr, cls, ClassNotRegistered)
+		}
+	}
+
+	// A real address is still probed, and the devnet escape still works.
+	in := probeInput(host, consPub)
+	if m := Run(context.Background(), in, mustCoder(t), StepTimeouts{}); m.Outcome == OutcomeBadHost {
+		t.Fatalf("the escape did not admit a loopback test server: %s", m.RawError)
 	}
 }

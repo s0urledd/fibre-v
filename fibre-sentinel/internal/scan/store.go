@@ -67,6 +67,15 @@ type PersistState struct {
 	HostSeedAt       int64        `json:"host_seed_height,omitempty"`
 	ParamFingerprint string       `json:"protocol_params_fingerprint"`
 	ParamHistory     []ParamEntry `json:"param_history"`
+	// LastReconcileHeight is the height of the last params reconcile. It is
+	// persisted because the reconcile's log line is the record of a params
+	// change that arrived without an event, and that line names the interval
+	// the change landed in. Kept only in memory, the first reconcile after
+	// every restart named an interval of one reconcile period ending at the
+	// current height — which is wrong whenever the process was down for
+	// longer, in the direction that understates how many publications carry
+	// the old deadline.
+	LastReconcileHeight int64 `json:"last_reconcile_height,omitempty"`
 	// Gaps are height ranges the scanner had to skip because the node could
 	// not serve them. Published, never hidden: a publication in one of these
 	// blocks is unknown to this observer.

@@ -13,13 +13,20 @@ import (
 )
 
 type allSnapshot struct {
-	Obligations   obligationsJSON          `json:"obligations"`
-	Classes       map[string]int64         `json:"classes"`
-	Faults        int64                    `json:"faults"`
-	ProbeCount    int64                    `json:"probe_count"`
-	Gaps          int64                    `json:"probe_gaps"`
-	Validators    int64                    `json:"validators_probed"`
-	ServeRate     struct{ Num, Den int64 } `json:"serve_rate"`
+	Obligations obligationsJSON          `json:"obligations"`
+	Classes     map[string]int64         `json:"classes"`
+	Faults      int64                    `json:"faults"`
+	ProbeCount  int64                    `json:"probe_count"`
+	Gaps        int64                    `json:"probe_gaps"`
+	Validators  int64                    `json:"validators_probed"`
+	ServeRate   struct{ Num, Den int64 } `json:"serve_rate"`
+	Coverage    struct{ Num, Den int64 } `json:"serve_rate_coverage"`
+	HeldOut     map[string]int64         `json:"serve_rate_held_out"`
+	Attestation struct {
+		Attested   int64 `json:"attested_probes"`
+		Unattested int64 `json:"unattested_probes"`
+		Unknown    int64 `json:"unknown_probes"`
+	} `json:"attestation"`
 	ReachWindow   struct{ Num, Den int64 } `json:"reachability_window"`
 	VantageHealth struct {
 		Suspect []struct{ At string } `json:"suspect"`
@@ -157,6 +164,25 @@ func TestRollupAndPruneKeepTheAllWindow(t *testing.T) {
 		if after.Classes[c] != n {
 			t.Errorf("class %s: %d -> %d", c, n, after.Classes[c])
 		}
+	}
+	// docs/verdicts.md tells a reader to check the answer against itself.
+	// The classes are folded in from the rollup on this window; the
+	// attestation counts have to be folded in with them or the identity
+	// fails on exactly the window a reader would check it on.
+	for _, c := range []struct {
+		name string
+		snap allSnapshot
+	}{{"before the prune", before}, {"after the prune", after}} {
+		att := c.snap.Attestation
+		if got, want := att.Attested+att.Unattested+att.Unknown, c.snap.Coverage.Den; got != want {
+			t.Errorf("%s: attested+unattested+unknown = %d, serve_rate_coverage.den = %d", c.name, got, want)
+		}
+		if got, want := c.snap.HeldOut["UNATTESTED"], att.Unattested; got != want {
+			t.Errorf("%s: serve_rate_held_out.UNATTESTED = %d, attestation.unattested_probes = %d", c.name, got, want)
+		}
+	}
+	if after.Attestation != before.Attestation {
+		t.Errorf("attestation changed across the prune: before %+v, after %+v", before.Attestation, after.Attestation)
 	}
 	var afterVals struct {
 		Validators []valSnapshot `json:"validators"`

@@ -35,6 +35,12 @@ import (
 // did not complete TLS.
 func stabilityFixture(t *testing.T) *httptest.Server {
 	t.Helper()
+	ts, _ := stabilityFixtureStore(t)
+	return ts
+}
+
+func stabilityFixtureStore(t *testing.T) (*httptest.Server, *store.Store) {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -152,12 +158,22 @@ func stabilityFixture(t *testing.T) *httptest.Server {
 			}
 		}
 	}
+	// Both validators advertise a Fibre endpoint. The "answering now" census
+	// is taken over the validators that do, so a fixture without endpoints
+	// would be a network with nothing registered.
+	for _, a := range []string{"v1", "v2"} {
+		if _, err := st.DB().Exec(`INSERT INTO endpoints
+			(validator_cons_address, host, first_seen_at, first_seen_height, last_seen_at, last_seen_height)
+			VALUES (?, ?, ?, ?, ?, ?)`, a, a+":4433", store.TS(now.Add(-2*time.Hour)), 99, store.TS(now), 99); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := st.StartRun("collector", "test", "t", now); err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewServer(api.New(st, "test"))
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, st
 }
 
 type stabilityValidator struct {
@@ -528,5 +544,55 @@ func TestLatencyIsServiceTimeAndSizeNormalised(t *testing.T) {
 	}
 	if net.P95 == nil || *net.P95 >= 60000 {
 		t.Errorf("network p95 = %v, want a success rather than the 60s failures", net.P95)
+	}
+}
+
+// The "answering now" census counts validators that advertise a Fibre
+// endpoint, not every validator this observer has ever probed. Mocha jails
+// and unbonds routinely, and an operator that left the bonded provider list
+// keeps its last handshake in the record forever: counting it meant the
+// denominator only ever grew, and the numerator was printed on the overview
+// beside registered_endpoints — a count from a different population — so the
+// tile could read more validators answering than there are endpoints to
+// answer from.
+func TestReachabilityCensusFollowsTheRegistry(t *testing.T) {
+	ts, st := stabilityFixtureStore(t)
+	// Pinned, so each read is computed rather than served from the snapshot
+	// the previous one filled; the pin also exercises the as_of branch of the
+	// registry query, which has its own bounds.
+	read := func() (num, den int64, registered int64) {
+		t.Helper()
+		var net struct {
+			Now        rateJSON `json:"reachability"`
+			Registered int64    `json:"registered_endpoints"`
+		}
+		q := "/v1/network?window=all&as_of=" + time.Now().UTC().Format(time.RFC3339)
+		if code := get(t, ts, q, &net); code != 200 {
+			t.Fatalf("network: %d", code)
+		}
+		return net.Now.Num, net.Now.Den, net.Registered
+	}
+	num, den, registered := read()
+	if num != 1 || den != 2 || registered != 2 {
+		t.Fatalf("both registered: %d/%d over %d endpoints, want 1/2 over 2", num, den, registered)
+	}
+	if den > registered {
+		t.Fatalf("the census (%d) is larger than the registry it is printed against (%d)", den, registered)
+	}
+
+	// v2 leaves the bonded provider list. Its last handshake, a failed one,
+	// stays in the record and must stop being counted the moment its
+	// endpoint closes: the tile says how many registered endpoints answer,
+	// and v2 no longer has one.
+	if _, err := st.DB().Exec(`UPDATE endpoints SET closed_at = ?, closed_height = ?, closed_reason = ?
+		WHERE validator_cons_address = ?`, store.TS(time.Now().UTC().Add(-time.Second)), 120, "left_bonded_provider_list", "v2"); err != nil {
+		t.Fatal(err)
+	}
+	num, den, registered = read()
+	if registered != 1 {
+		t.Fatalf("registered_endpoints = %d after v2 left, want 1", registered)
+	}
+	if num != 1 || den != 1 {
+		t.Fatalf("census = %d/%d after v2 left, want 1/1: a closed endpoint is not answering and not counted", num, den)
 	}
 }

@@ -2,6 +2,8 @@ package policy
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,10 @@ import (
 
 func newTest(t *testing.T, cfg Config) *Policy {
 	t.Helper()
+	// A process-local master secret is refused outside tests, because the
+	// day commitments it stamps cannot be verified after a restart. These
+	// tests are the case it exists for.
+	cfg.Sampling.AllowEphemeralSecret = true
 	p, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +274,7 @@ func TestDecisionsAreBoundedAndEvictOldestFirst(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	hash := func(i int) string { return fmt.Sprintf("%08x", i) }
 	for i := 0; i < maxDecisions+1000; i++ {
-		p.remember(scan.Publication{PromiseHash: hash(i), SettlementTime: base.Add(time.Duration(i) * time.Second)}, i%2 == 0)
+		p.remember(scan.Publication{PromiseHash: hash(i), SettlementTime: base.Add(time.Duration(i) * time.Second)}, i%2 == 0, 1, "test")
 	}
 	if len(p.decisions) >= maxDecisions {
 		t.Fatalf("decisions grew to %d, bound is %d", len(p.decisions), maxDecisions)
@@ -303,5 +309,133 @@ func TestDecisionsAreBoundedAndEvictOldestFirst(t *testing.T) {
 	p.Forget(newest)
 	if _, ok := p.decisions[newest]; ok {
 		t.Fatalf("Forget did not drop the decision")
+	}
+}
+
+// Every row carries the probability its publication was drawn at, and the
+// commit-and-reveal audit the methodology page publishes recomputes exactly
+// that: seed, hash, compare to p. The probability moves with load, and the
+// rows are stamped hours after the decision, so reading the process-wide last
+// value gave a publication admitted at p=1 rows that said p=0.24. A verifier
+// following the recipe would then derive a sample that does not match the
+// record — which reads as the observer having probed something other than
+// what it drew.
+func TestSamplingForIsThePublicationsOwnDraw(t *testing.T) {
+	cfg := Default()
+	cfg.Caps.Global.BytesPerHour = 50 << 30
+	p := newTest(t, cfg)
+	now := time.Now()
+	rows := make([]int, 100)
+	for i := range rows {
+		rows[i] = 123
+	}
+
+	// The first publication is drawn while nothing is projected, so it is
+	// admitted at p = 1.
+	first := pubOf(hexHash(1), now, 128<<20, rows...)
+	if ok, _ := p.Admit(first, false); !ok {
+		t.Fatal("the first publication under an empty projection was denied")
+	}
+	firstP, firstBinding, _ := p.SamplingFor(first)
+	if firstP != 1 {
+		t.Fatalf("the first publication's p = %.3f, want 1", firstP)
+	}
+
+	// Load builds until a cap binds and p falls.
+	for i := 0; i < 60; i++ {
+		p.Admit(pubOf(hexHash(1000+i), now.Add(-time.Duration(i)*time.Minute), 128<<20, rows...), false)
+	}
+	nowP, _ := p.State()
+	if nowP >= 1 {
+		t.Fatalf("no cap bound after 60 large publications (p = %.3f); the fixture cannot show the bug", nowP)
+	}
+
+	// The first publication's stamp must not have moved with the load.
+	againP, againBinding, _ := p.SamplingFor(first)
+	if againP != firstP || againBinding != firstBinding {
+		t.Fatalf("the first publication's draw changed from p=%.3f/%s to p=%.3f/%s as other publications were drawn",
+			firstP, firstBinding, againP, againBinding)
+	}
+	if againP == nowP {
+		t.Fatalf("the first publication reports the process-wide current p (%.3f) rather than its own", nowP)
+	}
+
+	// Every publication reports a p that is its own, and a denial's reason
+	// quotes the same number.
+	for i := 0; i < 60; i++ {
+		pub := pubOf(hexHash(1000+i), now.Add(-time.Duration(i)*time.Minute), 128<<20, rows...)
+		gotP, gotBinding, commitment := p.SamplingFor(pub)
+		if gotP <= 0 || gotP > 1 {
+			t.Fatalf("publication %d: p = %.3f, outside (0,1]", i, gotP)
+		}
+		if gotBinding == "" {
+			t.Fatalf("publication %d: no binding cap recorded", i)
+		}
+		if commitment == "" {
+			t.Fatalf("publication %d: no day commitment", i)
+		}
+		if ok, reason := p.Admit(pub, false); !ok {
+			if want := fmt.Sprintf("p=%.3f", gotP); !strings.Contains(reason, want) {
+				t.Fatalf("publication %d denied with reason %q, which does not quote its own %s", i, reason, want)
+			}
+		}
+	}
+
+	// An already-started publication is not a draw, and says so rather than
+	// borrowing a probability it was never subject to.
+	started := pubOf(hexHash(7777), now, 128<<20, rows...)
+	if ok, _ := p.Admit(started, true); !ok {
+		t.Fatal("an already-started publication was denied")
+	}
+	if gotP, gotBinding, _ := p.SamplingFor(started); gotP != 1 || gotBinding != "already_started" {
+		t.Fatalf("already-started publication: p=%.3f binding=%q, want 1/already_started", gotP, gotBinding)
+	}
+}
+
+// The sampling audit is: reveal the day's secret afterwards, recompute each
+// publication's draw, check it against the rows. A master secret that is new
+// on every start makes every commitment already published unverifiable — not
+// visibly wrong, just impossible to check, which for an observer whose claim
+// is "recompute this yourself" is the worse failure. It has to be refused
+// rather than warned about, because nothing downstream can detect it.
+func TestEphemeralSamplingSecretIsRefusedOutsideTests(t *testing.T) {
+	cfg := Default()
+	if cfg.Sampling.MasterSecretFile != "" {
+		t.Fatalf("the default config now sets a secret file (%q); this test no longer covers the case", cfg.Sampling.MasterSecretFile)
+	}
+	if _, err := New(cfg); err == nil {
+		t.Fatal("a policy with no master_secret_file was accepted")
+	} else if !strings.Contains(err.Error(), "master_secret_file") {
+		t.Fatalf("the refusal does not name what to set: %v", err)
+	}
+
+	// The escape exists, and says what it is.
+	cfg.Sampling.AllowEphemeralSecret = true
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatalf("allow_ephemeral_secret did not permit it: %v", err)
+	}
+	if !p.EphemeralSecret() {
+		t.Fatal("a process-local secret does not report itself as one")
+	}
+
+	// A configured path is the ordinary case and reports itself as durable.
+	cfg2 := Default()
+	cfg2.Sampling.MasterSecretFile = filepath.Join(t.TempDir(), "sampling-master.key")
+	p2, err := New(cfg2)
+	if err != nil {
+		t.Fatalf("a configured secret file was refused: %v", err)
+	}
+	if p2.EphemeralSecret() {
+		t.Fatal("a secret read from a file reports itself as process-local")
+	}
+	// And it survives: a second policy over the same file draws the same way.
+	p3, err := New(cfg2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	day := time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC)
+	if p2.DayCommitment(day) != p3.DayCommitment(day) {
+		t.Fatal("two policies over the same secret file produced different day commitments")
 	}
 }

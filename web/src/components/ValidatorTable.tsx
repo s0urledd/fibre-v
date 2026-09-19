@@ -20,6 +20,7 @@ const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode | 
   { key: "reach", label: "Reachability", dir: 1, info: <>
       <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes with the registered Fibre endpoint, from one location. Nothing is downloaded. Whether the certificate is the right one is a separate figure, Endorsed, on the validator&rsquo;s page.</p>
       <p>This is not signing uptime. A validator can sign every block with its Fibre endpoint down, and the reverse.</p>
+      <p>Under {MIN_RATED} handshakes the figure has no gauge and is not ranked: too few to lean on.</p>
     </> },
   { key: "serve", label: "Serve rate", dir: 1, info: <>
       <p>Obligations kept: shards this validator signed for and handed over at the last probe before the retention deadline, out of the obligations we saw kept or broken. One observation per shard, not per probe.</p>
@@ -28,6 +29,7 @@ const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode | 
   { key: "throughput", label: "Throughput", dir: -1, info: <>
       <p>Bytes handed over per second during the download itself, median over healthy probes. Connecting and checking the certificate are not in it.</p>
       <p>Measured from one location, so part of every figure is our own path.</p>
+      <p>Under {MIN_RATED} healthy probes the figure is printed but not ranked.</p>
     </> },
   { key: "faults", label: "Faults", dir: -1, info: <>
       <p>The validator answered but did not hand over a shard it had signed for.</p>
@@ -44,8 +46,14 @@ function keyValue(v: Validator, k: SortKey): number | null {
     // the rows that have no rate at all, in either direction.
     case "serve": return enoughToRank(v.obligations?.rate) ? rv(v.obligations.rate) : null;
     case "faults": return v.faults ?? v.classes.FAULT ?? 0;
-    case "reach": return bonded(v) ? rv(v.reachability_window) : null;
-    case "throughput": return v.serve_bytes_per_second ?? null;
+    // Reachability ranks under the same floor as the serve rate. A validator
+    // that registered an hour ago has a handful of handshakes, and this
+    // column sorts worst-first: one failed handshake out of two would have
+    // put it above operators that have been down all week on hundreds. The
+    // cell already prints such a figure without a gauge; it must not sort by
+    // it either.
+    case "reach": return bonded(v) && enoughToRank(v.reachability_window) ? rv(v.reachability_window) : null;
+    case "throughput": return v.serve_throughput_sample >= MIN_RATED ? (v.serve_bytes_per_second ?? null) : null;
     default: return null;
   }
 }

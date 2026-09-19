@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -597,6 +598,115 @@ func TestAvatarRoute(t *testing.T) {
 		r.Body.Close()
 		if r.StatusCode != 404 {
 			t.Errorf("%s: %d, want 404", p, r.StatusCode)
+		}
+	}
+}
+
+// A list that stops at its limit without saying so reads as the whole
+// answer. On /v1/probes that matters more than elsewhere: docs/verdicts.md
+// points a reader at ?at=<scheduled_at> as the evidence behind a
+// correlated-failure exclusion, and a suspect point can hold more rows than
+// the maximum limit allows. Ordering is started_at DESC and since is a lower
+// bound, so before is what makes the list walkable at all.
+func TestProbesReportTheirBoundAndCanBeWalked(t *testing.T) {
+	ts, _ := serverAndStore(t)
+	type page struct {
+		Probes []struct {
+			StartedAt string `json:"started_at"`
+		} `json:"probes"`
+		Limit      int    `json:"limit"`
+		Truncated  bool   `json:"truncated"`
+		NextBefore string `json:"next_before"`
+	}
+	var all page
+	if code := get(t, ts, "/v1/probes?limit=1000", &all); code != 200 {
+		t.Fatalf("probes: %d", code)
+	}
+	if len(all.Probes) < 2 {
+		t.Skip("the sample store has too few probes to page")
+	}
+	if all.Truncated {
+		t.Fatalf("a full page of %d rows reports truncated with limit 1000", len(all.Probes))
+	}
+
+	var first page
+	if code := get(t, ts, "/v1/probes?limit=1", &first); code != 200 {
+		t.Fatalf("probes limit=1: %d", code)
+	}
+	if len(first.Probes) != 1 || first.Limit != 1 {
+		t.Fatalf("limit=1 returned %d rows, limit field %d", len(first.Probes), first.Limit)
+	}
+	if !first.Truncated {
+		t.Fatal("a page cut short by its limit did not say so")
+	}
+	if first.NextBefore == "" {
+		t.Fatal("a truncated page carries no cursor to continue from")
+	}
+
+	var second page
+	if code := get(t, ts, "/v1/probes?limit=1&before="+url.QueryEscape(first.NextBefore), &second); code != 200 {
+		t.Fatalf("probes before: %d", code)
+	}
+	if len(second.Probes) != 1 {
+		t.Fatalf("the second page has %d rows, want 1", len(second.Probes))
+	}
+	if second.Probes[0].StartedAt == first.Probes[0].StartedAt {
+		t.Fatal("before did not advance: the second page repeats the first row")
+	}
+	if code := get(t, ts, "/v1/probes?before=not-a-time", nil); code != 400 {
+		t.Errorf("a malformed before was %d, want 400", code)
+	}
+}
+
+// ?at= is the link the dashboard publishes beside every correlated-failure
+// point: "here are the rows we left out". It filtered on the raw string, so a
+// timestamp in any spelling but the stored one scanned the whole table and
+// answered with nothing — which reads as "there were no rows at that point",
+// the opposite of what the link is for.
+func TestProbesAtAcceptsThePublishedSpellingAndRejectsNonsense(t *testing.T) {
+	ts, _ := serverAndStore(t)
+	var probes struct {
+		Probes []struct {
+			ScheduledAt string `json:"scheduled_at"`
+		} `json:"probes"`
+	}
+	if code := get(t, ts, "/v1/probes?limit=1", &probes); code != 200 || len(probes.Probes) == 0 {
+		t.Skip("the sample record has no probes")
+	}
+	at := probes.Probes[0].ScheduledAt
+
+	var byAt struct {
+		Probes []struct {
+			ScheduledAt string `json:"scheduled_at"`
+		} `json:"probes"`
+	}
+	if code := get(t, ts, "/v1/probes?at="+url.QueryEscape(at), &byAt); code != 200 {
+		t.Fatalf("at=%s: %d", at, code)
+	}
+	if len(byAt.Probes) == 0 {
+		t.Fatalf("at=%s matched no rows, though that is the value the API itself printed", at)
+	}
+	for _, p := range byAt.Probes {
+		if p.ScheduledAt != at {
+			t.Errorf("at=%s returned a row scheduled at %s", at, p.ScheduledAt)
+		}
+	}
+
+	// The same instant in plain RFC 3339 reaches the same rows.
+	if parsed, err := time.Parse(time.RFC3339Nano, at); err == nil {
+		var alt struct {
+			Probes []struct{} `json:"probes"`
+		}
+		if code := get(t, ts, "/v1/probes?at="+url.QueryEscape(parsed.UTC().Format(time.RFC3339Nano)), &alt); code != 200 {
+			t.Errorf("RFC 3339 spelling: %d", code)
+		} else if len(alt.Probes) != len(byAt.Probes) {
+			t.Errorf("RFC 3339 spelling matched %d rows, the stored spelling matched %d", len(alt.Probes), len(byAt.Probes))
+		}
+	}
+
+	for _, bad := range []string{"yesterday", "2026-09-18", "1758196800"} {
+		if code := get(t, ts, "/v1/probes?at="+url.QueryEscape(bad), nil); code != 400 {
+			t.Errorf("at=%q was %d, want 400: an unparseable point must not be scanned for", bad, code)
 		}
 	}
 }

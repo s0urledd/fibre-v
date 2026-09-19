@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -52,6 +53,16 @@ var Files = []FileSpec{
 	{"host_history.jsonl", "time"},
 }
 
+// StateFile is the scanner's state, carried in every export as a snapshot
+// rather than as a day's lines. It is not a record file: it is the current
+// value of the param history, the scan gaps, the host seed and the scan
+// frontier, and sentinel-recompute needs all four to redraw a verdict the way
+// the observer drew it. Without it the tool reads no gaps, so a late shadow
+// verdict that the record defers on a scan gap is redrawn as a decided one,
+// and a host it cannot resolve is a difference rather than a known blind
+// spot. A few kilobytes, and the piece that makes the rest checkable.
+const StateFile = "state.json"
+
 // Member describes one file inside an export.
 type Member struct {
 	Name      string `json:"name"`
@@ -63,6 +74,11 @@ type Member struct {
 	LateLines int64  `json:"late_lines"`
 	Bytes     int64  `json:"bytes"`
 	SHA256    string `json:"sha256"`
+	// SkewedLines are records dated more than one day past the export's day:
+	// a clock step on the vantage, not a record of the future. They are in
+	// this export, with the day's lines, and named here because the
+	// alternative is a file that never exports again.
+	SkewedLines int64 `json:"skewed_lines,omitempty"`
 	// From and To are the byte range of the source file the lines were
 	// read from, so a holder of the original file can re-derive the member.
 	From int64 `json:"source_from"`
@@ -76,7 +92,10 @@ type Manifest struct {
 	GeneratedAt time.Time `json:"generated_at"`
 	Build       string    `json:"build"`
 	Files       []Member  `json:"files"`
-	Rule        string    `json:"rule"`
+	// State is the scanner state snapshot carried beside the day's lines.
+	// Absent only on an export built from a data directory that had none.
+	State *Member `json:"state,omitempty"`
+	Rule  string  `json:"rule"`
 }
 
 // Entry is one line of the index the API serves.
@@ -194,6 +213,14 @@ func (b *Builder) build(day string, st *state, now time.Time) error {
 	}
 	man := Manifest{Vantage: b.Vantage, Day: day, GeneratedAt: now.UTC(), Build: b.Build, Rule: rule}
 	newOffsets := map[string]int64{}
+	// The whole state, as it stands, not the part dated today: it is a
+	// snapshot, and every export carries the one current at the time it was
+	// built so that any single tarball is enough to redraw the verdicts of
+	// the day it holds.
+	stateBytes, stateErr := os.ReadFile(filepath.Join(b.DataDir, StateFile))
+	if stateErr != nil && !errors.Is(stateErr, fs.ErrNotExist) {
+		return stateErr
+	}
 	var tarBuf bytes.Buffer
 	gz := gzip.NewWriter(&tarBuf)
 	tw := tar.NewWriter(gz)
@@ -208,6 +235,15 @@ func (b *Builder) build(day string, st *state, now time.Time) error {
 		if err := addMember(tw, f.Name, data, now); err != nil {
 			return err
 		}
+	}
+	if stateBytes != nil {
+		sum := sha256.Sum256(stateBytes)
+		man.State = &Member{Name: StateFile, Lines: 1, Bytes: int64(len(stateBytes)), SHA256: hex.EncodeToString(sum[:])}
+		if err := addMember(tw, StateFile, stateBytes, now); err != nil {
+			return err
+		}
+	} else if b.Logf != nil {
+		b.Logf("WARNING: export %s: no %s in the data directory, so this export cannot be recomputed on its own (scan gaps, the param history and the host seed all live there)", day, StateFile)
 	}
 	manJSON, err := json.MarshalIndent(man, "", "  ")
 	if err != nil {
@@ -313,7 +349,22 @@ func collect(path string, f FileSpec, day string, from int64) (Member, []byte, i
 			d = day
 		}
 		if d > day {
-			break // the first record of a later day: tomorrow's export starts here
+			// The first record of a later day: tomorrow's export starts
+			// here — unless it is dated so far ahead that no export will
+			// ever reach it. Builds advance one calendar day at a time up
+			// to yesterday, so a single line carrying a forward clock step
+			// froze this file's offset for good: every later export shipped
+			// an empty member for it, with no error and nothing in the
+			// manifest but lines: 0, while the record went on growing
+			// behind it. A line the clock cannot justify is exported with
+			// the day being built, where the record's own rule puts
+			// anything undated, and counted so the manifest says it
+			// happened.
+			if d > nextDay(day) {
+				m.SkewedLines++
+			} else {
+				break
+			}
 		}
 		pos += int64(len(raw))
 		out.Write(raw)
@@ -327,6 +378,17 @@ func collect(path string, f FileSpec, day string, from int64) (Member, []byte, i
 	m.Bytes = int64(out.Len())
 	m.SHA256 = hex.EncodeToString(h.Sum(nil))
 	return m, out.Bytes(), pos, nil
+}
+
+// nextDay is the calendar day after a YYYY-MM-DD string. An unparseable day
+// yields itself, which makes the look-ahead test above false and keeps the
+// old behaviour for anything this cannot reason about.
+func nextDay(day string) string {
+	t, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		return day
+	}
+	return t.AddDate(0, 0, 1).Format("2006-01-02")
 }
 
 // emptySHA is SHA-256 of nothing, the digest of an empty member.

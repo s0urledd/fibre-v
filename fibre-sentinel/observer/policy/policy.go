@@ -36,7 +36,12 @@ type Config struct {
 	// PointsPerPublication is how many probes one publication costs a
 	// validator: set by the prober from its schedule, not from the file.
 	PointsPerPublication float64 `yaml:"-"`
-	Capacity             struct {
+	// DownloadsPerPublication is how many of those points transfer bytes:
+	// the in-window points and the grace point, not the post point, which
+	// expects NOT_FOUND. Set from the same flag as PointsPerPublication so
+	// the byte side and the request side of the projection cannot drift.
+	DownloadsPerPublication float64 `yaml:"-"`
+	Capacity                struct {
 		FloorRows         int   `yaml:"floor_rows"`          // rows of the smallest validator the capacity model is stated for (148)
 		FloorValidatorBps int64 `yaml:"floor_validator_bps"` // assumed serving capacity of a floor validator, bits per second (0.65 Gbps, UNVERIFIED)
 		ScaleWithRows     bool  `yaml:"scale_with_rows"`     // cap(rows) = cap(floor) * rows / floor_rows
@@ -54,9 +59,14 @@ type Config struct {
 		} `yaml:"global"`
 	} `yaml:"caps"`
 	Sampling struct {
-		MasterSecretFile   string        `yaml:"master_secret_file"`
-		ProjectionLookback time.Duration `yaml:"projection_lookback"`
-		AlwaysProbe        []string      `yaml:"always_probe"` // promise hashes exempt from sampling
+		MasterSecretFile string `yaml:"master_secret_file"`
+		// AllowEphemeralSecret permits a process-local master secret, which
+		// is only ever right in a test: the day commitments it produces
+		// cannot be verified after a restart. Not settable from YAML, so a
+		// deployment cannot reach it by accident.
+		AllowEphemeralSecret bool          `yaml:"-"`
+		ProjectionLookback   time.Duration `yaml:"projection_lookback"`
+		AlwaysProbe          []string      `yaml:"always_probe"` // promise hashes exempt from sampling
 	} `yaml:"sampling"`
 	Backoff struct {
 		SkipDownloadAfter int           `yaml:"skip_download_after"` // consecutive transport failures before L4 is skipped
@@ -150,9 +160,15 @@ func ShardBytes(blobSize uint32, originalRows, rows int) int64 {
 	return probe.ShardBytes(blobSize, originalRows, rows)
 }
 
-// downloadsPerBlob is how many schedule points transfer bytes (in-window
-// points plus the grace point; the post point expects NOT_FOUND).
-const downloadsPerBlob = 5
+// defaultDownloadsPerBlob is how many schedule points transfer bytes under
+// the default schedule (four in-window points plus the grace point; the post
+// point expects NOT_FOUND). It is only the fallback: the real count comes
+// from the schedule through Config.DownloadsPerPublication, because the
+// request side of the projection already follows the schedule and a constant
+// on the byte side would drift from it the first time -in-window-probes is
+// changed — projecting too few bytes, holding p at 1, and letting the hard
+// caps bite part-way through schedules instead.
+const defaultDownloadsPerBlob = 5.0
 
 // event is one accounted probe.
 type event struct {
@@ -189,7 +205,15 @@ type Policy struct {
 	lastCap   string
 	lastProj  Projection
 	logf      func(string, ...any)
+	// ephemeral: the master secret is process-local (tests only). Published
+	// beside the commitment so a reader is never told to verify something
+	// that cannot be verified.
+	ephemeral bool
 }
+
+// EphemeralSecret reports whether the master secret is process-local, and so
+// whether the day commitments this policy stamps will survive a restart.
+func (p *Policy) EphemeralSecret() bool { return p.ephemeral }
 
 type pubLoad struct {
 	settled  time.Time
@@ -200,10 +224,26 @@ type pubLoad struct {
 
 // New builds a Policy. The master secret is read from cfg.Sampling.
 // MasterSecretFile, or generated (and written, 0600) if the file is absent
-// and the path is set; with no path a process-local random secret is used.
+// and the path is set.
+//
+// With no path the secret is process-local, which silently breaks the only
+// thing the sampling machinery exists for. Every row carries a commitment to
+// that day's secret, /v1/sampling publishes it, and the audit the methodology
+// page describes is: reveal the secret after the day closes, recompute each
+// publication's draw, check it against the rows. A secret that does not
+// survive a restart makes the commitments already published unverifiable —
+// not wrong in a way anyone can see, just impossible to check, which for an
+// observer whose claim is "recompute this yourself" is the worse failure.
+// So it is refused unless the caller says in as many words that this is a
+// test.
 func New(cfg Config) (*Policy, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
+	}
+	if cfg.Sampling.MasterSecretFile == "" && !cfg.Sampling.AllowEphemeralSecret {
+		return nil, errors.New("sampling: master_secret_file is not set, so the master secret would be new on every restart " +
+			"and every day commitment already published would become unverifiable; set it (deploy/README.md) " +
+			"or set allow_ephemeral_secret for a test")
 	}
 	master, err := loadOrCreateSecret(cfg.Sampling.MasterSecretFile)
 	if err != nil {
@@ -211,6 +251,7 @@ func New(cfg Config) (*Policy, error) {
 	}
 	return &Policy{
 		cfg:        cfg,
+		ephemeral:  cfg.Sampling.MasterSecretFile == "",
 		master:     master,
 		validators: map[string]*validatorState{},
 		recentPubs: map[string]pubLoad{},
@@ -295,13 +336,23 @@ func (p *Policy) observe(pub scan.Publication, now time.Time) {
 	if _, ok := p.recentPubs[pub.PromiseHash]; ok {
 		return
 	}
-	if now.Sub(pub.SettlementTime) > p.cfg.Sampling.ProjectionLookback {
+	// In the lookback if its settlement is, or if any of its schedule is
+	// still to come. Testing the settlement time alone dropped every
+	// publication the prober had backlogged — after a restart, or while the
+	// scanner catches up — although their probes were still going to be run
+	// and their bytes still going to be spent. The projection then said the
+	// vantage was idle, p stayed at 1, everything was admitted, and the hard
+	// per-validator caps denied probes part-way through the schedules. The
+	// schedule is packed toward the deadline, so the points lost that way
+	// are the late in-window and grace ones: the readings that catch an
+	// early prune.
+	if now.Sub(pub.SettlementTime) > p.cfg.Sampling.ProjectionLookback && !pub.MustServeUntil.After(now) {
 		return
 	}
 	pl := pubLoad{settled: pub.SettlementTime, perVal: map[string]int64{}, perValRs: map[string]int{}}
 	orig := pub.Assignment.ProtocolParams.OriginalRows
 	for _, v := range pub.Assignment.Validators {
-		b := ShardBytes(pub.Promise.BlobSize, orig, v.RowCount) * downloadsPerBlob
+		b := int64(float64(ShardBytes(pub.Promise.BlobSize, orig, v.RowCount)) * p.cfg.downloadsPerPublication())
 		pl.perVal[v.Address] = b
 		pl.perValRs[v.Address] = v.RowCount
 		pl.global += b
@@ -322,6 +373,14 @@ func (c Config) pointsPerPublication() float64 {
 		return c.PointsPerPublication
 	}
 	return defaultPointsPerPublication
+}
+
+// downloadsPerPublication is how many of those points transfer bytes.
+func (c Config) downloadsPerPublication() float64 {
+	if c.DownloadsPerPublication > 0 {
+		return c.DownloadsPerPublication
+	}
+	return defaultDownloadsPerBlob
 }
 
 // projectedP computes the admission probability from the trailing lookback:
@@ -512,33 +571,49 @@ func (p *Policy) Admit(pub scan.Publication, alreadyStarted bool) (bool, string)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if alreadyStarted {
-		p.remember(pub, true)
+		// Not a draw: the schedule was already running when the policy was
+		// asked, so it is carried to its end whatever the load is now. Its
+		// remaining points are still going to be spent, though, so they stay
+		// in the projection — otherwise a restart mid-schedule makes the
+		// vantage look idle and admits a second wave on top of the first.
+		p.observe(pub, time.Now())
+		p.remember(pub, true, 1, "already_started")
 		return true, ""
 	}
 	if d, ok := p.decisions[pub.PromiseHash]; ok {
 		if d.in {
 			return true, ""
 		}
-		return false, p.lastReason(pub)
+		return false, p.reasonFor(pub, d)
 	}
 	for _, h := range p.cfg.Sampling.AlwaysProbe {
 		if h == pub.PromiseHash {
-			p.remember(pub, true)
+			p.remember(pub, true, 1, "always_probe")
 			return true, ""
 		}
 	}
 	now := time.Now()
-	p.observe(pub, now)
+	// The draw is made against the load already in the lookback, not against
+	// a projection this publication has just been added to. Observing first
+	// put the publication's own bytes in the denominator of its own
+	// probability, so two publications arriving at the same instant against
+	// the same prior load did not get the same p — the larger one got a
+	// strictly smaller one. That is a bias running against exactly the
+	// publications whose retention is most worth checking, and it is
+	// invisible in the sampling audit, which checks the draw against the p
+	// on the row and never asks where the p came from. The projection now
+	// lags by one publication, which is the unbiased form.
 	prev := p.lastProj
 	prob, binding := p.projectedP(now)
 	p.lastP, p.lastCap = prob, binding
 	p.logProjection(prev, p.lastProj)
 	in := p.Sampled(pub.PromiseHash, pub.SettlementTime, prob)
-	p.remember(pub, in)
+	p.observe(pub, now)
+	p.remember(pub, in, prob, binding)
 	if in {
 		return true, ""
 	}
-	return false, p.lastReason(pub)
+	return false, p.reasonFor(pub, decision{in: in, p: prob, binding: binding})
 }
 
 // decision is one sticky admit/deny plus the settlement time it belongs to,
@@ -546,6 +621,18 @@ func (p *Policy) Admit(pub scan.Publication, alreadyStarted bool) (bool, string)
 type decision struct {
 	in bool
 	at time.Time
+	// p and binding are the draw's own inputs: the probability this
+	// publication was admitted at and the cap that bound it. They are kept
+	// per publication because the probability moves with load, and the rows
+	// are stamped hours after the decision. Reading the process-wide last
+	// values instead gave every row whatever some other publication's draw
+	// had most recently computed — a publication admitted at p=1 carrying
+	// rows that say p=0.24 — and that is the number the commit-and-reveal
+	// audit recomputes. With it wrong, a verifier following the published
+	// recipe derives a sample that does not match the record, which reads
+	// as the observer having probed something other than what it drew.
+	p       float64
+	binding string
 }
 
 // maxDecisions bounds the sticky admit/deny map. A decision only matters
@@ -568,11 +655,11 @@ const keepDecisions = maxDecisions * 3 / 4
 // did exactly that to every publication still running. Evicting by settlement
 // time instead drops the ones whose windows closed longest ago, which are the
 // ones that can no longer be asked about.
-func (p *Policy) remember(pub scan.Publication, in bool) {
+func (p *Policy) remember(pub scan.Publication, in bool, prob float64, binding string) {
 	if len(p.decisions) >= maxDecisions {
 		p.evictOldestDecisions()
 	}
-	p.decisions[pub.PromiseHash] = decision{in: in, at: pub.SettlementTime}
+	p.decisions[pub.PromiseHash] = decision{in: in, at: pub.SettlementTime, p: prob, binding: binding}
 }
 
 func (p *Policy) evictOldestDecisions() {
@@ -604,8 +691,10 @@ func (p *Policy) Forget(promiseHash string) {
 	delete(p.decisions, promiseHash)
 }
 
-func (p *Policy) lastReason(pub scan.Publication) string {
-	return fmt.Sprintf("budget:p=%.3f:%s:day_commitment=%s", p.lastP, p.lastCap, p.DayCommitment(pub.SettlementTime))
+// reasonFor explains one publication's denial with that publication's own
+// draw, not with the last one the process happened to make.
+func (p *Policy) reasonFor(pub scan.Publication, d decision) string {
+	return fmt.Sprintf("budget:p=%.3f:%s:day_commitment=%s", d.p, d.binding, p.DayCommitment(pub.SettlementTime))
 }
 
 // SamplingFor returns what this publication's admission decision was made
@@ -620,7 +709,15 @@ func (p *Policy) lastReason(pub scan.Publication) string {
 func (p *Policy) SamplingFor(pub scan.Publication) (prob float64, binding, commitment string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.lastP, p.lastCap, p.DayCommitment(pub.SettlementTime)
+	if d, ok := p.decisions[pub.PromiseHash]; ok {
+		return d.p, d.binding, p.DayCommitment(pub.SettlementTime)
+	}
+	// No decision on record: this publication was never put to the policy
+	// (a probe that predates it, or a decision evicted after its window
+	// closed). The process-wide last values are all there is, and they are
+	// marked as such so a reader does not take them for this publication's
+	// own draw.
+	return p.lastP, p.lastCap + ":unrecorded", p.DayCommitment(pub.SettlementTime)
 }
 
 // State returns the last computed admission probability and binding cap,

@@ -15,6 +15,7 @@ import (
 // what is published hashes to the commitment the rows carried.
 func TestRevealDue(t *testing.T) {
 	cfg := Default()
+	cfg.Sampling.AllowEphemeralSecret = true
 	p, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)

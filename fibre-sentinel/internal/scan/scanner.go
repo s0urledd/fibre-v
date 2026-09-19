@@ -68,6 +68,11 @@ type Scanner struct {
 	// lastReconcile is the height of the last params reconcile in this
 	// process; a silent change found at the next one landed after it.
 	lastReconcile int64
+	// unavailableRun counts heights declared unavailable back to back. The
+	// first costs the full grace, because a node briefly behind and a node
+	// that will never have the height look the same for the first minutes;
+	// the ones after it do not, because by then the answer is known.
+	unavailableRun int
 
 	// fibreInactive is set when the x/fibre module does not answer queries
 	// (the chain is on an app version before Fibre). The scanner keeps
@@ -222,6 +227,7 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 			// resume height, and say so
 			s.seedHosts(ctx, st.LastScannedHeight+1)
 		}
+		s.lastReconcile = st.LastReconcileHeight
 		resumeAt := st.LastScannedHeight + 1
 		s.log.Printf("resuming: last_scanned=%d, %d param-history entries%s", st.LastScannedHeight, len(st.ParamHistory),
 			map[bool]string{true: " (x/fibre not active yet)", false: ""}[s.fibreInactive])
@@ -257,14 +263,15 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 	// resumes with the right history.
 	seeded, seedAt := s.hosts.Seeded()
 	if err := s.store.SaveState(PersistState{
-		ChainID:           s.chainID,
-		StartHeight:       start,
-		LastScannedHeight: start - 1,
-		ParamFingerprint:  assign.ParamsV10BlobV0.Fingerprint(),
-		ParamHistory:      s.params.Entries(),
-		HostHistory:       s.hosts.Entries(),
-		HostSeeded:        seeded,
-		HostSeedAt:        seedAt,
+		ChainID:             s.chainID,
+		StartHeight:         start,
+		LastScannedHeight:   start - 1,
+		ParamFingerprint:    assign.ParamsV10BlobV0.Fingerprint(),
+		ParamHistory:        s.params.Entries(),
+		LastReconcileHeight: s.lastReconcile,
+		HostHistory:         s.hosts.Entries(),
+		HostSeeded:          seeded,
+		HostSeedAt:          seedAt,
 	}); err != nil {
 		return 0, err
 	}
@@ -286,16 +293,17 @@ func (s *Scanner) checkpoint(lastScanned int64) {
 	}
 	seeded, seedAt := s.hosts.Seeded()
 	if err := s.store.SaveState(PersistState{
-		ChainID:           s.chainID,
-		StartHeight:       s.startHeight,
-		LastScannedHeight: lastScanned,
-		LastScannedTime:   s.lastBlockTime,
-		ParamFingerprint:  assign.ParamsV10BlobV0.Fingerprint(),
-		ParamHistory:      s.params.Entries(),
-		Gaps:              s.gaps,
-		HostHistory:       s.hosts.Entries(),
-		HostSeeded:        seeded,
-		HostSeedAt:        seedAt,
+		ChainID:             s.chainID,
+		StartHeight:         s.startHeight,
+		LastScannedHeight:   lastScanned,
+		LastScannedTime:     s.lastBlockTime,
+		ParamFingerprint:    assign.ParamsV10BlobV0.Fingerprint(),
+		ParamHistory:        s.params.Entries(),
+		LastReconcileHeight: s.lastReconcile,
+		Gaps:                s.gaps,
+		HostHistory:         s.hosts.Entries(),
+		HostSeeded:          seeded,
+		HostSeedAt:          seedAt,
 	}); err != nil {
 		s.log.Fatalf("save state: %v", err)
 	}
@@ -392,6 +400,15 @@ func rpcBackoff(attempt int) time.Duration {
 // storage.discard_abci_responses = true, never will.
 var unavailableGrace = 10 * time.Minute
 
+// unavailableRunGrace is the grace applied to a height immediately after one
+// already declared unavailable. The full grace exists to tell a node that is
+// briefly behind from one that will never have the height; once a run has
+// been established, the second answer is known, and paying ten minutes per
+// height meant a thousand-block hole — the span the chain allows between a
+// promise and its settlement — took a week to cross, one height at a time,
+// with the feed stopped throughout.
+const unavailableRunGrace = 20 * time.Second
+
 // rpcWarnEvery is how often a still-failing retry is logged as a WARNING,
 // so a long outage leaves a trail without a line every few seconds.
 const rpcWarnEvery = 5 * time.Minute
@@ -430,6 +447,9 @@ func (s *Scanner) retryRPCAt(ctx context.Context, what string, height int64, fn 
 			if attempt > 0 {
 				s.log.Printf("%s: recovered after %d attempts, %s", what, attempt+1, time.Since(start).Round(time.Second))
 			}
+			// The run of unavailable heights, if there was one, is over: the
+			// next hole is judged on the full grace again.
+			s.unavailableRun = 0
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -439,8 +459,15 @@ func (s *Scanner) retryRPCAt(ctx context.Context, what string, height int64, fn 
 			return err
 		}
 		unavailable := IsHeightUnavailable(err)
-		if unavailable && time.Since(start) >= unavailableGrace {
-			return &ErrHeightUnavailable{Height: height, Err: err}
+		if unavailable {
+			grace := unavailableGrace
+			if s.unavailableRun > 0 {
+				grace = unavailableRunGrace
+			}
+			if time.Since(start) >= grace {
+				s.unavailableRun++
+				return &ErrHeightUnavailable{Height: height, Err: err}
+			}
 		}
 		wait := rpcBackoff(attempt)
 		if unavailable {
@@ -514,10 +541,13 @@ const paramReconcileEvery = 60
 // nothing (the record is append-only), so the log line is the record.
 func (s *Scanner) reconcileParams(ctx context.Context, h int64) {
 	since := s.lastReconcile
-	if since == 0 {
-		// first check in this process: checks land on multiples of the
-		// interval, so the previous one was an interval ago
-		since = h - paramReconcileEvery
+	unknownSince := since == 0
+	if unknownSince {
+		// No reconcile on record: this observer has never checked, so the
+		// interval a silent change could have landed in is the whole scan.
+		// Assuming one reconcile period understated it, and this log line is
+		// the only record of which publications carry the old deadline.
+		since = s.startHeight - 1
 	}
 	s.lastReconcile = h
 	var live fibretypes.Params
@@ -546,8 +576,16 @@ func (s *Scanner) reconcileParams(ctx context.Context, h int64) {
 			}
 		}
 		n := s.store.CountSettledBetween(since+1, h)
-		s.log.Printf("WARNING: h=%d: x/fibre params in state differ from the event history (promise_timeout=%s shard_retention=%s withdrawal_delay=%s in state); a change landed without an event somewhere in heights %d-%d, recorded as in force from height %d; %d publication(s) settled in that interval were recorded with the old params and are not rewritten; the retention window is %s",
-			h, live.PaymentPromiseTimeout, live.ShardRetention, live.WithdrawalDelay, since+1, h, h+1, n, direction)
+		counted := fmt.Sprintf("%d publication(s) settled in that interval were recorded with the old params and are not rewritten", n)
+		if unknownSince {
+			// The count is over this process's own appends, so after a
+			// restart it is a floor, not a total. Say which it is rather
+			// than printing a number that reads as complete.
+			counted = fmt.Sprintf("at least %d publication(s) settled in that interval were recorded with the old params and are not rewritten "+
+				"(no earlier reconcile is on record, so the interval is the whole scan and the count covers only this process's appends)", n)
+		}
+		s.log.Printf("WARNING: h=%d: x/fibre params in state differ from the event history (promise_timeout=%s shard_retention=%s withdrawal_delay=%s in state); a change landed without an event somewhere in heights %d-%d, recorded as in force from height %d; %s; the retention window is %s",
+			h, live.PaymentPromiseTimeout, live.ShardRetention, live.WithdrawalDelay, since+1, h, h+1, counted, direction)
 	}
 }
 
@@ -597,6 +635,16 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 	if s.fibreInactive && (h%inactiveRetryEvery == 0 || h == s.startHeight) {
 		s.trySeed(ctx, h)
 	}
+	// The host registry lives in x/valaddr, which does not exist before
+	// app version 10. A scanner started on a pre-activation chain therefore
+	// could not seed, and seeding ran only once per process from resume() —
+	// so a scanner that lived through activation had no host history and no
+	// back-fill path for the rest of its life, because lazySeed returns
+	// while unseeded. Only a restart fixed it, and nothing said so. Retried
+	// on the same cadence as the params seed until it takes.
+	if seeded, _ := s.hosts.Seeded(); !seeded && h%inactiveRetryEvery == 0 {
+		s.seedHosts(ctx, h)
+	}
 	var blk *Block
 	var res *BlockResults
 	if err := s.retryRPCAt(ctx, fmt.Sprintf("fetch block %d", h), h, func() error {
@@ -628,8 +676,17 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 	}
 
 	// 1) param updates first, so must_serve_until for a PayForFibre later in
-	//    the same block sees the new value.
+	//    the same block sees the new value. Only a successful tx changes
+	//    anything: the keeper emits nothing on failure, so an
+	//    EventUpdateFibreParams on a failed tx is not a params change — and
+	//    acting on one would move must_serve_until for every publication
+	//    after it, which is the deadline this observer judges against. The
+	//    host-registration loop below has always applied this rule; this one
+	//    did not.
 	for i, evs := range res.TxEvents {
+		if res.TxCodes[i] != 0 {
+			continue
+		}
 		for _, ev := range evs {
 			p, isUpdate, perr := parseUpdateFibreParams(ev)
 			if !isUpdate {
@@ -713,6 +770,21 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 		}
 		pub, berr := s.buildPublication(ctx, msg, blk, i, txHash, code)
 		if berr != nil {
+			// A height this node cannot serve is a gap, not a crash. The
+			// validator set is fetched at the PROMISE height, which the
+			// chain allows to be up to PaymentPromiseHeightWindow blocks
+			// below the settlement height, so a state-synced node or one
+			// whose retention starts inside that span cannot build these
+			// records at all. Exiting on it produced a restart loop no
+			// supervisor could break — resume() comes back to the same
+			// height and hits the same publication — and recorded nothing,
+			// so the feed stopped with the site showing an unbroken window.
+			// Recorded as a gap at the settlement height instead: the
+			// obligations in it are unobserved and say so, and the scan
+			// moves on.
+			if s.recordGap(h, berr, blk.Time) {
+				continue
+			}
 			s.log.Fatalf("h=%d tx=%d: build publication: %v", h, i, berr)
 		}
 		if err := s.store.AppendPublication(pub); err != nil {
@@ -910,24 +982,44 @@ func (s *Scanner) validatorSet(ctx context.Context, height int64) (valSetEntry, 
 // scan are known only from this. The state at startHeight is asked for
 // first; a node that has pruned it answers with the current registry,
 // which is what a registration older than the scan looks like either way.
+// seedHosts reads the bonded registry into the host history, and leaves the
+// history it was given alone until it has something to put there.
+//
+// It used to empty s.hosts as its first statement and only then make the
+// query — which has no retry, unlike every other chain read here — so one
+// timeout at startup discarded the persisted history AND left seeded false.
+// The next checkpoint wrote the empty history back over state.json, and
+// lazySeed, the one back-fill path for a validator the seed missed, returns
+// immediately while unseeded: the loss was permanent for the life of the
+// process, and the process would not have noticed.
 func (s *Scanner) seedHosts(ctx context.Context, startHeight int64) {
-	s.hosts = NewHostHistory()
 	at, source := startHeight, HostFromSeed
-	provs, err := s.chain.BondedFibreProvidersAt(ctx, startHeight)
-	if err != nil {
+	var provs []FibreProvider
+	err := s.retryRPC(ctx, fmt.Sprintf("bonded registry at height %d", startHeight), func() error {
+		var e error
+		provs, e = s.chain.BondedFibreProvidersAt(ctx, startHeight)
+		return e
+	})
+	if err != nil && !IsModuleInactive(err) {
 		// The start's state is pruned: read the registry at the tip and
 		// record it at the tip's height. Settlements between the start and
 		// the tip with no event of their own are unknown, never this value.
 		_, tip, terr := s.chain.Status(ctx)
 		if terr == nil {
-			provs, err = s.chain.BondedFibreProvidersAt(ctx, tip)
+			err = s.retryRPC(ctx, fmt.Sprintf("bonded registry at height %d", tip), func() error {
+				var e error
+				provs, e = s.chain.BondedFibreProvidersAt(ctx, tip)
+				return e
+			})
 			at, source = tip, HostFromSeedCurrent
 		}
 	}
 	if err != nil {
-		s.log.Printf("WARNING: bonded registry could not be read to seed the host history (%v); host_at_settlement is unknown until a validator registers again", err)
+		s.log.Printf("WARNING: bonded registry could not be read to seed the host history (%v); host_at_settlement is unknown until a validator registers again, and this is retried every %d heights", err, inactiveRetryEvery)
 		return
 	}
+	// Only now: the entries already on record are kept, and the seed is
+	// merged into them.
 	s.hosts.Seed(at, provs, source)
 	for _, e := range s.hosts.Entries() {
 		if err := s.store.AppendHostEvent(HostEvent{HostEntry: e, Time: time.Now().UTC()}); err != nil {

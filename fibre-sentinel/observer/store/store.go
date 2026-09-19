@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 15
+const SchemaVersion = 18
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -414,6 +414,55 @@ var migrations = []migration{
 			)`,
 		},
 	},
+	{
+		version: 16,
+		note:    "probe_daily.identity_up: the endorsed share of a rolled day's completed handshakes, so identity_rate_window survives the prune the way reachability_window does",
+		stmts: []string{
+			// identity_rate_window is endorsed handshakes over completed
+			// ones, so its denominator is beats_up, already rolled. Only the
+			// numerator was missing, and without it the figure quietly
+			// narrowed to the unpruned days while the reachability figure
+			// printed beside it kept covering everything — two spans, one
+			// row, no way for a reader to tell.
+			`ALTER TABLE probe_daily ADD COLUMN identity_up INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		version: 17,
+		note:    "probe_daily attestation split: the proven / unproven / unrecorded counts of a rolled day, so the response's own reconciliation identity still holds once the rollup is folded in",
+		stmts: []string{
+			// docs/verdicts.md tells a reader to check the answer against
+			// itself: serve_rate_coverage.den equals attested + unattested +
+			// unknown, and serve_rate_held_out.UNATTESTED equals
+			// attestation.unattested_probes. The classes are folded in from
+			// the rollup on the "all" window and the attestation counts were
+			// not, so after the first prune both identities failed — on the
+			// one window a reader is most likely to check.
+			`ALTER TABLE probe_daily ADD COLUMN attested INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE probe_daily ADD COLUMN unattested INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE probe_daily ADD COLUMN unknown_att INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		version: 18,
+		note:    "indexes for the two public routes that had none: /v1/probes?at= and /v1/sampling; and the sampling index no query could use is replaced",
+		stmts: []string{
+			// ?at= filters on scheduled_at, which no index led with — and the
+			// dashboard itself links to it, from every correlated-failure
+			// point it publishes. A full scan behind a public link is an
+			// amplifier: one cheap GET buys the table.
+			`CREATE INDEX IF NOT EXISTS probes_scheduled ON probes (scheduled_at)`,
+			// probes_sampling was (sampling_commitment, started_at). The one
+			// query reading those columns constrains started_at, the second
+			// column, and wraps the first in COALESCE, so the index could
+			// never be used for it: pure cost, a b-tree write on every probe
+			// insert and its share of the WAL. Replaced with one the handler
+			// can seek and that covers every column it reads.
+			`DROP INDEX IF EXISTS probes_sampling`,
+			`CREATE INDEX IF NOT EXISTS probes_sampling_started ON probes
+				(started_at, sampling_commitment, sampling_binding, sampling_p, classification, promise_hash)`,
+		},
+	},
 }
 
 // Store wraps one SQLite database.
@@ -427,7 +476,17 @@ type Store struct {
 func Open(path string) (*Store, error) {
 	dsn := path
 	if path != ":memory:" {
-		dsn = "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
+		// auto_vacuum(incremental) has to be set before the first table is
+		// created; on an existing file it takes a full VACUUM, which is why
+		// it is here and not in a migration. Without it the retention pass
+		// deletes rows and returns nothing to the operating system: the
+		// pages go on SQLite's free list and observer.db never shrinks, so
+		// the pruning deploy/README.md presents as the answer to a full disk
+		// reclaims none of it. Incremental rather than full because a
+		// blocking VACUUM of a multi-gigabyte database is not something to
+		// run behind a live API; the collector releases pages after a prune
+		// (Store.ReclaimSpace).
+		dsn = "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=auto_vacuum(incremental)"
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -1280,9 +1339,19 @@ func (s *Store) UpsertValidatorIdentities(ids []scan.ValidatorIdentity, now time
 // limit of them, oldest check first. Only well-formed key suffixes are
 // candidates; a moniker or URL in the identity field is never looked up.
 func (s *Store) AvatarsDue(ctx context.Context, now time.Time, maxAge time.Duration, limit int) ([]string, error) {
+	// Sixteen hex characters, the same test keybase.ValidIdentity applies.
+	// Selecting on length alone handed the lookup identities it refuses, so
+	// a validator with a 16-character non-hex identity produced a guaranteed
+	// failure every refresh cycle, forever, and an error row keyed by it.
+	//
+	// Joined case-insensitively, because the chain carries whatever the
+	// operator typed: keybase.ValidIdentity accepts both cases, and a
+	// mixed-case identity must not look unfetched forever beside the row
+	// already held for it.
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT vi.identity, COALESCE(a.checked_at, '')
-		FROM validator_identities vi LEFT JOIN validator_avatars a ON a.identity = vi.identity
-		WHERE length(vi.identity) = 16 AND (a.checked_at IS NULL OR a.checked_at < ?)
+		FROM validator_identities vi LEFT JOIN validator_avatars a ON UPPER(a.identity) = UPPER(vi.identity)
+		WHERE vi.identity GLOB '[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
+		  AND (a.checked_at IS NULL OR a.checked_at < ?)
 		ORDER BY COALESCE(a.checked_at, '') ASC LIMIT ?`, ts(now.Add(-maxAge)), limit)
 	if err != nil {
 		return nil, err
@@ -1302,6 +1371,9 @@ func (s *Store) AvatarsDue(ctx context.Context, now time.Time, maxAge time.Durat
 // PutAvatar records the result of one resolution: the picture (status ok),
 // its absence (none) or a failed attempt (error, with the reason in url).
 func (s *Store) PutAvatar(identity, status, url, contentType string, data []byte, now time.Time) error {
+	// One canonical spelling for the key. The chain carries the operator's,
+	// which may be either case; the API serves /v1/avatars/<upper>.
+	identity = strings.ToUpper(identity)
 	_, err := s.db.Exec(`INSERT INTO validator_avatars (identity, url, content_type, data, status, checked_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(identity) DO UPDATE SET url = excluded.url, content_type = excluded.content_type,
@@ -1314,7 +1386,7 @@ func (s *Store) PutAvatar(identity, status, url, contentType string, data []byte
 // held (never resolved, no picture, or the last attempt failed).
 func (s *Store) Avatar(ctx context.Context, identity string) (contentType string, data []byte, checkedAt time.Time, ok bool, err error) {
 	var checked string
-	err = s.db.QueryRowContext(ctx, `SELECT content_type, data, checked_at FROM validator_avatars WHERE identity = ? AND status = 'ok'`, identity).Scan(&contentType, &data, &checked)
+	err = s.db.QueryRowContext(ctx, `SELECT content_type, data, checked_at FROM validator_avatars WHERE UPPER(identity) = ? AND status = 'ok'`, strings.ToUpper(identity)).Scan(&contentType, &data, &checked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, time.Time{}, false, nil
 	}
@@ -1335,6 +1407,56 @@ type Endpoint struct {
 	LastSeenAt           string
 	LastSeenHeight       int64
 	ClosedAt             *string
+}
+
+// ReclaimSpace returns pages freed by the retention pass to the operating
+// system, up to a bounded number so the call cannot stall a live database.
+//
+// It is a no-op on a database created before auto_vacuum was set, which
+// cannot free pages incrementally at all; the count returned is then zero and
+// the caller says nothing. freed is the number of pages released.
+func (s *Store) ReclaimSpace(ctx context.Context, maxPages int) (freed int64, err error) {
+	if maxPages <= 0 {
+		maxPages = 2000
+	}
+	var before, after int64
+	if err := s.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&before); err != nil {
+		return 0, err
+	}
+	if before == 0 {
+		return 0, nil
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA incremental_vacuum(%d)", maxPages)); err != nil {
+		return 0, err
+	}
+	if err := s.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&after); err != nil {
+		return 0, err
+	}
+	if before <= after {
+		return 0, nil
+	}
+	return before - after, nil
+}
+
+// CheckpointWAL copies the write-ahead log back into the database and, when
+// no reader is holding a snapshot, truncates it.
+//
+// SQLite's own auto-checkpoint copies pages back but never resets the file,
+// and it cannot reset one while any reader has a snapshot open. The API holds
+// one through every snapshot refresh, which on a busy vantage is much of the
+// time, so a batch ingest — a collector restarting with a day of measurements
+// unread, or the first pass after an outage — leaves the -wal at its
+// high-water mark for good: measured at about a gigabyte for one mocha day of
+// probe rows, on the same volume as the database and counted by the health
+// check's disk threshold.
+//
+// Called once per collector pass. It returns busy without doing anything when
+// a reader is in the way, which is not an error: the next pass tries again.
+// The counts are the SQLite pragma's own: log frames and frames checkpointed.
+func (s *Store) CheckpointWAL(ctx context.Context) (busy bool, inLog, checkpointed int64, err error) {
+	var b int64
+	err = s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&b, &inLog, &checkpointed)
+	return b == 1, inLog, checkpointed, err
 }
 
 // CurrentEndpoints lists open endpoint rows.

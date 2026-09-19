@@ -274,6 +274,13 @@ type DownloadResult struct {
 	// every promise that could own them settles by a known bound (the
 	// collector judges the row once the scanner has read past it).
 	ShadowGap string `json:"shadow_gap,omitempty"`
+	// RowsSubsetOfAssignment: every index returned is one this promise
+	// assigns this validator, and there are fewer of them than it owes. The
+	// hash-order argument that holds verified-but-foreign rows out of the
+	// rate does not reach this case — a shard served in this one's place
+	// would carry that promise's indices, not a part of this one's — so the
+	// reason on the row must not cite it.
+	RowsSubsetOfAssignment bool `json:"rows_subset_of_assignment,omitempty"`
 	// BytesReturned is the row payload the server handed over: the sum of
 	// the row data bytes, proofs and the RLC vector excluded. Rows are not a
 	// unit of size — a row is as wide as the blob's square — so this is what
