@@ -5,6 +5,7 @@ import { type Validator, type Rate, shortBech, ago, held, utc, bytesPerSecond, M
 import RateCell from "./Rate";
 import { Count } from "./Verdict";
 import Info from "./Info";
+import { DISPUTE_URL, SELF_VALIDATOR } from "@/lib/site";
 
 /**
  * The validator table. Eight columns, in the order an operator looks: who,
@@ -35,11 +36,27 @@ const COLS: { key: SortKey; label: string; dir: 1 | -1; info: React.ReactNode | 
       <p>The validator answered but did not hand over a shard it had signed for.</p>
       <p>Counted <strong>per obligation</strong>, like the serve rate: one per shard broken, not one per probe. The schedule visits the same shard four times, so a probe count of the same event reads about four times larger &mdash; and a four-figure number beside an operator&rsquo;s name is an accusation the record does not support. The probe count is on the row&rsquo;s tooltip and in the API.</p>
       <p>The only number counted against a validator. Unreachable, unproven and unregistered are not faults.</p>
+      <p>What it claims is that the validator was reached and did not hand over a shard the chain records it as obliged to hold. It is not a finding of intent, and one thing it cannot rule out is a power cut: the Fibre server commits its shard markers without waiting for the disk, so a validator that lost power can answer <em>not found</em> for a shard still on it. <a href={DISPUTE_URL} rel="noopener noreferrer" target="_blank">How to dispute a verdict</a>.</p>
     </> },
 ];
 
 const rv = (r: Rate | null | undefined) => (r && r.den > 0 && r.value !== null ? r.value : null);
 const bonded = (v: Validator) => !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED");
+
+// Whether a row is the validator this observer's own operator runs.
+//
+// A site that grades operators and is run by one of them should say which row
+// is its own; leaving a reader to work it out from a moniker is not saying it.
+// The match takes any of the three identifiers the API publishes, so an
+// operator can set whichever one they have to hand. It marks and nothing
+// else: no filter, no exclusion, no adjustment. The figures on that row come
+// from the same code and the same record as every other, which is the only
+// reason marking it is worth anything.
+function isSelf(v: Validator): boolean {
+  if (!SELF_VALIDATOR) return false;
+  return [v.address, v.cons_address, v.operator_address]
+    .some((a) => !!a && a.toLowerCase() === SELF_VALIDATOR);
+}
 
 // The faults cell prints broken obligations and the tooltip carries the probe
 // count behind them, because the two answer different questions and the gap
@@ -275,6 +292,7 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                         </Link>
                         <span className="addr" title={v.cons_address || v.address}>
                           {v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 12) + "…"}
+                          {isSelf(v) && <span className="ours" title="This observer's own operator runs this validator. It is measured by the same code from the same rows as every other row here, and nothing about it is filtered, excluded or adjusted.">ours</span>}
                         </span>
                       </span>
                     </span>

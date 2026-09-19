@@ -1,0 +1,24 @@
+/**
+ * Who this deployment says it is.
+ *
+ * Read at build time so an operator running this code for their own network
+ * puts their own repository and validator here without editing a component —
+ * and so that moving this repository, which is a decision still open, is one
+ * environment variable rather than a search across the site.
+ */
+export const SOURCE_URL = (process.env.NEXT_PUBLIC_SOURCE_URL ?? "https://github.com/s0urledd/fibre-v").replace(/\/$/, "");
+
+/** The dispute route: what to do about a verdict you think is wrong. */
+export const DISPUTE_URL = `${SOURCE_URL}/blob/main/docs/verdicts.md#disputing-a-verdict`;
+
+/**
+ * The validator this observer's own operator runs on the measured network,
+ * as the API reports its address. Empty disables the marking entirely.
+ *
+ * It is used for one thing: marking that row in the table, because a site
+ * that grades operators and is run by one of them should say which row is
+ * its own. Nothing filters, excludes, ranks or adjusts on it — the figures
+ * about that validator come from the same code and the same rows as
+ * everyone else's, which is the point of saying which row it is.
+ */
+export const SELF_VALIDATOR = (process.env.NEXT_PUBLIC_SELF_VALIDATOR ?? "").trim().toLowerCase();

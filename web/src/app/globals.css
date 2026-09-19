@@ -180,6 +180,10 @@ main { min-height: 60vh; padding-top: var(--s5); }
 .foot .wrap { font-family: var(--mono); font-size: var(--t-small); color: var(--text-3); display: flex; flex-wrap: wrap; gap: var(--s3); }
 .foot.stale { border-top: 2px solid var(--hold); }
 .foot.stale .wrap { color: var(--text); }
+.ours {
+  margin-left: var(--s2); padding: 0 5px; border: 1px solid var(--line-2); border-radius: var(--r-sm);
+  font-size: var(--t-small); color: var(--text-3); text-transform: uppercase; letter-spacing: .04em;
+}
 
 /* ----------------------------------------------------------------- cards --- */
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: var(--s4) var(--s5); }
