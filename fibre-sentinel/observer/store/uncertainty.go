@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
@@ -149,13 +148,12 @@ func (s *Store) UpsertParamUncertainty(u scan.ParamUncertainty, raw []byte, now 
 		}
 	}
 	if n > 0 || raised > 0 {
-		// In the same transaction too. The API's window snapshots run to a
-		// thirty-minute TTL and key on this; a hold that commits while the
-		// snapshot holding the fault stays valid publishes the accusation
-		// the hold exists to withdraw.
-		if _, err := tx.Exec(`INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-			MetaParamHoldsRev, strconv.FormatInt(now.UTC().UnixNano(), 10), ts(now)); err != nil {
+		// In the same transaction as the range and the holds it raises.
+		// The API's window snapshots run to a thirty-minute TTL and key on
+		// this, so a hold that commits while the snapshot holding the
+		// fault stays valid publishes the accusation the hold exists to
+		// withdraw.
+		if err := bumpParamHoldsRev(tx, now); err != nil {
 			return false, err
 		}
 	}

@@ -829,8 +829,47 @@ func splitSQL(src string) []string {
 // MetaParamHoldsRev is bumped whenever a params hold is raised or lifted
 // or a correction moves a verdict, so the API's cached aggregates — which
 // run to a thirty-minute TTL — can tell that a figure they hold has been
-// withdrawn instead of republishing it until the TTL runs out.
+// withdrawn instead of republishing it until the TTL runs out. Its value is
+// a counter; see bumpParamHoldsRev for why it is not a timestamp.
 const MetaParamHoldsRev = "param_holds_rev"
+
+// execer is satisfied by *sql.DB and by *sql.Tx, so a revision bump can
+// join a transaction that is already open or stand on its own.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// bumpParamHoldsRev advances the revision the API's cached aggregates key
+// on, as one atomic statement.
+//
+// It counts rather than stamping the clock. The collector takes one
+// time.Now() at the top of a pass and threads it through every record it
+// ingests, so two ranges landing in the same pass wrote the same
+// nanosecond: a snapshot computed between them carried that value, still
+// matched it afterwards, and went on serving the verdicts the second range
+// had just withheld. Two bumps must never produce the same token, and a
+// counter cannot.
+//
+// The increment is done by SQLite inside the statement, not read-then-
+// written in Go, so two writers cannot both read the same value first.
+//
+// A value left by the earlier timestamp scheme is an integer, so it
+// increments from there and the token keeps rising across the change.
+// Anything that will not parse casts to 0 and the next value is 1, which is
+// still a change — the API only ever compares for equality, and treats the
+// token as opaque.
+func bumpParamHoldsRev(db execer, now time.Time) error {
+	_, err := db.Exec(`INSERT INTO meta (key, value, updated_at) VALUES (?, '1', ?)
+		ON CONFLICT(key) DO UPDATE SET
+			value      = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT),
+			updated_at = excluded.updated_at`, MetaParamHoldsRev, ts(now))
+	return err
+}
+
+// BumpParamHoldsRev advances the revision from outside a transaction, for
+// the collector's hold sync and correction passes. Every path that moves
+// this key goes through the same counter; none of them writes a timestamp.
+func (s *Store) BumpParamHoldsRev(now time.Time) error { return bumpParamHoldsRev(s.db, now) }
 
 const TimeLayout = "2006-01-02T15:04:05.000000000Z"
 

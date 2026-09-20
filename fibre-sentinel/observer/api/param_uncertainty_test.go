@@ -915,3 +915,142 @@ func TestRecordingARangeWithholdsTheRowsAlreadyStored(t *testing.T) {
 	}
 	assertReconciles(t, after)
 }
+
+// addPublication stores one publication and one NOT_FOUND probe per
+// validator at the last in-window point, so each validator has a fault.
+func addPublication(t *testing.T, st *store.Store, hash string, height int64, created, msu time.Time, addrs ...string) {
+	t.Helper()
+	var vals []scan.ValidatorAssignment
+	for i, a := range addrs {
+		vals = append(vals, scan.ValidatorAssignment{Address: a, VotingPower: 10, RowCount: 2, Rows: []int{2 * i, 2*i + 1}, Attested: true})
+	}
+	pub := scan.Publication{
+		SchemaVersion: scan.AttestationSchemaVersion, PromiseHash: hash,
+		SettlementHeight: height, SettlementTime: created, MustServeUntil: msu, RecordedAt: time.Now().UTC(),
+		SettlementTxHash: "tx" + hash, Signer: "celestia1pub",
+		Promise:                 scan.PromiseFields{ChainID: "t", Height: height, Commitment: "cc" + hash, CreationTimestamp: created, BlobSize: 4096},
+		ValidatorSignatureCount: len(vals),
+		Assignment: scan.AssignmentTable{
+			ProtocolParams:     scan.ProtocolParamsSnapshot{OriginalRows: 4, TotalRows: 16},
+			ValidatorSetHeight: height - 1, TotalVotingPower: int64(10 * len(vals)), Sigma: 2 * len(vals), Distinct: 2 * len(vals),
+			ValidatorsWithRows: len(vals), AttestedWithRows: len(vals), SignatureEntries: len(vals), SignaturesVerified: len(vals),
+			AttestedVotingPower: int64(10 * len(vals)), Validators: vals,
+		},
+	}
+	raw, err := json.Marshal(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertPublication(pub, raw); err != nil {
+		t.Fatal(err)
+	}
+	at := inWindowPoint(created, msu, 3)
+	for _, a := range addrs {
+		cls, reason := probe.Classify(probe.Evidence{Assigned: true, Attested: true, Phase: probe.PhaseInWindow, Outcome: probe.OutcomeNotFound})
+		m := probe.Measurement{
+			SchemaVersion: probe.AttestationSchemaVersion, Vantage: "test",
+			PromiseHash: hash, Commitment: "cc" + hash, MustServeUntil: msu, ValidatorSetHeight: height - 1,
+			ValidatorAddress: a, ValidatorHost: a + ":443",
+			Assigned: true, Attested: true, AssignedRowCount: 2,
+			ScheduleLabel: "w4", ScheduledAt: at, StartedAt: at, FinishedAt: at,
+			Phase: probe.PhaseInWindow, Outcome: probe.OutcomeNotFound,
+			Classification: cls, ClassificationReason: reason, TotalDurationMS: 10,
+		}
+		m.TCP.OK, m.TLS.OK, m.Identity.OK = true, true, true
+		raw, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.InsertProbe(m, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func rangeOver(id string, from, to int64) scan.ParamUncertainty {
+	return scan.ParamUncertainty{
+		SchemaVersion: scan.ParamUncertaintySchemaVersion,
+		ID:            id, ChainID: "t", Kind: scan.UncertaintySilentChange,
+		FromHeight: from, ToHeight: to, EffectiveFromHeight: to + 1, IntervalStartKnown: true,
+		Direction: "shorter", PublicationsAffected: 1, DetectedAt: time.Now().UTC(),
+		Resolution: scan.ResolutionUnresolvable, ResolveError: "the node cannot answer for those heights",
+	}
+}
+
+// Two ranges landing in the same collector pass must not write the same
+// cache revision. The pass stamps one time.Now() at its top and threads it
+// through every record it ingests, so a revision built from that clock was
+// identical for both — and a snapshot computed between them carried that
+// value, still matched it afterwards, and went on publishing the faults the
+// second range had just withheld.
+//
+// Nothing here clears a cache or runs a hold sync. The only thing that may
+// invalidate the cached answer is the revision moving.
+func TestTwoRangesInOnePassEachInvalidateTheCachedAnswer(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	base := time.Now().UTC().Truncate(time.Second)
+
+	// Two validators each, and the two publications on different windows so
+	// their schedule points do not coincide. Two faults at one point is
+	// under the correlated-failure guard's floor of three, so the guard
+	// never fires here and the faults are the plain published kind — which
+	// is what this test needs to watch disappear.
+	addPublication(t, st, "pubA", 150, base.Add(-2*time.Hour), base.Add(-30*time.Minute), "a1", "a2")
+	addPublication(t, st, "pubB", 400, base.Add(-3*time.Hour), base.Add(-45*time.Minute), "b1", "b2")
+
+	ts := httptest.NewServer(api.New(st, "test"))
+	t.Cleanup(ts.Close)
+	read := func() heldJSON {
+		t.Helper()
+		var out heldJSON
+		get(t, ts, "/v1/network?window=24h", &out)
+		return out
+	}
+	if got := read().Faults; got != 4 {
+		t.Fatalf("faults = %d before any range, want 4", got)
+	}
+
+	// The one clock the collector would use for the whole pass.
+	now := time.Now()
+
+	// Range A lands, covering pubA only.
+	rawA, err := json.Marshal(rangeOver("t:silent_change:121-180", 121, 180))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertParamUncertainty(rangeOver("t:silent_change:121-180", 121, 180), rawA, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// The cache is filled here, between the two records. pubB's faults are
+	// real at this moment and correctly published.
+	mid := read()
+	if mid.Faults != 2 {
+		t.Fatalf("faults = %d after range A, want pubB's 2", mid.Faults)
+	}
+
+	// Range B lands in the same pass, under the same clock, covering pubB.
+	rawB, err := json.Marshal(rangeOver("t:silent_change:381-420", 381, 420))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertParamUncertainty(rangeOver("t:silent_change:381-420", 381, 420), rawB, now); err != nil {
+		t.Fatal(err)
+	}
+
+	after := read()
+	if after.Faults != 0 {
+		t.Fatalf("faults = %d from the cached answer after range B; the two ranges wrote the same revision", after.Faults)
+	}
+	if after.Obligations.Broken != 0 {
+		t.Fatalf("broken = %d", after.Obligations.Broken)
+	}
+	if after.Obligations.HeldParamUnverified != 4 {
+		t.Fatalf("held_param_unverified = %d, want 4", after.Obligations.HeldParamUnverified)
+	}
+	assertReconciles(t, after)
+}

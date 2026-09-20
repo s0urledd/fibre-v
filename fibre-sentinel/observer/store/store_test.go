@@ -423,3 +423,105 @@ func TestReclaimSpaceReturnsFreedPages(t *testing.T) {
 		t.Fatalf("second reclaim freed %d, err %v", again, err)
 	}
 }
+
+// Every path that moves the cache revision must produce a new token each
+// time it runs, whatever clock the caller is holding. The collector stamps
+// one time.Now() at the top of a pass and threads it through everything it
+// ingests, so a revision built from that clock repeated itself — and a
+// snapshot computed under it stayed valid across the second bump.
+func TestTheCacheRevisionChangesOnEveryBump(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// One clock, as a collector pass holds it.
+	now := time.Now()
+	seen := map[string]bool{}
+	var last string
+	for i := 0; i < 5; i++ {
+		if err := st.BumpParamHoldsRev(now); err != nil {
+			t.Fatal(err)
+		}
+		v, err := st.Meta(store.MetaParamHoldsRev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v == "" {
+			t.Fatal("the revision is empty after a bump")
+		}
+		if seen[v] {
+			t.Fatalf("bump %d produced %q again; two bumps under one clock must not collide", i+1, v)
+		}
+		seen[v] = true
+		if last != "" {
+			a, err1 := strconv.ParseInt(last, 10, 64)
+			b, err2 := strconv.ParseInt(v, 10, 64)
+			if err1 != nil || err2 != nil || b <= a {
+				t.Fatalf("the revision did not rise: %q then %q", last, v)
+			}
+		}
+		last = v
+	}
+}
+
+// A store carrying the earlier timestamp value keeps rising from it rather
+// than restarting, so the token never repeats one an API process already
+// holds.
+func TestTheCacheRevisionRisesFromATimestampLeftByTheOldScheme(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	now := time.Now()
+	stamp := strconv.FormatInt(now.UTC().UnixNano(), 10)
+	if err := st.SetMeta(store.MetaParamHoldsRev, stamp, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BumpParamHoldsRev(now); err != nil {
+		t.Fatal(err)
+	}
+	v, err := st.Meta(store.MetaParamHoldsRev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := strconv.ParseInt(stamp, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		t.Fatalf("the revision is not an integer after the change: %q", v)
+	}
+	if got != old+1 {
+		t.Fatalf("revision = %d, want %d: it must carry on from the timestamp, not restart", got, old+1)
+	}
+}
+
+// A value that is not a number at all still yields a changed token rather
+// than an error; the API treats it as opaque and only compares equality.
+func TestTheCacheRevisionSurvivesAnUnreadableValue(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	now := time.Now()
+	if err := st.SetMeta(store.MetaParamHoldsRev, "not-a-number", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BumpParamHoldsRev(now); err != nil {
+		t.Fatal(err)
+	}
+	v, err := st.Meta(store.MetaParamHoldsRev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v == "not-a-number" || v == "" {
+		t.Fatalf("revision = %q after a bump over an unreadable value", v)
+	}
+}
