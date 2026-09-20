@@ -30,12 +30,20 @@ type Store struct {
 	pubFile  *os.File
 	payFile  *os.File
 	hostFile *os.File
+	uncFile  *os.File
 	seen     map[string]bool
 	paySeen  map[string]bool
+	// uncSeen keys the param-uncertainty lines this process already wrote,
+	// by (id, resolution). A range opened and later closed writes two
+	// lines under the same id, so the id alone would swallow the closing
+	// one.
+	uncSeen map[string]bool
 	// settled holds the settlement height of every publication appended
 	// by this process, so a silent params change can say how many records
 	// it left with a window computed from the old params.
 	settled []int64
+	// coverFrom is the first height settled can speak for.
+	coverFrom int64
 }
 
 // CountSettledBetween counts the publications this process appended whose
@@ -48,6 +56,48 @@ func (s *Store) CountSettledBetween(from, to int64) int {
 		}
 	}
 	return n
+}
+
+// SettledCoverFrom is the first height CountSettledBetween can speak for:
+// this process's own start or resume height. A count over a range that
+// begins before it is a floor, not a total, because the publications of
+// earlier heights were appended by an earlier process and are not in
+// memory here.
+func (s *Store) SettledCoverFrom() int64 { return s.coverFrom }
+
+// AppendParamUncertainty appends one range this observer was blind over to
+// param_uncertainty.jsonl, the record the collector derives its holds and
+// its deadline corrections from. Fsynced per line like AppendHostEvent: it
+// is written before the cursor moves past the height that produced it, and
+// the range is the only thing that says which publications carry a
+// deadline the observer cannot vouch for.
+func (s *Store) AppendParamUncertainty(u ParamUncertainty) error {
+	k := u.ID + "|" + u.Resolution
+	if s.uncSeen[k] {
+		return nil
+	}
+	if s.uncFile == nil {
+		f, err := os.OpenFile(filepath.Join(s.dir, "param_uncertainty.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return fmt.Errorf("open param_uncertainty.jsonl: %w", err)
+		}
+		s.uncFile = f
+	}
+	b, err := json.Marshal(u)
+	if err != nil {
+		return err
+	}
+	if _, err := s.uncFile.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	if err := s.uncFile.Sync(); err != nil {
+		return err
+	}
+	if s.uncSeen == nil {
+		s.uncSeen = map[string]bool{}
+	}
+	s.uncSeen[k] = true
+	return nil
 }
 
 // PersistState is state.json.
@@ -76,6 +126,11 @@ type PersistState struct {
 	// longer, in the direction that understates how many publications carry
 	// the old deadline.
 	LastReconcileHeight int64 `json:"last_reconcile_height,omitempty"`
+	// ReconcileFailingSince is the first height of the current run of
+	// failed params reconciles, or zero when the last one read state. It is
+	// persisted so a restart in the middle of an RPC outage does not write
+	// a second check_skipped record for a stretch already on the record.
+	ReconcileFailingSince int64 `json:"reconcile_failing_since,omitempty"`
 	// Gaps are height ranges the scanner had to skip because the node could
 	// not serve them. Published, never hidden: a publication in one of these
 	// blocks is unknown to this observer.
@@ -125,6 +180,7 @@ func OpenStore(dir string) (*Store, error) {
 		statePth: filepath.Join(dir, "state.json"),
 		seen:     map[string]bool{},
 		paySeen:  map[string]bool{},
+		uncSeen:  map[string]bool{},
 	}
 	if err := s.loadSeen(); err != nil {
 		return nil, err
@@ -419,8 +475,18 @@ func (s *Store) Close() error {
 			first = err
 		}
 	}
+	if s.uncFile != nil {
+		if err := s.uncFile.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
 	return first
 }
+
+// SetSettledCoverFrom records the first height this process's own
+// publication appends can speak for, so a count over a wider range can say
+// it is a floor.
+func (s *Store) SetSettledCoverFrom(h int64) { s.coverFrom = h }
 
 // PublicationsPath is the jsonl path (for tooling / tests).
 func (s *Store) PublicationsPath() string { return s.pubPath }
