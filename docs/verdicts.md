@@ -84,18 +84,27 @@ does not average out.
 A publisher stops collecting signatures the moment it has two thirds of
 stake, so the validators that end up *proven* obliged for a blob are, by
 construction, the ones that answered the upload first. Speed of response to
-an upload and reliability of retention are not independent: the same disk,
-the same host, the same operator. The serve rate is therefore computed over a
-population selected for having been fast, which is not the population an
-operator or a delegator has in mind when they read it.
+an upload decides who is in the denominator, and the serve rate is therefore
+computed over a population selected for having been fast — which is not the
+population an operator or a delegator has in mind when they read it.
 
-The direction is knowable even though the size is not. A validator that is
-slow to accept uploads is under-represented in the denominator, so the
-published rate is, if anything, **better** than the network's true retention —
-it flatters the set rather than accusing it. That is the safer direction for a
-figure printed beside operators' names, and it is the reason this observer
-does not correct for it: any correction would have to model the missing
-population, and a model is not an observation.
+Neither the size nor the direction of the bias is measured here. The
+expectation is that it flatters: a validator slow to accept uploads is
+under-represented in the denominator, and if slow-to-accept and
+poor-at-retaining are the same operators, the published rate reads better
+than the network's true retention. But that is an assumption about a
+correlation this observer has never measured — it probes retention, not
+upload latency, and it holds no reading of the two together. Two things
+could turn it the other way: completion order depends on shard size, which
+scales with stake, so the quorum leans toward smaller validators, and
+nothing here establishes that smaller validators retain better; and a host
+fast to accept an upload is not thereby a host that still has it thirteen
+hours later.
+
+So the direction is stated as what it is — the likelier of the two, not a
+property of the measurement — and it is not the reason the rate goes
+uncorrected. The reason is that any correction would have to model the
+missing population, and a model is not an observation.
 
 What is published instead is the size of the bias's input:
 `attestation.coverage` (the proven share of assigned probes),
@@ -314,10 +323,23 @@ One sentence each, and what a reader should conclude.
   before it can be a `FAULT`), so half the set faulting at one minute is
   the network, a release, or the observer's coder, and is shown as such
   with a link to its rows (`/v1/probes?at=<scheduled_at>`). "Probed" is a
-  row that is not a gap: a validator the load cap turned away or a slot
-  that elapsed (`NOT_PROBED`, `PROBE_ERROR`) is not in the share's
-  denominator, so a burst among the validators that were asked is caught
-  however many were not. The points, the shares and the number of rows
+  row that carries a reachability verdict for the endpoint, which is the
+  only kind of row that could land in either numerator. A row that could
+  not have been `UNREACHABLE` or `FAULT` whatever happened at that point is
+  not in the share's denominator either, or it would drag the share down by
+  its mere presence: a validator the load cap turned away or a slot that
+  elapsed (`NOT_PROBED`, `PROBE_ERROR`), one with no reachable Fibre host so
+  that no connection was attempted (`NOT_REGISTERED`), and one whose
+  assignment carries no signature on the settled promise (`UNATTESTED`),
+  which the taxonomy decides before it looks at reachability at all. That
+  last one is not a rare case: a publisher stops collecting at two thirds of
+  stake, so a third of the assigned rows at a typical point are
+  `UNATTESTED`, and leaving them in the denominator held the guard below its
+  threshold through outages it exists to catch. Everything kept in the
+  denominator means a connection was attempted and the endpoint answered or
+  refused — an identity failure, a throttle or a server error is positive
+  evidence that the network was up. So a burst among the validators that
+  actually answered is caught however many did not. The points, the shares and the number of rows
   removed (gaps included) are published so the exclusion is visible, and
   the rows keep their classification in the store: a verifier sees what
   was excluded and why. The points are judged over every vantage together

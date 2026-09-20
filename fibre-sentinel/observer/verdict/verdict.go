@@ -121,11 +121,13 @@ type SuspectPoint struct {
 
 // SuspectPoints applies the correlated-failure guard: over assigned
 // in-window rows started in the window, grouped by scheduled time, with
-// more than one validator probed at the point. "Probed" is a row that is
-// not a gap: a validator the load cap turned away, or a slot that elapsed,
-// says nothing about the point and does not dilute the share. Rows counts
-// every row at the point, gaps included, because the exclusion removes
-// them all.
+// more than one validator probed at the point. "Probed" is a row that
+// carries a reachability verdict for the endpoint, which is the only kind
+// of row that could land in either numerator — see noReachVerdict. A row
+// that could not be in the numerator whatever happened at the point must
+// not sit in the denominator either, or it drags the share down by its
+// mere presence. Rows counts every row at the point, excluded ones
+// included, because the exclusion removes them all.
 func SuspectPoints(rows []Row, w Window) []SuspectPoint {
 	type acc struct {
 		label                  string
@@ -144,7 +146,7 @@ func SuspectPoints(rows []Row, w Window) []SuspectPoint {
 			groups[k] = g
 		}
 		g.n++
-		if isGap(r.Classification) {
+		if noReachVerdict(r.Classification) {
 			continue
 		}
 		g.vals[r.Validator] = true
@@ -217,6 +219,42 @@ func (o Obligations) Rate() (v float64, ok bool) {
 
 func isGap(c probe.Classification) bool {
 	return c == probe.ClassNotProbed || c == probe.ClassProbeError
+}
+
+// GuardSilentClasses is every classification that leaves the observer
+// without a reachability verdict for the endpoint at that point, so that
+// the rollup's SQL twin can spell the same list into its query and a test
+// can hold the two to it.
+//
+// The guard asks whether many validators failed at once. A row can answer
+// that only if it could itself have come back UNREACHABLE or FAULT:
+//
+//   - NOT_PROBED, PROBE_ERROR: the observer never asked, or could not carry
+//     the probe out.
+//   - NOT_REGISTERED: no reachable Fibre host was registered, so no
+//     connection was attempted.
+//   - UNATTESTED: Classify returns it before it looks at reachability at
+//     all, so the row reads UNATTESTED whether the endpoint answered or
+//     refused. On mocha a publisher stops collecting at two thirds of
+//     stake, which leaves roughly a third of assigned rows unattested at
+//     every point — enough, left in the denominator, to hold the guard
+//     below its threshold through a real outage.
+//
+// Everything else kept in the denominator means a connection was attempted
+// and the endpoint answered or refused: an identity failure, a throttle or
+// a server error is positive evidence that the network was up, so it
+// belongs there.
+var GuardSilentClasses = []probe.Classification{
+	probe.ClassNotProbed, probe.ClassProbeError, probe.ClassNotRegistered, probe.ClassUnattested,
+}
+
+func noReachVerdict(c probe.Classification) bool {
+	for _, s := range GuardSilentClasses {
+		if c == s {
+			return true
+		}
+	}
+	return false
 }
 
 // ComputeObligations buckets every proven obligation: an assigned,

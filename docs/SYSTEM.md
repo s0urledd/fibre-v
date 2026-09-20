@@ -296,6 +296,18 @@ stale pin or a broken coder, not that many independent operators at one
 minute. Every rate leaves those rows out; the points are published at
 `vantage_health.suspect`.
 
+"Probed" is the denominator, and it holds only the rows that carry a
+reachability verdict — the rows that could themselves have been in a
+numerator. `verdict.GuardSilentClasses` names the four that cannot
+(`NOT_PROBED`, `PROBE_ERROR`, `NOT_REGISTERED`, `UNATTESTED`) and
+`rollup.GuardSilentSQL` is the same list spelled for the SQL twin, held to
+it by `TestTheSQLAndTheGoTwinExcludeTheSameClassesFromTheGuard`.
+`UNATTESTED` is the one that matters at scale: `Classify` returns it before
+it looks at reachability, and a publisher stops collecting signatures at two
+thirds of stake, so about a third of every point's assigned rows are
+`UNATTESTED` and can never be in the numerator. In the denominator they held
+the guard under 50% through a real outage.
+
 ---
 
 ## 10. The web app

@@ -157,21 +157,29 @@ type Querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
+// GuardSilentSQL is the SQL spelling of verdict.GuardSilentClasses: the
+// classifications that leave the observer without a reachability verdict
+// for the endpoint, so the row could not have landed in either numerator
+// whatever happened at the point.
+// TestTheSQLAndTheGoTwinExcludeTheSameClassesFromTheGuard holds the two
+// lists to each other.
+const GuardSilentSQL = `('NOT_PROBED','PROBE_ERROR','NOT_REGISTERED','UNATTESTED')`
+
 // SuspectPoints tallies every schedule point at which more than one
 // validator was probed, over the assigned in-window rows that `where`
 // selects, in schedule order. The caller applies Reason. Validators counts
-// the validators with a real row at the point: a gap row (NOT_PROBED,
-// PROBE_ERROR) is a validator the observer did not ask, and must not
-// dilute the share; Rows counts every row at the point, because the
+// the validators that gave a reachability verdict at the point; a row that
+// could not be in the numerator whatever happened must not dilute the
+// share (see GuardSilentSQL). Rows counts every row at the point, because the
 // exclusion removes them all. The Go twin is verdict.SuspectPoints.
 func SuspectPoints(ctx context.Context, db Querier, where string, args ...any) ([]Point, error) {
 	rows, err := db.QueryContext(ctx, `SELECT scheduled_at, schedule_label,
 			COUNT(DISTINCT CASE WHEN classification = 'UNREACHABLE' THEN validator_address END),
 			COUNT(DISTINCT CASE WHEN classification = 'FAULT' THEN validator_address END),
-			COUNT(DISTINCT CASE WHEN classification NOT IN ('NOT_PROBED','PROBE_ERROR') THEN validator_address END), COUNT(*)
+			COUNT(DISTINCT CASE WHEN classification NOT IN `+GuardSilentSQL+` THEN validator_address END), COUNT(*)
 		FROM probes
 		WHERE `+where+` AND assigned = 1 AND phase = 'in_window'
-		GROUP BY scheduled_at HAVING COUNT(DISTINCT CASE WHEN classification NOT IN ('NOT_PROBED','PROBE_ERROR') THEN validator_address END) > 1
+		GROUP BY scheduled_at HAVING COUNT(DISTINCT CASE WHEN classification NOT IN `+GuardSilentSQL+` THEN validator_address END) > 1
 		ORDER BY scheduled_at`, args...)
 	if err != nil {
 		return nil, err

@@ -530,7 +530,10 @@ const paramReconcileEvery = 60
 // would let a lengthened window stand alone as the only candidate for a
 // promise the server may have validated against the old, shorter one).
 //
-// The change really landed somewhere in (last check, h]. Publications
+// The change really landed somewhere in (last check, h], where "last
+// check" is the last one that actually read state: a reconcile whose RPC
+// failed leaves the marker alone, so an outage widens the interval
+// instead of hiding part of it. Publications
 // settled in that interval were recorded with the old params and are not
 // rewritten: when the window got shorter, the observer's must_serve_until
 // for them is later than the server's prune time, and a NOT_FOUND between
@@ -540,6 +543,20 @@ const paramReconcileEvery = 60
 // fault suspect point, and a re-scan from the interval's start rewrites
 // nothing (the record is append-only), so the log line is the record.
 func (s *Scanner) reconcileParams(ctx context.Context, h int64) {
+	s.reconcileParamsWith(h, func() (fibretypes.Params, error) {
+		var live fibretypes.Params
+		err := s.retryRPC(ctx, fmt.Sprintf("params reconcile at height %d", h), func() error {
+			var err error
+			live, err = s.chain.FibreParamsAt(ctx, h)
+			return err
+		})
+		return live, err
+	})
+}
+
+// reconcileParamsWith is reconcileParams with the state read injected, so a
+// test can fail it without a chain.
+func (s *Scanner) reconcileParamsWith(h int64, readState func() (fibretypes.Params, error)) {
 	since := s.lastReconcile
 	unknownSince := since == 0
 	if unknownSince {
@@ -549,16 +566,19 @@ func (s *Scanner) reconcileParams(ctx context.Context, h int64) {
 		// the only record of which publications carry the old deadline.
 		since = s.startHeight - 1
 	}
-	s.lastReconcile = h
-	var live fibretypes.Params
-	if err := s.retryRPC(ctx, fmt.Sprintf("params reconcile at height %d", h), func() error {
-		var err error
-		live, err = s.chain.FibreParamsAt(ctx, h)
-		return err
-	}); err != nil {
-		s.log.Printf("h=%d: params reconcile skipped: %v", h, err)
+	live, err := readState()
+	if err != nil {
+		// The marker stays where it was. It is the start of the interval a
+		// silent change could have landed in, and a check that did not
+		// happen narrows nothing: moving it here would drop
+		// (previous check, h] out of the interval the next successful
+		// check reports, and that interval is the only record of which
+		// publications carry a deadline computed from the old params.
+		// Under a long RPC outage the interval widens, which is the truth.
+		s.log.Printf("h=%d: params reconcile skipped: %v (the uncertainty interval still starts at height %d)", h, err, since+1)
 		return
 	}
+	s.lastReconcile = h
 	cur := s.params.at(h, math.MaxInt)
 	if cur != nil && paramsEqual(cur.Params, live) {
 		return
