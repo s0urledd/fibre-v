@@ -190,6 +190,37 @@ func (s *Store) ParamRangeRows(ctx context.Context, clause string) ([]ParamRange
 // the row arrived.
 const StaleDeadline = `prb.must_serve_until <> (SELECT pb.must_serve_until FROM publications pb WHERE pb.promise_hash = prb.promise_hash)`
 
+// CoveredByAHoldingRange is a publication (aliased pb) whose upload
+// interval overlaps a range that still withholds. It is the same overlap
+// SyncParamHolds uses, spelled so InsertProbe can ask it of one row.
+const CoveredByAHoldingRange = `EXISTS (SELECT 1 FROM param_uncertainty u
+		WHERE u.holds = 1 AND pb.promise_height - 1 <= u.to_height AND pb.settlement_height >= u.from_height)`
+
+// ProbeHeldAtInsert decides whether a probe row is born withheld. It takes
+// the deadline the measurement carries and the promise hash, in that order.
+//
+// All three arms are needed and each covers a case the others cannot:
+//
+//   - the publication is already held, which is the normal state while a
+//     range is open and nothing has been corrected yet;
+//   - the deadline disagrees with the publication's, which is every row the
+//     prober produces after a range was corrected, because it schedules
+//     from publications.jsonl and that file still carries the deadline the
+//     scanner stamped;
+//   - the publication is covered by a range that still withholds, which
+//     catches the pass where the range itself has only just been ingested
+//     and the hold has not been synced onto the publication yet.
+//
+// Deciding this in the statement that writes the row is what makes the
+// withholding a property of the row rather than a race the collector
+// usually wins: there is no moment at which a row that should be withheld
+// exists and reads FAULT. SyncParamHolds recomputes the same thing
+// afterwards, so a row inserted before its publication cannot stay wrong.
+const ProbeHeldAtInsert = `COALESCE((SELECT pb.retention_unverified = 1
+		OR pb.must_serve_until <> ?
+		OR ` + CoveredByAHoldingRange + `
+	FROM publications pb WHERE pb.promise_hash = ?), 0)`
+
 // SyncParamHolds recomputes which publications and probe rows have a
 // deadline this observer cannot vouch for. It sets the flag where it
 // belongs and clears it where it no longer does, in one idempotent pass, so
@@ -205,9 +236,7 @@ const StaleDeadline = `prb.must_serve_until <> (SELECT pb.must_serve_until FROM 
 // scan cursor produces, and clearing the flag when one of them closes
 // would un-hold rows the other still covers.
 func (s *Store) SyncParamHolds(ctx context.Context) (int64, error) {
-	const held = `SELECT pb.promise_hash FROM publications pb
-		JOIN param_uncertainty u ON u.holds = 1
-		WHERE pb.promise_height - 1 <= u.to_height AND pb.settlement_height >= u.from_height`
+	const held = `SELECT pb.promise_hash FROM publications pb WHERE ` + CoveredByAHoldingRange
 	const rowHeld = `(promise_hash IN (SELECT promise_hash FROM publications WHERE retention_unverified = 1)
 		OR EXISTS (SELECT 1 FROM probes prb WHERE prb.dedupe_key = probes.dedupe_key AND ` + StaleDeadline + `))`
 	tx, err := s.db.BeginTx(ctx, nil)

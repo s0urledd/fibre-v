@@ -77,9 +77,16 @@ window runs — hours after the range that corrected it was closed. A rule
 keyed on the range cannot see those rows at all. A rule keyed on the
 disagreement cannot miss them, whenever they arrive.
 
-The hold is stamped in the same statement that writes the row, so a stale
-measurement is born withheld: there is no moment at which it exists and
-reads `FAULT`. The collector's next pass re-grades it against the deadline
+The hold is stamped in the same statement that writes the row, so a
+measurement that should be withheld is born withheld: there is no moment at
+which it exists and reads `FAULT`. Three things put it there, and each
+covers a case the others cannot — the publication is already withheld
+(the normal state while a range is open and nothing has been corrected),
+the row's deadline disagrees with its publication's (every row the prober
+produces after a correction), or the publication is covered by a range that
+still withholds (the pass where the range itself has only just arrived).
+The collector ingests the ranges before the measurements for the same
+reason: a range says how to read the rows it covers. The collector's next pass re-grades it against the deadline
 its publication now carries and the hold lifts. A row whose own record the
 retention pass has stripped cannot be re-graded, so it stays withheld.
 

@@ -285,6 +285,27 @@ func main() {
 				log.Printf("publications: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
 			}
 		}
+		// Before the measurements, deliberately. A range says how to read
+		// the rows of the publications it covers, and InsertProbe decides
+		// there and then whether a row is born withheld. Ingesting the
+		// ranges after the measurements left every row of the pass that
+		// first carried a range readable as FAULT until the hold sync at
+		// the end of that pass — and for as long as the collector stayed
+		// down, if it stopped in between.
+		//
+		// The ranges come in before the corrections that close them, and
+		// both come in before the holds are synced, so a range and the
+		// correction that lifts it can never be half-applied in one pass.
+		if r, err := ingest.ParamUncertainty(st, *uncPath, now); err != nil {
+			fail("param uncertainty", err)
+		} else if r.Inserted > 0 {
+			log.Printf("param uncertainty: +%d range(s) (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		if r, err := ingest.Corrections(st, *corrPath, now); err != nil {
+			fail("corrections", err)
+		} else if r.Inserted > 0 {
+			log.Printf("corrections: +%d deadline/verdict correction(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
 		if r, err := ingest.Measurements(st, *measPath, now); err != nil {
 			fail("measurements", err)
 		} else {
@@ -334,19 +355,6 @@ func main() {
 			fail("host history", err)
 		} else if r.Inserted > 0 {
 			log.Printf("host history: +%d registration(s) (read %d, line %d)", r.Inserted, r.Read, r.Line)
-		}
-		// The ranges come in before the corrections that close them, and
-		// both come in before the holds are synced, so a range and the
-		// correction that lifts it can never be half-applied in one pass.
-		if r, err := ingest.ParamUncertainty(st, *uncPath, now); err != nil {
-			fail("param uncertainty", err)
-		} else if r.Inserted > 0 {
-			log.Printf("param uncertainty: +%d range(s) (read %d, line %d)", r.Inserted, r.Read, r.Line)
-		}
-		if r, err := ingest.Corrections(st, *corrPath, now); err != nil {
-			fail("corrections", err)
-		} else if r.Inserted > 0 {
-			log.Printf("corrections: +%d deadline/verdict correction(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
 		if r, err := ingest.Amendments(st, *amendPath, now); err != nil {
 			fail("amendments", err)

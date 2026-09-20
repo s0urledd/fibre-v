@@ -93,7 +93,14 @@ func paramUncertaintyOf(r store.ParamRange) paramUncertainty {
 // when nothing is.
 func (s *Server) retentionUncertaintyNow(ctx context.Context) *retentionUncertainty {
 	pubs, probes, ranges, err := s.st.HeldCounts(ctx)
-	if err != nil || ranges == 0 {
+	// Rows outlive the range that withheld them. A measurement arriving
+	// after a range was corrected is born withheld on the deadline it
+	// carries, and stays that way until the next correction pass reaches
+	// it — by which time no range is open at all. Keying the disclosure on
+	// open ranges alone made it disappear while RETENTION_UNVERIFIED was
+	// still in serve_rate_held_out, which is a held-out bucket with nothing
+	// beside it saying why.
+	if err != nil || (ranges == 0 && pubs == 0 && probes == 0) {
 		return nil
 	}
 	return &retentionUncertainty{OpenRanges: ranges, PublicationsHeld: pubs, ProbesHeld: probes, Note: retentionUncertaintyNote}

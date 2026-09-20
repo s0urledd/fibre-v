@@ -705,3 +705,114 @@ func TestADeadlineThatMovesIsCorrectedEvenWhenTheVerdictDoesNot(t *testing.T) {
 		t.Fatal("the early HEALTHY row kept the deadline this observer withdrew")
 	}
 }
+
+// A measurement arriving while the range is still OPEN carries the same
+// deadline the publication carries — nothing has been corrected yet — so
+// the deadline-disagreement arm says nothing about it. The publication is
+// already withheld, and its rows must be too, from the moment they exist.
+//
+// This is the common case, not the exotic one: an open range is the normal
+// state before verification. Keying the insert on disagreement alone left
+// every such row readable as FAULT until the next SyncParamHolds, and for
+// as long as the collector stayed down if it stopped in between.
+func TestAMeasurementArrivingIntoAnOpenRangeIsHeldOnInsert(t *testing.T) {
+	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
+	st, created, msu := heldFixture(t, map[string][]probe.Outcome{"v1": ok, "v2": ok})
+	openRange(t, st) // unresolvable, so nothing is ever corrected
+
+	// Two more probes land, carrying the very deadline the publication
+	// carries. No sync runs afterwards.
+	insertLate(t, st, created, msu, "v1", 0.95, probe.OutcomeNotFound)
+	insertLate(t, st, created, msu, "v2", 0.95, probe.OutcomeNotFound)
+
+	got := networkHeld(t, st)
+	if got.Faults != 0 {
+		t.Fatalf("faults = %d without a sync; a row of a withheld publication must be born withheld", got.Faults)
+	}
+	if got.Obligations.Broken != 0 {
+		t.Fatalf("broken = %d", got.Obligations.Broken)
+	}
+	var unheld int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM probes WHERE schedule_label = 'late' AND retention_unverified = 0`).Scan(&unheld); err != nil {
+		t.Fatal(err)
+	}
+	if unheld != 0 {
+		t.Fatalf("%d late row(s) went in unheld", unheld)
+	}
+	assertReconciles(t, got)
+}
+
+// The same, one pass earlier: the range itself has only just been ingested
+// and the hold has not been synced onto the publication yet. The collector
+// now ingests ranges before measurements, and the insert asks the ranges
+// directly, so a row of the very pass that first carried a range is still
+// born withheld.
+func TestAMeasurementIsHeldEvenBeforeTheHoldIsSyncedOntoItsPublication(t *testing.T) {
+	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
+	st, created, msu := heldFixture(t, map[string][]probe.Outcome{"v1": ok})
+
+	// The range lands, but nothing syncs the hold onto the publication.
+	u := scan.ParamUncertainty{
+		SchemaVersion: scan.ParamUncertaintySchemaVersion,
+		ID:            "t:silent_change:121-180", ChainID: "t", Kind: scan.UncertaintySilentChange,
+		FromHeight: 121, ToHeight: 180, EffectiveFromHeight: 181, IntervalStartKnown: true,
+		Direction: "shorter", PublicationsAffected: 1, DetectedAt: time.Now().UTC(),
+		Resolution: scan.ResolutionUnresolvable, ResolveError: "the node cannot answer for those heights",
+	}
+	raw, err := json.Marshal(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertParamUncertainty(u, raw); err != nil {
+		t.Fatal(err)
+	}
+	var pubHeld int
+	if err := st.DB().QueryRow(`SELECT retention_unverified FROM publications WHERE promise_hash = 'held1'`).Scan(&pubHeld); err != nil {
+		t.Fatal(err)
+	}
+	if pubHeld != 0 {
+		t.Fatal("this test needs the publication still unsynced to mean anything")
+	}
+
+	insertLate(t, st, created, msu, "v1", 0.95, probe.OutcomeNotFound)
+
+	var held int
+	if err := st.DB().QueryRow(`SELECT retention_unverified FROM probes WHERE schedule_label = 'late'`).Scan(&held); err != nil {
+		t.Fatal(err)
+	}
+	if held != 1 {
+		t.Fatal("the row went in unheld although an open range covers its publication")
+	}
+	if got := networkHeld(t, st); got.Faults != 0 {
+		t.Fatalf("faults = %d", got.Faults)
+	}
+}
+
+// The disclosure follows the rows, not the ranges. A row withheld after
+// every range has closed is still a row this observer is not speaking for,
+// and RETENTION_UNVERIFIED sitting in serve_rate_held_out with no block
+// beside it saying why is a held-out bucket with no explanation.
+func TestTheDisclosureSurvivesTheRangeThatCausedIt(t *testing.T) {
+	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
+	st, created, staleMSU := heldFixture(t, map[string][]probe.Outcome{"v1": ok})
+	seedParams(t, st, 100, created, staleMSU.Sub(created))
+	seedParams(t, st, 181, created, shortWindow)
+	runCorrector(t, st, verifiedRange(created, staleMSU))
+	if got := networkHeld(t, st); got.RetentionUncertainty != nil {
+		t.Fatalf("the range did not close: %+v", got.RetentionUncertainty)
+	}
+
+	// A row arrives against the withdrawn deadline. No range is open.
+	insertLate(t, st, created, staleMSU, "v1", 0.95, probe.OutcomeNotFound)
+
+	got := networkHeld(t, st)
+	if got.HeldOut["RETENTION_UNVERIFIED"] == 0 {
+		t.Fatal("this test needs a withheld row to mean anything")
+	}
+	if got.RetentionUncertainty == nil {
+		t.Fatal("the response withholds rows and says nothing about why")
+	}
+	if got.RetentionUncertainty.OpenRanges != 0 || got.RetentionUncertainty.ProbesHeld == 0 {
+		t.Fatalf("retention_uncertainty = %+v, want no open range and a held probe", got.RetentionUncertainty)
+	}
+}

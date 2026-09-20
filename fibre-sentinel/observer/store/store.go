@@ -1111,17 +1111,12 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		 host_at_settlement, settlement_host_outcome, settlement_host_served, retention_unverified)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		-- Born held when this row's deadline already disagrees with its
-		-- publication's. The prober schedules from publications.jsonl,
-		-- which is append-only and still carries the deadline the scanner
-		-- stamped, so it keeps producing rows against a deadline this
-		-- observer has already withdrawn — for as long as the old window
-		-- runs. Stamping the hold in the INSERT rather than in the pass
-		-- that follows it is what makes that structurally unpublishable
-		-- instead of a race the collector usually wins: there is no moment
-		-- at which the row exists and reads FAULT. The corrector clears it
-		-- when it re-grades the row.
-		COALESCE((SELECT pb.must_serve_until <> ? FROM publications pb WHERE pb.promise_hash = ?), 0))
+		-- Born withheld when this row must be: see ProbeHeldAtInsert for
+		-- the three cases and why each is needed. Deciding it here rather
+		-- than in the pass that follows is what makes the withholding a
+		-- property of the row instead of a race the collector usually
+		-- wins.
+		`+ProbeHeldAtInsert+`)
 		ON CONFLICT(dedupe_key) DO NOTHING`,
 		m.DedupeKey(), m.Vantage, m.PromiseHash, m.Commitment, m.BlobVersion, ts(m.MustServeUntil), m.ValidatorSetHeight,
 		m.ValidatorAddress, m.ValidatorHost, b2i(m.Assigned), m.AssignedRowCount, m.ScheduleLabel, ts(m.ScheduledAt),

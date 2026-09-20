@@ -483,8 +483,12 @@ from outside the celestia-app module.
     deadline this observer has withdrawn. The prober schedules from the
     append-only record and keeps producing such rows long after the range
     closed, so the predicate is the disagreement, not the range. The hold
-    is stamped by `InsertProbe` itself, in the statement that writes the
-    row.
+    is stamped by `InsertProbe` itself (`store.ProbeHeldAtInsert`), in the
+    statement that writes the row, over three arms: the publication is
+    already withheld, the deadline disagrees, or a range that still
+    withholds covers the publication. The collector ingests the ranges
+    **before** the measurements, because a range says how to read the rows
+    it covers.
 12. **A range withholds until its corrections have landed, not until it is
     verified.** Reading every height says what the deadline should have
     been; applying that is what releases a row. The two facts are
