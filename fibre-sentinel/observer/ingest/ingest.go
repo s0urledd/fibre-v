@@ -159,8 +159,27 @@ func tail(st *store.Store, path string, fn handler, now time.Time) (Result, erro
 				err = fmt.Errorf("%w: %v after %d passes", ErrBadRecord, err, retryPasses)
 			}
 			if !errors.Is(err, ErrBadRecord) {
-				_ = flush()
-				return res, fmt.Errorf("%s line %d: %w", path, res.Line, err)
+				// The store refused this line, so the cursor must not move
+				// past it. res.Offset was advanced before the handler ran,
+				// and flush() writes whatever it holds whenever any earlier
+				// line in this pass has not been flushed yet — so without
+				// this rewind a failed insert followed by a successful
+				// cursor write left the line in the JSONL and nowhere in
+				// SQL, permanently, because the next pass starts after it.
+				// Only a full re-ingest from zero would have found it.
+				//
+				// Rewinding is exactly what the ErrRetryLater path above
+				// does, for the same reason. A flush that fails here is the
+				// more serious of the two errors: the cursor is then ahead
+				// of what was stored, which is the state this rewind exists
+				// to prevent, so it is reported rather than discarded.
+				res.Read--
+				res.Line--
+				res.Offset -= int64(len(raw))
+				if ferr := flush(); ferr != nil {
+					return res, fmt.Errorf("%s line %d: %w (and the ingest cursor could not be written: %v)", path, res.Line+1, err, ferr)
+				}
+				return res, fmt.Errorf("%s line %d: %w", path, res.Line+1, err)
 			}
 			res.Skipped++
 			res.LastSkipped = fmt.Sprintf("%s line %d: %v", path, res.Line, err)
