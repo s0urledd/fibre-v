@@ -51,6 +51,13 @@ var Files = []FileSpec{
 	{"sampling-secrets.jsonl", "revealed_at"},
 	{"amendments.jsonl", "judged_at"},
 	{"host_history.jsonl", "time"},
+	// The ranges this observer could not say which x/fibre params were in
+	// force over, and the deadlines and verdicts a verified range moved.
+	// Both are in the export for the same reason amendments are: without
+	// them a third party redrawing the verdicts reaches a different answer
+	// and cannot see why.
+	{"param_uncertainty.jsonl", "detected_at"},
+	{"corrections.jsonl", "judged_at"},
 }
 
 // StateFile is the scanner's state, carried in every export as a snapshot

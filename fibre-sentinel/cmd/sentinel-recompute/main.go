@@ -9,6 +9,11 @@
 //     with the correlated-failure guard, in a second implementation
 //     (observer/verdict) of the rules the API evaluates in SQL, compared
 //     against the API's own answer when -api or -api-json is given;
+//   - the height ranges this observer could not say which x/fibre params
+//     were in force over (param_uncertainty.jsonl), the verdicts they
+//     withhold, and the deadline corrections a verified range produced
+//     (corrections.jsonl) — each redrawn rather than trusted, so a
+//     fabricated correction is a divergence;
 //   - with -sampling, the admission draws of every day whose secret is
 //     revealed (sampling-secrets.jsonl): which publications this observer
 //     should have probed against which ones it did.
@@ -18,6 +23,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -234,11 +240,64 @@ func main() {
 	fmt.Printf("late| %d verdicts deferred at the probe, %d drawable at scanner frontier %s, %d differ from amendments.jsonl (%d amendments on record)\n",
 		deferred, judged, frontier.Format(time.RFC3339), amendDiffs, len(amendments))
 
+	// ---- params ranges: the holds and the corrections ----
+	//
+	// Without these the tool reproduces what the prober stamped, while the
+	// API publishes what this observer stands behind — and the difference
+	// would read as the API being wrong. The record carries both files for
+	// exactly this reason.
+	ranges := loadParamRanges(filepath.Join(*dataDir, "param_uncertainty.jsonl"))
+	corrections := loadCorrections(filepath.Join(*dataDir, "corrections.jsonl"))
+	var corrDiffs, corrected int
+	for i := range ms {
+		c, ok := corrections[ms[i].DedupeKey()]
+		if !ok {
+			continue
+		}
+		corrected++
+		tol := *pruneTol
+		if tol == 0 {
+			tol, _ = toleranceFor(runs, ms[i])
+		}
+		if c.PruneToleranceS > 0 {
+			tol = time.Duration(c.PruneToleranceS) * time.Second
+		}
+		// Redrawn, not trusted: a correction the record cannot reproduce
+		// is a divergence, and a fabricated one is caught here.
+		got := ms[i].RecomputeWith(tol, c.ToMustServeUntil)
+		if string(got.Classification) != c.ToClassification || string(got.Phase) != c.ToPhase {
+			corrDiffs++
+			if printed < *maxDiff {
+				printed++
+				fmt.Printf("corr| %s %s %s: correction says %s/%s, recomputed %s/%s\n", short(ms[i].PromiseHash), ms[i].ValidatorAddress,
+					ms[i].ScheduledAt.UTC().Format(time.RFC3339), c.ToPhase, c.ToClassification, got.Phase, got.Classification)
+			}
+		}
+		ms[i].Phase, ms[i].Classification = got.Phase, got.Classification
+		ms[i].MustServeUntil = c.ToMustServeUntil
+	}
+	if corrDiffs > 0 {
+		differs = true
+	}
+	holding := 0
+	for _, u := range ranges {
+		if u.Holds() {
+			holding++
+		}
+	}
+	fmt.Printf("params| %d x/fibre params range(s) on record, %d still withholding verdicts; %d row(s) corrected, %d differ from corrections.jsonl\n",
+		len(ranges), holding, corrected, corrDiffs)
+
 	// ---- obligations ----
 	rows := make([]verdict.Row, 0, len(ms))
 	for _, m := range ms {
 		rows = append(rows, verdict.FromMeasurement(m))
 	}
+	heights := map[string]verdict.PromiseHeights{}
+	for _, p := range pubs {
+		heights[p.PromiseHash] = verdict.PromiseHeights{PromiseHeight: p.Promise.Height, SettlementHeight: p.SettlementHeight}
+	}
+	verdict.MarkRetentionUnverified(rows, heights, ranges)
 	settled := map[string]time.Time{}
 	for _, p := range pubs {
 		settled[p.PromiseHash] = p.SettlementTime
@@ -643,4 +702,69 @@ func loadHostHistory(dir string) (*scan.HostHistory, []scan.ScanGap, bool) {
 		seeded, seedAt = true, st.HostSeedAt
 	}
 	return scan.LoadHostHistory(entries, seeded, seedAt), st.Gaps, true
+}
+
+// loadParamRanges reads param_uncertainty.jsonl: the height ranges the
+// scanner could not say which x/fibre params were in force over. A later
+// line for the same id supersedes an earlier one, which is how a range
+// that was open when it was written and verified later reads.
+func loadParamRanges(path string) []scan.ParamUncertainty {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	byID := map[string]scan.ParamUncertainty{}
+	var order []string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 1<<20), 8<<20)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var u scan.ParamUncertainty
+		if json.Unmarshal(line, &u) != nil || u.ID == "" {
+			continue
+		}
+		if _, seen := byID[u.ID]; !seen {
+			order = append(order, u.ID)
+		}
+		byID[u.ID] = u
+	}
+	out := make([]scan.ParamUncertainty, 0, len(order))
+	for _, id := range order {
+		out = append(out, byID[id])
+	}
+	return out
+}
+
+// loadCorrections reads corrections.jsonl, keyed by the probe row each
+// verdict correction moved. Publication deadline corrections are skipped:
+// the row corrections carry the deadline they were drawn against, which is
+// what a re-derivation needs.
+func loadCorrections(path string) map[string]store.Correction {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	out := map[string]store.Correction{}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 1<<20), 8<<20)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var c store.Correction
+		if json.Unmarshal(line, &c) != nil || c.Kind != store.CorrectionProbeVerdict || c.DedupeKey == "" {
+			continue
+		}
+		if prev, ok := out[c.DedupeKey]; ok && prev.JudgedAt.After(c.JudgedAt) {
+			continue
+		}
+		out[c.DedupeKey] = c
+	}
+	return out
 }

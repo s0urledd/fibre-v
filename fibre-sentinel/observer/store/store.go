@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 18
+const SchemaVersion = 19
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -463,6 +463,113 @@ var migrations = []migration{
 				(started_at, sampling_commitment, sampling_binding, sampling_p, classification, promise_hash)`,
 		},
 	},
+	{
+		version: 19,
+		note:    "params uncertainty: the height ranges this observer cannot say which x/fibre params were in force over, the hold they place on the verdicts they cover, and the append-only log of every deadline and verdict a verification moved",
+		stmts: []string{
+			// The ranges. Everything but the resolution is written once;
+			// the resolution latches from open to verified or unresolvable
+			// and is never cleared, because a range that was closed cannot
+			// become open again.
+			`CREATE TABLE IF NOT EXISTS param_uncertainty (
+				id                             TEXT PRIMARY KEY,
+				chain_id                       TEXT NOT NULL,
+				kind                           TEXT NOT NULL,
+				from_height                    INTEGER NOT NULL,
+				to_height                      INTEGER NOT NULL,
+				effective_from_height          INTEGER NOT NULL DEFAULT 0,
+				interval_start_known           INTEGER NOT NULL DEFAULT 1,
+				direction                      TEXT NOT NULL DEFAULT '',
+				window_before_s                INTEGER NOT NULL DEFAULT 0,
+				window_after_s                 INTEGER NOT NULL DEFAULT 0,
+				publications_affected          INTEGER NOT NULL DEFAULT 0,
+				publications_affected_is_floor INTEGER NOT NULL DEFAULT 0,
+				detected_at                    TEXT NOT NULL,
+				to_time                        TEXT,
+				last_error                     TEXT NOT NULL DEFAULT '',
+				holds                          INTEGER NOT NULL DEFAULT 0,
+				resolution                     TEXT NOT NULL DEFAULT '',
+				resolved_at                    TEXT,
+				resolve_method                 TEXT NOT NULL DEFAULT '',
+				heights_read                   INTEGER NOT NULL DEFAULT 0,
+				resolve_error                  TEXT NOT NULL DEFAULT '',
+				raw_json                       TEXT NOT NULL
+			)`,
+			// The one query that matters runs every collector pass: which
+			// ranges still hold, and which heights do they cover.
+			`CREATE INDEX IF NOT EXISTS param_uncertainty_holding
+				ON param_uncertainty (holds, from_height, to_height)`,
+
+			// The correction log. No FOREIGN KEY to probes, deliberately:
+			// probe_amendments references probes(dedupe_key) ON DELETE
+			// CASCADE, so the retention prune destroys the log of the
+			// amendments it once published. A record of what this observer
+			// withdrew has to outlive the row it withdrew it from.
+			`CREATE TABLE IF NOT EXISTS publication_corrections (
+				promise_hash          TEXT NOT NULL,
+				uncertainty_id        TEXT NOT NULL,
+				from_must_serve_until TEXT NOT NULL,
+				to_must_serve_until   TEXT NOT NULL,
+				from_basis            TEXT NOT NULL,
+				to_basis              TEXT NOT NULL,
+				reason                TEXT NOT NULL,
+				judged_at             TEXT NOT NULL,
+				PRIMARY KEY (promise_hash, uncertainty_id)
+			)`,
+			`CREATE TABLE IF NOT EXISTS probe_corrections (
+				dedupe_key            TEXT NOT NULL,
+				uncertainty_id        TEXT NOT NULL,
+				promise_hash          TEXT NOT NULL,
+				validator_address     TEXT NOT NULL,
+				scheduled_at          TEXT NOT NULL,
+				from_phase            TEXT NOT NULL,
+				to_phase              TEXT NOT NULL,
+				from_classification   TEXT NOT NULL,
+				to_classification     TEXT NOT NULL,
+				from_must_serve_until TEXT NOT NULL,
+				to_must_serve_until   TEXT NOT NULL,
+				reason                TEXT NOT NULL,
+				prune_tolerance_s     INTEGER NOT NULL DEFAULT 0,
+				judged_at             TEXT NOT NULL,
+				PRIMARY KEY (dedupe_key, uncertainty_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS probe_corrections_promise ON probe_corrections (promise_hash)`,
+
+			// The verdict as it was stamped, kept beside the corrected one.
+			// NULL means uncorrected, never "the same as".
+			`ALTER TABLE publications ADD COLUMN must_serve_until_at_scan       TEXT`,
+			`ALTER TABLE publications ADD COLUMN must_serve_until_basis_at_scan TEXT`,
+			`ALTER TABLE publications ADD COLUMN corrected_at                   TEXT`,
+			`ALTER TABLE probes       ADD COLUMN must_serve_until_at_probe      TEXT`,
+			`ALTER TABLE probes       ADD COLUMN phase_at_probe                 TEXT`,
+			`ALTER TABLE probes       ADD COLUMN corrected_at                   TEXT`,
+
+			// The hold, denormalised onto the rows so every rate query is a
+			// column test rather than a join against a range table. It is
+			// derived state: SyncParamHolds recomputes it from
+			// param_uncertainty every pass, in both directions, so it
+			// cannot drift or stick.
+			`ALTER TABLE publications ADD COLUMN retention_unverified INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE probes       ADD COLUMN retention_unverified INTEGER NOT NULL DEFAULT 0`,
+			`CREATE INDEX IF NOT EXISTS probes_held ON probes (promise_hash) WHERE retention_unverified = 1`,
+
+			// Publication.must_serve_until_ambiguous has been written to
+			// publications.jsonl since the field was added and read by
+			// nothing: no column, no ingest, no API. Shipping a second
+			// uncertainty axis while the first stays invisible would be
+			// worse than having one. Backfilled from raw_json, which the
+			// retention pass strips after 30 days; older rows keep 0, which
+			// understates rather than invents.
+			// The ninth obligation bucket. Rolled days from before this
+			// migration keep 0, which is honest: nothing was held then.
+			`ALTER TABLE obligation_daily ADD COLUMN held_param_unverified INTEGER NOT NULL DEFAULT 0`,
+
+			`ALTER TABLE publications ADD COLUMN must_serve_until_ambiguous INTEGER NOT NULL DEFAULT 0`,
+			`UPDATE publications SET must_serve_until_ambiguous = 1
+			 WHERE raw_json <> '' AND json_valid(raw_json)
+			   AND json_extract(raw_json, '$.must_serve_until_ambiguous') = 1`,
+		},
+	},
 }
 
 // Store wraps one SQLite database.
@@ -699,6 +806,12 @@ func splitSQL(src string) []string {
 // that string comparison in SQL (>=, ORDER BY, MAX) is chronological.
 // RFC3339Nano trims trailing zeros, which breaks that: "...:00Z" sorts after
 // "...:00.5Z".
+// MetaParamHoldsRev is bumped whenever a params hold is raised or lifted
+// or a correction moves a verdict, so the API's cached aggregates — which
+// run to a thirty-minute TTL — can tell that a figure they hold has been
+// withdrawn instead of republishing it until the TTL runs out.
+const MetaParamHoldsRev = "param_holds_rev"
+
 const TimeLayout = "2006-01-02T15:04:05.000000000Z"
 
 // TS formats a time for a timestamp column or a comparison argument.

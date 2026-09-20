@@ -367,6 +367,64 @@ func HostEvents(st *store.Store, path string, now time.Time) (Result, error) {
 	}, now)
 }
 
+// ParamUncertainty ingests param_uncertainty.jsonl: the height ranges the
+// scanner could not say which x/fibre params were in force over, and what
+// came of trying to close them. A range is written once when it opens and
+// again if it later closes, both under the same id, so the handler is an
+// upsert whose second write only latches the resolution.
+func ParamUncertainty(st *store.Store, path string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var u scan.ParamUncertainty
+		if err := json.Unmarshal(raw, &u); err != nil {
+			return false, fmt.Errorf("%w: decode param uncertainty: %v", ErrBadRecord, err)
+		}
+		if u.ID == "" || u.Kind == "" || u.ToHeight < u.FromHeight {
+			return false, fmt.Errorf("%w: param uncertainty without an id, a kind or a usable range", ErrBadRecord)
+		}
+		return st.UpsertParamUncertainty(u, raw)
+	}, now)
+}
+
+// Corrections replays corrections.jsonl, the collector's own log of the
+// deadlines and verdicts a verified params range moved, so a rebuilt
+// database carries them without re-deriving.
+func Corrections(st *store.Store, path string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var c store.Correction
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return false, fmt.Errorf("%w: decode correction: %v", ErrBadRecord, err)
+		}
+		if c.UncertaintyID == "" || c.JudgedAt.IsZero() {
+			return false, fmt.Errorf("%w: correction without an uncertainty id or a judged_at", ErrBadRecord)
+		}
+		switch c.Kind {
+		case store.CorrectionPublicationDeadline:
+			if c.PromiseHash == "" {
+				return false, fmt.Errorf("%w: publication correction without a promise_hash", ErrBadRecord)
+			}
+			ok, err := st.ApplyPublicationCorrection(c)
+			if errors.Is(err, store.ErrNoSuchRow) {
+				// The publication line has not been ingested yet, or came
+				// after this one in the same pass. Defer rather than skip:
+				// a correction dropped on the floor leaves a deadline this
+				// observer has already decided is wrong.
+				return false, fmt.Errorf("%w: no publication %s yet", ErrRetryLater, c.PromiseHash)
+			}
+			return ok, err
+		case store.CorrectionProbeVerdict:
+			if c.DedupeKey == "" {
+				return false, fmt.Errorf("%w: probe correction without a dedupe_key", ErrBadRecord)
+			}
+			ok, err := st.ApplyProbeCorrection(c)
+			if errors.Is(err, store.ErrNoSuchRow) {
+				return false, fmt.Errorf("%w: no probe row %s yet", ErrRetryLater, c.DedupeKey)
+			}
+			return ok, err
+		}
+		return false, fmt.Errorf("%w: correction of unknown kind %q", ErrBadRecord, c.Kind)
+	}, now)
+}
+
 // Amendments replays amendments.jsonl, the collector's own log of late
 // shadow verdicts, so a rebuilt database carries them without re-judging.
 func Amendments(st *store.Store, path string, now time.Time) (Result, error) {

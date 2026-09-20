@@ -104,9 +104,14 @@ func timeoutFor(name string) time.Duration {
 type logf func(format string, args ...any)
 
 type snap[T any] struct {
-	v  T
-	at time.Time
-	ms int64
+	v T
+	// rev is the value revision() returned when this snapshot was
+	// computed. A snapshot taken under a different revision is not stale,
+	// it is wrong, and it is dropped rather than served while a refresh
+	// runs behind it.
+	rev string
+	at  time.Time
+	ms  int64
 }
 
 // snapshotCache holds one computed value per window, refreshed on read.
@@ -123,6 +128,13 @@ type snapshotCache[T any] struct {
 	mu         sync.Mutex
 	entries    map[string]*snap[T]
 	refreshing map[string]bool
+	// revision returns a token that changes when something happened that a
+	// cached aggregate cannot survive. The TTLs here run to thirty minutes,
+	// and a withheld fault republished for half an hour after the hold
+	// landed is exactly the accusation the hold exists to stop, so the
+	// answer is invalidation and not a shorter TTL. nil means nothing can
+	// invalidate this cache.
+	revision func() string
 	// bg counts the background computations in flight (warm-up and
 	// refreshes), so Server.Close can wait for their files to land before
 	// the directory they write to goes away.
@@ -135,6 +147,7 @@ type persisted[T any] struct {
 	Window string    `json:"window"`
 	At     time.Time `json:"at"`
 	Ms     int64     `json:"ms"`
+	Rev    string    `json:"rev,omitempty"`
 	Value  T         `json:"value"`
 }
 
@@ -158,7 +171,7 @@ func (c *snapshotCache[T]) persistTo(dir string, log logf) {
 			continue
 		}
 		c.mu.Lock()
-		c.entries[name] = &snap[T]{v: p.Value, at: p.At, ms: p.Ms}
+		c.entries[name] = &snap[T]{v: p.Value, rev: p.Rev, at: p.At, ms: p.Ms}
 		c.mu.Unlock()
 		loaded++
 	}
@@ -177,7 +190,7 @@ func (c *snapshotCache[T]) persist(window string, s *snap[T]) {
 	if c.dir == "" {
 		return
 	}
-	b, err := json.Marshal(persisted[T]{Label: c.label, Window: window, At: s.at, Ms: s.ms, Value: s.v})
+	b, err := json.Marshal(persisted[T]{Label: c.label, Window: window, At: s.at, Ms: s.ms, Rev: s.rev, Value: s.v})
 	if err != nil {
 		return
 	}
@@ -215,10 +228,25 @@ func (c *snapshotCache[T]) ttl(name string) time.Duration {
 // get returns the snapshot for win with the moment it was taken and what it
 // cost, computing inline only when there is nothing at all to serve. A stale
 // snapshot is returned as it stands and a refresh is started behind it.
+func (c *snapshotCache[T]) rev() string {
+	if c.revision == nil {
+		return ""
+	}
+	return c.revision()
+}
+
 func (c *snapshotCache[T]) get(ctx context.Context, log logf, win Window) (T, time.Time, int64, error) {
 	var zero T
+	rev := c.rev()
 	c.mu.Lock()
 	s := c.entries[win.Name]
+	if s != nil && s.rev != rev {
+		// Computed under a different revision: a hold landed, or a
+		// correction moved a verdict. Serving it while a refresh runs
+		// behind it would republish the figure that changed.
+		delete(c.entries, win.Name)
+		s = nil
+	}
 	if s != nil && time.Since(s.at) >= c.ttl(win.Name) && !c.refreshing[win.Name] {
 		c.refreshing[win.Name] = true
 		c.bg.Add(1)
@@ -306,7 +334,7 @@ func (c *snapshotCache[T]) fill(ctx context.Context, win Window) (*snap[T], erro
 	if err != nil {
 		return nil, err
 	}
-	s := &snap[T]{v: v, at: start, ms: time.Since(start).Milliseconds()}
+	s := &snap[T]{v: v, rev: c.rev(), at: start, ms: time.Since(start).Milliseconds()}
 	c.entries[win.Name] = s
 	c.persist(win.Name, s)
 	return s, nil

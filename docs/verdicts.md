@@ -43,10 +43,55 @@ as in force from the block after the check. Publications settled between
 the change and the check keep the window computed from the old params (the
 record is append-only); when that change shortened the window their
 recorded deadline is later than the server's prune time, and an in-window
-`NOT_FOUND` between the two would be a fault. The scanner logs the interval
-and the count; every validator prunes at the same moment, so such a point
-is caught by the correlated-failure guard as a fault suspect point, which
-is the only protection the record offers there.
+`NOT_FOUND` between the two would be a fault.
+
+That range is written down (`param_uncertainty.jsonl`, published at
+`/v1/meta.param_uncertainty`) and the scanner tries to close it in the same
+pass, by reading `x/fibre` params at **every height in it**. Not a
+bisection: a bisection locates a transition but cannot prove there was no
+third value between the endpoints, and a third value whose window dipped
+shorter is the entire reason the two endpoints are not a proof. Sixty
+heights is about a second against the node the scanner already follows, so
+the common case closes immediately and the values that were really in force
+go into the param history at the heights they were in force from.
+
+While a range is open — the node could not answer, or the range is wider
+than one pass will read — every obligation it covers is **held**: the rows
+publish `RETENTION_UNVERIFIED` instead of the `HEALTHY` or `FAULT` they were
+stamped with, and neither the fault nor the credit reaches a rate. A
+publication is covered when its upload interval, from the block before the
+promise height to the settlement tx, overlaps the range.
+
+The correlated-failure guard is *not* the protection here and never was: it
+needs three faulting validators and half the point, so two affected
+validators, or a share under the threshold, walks straight through it. The
+guard is for a correlated outage; this is for the observer being wrong about
+the deadline, which is a different fact and needs a different mechanism.
+
+When a range is verified, the deadlines it covers are recomputed against the
+proven values and every row re-graded, as append-only corrections
+(`corrections.jsonl`, `publication_corrections`, `probe_corrections`). The
+row keeps what it was stamped with beside the corrected value
+(`must_serve_until_at_probe`, `phase_at_probe`, `classification_at_probe`,
+`corrected_at`), and the correction log carries no foreign key to the probe
+row, so the retention prune cannot delete the record of a verdict this
+observer withdrew.
+
+**A correction only ever moves a deadline earlier.** Verifying a range can
+make the recomputed deadline *later* — a value proven to have started before
+the promise height replaces what the history had there rather than joining
+it, and a longer replacement raises the earliest bound — and that would turn
+a validator that read clean into a `FAULT` on evidence this observer did not
+hold when it published the clean reading. So the correction is clamped: it
+can withdraw an accusation, never make one. The cost is real and is taken
+deliberately: a window that was silently *lengthened* leaves obligations
+under-claimed, and a validator that pruned on the old shorter deadline keeps
+a verdict this observer will not revisit.
+
+What this still does not catch: a change that lands and reverts inside one
+60-block period produces no disagreement at the check, so no range opens.
+Detection is endpoint sampling at 60-block granularity, and that is the
+bound.
 
 ## Who is actually obliged
 
@@ -174,6 +219,7 @@ One sentence each, and what a reader should conclude.
 | `UNATTESTED` | assigned validator, any phase, where no verified signature from that validator appears on the settled promise and the probe reached the question of the shard at all (an observer-side outcome, a stale assignment pin, a missing registry entry or an unusable certificate is named first, as `PROBE_ERROR`, `NOT_REGISTERED` or `IDENTITY_MISMATCH`, none of which enters a rate) | nothing on chain proves this validator ever stored the shard, so no verdict is owed either way. Outside every rate, in both directions |
 | `PROBE_ERROR` | the observer could not carry out the probe, or gave up on it (`PROBE_ERROR`, `RPC_DEADLINE`) | an observer problem, shown as a gap |
 | `NOT_PROBED` | the slot elapsed unprobed (observer down or late), or the download was skipped by policy (`MISSED`, `REACHABLE`) | a gap in observation, never a zero |
+| `RETENTION_UNVERIFIED` | the publication's upload interval overlaps a range of heights over which an `x/fibre` params change landed with no event and this observer has not read the params at every height (see "Phases"). Applied over the stored row rather than returned by `Classify`: the measurement record says what happened on the wire and is append-only, while whether this observer trusts its own deadline is a judgement that has to be revisable | this observer cannot say when the obligation ended, so it publishes no serve verdict — **neither the fault nor the credit**. Withholding only the accusations would raise every rate it touched, which is the same argument this document makes for `UNATTESTED` and for grace probes. Replaces exactly `HEALTHY` and `FAULT`; `INVALID_ROWS` is carved out, because bytes that fail the commitment are a fault in every phase and no deadline rescues them. Never a statement about the validator |
 
 ## How the dashboard derives its numbers
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/rollup"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/verdict"
@@ -131,5 +132,83 @@ func TestTheSQLAndTheGoTwinExcludeTheSameClassesFromTheGuard(t *testing.T) {
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("guard denominator diverged:\n  Go:  %s\n  SQL: %s", strings.Join(want, ","), strings.Join(got, ","))
+	}
+}
+
+// The hold is applied twice, once in SQL and once in Go, and the two must
+// land on the same answer for every row. A disagreement here is worse than
+// a wrong answer: sentinel-recompute would report a divergence on every
+// held row, and one of the two implementations would be publishing a fault
+// the other says it cannot support.
+//
+// This sweeps the whole cell space rather than a fixture, so a new
+// classification or a new outcome is covered without anyone remembering to
+// add it.
+func TestTheSQLAndTheGoTwinHoldTheSameRows(t *testing.T) {
+	st := openStore(t)
+	db := st.DB()
+	ctx := context.Background()
+
+	type cell struct {
+		key  string
+		cls  probe.Classification
+		out  probe.Outcome
+		held bool
+	}
+	var cells []cell
+	i := 0
+	for _, c := range probe.AllClassifications {
+		for _, o := range probe.AllOutcomes {
+			for _, held := range []bool{false, true} {
+				i++
+				cells = append(cells, cell{key: "k" + strconv.Itoa(i), cls: c, out: o, held: held})
+			}
+		}
+	}
+	for _, c := range cells {
+		h := 0
+		if c.held {
+			h = 1
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO probes
+			(dedupe_key, vantage, promise_hash, commitment, blob_version, must_serve_until, validator_set_height,
+			 validator_address, validator_host, assigned, assigned_row_count, schedule_label, scheduled_at, started_at,
+			 finished_at, lateness_ms, dns_ok, dns_ms, tcp_ok, tcp_ms, tls_ok, tls_ms, identity_ok, download_ok,
+			 download_ms, rows_returned, rows_expected, commitment_verified, assignment_verified, phase, outcome,
+			 classification, total_duration_ms, raw_json, retention_unverified)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			c.key, "t", "p", "c", 0, "2026-01-01T00:00:00.000000000Z", 1,
+			"v", "h", 1, 2, "w1", "2026-01-01T00:00:00.000000000Z", "2026-01-01T00:00:00.000000000Z",
+			"2026-01-01T00:00:00.000000000Z", 0, 1, 0, 1, 0, 1, 0, 1, 1,
+			0, 2, 2, 1, 1, "in_window", string(c.out),
+			string(c.cls), 10, "{}", h); err != nil {
+			t.Fatalf("insert %s: %v", c.key, err)
+		}
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT dedupe_key, `+rollup.EffectiveClass("")+` FROM probes`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var k, c string
+		if err := rows.Scan(&k, &c); err != nil {
+			t.Fatal(err)
+		}
+		got[k] = c
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(cells) {
+		t.Fatalf("read %d rows back, inserted %d", len(got), len(cells))
+	}
+	for _, c := range cells {
+		want := verdict.Row{Classification: c.cls, Outcome: c.out, RetentionUnverified: c.held}.EffectiveClass()
+		if got[c.key] != string(want) {
+			t.Errorf("(%s, %s, held=%v): SQL says %q, the Go twin says %q", c.cls, c.out, c.held, got[c.key], want)
+		}
 	}
 }

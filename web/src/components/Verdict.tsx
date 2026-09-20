@@ -13,7 +13,8 @@
  *   kept    counted in the numerator                       HEALTHY
  *   fault   counted against — the only accusation          FAULT
  *   hold    held out: we could not complete the measurement UNREACHABLE, IDENTITY_EXPIRED
- *   held    held out: nothing was owed, or not by this promise
+ *   held    held out: nothing was owed, not by this promise, or this site
+ *           cannot say when the obligation ended    RETENTION_UNVERIFIED
  *   gap     not observed at all — a gap, never a verdict    NOT_PROBED, PROBE_ERROR
  *
  * FAULT owns the only pointed shape in the system and the only status colour
@@ -102,6 +103,10 @@ const VERDICTS: Record<string, Def> = {
   NOT_PROBED: {
     label: "not probed", tier: "gap",
     def: "The slot elapsed unprobed, or the policy sampled it out. A gap, not a verdict.",
+  },
+  RETENTION_UNVERIFIED: {
+    label: "deadline unverified", tier: "held",
+    def: "Fibre's parameters changed without an event somewhere in a range of heights covering this blob's upload, and this site has not read the parameters at every height in that range. How long the shard had to be kept is computed from those parameters, so this site cannot say when the obligation ended. It publishes neither the failure nor the credit; the verdict returns once the range has been read.",
   },
 };
 

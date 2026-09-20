@@ -97,6 +97,8 @@ derived index of them.
 | `sampling-secrets.jsonl` | revealed day secret | `revealed_at` |
 | `amendments.jsonl` | late shadow verdict | `judged_at` |
 | `host_history.jsonl` | host registration | `time` |
+| `param_uncertainty.jsonl` | a height range whose `x/fibre` params the observer cannot vouch for, and what came of closing it | `detected_at` |
+| `corrections.jsonl` | a deadline or verdict a verified range moved | `judged_at` |
 
 `state.json` is **not** a record file: it is the scanner's current param
 history, scan gaps, host seed and frontier. Every export carries it as a
@@ -104,7 +106,9 @@ snapshot because `sentinel-recompute` needs all four to redraw a verdict the
 way the observer drew it.
 
 Dedupe keys make re-ingest a no-op: a publication by `settlement_tx_hash`, a
-probe by `(vantage, promise_hash, validator_address, scheduled_at)`.
+probe by `(vantage, promise_hash, validator_address, scheduled_at)`, a params
+range by its id (`chain:kind:from-to`) plus its resolution, a correction by
+`(target, range id)`.
 
 ---
 
@@ -115,7 +119,7 @@ needs a full VACUUM, which is why an existing DB has to be deleted). The
 collector owns the schema; the API opens `query_only` and refuses a database
 older *or* newer than the binary expects.
 
-**Schema version 18.** Base tables from `schema.sql`: `schema_migrations`,
+**Schema version 19.** Base tables from `schema.sql`: `schema_migrations`,
 `observer_runs`, `ingest_cursors`, `params_history`, `publications`,
 `assignments`, `endpoints`, `probes`, `meta`, `reachability`. Migrations add:
 
@@ -138,11 +142,26 @@ older *or* newer than the binary expects.
 | 16 | `probe_daily.identity_up` |
 | 17 | `probe_daily` attestation split |
 | 18 | indexes for `/v1/probes?at=` and `/v1/sampling` |
+| 19 | params uncertainty: `param_uncertainty`, `publication_corrections`, `probe_corrections`, the `retention_unverified` hold and the `*_at_scan` / `*_at_probe` originals, `obligation_daily.held_param_unverified`, and `publications.must_serve_until_ambiguous` (written to the record since it was added and read by nothing until now) |
 
 The store is append-only **in its inserts** (`ON CONFLICT DO NOTHING`) but not
 in its verdicts: `ApplyAmendment` updates a row's classification in place when
-a deferred shadow verdict settles. Anything that caches per-publication
-results has to account for both — see `blobcache.go`'s fingerprint.
+a deferred shadow verdict settles, and `ApplyProbeCorrection` /
+`ApplyPublicationCorrection` move a deadline and a verdict when a params range
+is verified. Every one of them keeps what the row was stamped with in a
+sibling column (`classification_at_probe`, `phase_at_probe`,
+`must_serve_until_at_probe`, `must_serve_until_at_scan`) and logs the move to
+its own append-only table and record file. `probe_corrections` carries **no**
+foreign key to `probes`, unlike `probe_amendments`, whose `ON DELETE CASCADE`
+lets the retention prune delete the log of amendments it once published.
+
+Anything that caches per-publication results has to account for all of it —
+see `blobcache.go`'s fingerprint, which carries `amended_at`, `corrected_at`
+and `retention_unverified`, none of which adds a row or moves `MAX(rowid)`.
+The API's window snapshots run to a thirty-minute TTL and key on
+`meta.param_holds_rev`, which the collector bumps whenever a hold is raised or
+lifted; without that a withheld fault would stay on the front page for half an
+hour after the hold landed.
 
 ---
 
@@ -350,9 +369,12 @@ Units: `fibre-scan@`, `fibre-probe@`, `fibre-heartbeat@`, `fibre-collector@`,
 and `fibre-healthwatch@` (polls `/v1/health`, posts to a webhook), and
 optional `fibre-litestream@`.
 
-**Upgrade order matters**: install binaries → restart the collector (it owns
-migrations) → restart the rest. The API refuses a schema it does not
-understand rather than serving columns it does not know.
+**Upgrade order matters**: install binaries → **stop the API** → restart the
+collector (it owns migrations) → start the API. `store.OpenReadOnly` refuses a
+database whose schema version is not exactly the binary's, in either
+direction, so an API left running against a database the collector has just
+migrated will fail its next open rather than serve columns it does not know.
+The scanner shares no schema with the store and can be rolled at any point.
 
 Caddy serves the static export from `/var/www/fibre-observer` and proxies
 `/api/*` to the API port.
@@ -361,7 +383,9 @@ Caddy serves the static export from `/var/www/fibre-observer` and proxies
 
 - `VANTAGE=ut-1`, `DATA_DIR=/var/lib/fibre-observer/mocha`,
   `API_LISTEN=127.0.0.1:8081`
-- schema 18, `obligation_daily` empty (rollup runs 14 days after a day ends)
+- schema 18 at the time of writing; the collector migrates it to 19 on its
+  first start after this branch. `obligation_daily` empty (rollup runs 14
+  days after a day ends)
 - chain `mocha-5`, app version 9 — **Fibre arrives with version 10**, so
   there are no publications and no obligations yet; the 79 bonded validators
   on the site come from the staking module
@@ -452,6 +476,13 @@ from outside the celestia-app module.
 9. **The build revision on every row is a real commit.** A `-dirty` build is
    a row nobody can tie back to code.
 10. **The sampling master secret never leaves the host.**
+11. **No verdict is published against a deadline the observer cannot vouch
+    for.** A publication whose upload interval overlaps an unclosed
+    `param_uncertainty` range publishes `RETENTION_UNVERIFIED` in place of
+    both `HEALTHY` and `FAULT` — withholding only the accusations would
+    raise every rate it touched.
+12. **A correction only moves a deadline earlier.** Verifying a params range
+    can withdraw an accusation; it may never create one.
 
 ---
 
@@ -471,6 +502,25 @@ Stated here because they are properties of the machine, not of any validator.
   answer `NotFound` for a shard still on its disk. The shape that separates
   them is in the record, not in one row: a machine event puts a validator's
   faults at one moment across many promises.
+- **An eventless params change that reverts inside one check period is
+  invisible.** `reconcileParams` compares chain state against the event
+  history every 60 blocks. A change that lands and reverts between two
+  checks produces no disagreement, so no range opens, nothing is held, and a
+  validator pruning on the real deadline is published as a fault. Detection
+  is endpoint sampling at 60-block granularity; `paramReconcileEvery` is the
+  only lever.
+- **A range no node can answer for stays held forever.** The scanner reads
+  every height in a range to close it. A node that has pruned that state
+  leaves the range `unresolvable`, and its obligations are withheld
+  permanently — visible at `/v1/meta.param_uncertainty`, never silently
+  dropped, but never judged either. An archive node can close it later; the
+  resolution latch allows `unresolvable` → `verified`, only not the reverse.
+- **A held day does not roll, so it does not prune.** `dayFinal` refuses a
+  day with a held promise, because rolling freezes the buckets and the prune
+  then deletes the rows a correction would re-grade. `rollup.Run` walks days
+  in order, so one held day holds every later one. That is why the scanner
+  closes a range in the pass that opens it, and why a range it cannot read
+  is recorded `unresolvable` rather than left open.
 - **Serve and fault are not symmetric.** A fault is conclusive from one
   reading; a serve is a claim about a window and needs a reading near its end.
   So while the observer is blind, the obligations it can still judge are
