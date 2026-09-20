@@ -1043,9 +1043,16 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 		 validator_set_height, total_voting_power, sigma_rows, distinct_rows, wrap_overlaps, validators_with_rows,
 		 recorded_at, raw_json,
 		 attested_with_rows, attested_voting_power, signature_entries, signatures_verified,
-		 signatures_unmatched, signatures_out_of_position)
+		 signatures_unmatched, signatures_out_of_position, retention_unverified)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		        ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?,
+		-- Born withheld when a range that still withholds already covers
+		-- this publication's upload interval. Publications are ingested
+		-- before the ranges in a pass, so one settling into a range
+		-- recorded on an earlier pass would otherwise arrive unheld and
+		-- stay that way until the hold sync at the end of the pass.
+		EXISTS (SELECT 1 FROM param_uncertainty u
+			WHERE u.holds = 1 AND ? - 1 <= u.to_height AND ? >= u.from_height))
 		ON CONFLICT(promise_hash) DO NOTHING`,
 		p.PromiseHash, p.Promise.Commitment, p.Promise.BlobVersion, p.Promise.BlobSize, p.Promise.Namespace,
 		p.Promise.ChainID, p.Promise.Height, ts(p.Promise.CreationTimestamp),
@@ -1056,7 +1063,8 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 		a.ValidatorSetHeight, a.TotalVotingPower, a.Sigma, a.Distinct, a.WrapOverlaps, a.ValidatorsWithRows,
 		ts(p.RecordedAt), string(raw),
 		att(int64(a.AttestedWithRows)), att(a.AttestedVotingPower), att(int64(a.SignatureEntries)),
-		att(int64(a.SignaturesVerified)), att(int64(a.SignaturesUnmatched)), att(int64(a.SignaturesOutOfPosition)))
+		att(int64(a.SignaturesVerified)), att(int64(a.SignaturesUnmatched)), att(int64(a.SignaturesOutOfPosition)),
+		p.Promise.Height, p.SettlementHeight)
 	if err != nil {
 		return false, fmt.Errorf("publication %s: %w", p.PromiseHash, err)
 	}

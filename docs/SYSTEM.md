@@ -486,9 +486,13 @@ from outside the celestia-app module.
     is stamped by `InsertProbe` itself (`store.ProbeHeldAtInsert`), in the
     statement that writes the row, over three arms: the publication is
     already withheld, the deadline disagrees, or a range that still
-    withholds covers the publication. The collector ingests the ranges
-    **before** the measurements, because a range says how to read the rows
-    it covers.
+    withholds covers the publication. A publication settling into a range
+    already on record is born withheld the same way. Rows already stored
+    when a range lands are withheld in the transaction that records it,
+    together with the cache revision, so neither the store nor a warm
+    snapshot can publish a verdict the range has withdrawn. The collector
+    ingests the ranges **before** the measurements, because a range says
+    how to read the rows it covers.
 12. **A range withholds until its corrections have landed, not until it is
     verified.** Reading every height says what the deadline should have
     been; applying that is what releases a row. The two facts are

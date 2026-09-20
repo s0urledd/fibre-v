@@ -382,7 +382,7 @@ func ParamUncertainty(st *store.Store, path string, now time.Time) (Result, erro
 		if u.ID == "" || u.Kind == "" || u.ToHeight < u.FromHeight {
 			return false, fmt.Errorf("%w: param uncertainty without an id, a kind or a usable range", ErrBadRecord)
 		}
-		return st.UpsertParamUncertainty(u, raw)
+		return st.UpsertParamUncertainty(u, raw, now)
 	}, now)
 }
 

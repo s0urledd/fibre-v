@@ -135,7 +135,7 @@ func record(t *testing.T, st *store.Store, u scan.ParamUncertainty) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.UpsertParamUncertainty(u, raw); err != nil {
+	if _, err := st.UpsertParamUncertainty(u, raw, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.SyncParamHolds(context.Background()); err != nil {

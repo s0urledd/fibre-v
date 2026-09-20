@@ -86,7 +86,16 @@ the row's deadline disagrees with its publication's (every row the prober
 produces after a correction), or the publication is covered by a range that
 still withholds (the pass where the range itself has only just arrived).
 The collector ingests the ranges before the measurements for the same
-reason: a range says how to read the rows it covers. The collector's next pass re-grades it against the deadline
+reason: a range says how to read the rows it covers.
+
+Rows **already stored** when a range lands are withheld in the same
+transaction that records it. A range is a statement that the verdicts of
+the publications it covers cannot be published, and the rows carrying
+those verdicts are in the store before it arrives; leaving them to the
+hold sync at the end of the pass left every one of them readable as a
+fault in the meantime, and for as long as the collector stayed down if it
+stopped in between. The cache revision moves in that transaction too, so
+a snapshot holding the withdrawn fault cannot outlive it. The collector's next pass re-grades it against the deadline
 its publication now carries and the hold lifts. A row whose own record the
 retention pass has stripped cannot be re-graded, so it stays withheld.
 

@@ -208,7 +208,7 @@ func openRange(t *testing.T, st *store.Store) scan.ParamUncertainty {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.UpsertParamUncertainty(u, raw); err != nil {
+	if _, err := st.UpsertParamUncertainty(u, raw, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.SyncParamHolds(context.Background()); err != nil {
@@ -742,49 +742,76 @@ func TestAMeasurementArrivingIntoAnOpenRangeIsHeldOnInsert(t *testing.T) {
 	assertReconciles(t, got)
 }
 
-// The same, one pass earlier: the range itself has only just been ingested
-// and the hold has not been synced onto the publication yet. The collector
-// now ingests ranges before measurements, and the insert asks the ranges
-// directly, so a row of the very pass that first carried a range is still
-// born withheld.
-func TestAMeasurementIsHeldEvenBeforeTheHoldIsSyncedOntoItsPublication(t *testing.T) {
+// A publication settling into a range recorded on an EARLIER pass arrives
+// unheld — publications are ingested before the ranges, so nothing has
+// raised its flag. It and its rows must still be withheld from the moment
+// they exist, which is what the range-coverage arm of ProbeHeldAtInsert
+// and the matching arm on the publication insert are for.
+func TestAPublicationSettlingIntoARangeAlreadyOnRecordIsHeldOnInsert(t *testing.T) {
 	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
 	st, created, msu := heldFixture(t, map[string][]probe.Outcome{"v1": ok})
+	openRange(t, st)
 
-	// The range lands, but nothing syncs the hold onto the publication.
-	u := scan.ParamUncertainty{
-		SchemaVersion: scan.ParamUncertaintySchemaVersion,
-		ID:            "t:silent_change:121-180", ChainID: "t", Kind: scan.UncertaintySilentChange,
-		FromHeight: 121, ToHeight: 180, EffectiveFromHeight: 181, IntervalStartKnown: true,
-		Direction: "shorter", PublicationsAffected: 1, DetectedAt: time.Now().UTC(),
-		Resolution: scan.ResolutionUnresolvable, ResolveError: "the node cannot answer for those heights",
+	// A second publication, settled at height 160, lands now. Its promise
+	// height is inside 121-180, so the range covers it.
+	pub := scan.Publication{
+		SchemaVersion: scan.AttestationSchemaVersion, PromiseHash: "held2",
+		SettlementHeight: 160, SettlementTime: created, MustServeUntil: msu, RecordedAt: time.Now().UTC(),
+		SettlementTxHash: "txheld2", Signer: "celestia1pub",
+		Promise:                 scan.PromiseFields{ChainID: "t", Height: 160, Commitment: "ccheld2", CreationTimestamp: created, BlobSize: 4096},
+		ValidatorSignatureCount: 1,
+		Assignment: scan.AssignmentTable{
+			ProtocolParams:     scan.ProtocolParamsSnapshot{OriginalRows: 4, TotalRows: 16},
+			ValidatorSetHeight: 159, TotalVotingPower: 10, Sigma: 2, Distinct: 2,
+			ValidatorsWithRows: 1, AttestedWithRows: 1, SignatureEntries: 1, SignaturesVerified: 1,
+			AttestedVotingPower: 10,
+			Validators:          []scan.ValidatorAssignment{{Address: "v1", VotingPower: 10, RowCount: 2, Rows: []int{0, 1}, Attested: true}},
+		},
 	}
-	raw, err := json.Marshal(u)
+	raw, err := json.Marshal(pub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.UpsertParamUncertainty(u, raw); err != nil {
+	if _, err := st.UpsertPublication(pub, raw); err != nil {
 		t.Fatal(err)
 	}
 	var pubHeld int
-	if err := st.DB().QueryRow(`SELECT retention_unverified FROM publications WHERE promise_hash = 'held1'`).Scan(&pubHeld); err != nil {
+	if err := st.DB().QueryRow(`SELECT retention_unverified FROM publications WHERE promise_hash = 'held2'`).Scan(&pubHeld); err != nil {
 		t.Fatal(err)
 	}
-	if pubHeld != 0 {
-		t.Fatal("this test needs the publication still unsynced to mean anything")
+	if pubHeld != 1 {
+		t.Fatal("a publication settling into a range that still withholds went in unheld")
 	}
 
-	insertLate(t, st, created, msu, "v1", 0.95, probe.OutcomeNotFound)
-
-	var held int
-	if err := st.DB().QueryRow(`SELECT retention_unverified FROM probes WHERE schedule_label = 'late'`).Scan(&held); err != nil {
+	at := created.Add(time.Duration(float64(msu.Sub(created)) * 0.95))
+	cls, reason := probe.Classify(probe.Evidence{Assigned: true, Attested: true, Phase: probe.PhaseInWindow, Outcome: probe.OutcomeNotFound})
+	m := probe.Measurement{
+		SchemaVersion: probe.AttestationSchemaVersion, Vantage: "test",
+		PromiseHash: "held2", Commitment: "ccheld2", MustServeUntil: msu, ValidatorSetHeight: 159,
+		ValidatorAddress: "v1", ValidatorHost: "v1:443",
+		Assigned: true, Attested: true, AssignedRowCount: 2,
+		ScheduleLabel: "late", ScheduledAt: at, StartedAt: at, FinishedAt: at,
+		Phase: probe.PhaseInWindow, Outcome: probe.OutcomeNotFound,
+		Classification: cls, ClassificationReason: reason, TotalDurationMS: 10,
+	}
+	m.TCP.OK, m.TLS.OK, m.Identity.OK = true, true, true
+	raw, err = json.Marshal(m)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if held != 1 {
-		t.Fatal("the row went in unheld although an open range covers its publication")
+	if _, err := st.InsertProbe(m, raw); err != nil {
+		t.Fatal(err)
+	}
+
+	var rowHeld int
+	if err := st.DB().QueryRow(`SELECT retention_unverified FROM probes WHERE promise_hash = 'held2'`).Scan(&rowHeld); err != nil {
+		t.Fatal(err)
+	}
+	if rowHeld != 1 {
+		t.Fatal("the row went in unheld although a range that still withholds covers its publication")
 	}
 	if got := networkHeld(t, st); got.Faults != 0 {
-		t.Fatalf("faults = %d", got.Faults)
+		t.Fatalf("faults = %d without a sync", got.Faults)
 	}
 }
 
@@ -815,4 +842,76 @@ func TestTheDisclosureSurvivesTheRangeThatCausedIt(t *testing.T) {
 	if got.RetentionUncertainty.OpenRanges != 0 || got.RetentionUncertainty.ProbesHeld == 0 {
 		t.Fatalf("retention_uncertainty = %+v, want no open range and a held probe", got.RetentionUncertainty)
 	}
+}
+
+// Rows already in the store when a range lands are the case the insert-time
+// hold cannot reach: they were written before anything knew to distrust
+// their deadline. Recording the range must withhold them in the same
+// transaction, not at the end of the collector's pass — the API reads the
+// store concurrently, and a collector that stops in between leaves the old
+// verdicts published for as long as it is down.
+//
+// The second half is the same scenario with the answer already cached. The
+// window snapshots run to a thirty-minute TTL, so a hold that commits while
+// the snapshot holding the fault stays valid publishes the accusation it
+// exists to withdraw.
+func TestRecordingARangeWithholdsTheRowsAlreadyStored(t *testing.T) {
+	gone := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomeNotFound}
+	st, _, _ := heldFixture(t, map[string][]probe.Outcome{"v1": gone, "v2": gone})
+
+	// One server for the whole test, so the cache is the live one.
+	ts := httptest.NewServer(api.New(st, "test"))
+	t.Cleanup(ts.Close)
+	read := func() heldJSON {
+		t.Helper()
+		var out heldJSON
+		get(t, ts, "/v1/network?window=24h", &out)
+		return out
+	}
+
+	// The faults are published, and now they are also cached.
+	before := read()
+	if before.Faults != 4 || before.Obligations.Broken != 2 {
+		t.Fatalf("faults=%d broken=%d before the range, want 4/2", before.Faults, before.Obligations.Broken)
+	}
+
+	// The range lands. Nothing else runs: no hold sync, no corrector.
+	u := scan.ParamUncertainty{
+		SchemaVersion: scan.ParamUncertaintySchemaVersion,
+		ID:            "t:silent_change:121-180", ChainID: "t", Kind: scan.UncertaintySilentChange,
+		FromHeight: 121, ToHeight: 180, EffectiveFromHeight: 181, IntervalStartKnown: true,
+		Direction: "shorter", PublicationsAffected: 1, DetectedAt: time.Now().UTC(),
+		Resolution: scan.ResolutionUnresolvable, ResolveError: "the node cannot answer for those heights",
+	}
+	raw, err := json.Marshal(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertParamUncertainty(u, raw, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every row of the covered publication is withheld already.
+	var unheld int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM probes WHERE retention_unverified = 0`).Scan(&unheld); err != nil {
+		t.Fatal(err)
+	}
+	if unheld != 0 {
+		t.Fatalf("%d row(s) stored before the range are still unheld after it was recorded", unheld)
+	}
+
+	after := read()
+	if after.Faults != 0 {
+		t.Fatalf("faults = %d from the cached answer after the range was recorded; the hold did not invalidate it", after.Faults)
+	}
+	if after.Obligations.Broken != 0 {
+		t.Fatalf("broken = %d", after.Obligations.Broken)
+	}
+	if after.Obligations.HeldParamUnverified != 2 {
+		t.Fatalf("held_param_unverified = %d, want 2", after.Obligations.HeldParamUnverified)
+	}
+	if after.RetentionUncertainty == nil {
+		t.Fatal("rows are withheld and the response says nothing about why")
+	}
+	assertReconciles(t, after)
 }

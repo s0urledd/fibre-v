@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
@@ -80,11 +81,16 @@ const CorrectionSchemaVersion = 1
 // releases a row. Re-ingesting a line for a range already corrected must
 // not re-raise its hold, which is what the corrected_at term in the
 // conflict clause is for.
-func (s *Store) UpsertParamUncertainty(u scan.ParamUncertainty, raw []byte) (bool, error) {
+func (s *Store) UpsertParamUncertainty(u scan.ParamUncertainty, raw []byte, now time.Time) (bool, error) {
 	if u.ID == "" {
 		return false, fmt.Errorf("param uncertainty without an id")
 	}
-	res, err := s.db.Exec(`INSERT INTO param_uncertainty
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO param_uncertainty
 			(id, chain_id, kind, from_height, to_height, effective_from_height, interval_start_known,
 			 direction, window_before_s, window_after_s, publications_affected, publications_affected_is_floor,
 			 detected_at, to_time, last_error, holds, resolution, resolved_at, resolve_method, heights_read,
@@ -108,7 +114,52 @@ func (s *Store) UpsertParamUncertainty(u scan.ParamUncertainty, raw []byte) (boo
 		return false, err
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+
+	// Raising the hold on the rows the range covers happens here, in the
+	// same transaction that records the range, and not in the pass that
+	// follows. A range is a statement that the verdicts of the
+	// publications it covers cannot be published, and rows carrying those
+	// verdicts are already in the store when it lands. Leaving them to
+	// SyncParamHolds at the end of the pass left every one of them
+	// readable as FAULT in the meantime — and for as long as the collector
+	// stayed down, if it stopped in between. The range and the withholding
+	// are one fact, so they commit together or not at all.
+	//
+	// Only ever raising. Clearing needs the whole picture — a publication
+	// can sit inside two overlapping ranges — and that stays with
+	// SyncParamHolds, which recomputes both directions.
+	var holds int
+	if err := tx.QueryRow(`SELECT holds FROM param_uncertainty WHERE id = ?`, u.ID).Scan(&holds); err != nil {
+		return false, err
+	}
+	var raised int64
+	if holds == 1 {
+		const covered = `SELECT pb.promise_hash FROM publications pb
+			WHERE pb.promise_height - 1 <= ? AND pb.settlement_height >= ?`
+		for _, q := range []string{
+			`UPDATE publications SET retention_unverified = 1 WHERE retention_unverified = 0 AND promise_hash IN (` + covered + `)`,
+			`UPDATE probes SET retention_unverified = 1 WHERE retention_unverified = 0 AND promise_hash IN (` + covered + `)`,
+		} {
+			r, err := tx.Exec(q, u.ToHeight, u.FromHeight)
+			if err != nil {
+				return false, err
+			}
+			m, _ := r.RowsAffected()
+			raised += m
+		}
+	}
+	if n > 0 || raised > 0 {
+		// In the same transaction too. The API's window snapshots run to a
+		// thirty-minute TTL and key on this; a hold that commits while the
+		// snapshot holding the fault stays valid publishes the accusation
+		// the hold exists to withdraw.
+		if _, err := tx.Exec(`INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+			MetaParamHoldsRev, strconv.FormatInt(now.UTC().UnixNano(), 10), ts(now)); err != nil {
+			return false, err
+		}
+	}
+	return n > 0, tx.Commit()
 }
 
 // HoldingRanges is every range whose verdicts are still withheld: a silent
