@@ -197,6 +197,32 @@ func main() {
 		}
 		applied := 0
 		for _, a := range ams {
+			// The line is appended and fsynced BEFORE the amendment is
+			// applied. The two can only fail in one direction: a line whose
+			// amendment did not apply replays as a no-op, because
+			// ApplyAmendment is idempotent on (dedupe_key, judged_at) and a
+			// rebuild replays this file before anything is re-judged. An
+			// applied amendment with no line is the other way round, and it
+			// is permanent: the store would carry a verdict that changed
+			// with nothing on record saying why, and the export would no
+			// longer reproduce it. That is the state this ordering exists to
+			// prevent, and it is the same ordering the store uses for its own
+			// records.
+			b, err := json.Marshal(a)
+			if err != nil {
+				log.Printf("amendments: marshal %s: %v", a.DedupeKey, err)
+				continue
+			}
+			if _, err := amendFile.Write(append(b, '\n')); err != nil {
+				log.Printf("amendments: write: %v", err)
+				live.Error(fmt.Sprintf("amendments write: %v", err))
+				continue
+			}
+			if err := amendFile.Sync(); err != nil {
+				log.Printf("amendments: sync: %v", err)
+				live.Error(fmt.Sprintf("amendments sync: %v", err))
+				continue
+			}
 			ok, err := st.ApplyAmendment(a)
 			if err != nil {
 				log.Printf("late verdicts: apply %s: %v", a.DedupeKey, err)
@@ -206,16 +232,9 @@ func main() {
 				continue
 			}
 			applied++
-			if b, err := json.Marshal(a); err == nil {
-				if _, err := amendFile.Write(append(b, '\n')); err != nil {
-					log.Printf("amendments: write: %v", err)
-					live.Error(fmt.Sprintf("amendments write: %v", err))
-				}
-			}
 			log.Printf("late verdict: %s %s %s: %s -> %s", a.PromiseHash[:min(12, len(a.PromiseHash))], a.ValidatorAddress, a.ScheduledAt.UTC().Format(time.RFC3339), a.From, a.To)
 		}
 		if applied > 0 {
-			_ = amendFile.Sync()
 			live.Set("late_verdicts", applied)
 		}
 	}

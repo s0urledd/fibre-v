@@ -86,8 +86,15 @@ func fetchObligations(t *testing.T, ts *httptest.Server, query string) apiObliga
 	return out
 }
 
+// same compares every bucket, Total included. Total is the count of
+// obligations the buckets partition, so leaving it out of this comparison
+// let a bucket appear on one side and not the other without the one test
+// that runs both implementations over the same rows noticing: the eight
+// named buckets can agree while the two disagree about how many
+// obligations there were.
 func same(a obligationsJSON, b verdict.Obligations) bool {
-	return a.Served == b.Served && a.Broken == b.Broken && a.EndUnobserved == b.EndUnobserved &&
+	return a.Total == b.Total &&
+		a.Served == b.Served && a.Broken == b.Broken && a.EndUnobserved == b.EndUnobserved &&
 		a.Unobserved == b.Unobserved && a.UnobservedReachable == b.UnobservedReachable &&
 		a.UnobservedUnreachable == b.UnobservedUnreachable && a.UnobservedNotProbed == b.UnobservedNotProbed &&
 		a.Pending == b.Pending
