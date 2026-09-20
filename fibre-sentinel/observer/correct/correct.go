@@ -112,6 +112,71 @@ func (c *Corrector) Run(ctx context.Context, now time.Time) (int, error) {
 		log.Printf("params range %s verified over %d height(s): %d deadline/verdict correction(s); the hold on its publications is lifted",
 			u.ID, u.HeightsRead, n)
 	}
+	n, err := c.sweepStaleRows(ctx, now)
+	return moved + n, err
+}
+
+// maxSweep bounds one pass's standing work. A publication's rows arrive
+// four at a time per validator over the length of its window, so the
+// backlog after a correction is bounded by the set still being probed; the
+// cap only bites on a first pass over a store that was corrected while the
+// collector was down, and the rows it does not reach stay held until the
+// next pass.
+const maxSweep = 20000
+
+// sweepStaleRows re-grades every row whose deadline disagrees with its
+// publication's, whatever range corrected that publication and whenever
+// the row arrived.
+//
+// This is the standing half of the mechanism, and it is what the
+// range-keyed pass above cannot do. The prober schedules from
+// publications.jsonl, which is append-only and still carries the deadline
+// the scanner stamped, so it keeps producing rows against a withdrawn
+// deadline for as long as the old window runs — hours after the range was
+// closed. Nothing keyed on a range can find those rows, because the range
+// is finished with. Nothing keyed on the disagreement can miss them.
+//
+// They cannot be published in the meantime either: InsertProbe stamps the
+// hold in the same statement that writes the row, so a stale row is born
+// withheld and this pass is what releases it.
+func (c *Corrector) sweepStaleRows(ctx context.Context, now time.Time) (int, error) {
+	rows, err := c.st.StaleDeadlineRows(ctx, maxSweep)
+	if err != nil {
+		return 0, err
+	}
+	moved, unreached := 0, 0
+	for _, r := range rows {
+		var m probe.Measurement
+		if r.RawJSON == "" || json.Unmarshal([]byte(r.RawJSON), &m) != nil {
+			unreached++
+			continue
+		}
+		got := m.RecomputeWith(c.pruneTol, r.Deadline)
+		pc := store.Correction{
+			SchemaVersion: store.CorrectionSchemaVersion, Kind: store.CorrectionProbeVerdict,
+			UncertaintyID: r.UncertaintyID, PromiseHash: r.PromiseHash, DedupeKey: r.DedupeKey,
+			ValidatorAddress: r.ValidatorAddress, ScheduledAt: r.ScheduledAt,
+			FromPhase: r.Phase, ToPhase: string(got.Phase),
+			FromClassification: r.Classification, ToClassification: string(got.Classification),
+			FromMustServeUntil: r.MustServeUntil, ToMustServeUntil: r.Deadline,
+			PruneToleranceS: int64(c.pruneTol / time.Second),
+			Reason:          got.Reason + " (graded against the deadline this publication carries after its params range was verified; the prober still schedules from the deadline on the append-only record)",
+			JudgedAt:        now.UTC(),
+		}
+		if err := c.append(pc); err != nil {
+			return moved, err
+		}
+		if _, err := c.st.ApplyProbeCorrection(pc); err != nil {
+			return moved, err
+		}
+		moved++
+	}
+	if unreached > 0 {
+		log.Printf("params corrections: %d row(s) arriving against a withdrawn deadline could not be re-derived and stay withheld", unreached)
+	}
+	if moved > 0 {
+		log.Printf("params corrections: %d row(s) that arrived against a withdrawn deadline re-graded", moved)
+	}
 	return moved, nil
 }
 
@@ -196,7 +261,17 @@ func (c *Corrector) correctRows(ctx context.Context, p store.PublicationInRange,
 			continue
 		}
 		got := m.RecomputeWith(c.pruneTol, corrected)
-		if string(got.Phase) == r.Phase && string(got.Classification) == r.Classification {
+		// The deadline moving is itself a reason to correct, even when the
+		// phase and the classification come out the same. probes
+		// .must_serve_until is not decoration: ObligationBuckets cuts the
+		// end segment at must_serve_until minus a quarter of the window,
+		// and decides pending on must_serve_until against as_of. A row
+		// left with a withdrawn deadline puts the end-segment cut in the
+		// wrong place, so a HEALTHY reading lands in served or in
+		// end_unobserved on the strength of a window this observer no
+		// longer stands behind.
+		if string(got.Phase) == r.Phase && string(got.Classification) == r.Classification &&
+			r.MustServeUntil.Equal(corrected) {
 			continue
 		}
 		pc := store.Correction{

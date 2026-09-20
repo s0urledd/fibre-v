@@ -68,6 +68,21 @@ validators, or a share under the threshold, walks straight through it. The
 guard is for a correlated outage; this is for the observer being wrong about
 the deadline, which is a different fact and needs a different mechanism.
 
+**A row is held while its deadline disagrees with its publication's**, not
+while its range is open. Those are different sets, and the difference is the
+whole steady state: the prober schedules from `publications.jsonl`, which is
+append-only and still carries the deadline the scanner stamped, so it keeps
+producing measurements against a withdrawn deadline for as long as the *old*
+window runs — hours after the range that corrected it was closed. A rule
+keyed on the range cannot see those rows at all. A rule keyed on the
+disagreement cannot miss them, whenever they arrive.
+
+The hold is stamped in the same statement that writes the row, so a stale
+measurement is born withheld: there is no moment at which it exists and
+reads `FAULT`. The collector's next pass re-grades it against the deadline
+its publication now carries and the hold lifts. A row whose own record the
+retention pass has stripped cannot be re-graded, so it stays withheld.
+
 **Verifying a range is not what lifts the hold.** Reading every height says
 what the deadline should have been; it does not move the deadlines already
 stamped on the publications, or re-grade the rows drawn against them. Until

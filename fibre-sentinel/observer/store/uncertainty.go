@@ -174,13 +174,33 @@ func (s *Store) ParamRangeRows(ctx context.Context, clause string) ([]ParamRange
 	return out, rows.Err()
 }
 
-// SyncParamHolds recomputes, from the ranges on record, which publications
-// and probe rows have a deadline this observer cannot vouch for. It sets
-// the flag where it belongs and clears it where it no longer does, in one
-// idempotent pass, so the flag cannot drift from the ranges and cannot
-// stick after a range closes.
+// StaleDeadline is a probe row whose must_serve_until disagrees with its
+// publication's. publications.must_serve_until only ever moves through
+// ApplyPublicationCorrection, so disagreement means exactly one thing: this
+// row was graded against a deadline this observer has since withdrawn.
 //
-// Both directions in one pass matters: a publication can sit inside two
+// This is the invariant the whole mechanism rests on, and stating it as a
+// property rather than as an event is what closes the case the range-based
+// framing could not. The prober schedules from publications.jsonl, which is
+// append-only and still carries the deadline the scanner stamped, so it
+// keeps producing measurements against the old deadline for as long as the
+// old window runs — hours after the range that corrected it was closed.
+// "This range has been corrected" says nothing about those rows. "This
+// row's deadline disagrees with its publication's" says everything, whenever
+// the row arrived.
+const StaleDeadline = `prb.must_serve_until <> (SELECT pb.must_serve_until FROM publications pb WHERE pb.promise_hash = prb.promise_hash)`
+
+// SyncParamHolds recomputes which publications and probe rows have a
+// deadline this observer cannot vouch for. It sets the flag where it
+// belongs and clears it where it no longer does, in one idempotent pass, so
+// the flag cannot drift and cannot stick.
+//
+// A probe row is held for either of two reasons, and the union matters:
+// its publication sits in a range that still withholds, or its own deadline
+// is stale. The second covers every row that arrives after its range
+// closed, which the first cannot see at all.
+//
+// Both directions in one pass matters too: a publication can sit inside two
 // overlapping ranges, which is what a crash between the record and the
 // scan cursor produces, and clearing the flag when one of them closes
 // would un-hold rows the other still covers.
@@ -188,6 +208,8 @@ func (s *Store) SyncParamHolds(ctx context.Context) (int64, error) {
 	const held = `SELECT pb.promise_hash FROM publications pb
 		JOIN param_uncertainty u ON u.holds = 1
 		WHERE pb.promise_height - 1 <= u.to_height AND pb.settlement_height >= u.from_height`
+	const rowHeld = `(promise_hash IN (SELECT promise_hash FROM publications WHERE retention_unverified = 1)
+		OR EXISTS (SELECT 1 FROM probes prb WHERE prb.dedupe_key = probes.dedupe_key AND ` + StaleDeadline + `))`
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -197,10 +219,8 @@ func (s *Store) SyncParamHolds(ctx context.Context) (int64, error) {
 	for _, q := range []string{
 		`UPDATE publications SET retention_unverified = 1 WHERE retention_unverified = 0 AND promise_hash IN (` + held + `)`,
 		`UPDATE publications SET retention_unverified = 0 WHERE retention_unverified = 1 AND promise_hash NOT IN (` + held + `)`,
-		`UPDATE probes SET retention_unverified = 1 WHERE retention_unverified = 0
-			AND promise_hash IN (SELECT promise_hash FROM publications WHERE retention_unverified = 1)`,
-		`UPDATE probes SET retention_unverified = 0 WHERE retention_unverified = 1
-			AND promise_hash NOT IN (SELECT promise_hash FROM publications WHERE retention_unverified = 1)`,
+		`UPDATE probes SET retention_unverified = 1 WHERE retention_unverified = 0 AND ` + rowHeld,
+		`UPDATE probes SET retention_unverified = 0 WHERE retention_unverified = 1 AND NOT ` + rowHeld,
 	} {
 		res, err := tx.ExecContext(ctx, q)
 		if err != nil {
@@ -210,6 +230,54 @@ func (s *Store) SyncParamHolds(ctx context.Context) (int64, error) {
 		changed += n
 	}
 	return changed, tx.Commit()
+}
+
+// StaleRow is one probe row graded against a deadline that has since been
+// withdrawn, with the deadline its publication now carries and the range
+// that moved it.
+type StaleRow struct {
+	ProbeRowForCorrection
+	PromiseHash   string
+	Deadline      time.Time
+	UncertaintyID string
+}
+
+// StaleDeadlineRows is every row whose deadline disagrees with its
+// publication's, whenever it arrived and whatever range corrected the
+// publication. This is the corrector's standing work: a range closing does
+// not stop rows arriving against the old deadline, so nothing keyed on a
+// range can be the thing that finds them.
+func (s *Store) StaleDeadlineRows(ctx context.Context, limit int) ([]StaleRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT prb.dedupe_key, prb.validator_address, prb.scheduled_at, prb.phase,
+			prb.classification, prb.must_serve_until, prb.raw_json, prb.promise_hash,
+			pb.must_serve_until,
+			COALESCE((SELECT c.uncertainty_id FROM publication_corrections c
+			          WHERE c.promise_hash = prb.promise_hash ORDER BY c.judged_at DESC LIMIT 1), '')
+		FROM probes prb JOIN publications pb ON pb.promise_hash = prb.promise_hash
+		WHERE `+StaleDeadline+`
+		ORDER BY prb.started_at
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StaleRow
+	for rows.Next() {
+		var r StaleRow
+		var sched, msu, deadline string
+		if err := rows.Scan(&r.DedupeKey, &r.ValidatorAddress, &sched, &r.Phase, &r.Classification,
+			&msu, &r.RawJSON, &r.PromiseHash, &deadline, &r.UncertaintyID); err != nil {
+			return nil, err
+		}
+		r.ScheduledAt, _ = time.Parse(TimeLayout, sched)
+		r.MustServeUntil, _ = time.Parse(TimeLayout, msu)
+		var err error
+		if r.Deadline, err = time.Parse(TimeLayout, deadline); err != nil {
+			continue // the publication's own deadline will not parse; nothing to grade against
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // HeldCounts is how much is currently withheld, for the disclosure.

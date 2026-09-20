@@ -247,7 +247,7 @@ func main() {
 	// would read as the API being wrong. The record carries both files for
 	// exactly this reason.
 	ranges := loadParamRanges(filepath.Join(*dataDir, "param_uncertainty.jsonl"))
-	corrections, correctedRanges := loadCorrections(filepath.Join(*dataDir, "corrections.jsonl"))
+	corrections, correctedRanges, correctedDeadlines := loadCorrections(filepath.Join(*dataDir, "corrections.jsonl"))
 	var corrDiffs, corrected int
 	for i := range ms {
 		c, ok := corrections[ms[i].DedupeKey()]
@@ -298,6 +298,25 @@ func main() {
 		heights[p.PromiseHash] = verdict.PromiseHeights{PromiseHeight: p.Promise.Height, SettlementHeight: p.SettlementHeight}
 	}
 	verdict.MarkRetentionUnverified(rows, heights, ranges, correctedRanges)
+	// A row whose deadline disagrees with the one its publication now
+	// carries was graded against a deadline this observer has withdrawn,
+	// and is held until a correction re-grades it — whether it arrived
+	// before the range closed or hours after, which the prober keeps doing
+	// because it schedules from the append-only record. Same rule as the
+	// store's StaleDeadline, so an export taken between a row landing and
+	// the sweep reaching it reproduces the same held rows.
+	stale := 0
+	for i := range rows {
+		want, ok := correctedDeadlines[rows[i].PromiseHash]
+		if !ok || want.Equal(ms[i].MustServeUntil) {
+			continue
+		}
+		rows[i].RetentionUnverified = true
+		stale++
+	}
+	if stale > 0 {
+		fmt.Printf("params| %d row(s) still carry a deadline their publication has moved away from, and are held\n", stale)
+	}
 	settled := map[string]time.Time{}
 	for _, p := range pubs {
 		settled[p.PromiseHash] = p.SettlementTime
@@ -739,16 +758,19 @@ func loadParamRanges(path string) []scan.ParamUncertainty {
 	return out
 }
 
-// loadCorrections reads corrections.jsonl: the probe-row corrections keyed
-// by the row each one moved, and the set of ranges a correction pass
-// finished. Publication deadline corrections are skipped, because the row
-// corrections carry the deadline they were drawn against, which is what a
-// re-derivation needs.
-func loadCorrections(path string) (map[string]store.Correction, map[string]bool) {
+// loadCorrections reads corrections.jsonl three ways: the probe-row
+// corrections keyed by the row each one moved, the set of ranges a
+// correction pass finished, and the deadline each corrected publication now
+// carries. The last is what decides whether a row that has no correction of
+// its own is nonetheless stale — which is every row the prober produced
+// after the range closed, against the deadline still on the append-only
+// record.
+func loadCorrections(path string) (map[string]store.Correction, map[string]bool, map[string]time.Time) {
 	done := map[string]bool{}
+	deadlines := map[string]time.Time{}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, done
+		return nil, done, deadlines
 	}
 	defer f.Close()
 	out := map[string]store.Correction{}
@@ -767,6 +789,14 @@ func loadCorrections(path string) (map[string]store.Correction, map[string]bool)
 			done[c.UncertaintyID] = true
 			continue
 		}
+		if c.Kind == store.CorrectionPublicationDeadline && c.PromiseHash != "" {
+			// The deadline the publication carries now, which is what
+			// every row of it must be graded against.
+			if prev, ok := deadlines[c.PromiseHash]; !ok || c.ToMustServeUntil.Before(prev) {
+				deadlines[c.PromiseHash] = c.ToMustServeUntil
+			}
+			continue
+		}
 		if c.Kind != store.CorrectionProbeVerdict || c.DedupeKey == "" {
 			continue
 		}
@@ -775,5 +805,5 @@ func loadCorrections(path string) (map[string]store.Correction, map[string]bool)
 		}
 		out[c.DedupeKey] = c
 	}
-	return out, done
+	return out, done, deadlines
 }

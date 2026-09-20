@@ -477,18 +477,26 @@ from outside the celestia-app module.
 9. **The build revision on every row is a real commit.** A `-dirty` build is
    a row nobody can tie back to code.
 10. **The sampling master secret never leaves the host.**
-11. **A range withholds until its corrections have landed, not until it is
+11. **A probe row's deadline equals its publication's, or the row is
+    withheld.** `publications.must_serve_until` only moves through a
+    correction, so a disagreement means the row was graded against a
+    deadline this observer has withdrawn. The prober schedules from the
+    append-only record and keeps producing such rows long after the range
+    closed, so the predicate is the disagreement, not the range. The hold
+    is stamped by `InsertProbe` itself, in the statement that writes the
+    row.
+12. **A range withholds until its corrections have landed, not until it is
     verified.** Reading every height says what the deadline should have
     been; applying that is what releases a row. The two facts are
     `param_uncertainty.resolution` and `param_uncertainty.corrected_at`,
     and `holds` is derived from both. Conflating them released the rows
     with the old deadline and the old fault still on them.
-12. **No verdict is published against a deadline the observer cannot vouch
+13. **No verdict is published against a deadline the observer cannot vouch
     for.** A publication whose upload interval overlaps an unclosed
     `param_uncertainty` range publishes `RETENTION_UNVERIFIED` in place of
     both `HEALTHY` and `FAULT` — withholding only the accusations would
     raise every rate it touched.
-13. **A correction only moves a deadline earlier.** Verifying a params range
+14. **A correction only moves a deadline earlier.** Verifying a params range
     can withdraw an accusation; it may never create one.
 
 ---

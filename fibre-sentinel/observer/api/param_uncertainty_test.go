@@ -548,3 +548,160 @@ func TestARowThatCannotBeReDerivedKeepsTheRangeHeld(t *testing.T) {
 		t.Fatalf("faults = %d; a row this observer cannot re-derive must not publish one", after.Faults)
 	}
 }
+
+// insertLate adds one measurement that arrives after the range was closed,
+// carrying the deadline the scanner stamped — which is what the prober
+// does, because it schedules from publications.jsonl and that file is
+// append-only. `at` is a fraction of the ORIGINAL window, so a point past
+// the corrected deadline but inside the old one is where the false fault
+// would be.
+func insertLate(t *testing.T, st *store.Store, created, staleMSU time.Time, addr string, frac float64, out probe.Outcome) {
+	t.Helper()
+	at := created.Add(time.Duration(float64(staleMSU.Sub(created)) * frac))
+	cls, reason := probe.Classify(probe.Evidence{Assigned: true, Attested: true, Phase: probe.PhaseInWindow, Outcome: out})
+	m := probe.Measurement{
+		SchemaVersion: probe.AttestationSchemaVersion, Vantage: "test",
+		PromiseHash: "held1", Commitment: "ccheld", MustServeUntil: staleMSU, ValidatorSetHeight: 149,
+		ValidatorAddress: addr, ValidatorHost: addr + ":443",
+		Assigned: true, Attested: true, AssignedRowCount: 2,
+		ScheduleLabel: "late", ScheduledAt: at, StartedAt: at, FinishedAt: at,
+		Phase: probe.PhaseInWindow, Outcome: out,
+		Classification: cls, ClassificationReason: reason, TotalDurationMS: 10,
+	}
+	m.TCP.OK, m.TLS.OK, m.Identity.OK = true, true, true
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.InsertProbe(m, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The case the range-keyed framing could not reach. The prober schedules
+// from publications.jsonl, which is append-only and still carries the
+// deadline the scanner stamped, so it keeps producing measurements against
+// a withdrawn deadline for as long as the OLD window runs — hours after the
+// range that corrected it was closed. "This range has been corrected" says
+// nothing about those rows.
+//
+// Old window 90 minutes, verified window 55. A NOT_FOUND at 80 minutes is
+// inside the old window and well past the corrected one. It must never be
+// published as a fault: not while it waits for the corrector, and not
+// after.
+func TestAMeasurementArrivingAfterTheRangeClosedIsStillCorrected(t *testing.T) {
+	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
+	st, created, staleMSU := heldFixture(t, map[string][]probe.Outcome{"v1": ok, "v2": ok})
+	seedParams(t, st, 100, created, staleMSU.Sub(created))
+	seedParams(t, st, 181, created, shortWindow)
+
+	// The range is corrected and closed.
+	if _, applied := runCorrector(t, st, verifiedRange(created, staleMSU)); applied == 0 {
+		t.Fatal("the corrector applied nothing")
+	}
+	if got := networkHeld(t, st); got.RetentionUncertainty != nil {
+		t.Fatalf("the range did not close: %+v", got.RetentionUncertainty)
+	}
+
+	// Two validators are probed again, after the close, against the old
+	// deadline still on the append-only record.
+	insertLate(t, st, created, staleMSU, "v1", 0.89, probe.OutcomeNotFound)
+	insertLate(t, st, created, staleMSU, "v2", 0.89, probe.OutcomeNotFound)
+
+	// Before the corrector sees them they are already withheld: the hold is
+	// stamped in the same statement that writes the row, so there is no
+	// moment at which they exist and read FAULT.
+	between := networkHeld(t, st)
+	if between.Faults != 0 {
+		t.Fatalf("faults = %d between the insert and the sweep; a stale row must be born held", between.Faults)
+	}
+
+	// The collector's next pass re-grades them against the deadline the
+	// publication now carries.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "corrections.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	n, err := correct.New(st, f, 5*time.Minute).Run(context.Background(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("the sweep corrected %d row(s), want 2", n)
+	}
+	if _, err := st.SyncParamHolds(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	after := networkHeld(t, st)
+	if after.Faults != 0 {
+		t.Fatalf("faults = %d after the sweep: a measurement arriving against a withdrawn deadline was published as one", after.Faults)
+	}
+	if after.Obligations.Broken != 0 {
+		t.Fatalf("broken = %d after the sweep", after.Obligations.Broken)
+	}
+	if after.RetentionUncertainty != nil {
+		t.Fatalf("the late rows are still withheld after being re-graded: %+v", after.RetentionUncertainty)
+	}
+	assertReconciles(t, after)
+
+	// The correction is on the record, both of them.
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late := 0
+	for _, l := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		if l == "" {
+			continue
+		}
+		var c store.Correction
+		if err := json.Unmarshal([]byte(l), &c); err != nil {
+			t.Fatal(err)
+		}
+		if c.Kind == store.CorrectionProbeVerdict && c.FromMustServeUntil.Equal(staleMSU) &&
+			!c.ToMustServeUntil.Equal(staleMSU) && c.FromClassification == string(probe.ClassFault) {
+			late++
+		}
+	}
+	if late != 2 {
+		t.Fatalf("corrections.jsonl carries %d correction(s) for the late rows, want 2", late)
+	}
+}
+
+// A deadline that moves is itself a correction, even when the phase and the
+// classification come out the same. probes.must_serve_until is what
+// ObligationBuckets cuts the end segment at and what decides pending, so a
+// row left with a withdrawn deadline puts a HEALTHY reading in the wrong
+// bucket.
+func TestADeadlineThatMovesIsCorrectedEvenWhenTheVerdictDoesNot(t *testing.T) {
+	// Every reading HEALTHY and early, so no phase or class can change.
+	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
+	st, created, staleMSU := heldFixture(t, map[string][]probe.Outcome{"v1": ok})
+	seedParams(t, st, 100, created, staleMSU.Sub(created))
+	seedParams(t, st, 181, created, shortWindow)
+
+	var before string
+	if err := st.DB().QueryRow(`SELECT must_serve_until FROM probes WHERE schedule_label = 'w1'`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	runCorrector(t, st, verifiedRange(created, staleMSU))
+
+	var stale int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM probes prb WHERE ` + store.StaleDeadline).Scan(&stale); err != nil {
+		t.Fatal(err)
+	}
+	if stale != 0 {
+		t.Fatalf("%d row(s) kept a withdrawn deadline because their verdict did not change", stale)
+	}
+	var after string
+	if err := st.DB().QueryRow(`SELECT must_serve_until FROM probes WHERE schedule_label = 'w1'`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after == before {
+		t.Fatal("the early HEALTHY row kept the deadline this observer withdrew")
+	}
+}

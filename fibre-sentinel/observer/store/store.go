@@ -1108,9 +1108,20 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		 assignment_verified, phase, outcome, classification, classification_reason, raw_error, total_duration_ms, raw_json,
 		 attested, bytes_returned, row_indices, rows_sha256, rpc_code, shadowed_by, observer_build, app_version,
 		 sampling_p, sampling_binding, sampling_commitment, retry_first_outcome, clock_offset_ms, shadow_gap,
-		 host_at_settlement, settlement_host_outcome, settlement_host_served)
+		 host_at_settlement, settlement_host_outcome, settlement_host_served, retention_unverified)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		-- Born held when this row's deadline already disagrees with its
+		-- publication's. The prober schedules from publications.jsonl,
+		-- which is append-only and still carries the deadline the scanner
+		-- stamped, so it keeps producing rows against a deadline this
+		-- observer has already withdrawn — for as long as the old window
+		-- runs. Stamping the hold in the INSERT rather than in the pass
+		-- that follows it is what makes that structurally unpublishable
+		-- instead of a race the collector usually wins: there is no moment
+		-- at which the row exists and reads FAULT. The corrector clears it
+		-- when it re-grades the row.
+		COALESCE((SELECT pb.must_serve_until <> ? FROM publications pb WHERE pb.promise_hash = ?), 0))
 		ON CONFLICT(dedupe_key) DO NOTHING`,
 		m.DedupeKey(), m.Vantage, m.PromiseHash, m.Commitment, m.BlobVersion, ts(m.MustServeUntil), m.ValidatorSetHeight,
 		m.ValidatorAddress, m.ValidatorHost, b2i(m.Assigned), m.AssignedRowCount, m.ScheduleLabel, ts(m.ScheduledAt),
@@ -1126,7 +1137,8 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		nullIfEmpty(m.Download.ShadowedBy), nullIfEmpty(observerBuild(m)), observerAppVersion(m),
 		samplingP(m), samplingField(m, func(d *probe.SamplingDecision) string { return d.Binding }),
 		samplingField(m, func(d *probe.SamplingDecision) string { return d.DayCommitment }), retryFirstOutcome(m), m.ClockOffsetMS,
-		nullIfEmpty(m.Download.ShadowGap), nullIfEmpty(m.HostAtSettlement), settlementOutcome(m), settlementServed(m))
+		nullIfEmpty(m.Download.ShadowGap), nullIfEmpty(m.HostAtSettlement), settlementOutcome(m), settlementServed(m),
+		ts(m.MustServeUntil), m.PromiseHash)
 	if err != nil {
 		return false, fmt.Errorf("probe %s: %w", m.DedupeKey(), err)
 	}
