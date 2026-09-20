@@ -98,7 +98,7 @@ derived index of them.
 | `amendments.jsonl` | late shadow verdict | `judged_at` |
 | `host_history.jsonl` | host registration | `time` |
 | `param_uncertainty.jsonl` | a height range whose `x/fibre` params the observer cannot vouch for, and what came of closing it | `detected_at` |
-| `corrections.jsonl` | a deadline or verdict a verified range moved | `judged_at` |
+| `corrections.jsonl` | a deadline or verdict a verified range moved, and the `range_corrected` line that closes the range | `judged_at` |
 
 `state.json` is **not** a record file: it is the scanner's current param
 history, scan gaps, host seed and frontier. Every export carries it as a
@@ -119,7 +119,7 @@ needs a full VACUUM, which is why an existing DB has to be deleted). The
 collector owns the schema; the API opens `query_only` and refuses a database
 older *or* newer than the binary expects.
 
-**Schema version 19.** Base tables from `schema.sql`: `schema_migrations`,
+**Schema version 20.** Base tables from `schema.sql`: `schema_migrations`,
 `observer_runs`, `ingest_cursors`, `params_history`, `publications`,
 `assignments`, `endpoints`, `probes`, `meta`, `reachability`. Migrations add:
 
@@ -142,6 +142,7 @@ older *or* newer than the binary expects.
 | 16 | `probe_daily.identity_up` |
 | 17 | `probe_daily` attestation split |
 | 18 | indexes for `/v1/probes?at=` and `/v1/sampling` |
+| 20 | `param_uncertainty.corrected_at`: verifying a range and having applied what it proves are two different facts, and `holds` is derived from both |
 | 19 | params uncertainty: `param_uncertainty`, `publication_corrections`, `probe_corrections`, the `retention_unverified` hold and the `*_at_scan` / `*_at_probe` originals, `obligation_daily.held_param_unverified`, and `publications.must_serve_until_ambiguous` (written to the record since it was added and read by nothing until now) |
 
 The store is append-only **in its inserts** (`ON CONFLICT DO NOTHING`) but not
@@ -383,7 +384,7 @@ Caddy serves the static export from `/var/www/fibre-observer` and proxies
 
 - `VANTAGE=ut-1`, `DATA_DIR=/var/lib/fibre-observer/mocha`,
   `API_LISTEN=127.0.0.1:8081`
-- schema 18 at the time of writing; the collector migrates it to 19 on its
+- schema 18 at the time of writing; the collector migrates it to 20 on its
   first start after this branch. `obligation_daily` empty (rollup runs 14
   days after a day ends)
 - chain `mocha-5`, app version 9 — **Fibre arrives with version 10**, so
@@ -476,12 +477,18 @@ from outside the celestia-app module.
 9. **The build revision on every row is a real commit.** A `-dirty` build is
    a row nobody can tie back to code.
 10. **The sampling master secret never leaves the host.**
-11. **No verdict is published against a deadline the observer cannot vouch
+11. **A range withholds until its corrections have landed, not until it is
+    verified.** Reading every height says what the deadline should have
+    been; applying that is what releases a row. The two facts are
+    `param_uncertainty.resolution` and `param_uncertainty.corrected_at`,
+    and `holds` is derived from both. Conflating them released the rows
+    with the old deadline and the old fault still on them.
+12. **No verdict is published against a deadline the observer cannot vouch
     for.** A publication whose upload interval overlaps an unclosed
     `param_uncertainty` range publishes `RETENTION_UNVERIFIED` in place of
     both `HEALTHY` and `FAULT` — withholding only the accusations would
     raise every rate it touched.
-12. **A correction only moves a deadline earlier.** Verifying a params range
+13. **A correction only moves a deadline earlier.** Verifying a params range
     can withdraw an accusation; it may never create one.
 
 ---

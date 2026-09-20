@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 
-	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
 
@@ -40,7 +39,10 @@ type paramUncertainty struct {
 	WindowAfterS        int64  `json:"window_after_s,omitempty"`
 	// Holds says whether this range is still withholding verdicts. A
 	// check_skipped range never does: the observer could not look, which is
-	// not evidence that anything changed.
+	// not evidence that anything changed. A silent change does until its
+	// corrections have landed — verifying it says what the deadline should
+	// have been, applying that is what releases the rows — so a verified
+	// range with no corrected_at is still holding.
 	Holds                bool   `json:"holds"`
 	PublicationsAffected int64  `json:"publications_affected"`
 	AffectedIsFloor      bool   `json:"publications_affected_is_floor"`
@@ -48,6 +50,7 @@ type paramUncertainty struct {
 	ToTime               string `json:"to_time,omitempty"`
 	Resolution           string `json:"resolution,omitempty"` // verified | unresolvable
 	ResolvedAt           string `json:"resolved_at,omitempty"`
+	CorrectedAt          string `json:"corrected_at,omitempty"`
 	HeightsRead          int64  `json:"heights_read,omitempty"`
 	ResolveError         string `json:"resolve_error,omitempty"`
 	LastError            string `json:"last_error,omitempty"`
@@ -67,12 +70,13 @@ const retentionUncertaintyNote = "x/fibre params changed without an event in one
 	"must_serve_until is computed from those params, so for the publications whose upload falls inside a range it cannot say when the obligation ended, and publishes no serve verdict for them — neither the fault nor the credit. " +
 	"The ranges are in /v1/meta.param_uncertainty. A range closes when the params at every height in it have been read; the verdicts then return as corrections, and a corrected deadline can only be earlier than the recorded one, never later."
 
-func paramUncertaintyOf(u scan.ParamUncertainty) paramUncertainty {
+func paramUncertaintyOf(r store.ParamRange) paramUncertainty {
+	u := r.ParamUncertainty
 	out := paramUncertainty{
 		ID: u.ID, Kind: u.Kind, FromHeight: u.FromHeight, ToHeight: u.ToHeight,
 		EffectiveFromHeight: u.EffectiveFromHeight, IntervalStartKnown: u.IntervalStartKnown,
 		Direction: u.Direction, WindowBeforeS: u.WindowBeforeS, WindowAfterS: u.WindowAfterS,
-		Holds: u.Holds(), PublicationsAffected: u.PublicationsAffected, AffectedIsFloor: u.IsFloor,
+		Holds: r.Holds, CorrectedAt: r.CorrectedAt, PublicationsAffected: u.PublicationsAffected, AffectedIsFloor: u.IsFloor,
 		DetectedAt: u.DetectedAt.UTC().Format(store.TimeLayout), Resolution: u.Resolution,
 		HeightsRead: u.HeightsRead, ResolveError: u.ResolveError, LastError: u.LastError,
 	}

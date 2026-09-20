@@ -8,6 +8,7 @@ package ingest
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -398,6 +399,13 @@ func Corrections(st *store.Store, path string, now time.Time) (Result, error) {
 			return false, fmt.Errorf("%w: correction without an uncertainty id or a judged_at", ErrBadRecord)
 		}
 		switch c.Kind {
+		case store.CorrectionRangeComplete:
+			// Every deadline and verdict the range covers has been
+			// re-derived. Replaying this is what lets a database rebuilt
+			// from the export reach the same holds as the live one,
+			// instead of re-holding rows whose corrections are already in
+			// the file above it.
+			return true, st.MarkRangeCorrected(context.Background(), c.UncertaintyID, c.JudgedAt)
 		case store.CorrectionPublicationDeadline:
 			if c.PromiseHash == "" {
 				return false, fmt.Errorf("%w: publication correction without a promise_hash", ErrBadRecord)

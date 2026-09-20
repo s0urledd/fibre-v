@@ -4,16 +4,66 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/api"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/correct"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/verdict"
 )
+
+// shortWindow is the retention the params really carried from height 150.
+// The fixture's window is 90 minutes and its in-window points sit at
+// probe.DefaultInWindowFractions, so the last two land at 64.8 and 82.8
+// minutes. 55 minutes puts both of them past the deadline and past the
+// five-minute prune tolerance, which is what turns their NOT_FOUND from a
+// fault into an expected prune.
+const shortWindow = 55 * time.Minute
+
+// seedParams puts one params value into the store's history, as ingesting
+// the scanner's state.json does.
+func seedParams(t *testing.T, st *store.Store, fromHeight int64, created time.Time, window time.Duration) {
+	t.Helper()
+	p := scan.ParamsSnapshot{
+		WithdrawalDelaySeconds:       int64(13 * time.Hour / time.Second),
+		PaymentPromiseTimeoutSeconds: 600,
+		ShardRetentionSeconds:        int64(window / time.Second),
+		PaymentPromiseHeightWindow:   1000,
+		EffectiveFromHeight:          fromHeight, EffectiveFromTxIndex: -1, Source: "seed",
+	}
+	if err := st.UpsertParams([]scan.ParamEntry{{FromHeight: fromHeight, FromTxIndex: -1, Source: "seed", ParamsJSON: p}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// verifiedRange is the same range openRange records, closed by reading
+// every height: the long window until 150, the short one from there.
+func verifiedRange(created, msu time.Time) scan.ParamUncertainty {
+	long := scan.ParamsSnapshot{
+		WithdrawalDelaySeconds: int64(13 * time.Hour / time.Second), PaymentPromiseTimeoutSeconds: 600,
+		ShardRetentionSeconds: int64(msu.Sub(created) / time.Second), PaymentPromiseHeightWindow: 1000,
+		EffectiveFromHeight: 120, EffectiveFromTxIndex: -1, Source: "verified",
+	}
+	short := long
+	short.ShardRetentionSeconds = int64(shortWindow / time.Second)
+	short.EffectiveFromHeight = 150
+	at := time.Now().UTC()
+	return scan.ParamUncertainty{
+		SchemaVersion: scan.ParamUncertaintySchemaVersion,
+		ID:            "t:silent_change:121-180", ChainID: "t", Kind: scan.UncertaintySilentChange,
+		FromHeight: 121, ToHeight: 180, EffectiveFromHeight: 181, IntervalStartKnown: true,
+		Direction: "shorter", PublicationsAffected: 1, DetectedAt: at,
+		Resolution: scan.ResolutionVerified, ResolveMethod: "exhaustive_read", HeightsRead: 61, ResolvedAt: &at,
+		Values: []scan.ResolvedValue{{FromHeight: 120, Params: long}, {FromHeight: 150, Params: short}},
+	}
+}
 
 // heldJSON is the part of /v1/network these tests read.
 type heldJSON struct {
@@ -325,50 +375,176 @@ func assertReconciles(t *testing.T, r heldJSON) {
 	}
 }
 
-// Verifying the range lifts the hold and the withheld verdicts come back,
-// recomputed against the deadline the proven params support. This is the
-// half of the mechanism the two tests above do not reach: withholding that
-// never ends is not a measurement.
-func TestAVerifiedRangeGivesTheVerdictsBackUnderTheCorrectedDeadline(t *testing.T) {
-	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
-	st, _, _ := heldFixture(t, map[string][]probe.Outcome{"v1": ok, "v2": ok, "v3": ok})
-	openRange(t, st)
-	if got := networkHeld(t, st); got.Obligations.HeldParamUnverified != 3 {
-		t.Fatalf("held = %d, want 3", got.Obligations.HeldParamUnverified)
-	}
-
-	// The same range, now closed by reading every height, with no change to
-	// the window: the deadline does not move and every verdict returns.
-	u := scan.ParamUncertainty{
-		SchemaVersion: scan.ParamUncertaintySchemaVersion,
-		ID:            "t:silent_change:121-180", ChainID: "t", Kind: scan.UncertaintySilentChange,
-		FromHeight: 121, ToHeight: 180, EffectiveFromHeight: 181, IntervalStartKnown: true,
-		Direction: "shorter", PublicationsAffected: 1, DetectedAt: time.Now().UTC(),
-		Resolution: scan.ResolutionVerified, HeightsRead: 61, ResolveMethod: "exhaustive_read",
-	}
+// runCorrector drives the real path: ingest a range line, run the
+// correction pass, sync the holds. Nothing here reaches into the store to
+// mark a range corrected by hand — the first cut of this mechanism had a
+// corrector that could never run, and the test that called
+// MarkRangeCorrected itself passed anyway.
+func runCorrector(t *testing.T, st *store.Store, u scan.ParamUncertainty) (corrections string, applied int) {
+	t.Helper()
+	dir := t.TempDir()
 	raw, err := json.Marshal(u)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.UpsertParamUncertainty(u, raw); err != nil {
+	line := filepath.Join(dir, "param_uncertainty.jsonl")
+	if err := os.WriteFile(line, append(raw, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkRangeCorrected(context.Background(), u.ID); err != nil {
-		t.Fatal(err)
+	if _, err := ingest.ParamUncertainty(st, line, time.Now()); err != nil {
+		t.Fatalf("ingest range: %v", err)
 	}
 	if _, err := st.SyncParamHolds(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	corrections = filepath.Join(dir, "corrections.jsonl")
+	f, err := os.OpenFile(corrections, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	n, err := correct.New(st, f, 5*time.Minute).Run(context.Background(), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("corrector: %v", err)
+	}
+	if _, err := st.SyncParamHolds(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return corrections, n
+}
+
+// The whole point, end to end and through the real path: a range verified
+// by the scanner has its deadlines moved and its rows re-graded, and only
+// then does the hold lift.
+//
+// This is the test the first cut did not have. `holds` was written from the
+// record alone, so it went false the moment a range was verified;
+// HoldingRanges selected holds = 1 and the corrector filtered that set to
+// verified ranges, so the two sets never intersected and the corrector was
+// dead code. The rows were released with the old deadline and the old
+// FAULT still on them, and the API test did not notice because it marked
+// the range corrected by hand.
+func TestAVerifiedRangeIsCorrectedBeforeItsHoldLifts(t *testing.T) {
+	// Two validators answer NOT_FOUND at the last two points, under the
+	// deadline the scanner stamped. The params really shortened at height
+	// 150, which puts both of those points past the true deadline.
+	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
+	gone := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomeNotFound}
+	st, created, msu := heldFixture(t, map[string][]probe.Outcome{"v1": gone, "v2": gone, "v3": ok})
+
+	before := networkHeld(t, st)
+	if before.Faults != 4 || before.Obligations.Broken != 2 {
+		t.Fatalf("without the range: faults=%d broken=%d, want 4/2", before.Faults, before.Obligations.Broken)
+	}
+
+	// The params history the scanner persisted, as the collector ingested
+	// it: the long window from the start, the short one only from 181.
+	seedParams(t, st, 100, created, msu.Sub(created))
+	seedParams(t, st, 181, created, shortWindow)
+
+	u := verifiedRange(created, msu)
+	corrections, applied := runCorrector(t, st, u)
+	if applied == 0 {
+		t.Fatal("the corrector applied nothing; it never saw the verified range")
+	}
 
 	after := networkHeld(t, st)
-	if after.Obligations.HeldParamUnverified != 0 {
-		t.Fatalf("held = %d after the range was verified, want 0", after.Obligations.HeldParamUnverified)
-	}
-	if after.Obligations.Served != 3 {
-		t.Fatalf("served = %d, want 3: the withheld credit comes back", after.Obligations.Served)
-	}
 	if after.RetentionUncertainty != nil {
-		t.Fatalf("retention_uncertainty is still set: %+v", after.RetentionUncertainty)
+		t.Fatalf("the hold is still up after a completed correction pass: %+v", after.RetentionUncertainty)
+	}
+	if after.Obligations.HeldParamUnverified != 0 {
+		t.Fatalf("held = %d after the corrections landed", after.Obligations.HeldParamUnverified)
+	}
+	// The deadline moved, so the two NOT_FOUND points fall past it and are
+	// expected rather than faults. That is the whole defect, closed.
+	if after.Faults != 0 {
+		t.Fatalf("faults = %d after the deadline was corrected, want 0", after.Faults)
+	}
+	if after.Obligations.Broken != 0 {
+		t.Fatalf("broken = %d after the deadline was corrected, want 0", after.Obligations.Broken)
 	}
 	assertReconciles(t, after)
+
+	// The record carries it: the corrections and the line that closes the
+	// range, so a rebuild reaches the same holds.
+	body, err := os.ReadFile(corrections)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for _, l := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		if l == "" {
+			continue
+		}
+		var c store.Correction
+		if err := json.Unmarshal([]byte(l), &c); err != nil {
+			t.Fatalf("decode %q: %v", l, err)
+		}
+		kinds = append(kinds, c.Kind)
+	}
+	var complete int
+	for _, k := range kinds {
+		if k == store.CorrectionRangeComplete {
+			complete++
+		}
+	}
+	if complete != 1 {
+		t.Fatalf("corrections.jsonl carries %d range_corrected line(s), want 1: %v", complete, kinds)
+	}
+	if kinds[len(kinds)-1] != store.CorrectionRangeComplete {
+		t.Fatalf("the completion line is not last: %v", kinds)
+	}
+}
+
+// The same range arriving open first and verified second — the transition
+// the live scanner produces when its node could not answer at detection and
+// an archive node closes the range later.
+func TestAnOpenRangeThatLaterVerifiesIsCorrectedToo(t *testing.T) {
+	gone := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomeNotFound}
+	st, created, msu := heldFixture(t, map[string][]probe.Outcome{"v1": gone, "v2": gone})
+
+	openRange(t, st)
+	held := networkHeld(t, st)
+	if held.Obligations.HeldParamUnverified != 2 || held.Faults != 0 {
+		t.Fatalf("while unresolvable: held=%d faults=%d, want 2/0", held.Obligations.HeldParamUnverified, held.Faults)
+	}
+
+	seedParams(t, st, 100, created, msu.Sub(created))
+	seedParams(t, st, 181, created, shortWindow)
+	if _, applied := runCorrector(t, st, verifiedRange(created, msu)); applied == 0 {
+		t.Fatal("the corrector applied nothing after the range verified")
+	}
+	after := networkHeld(t, st)
+	if after.RetentionUncertainty != nil || after.Obligations.HeldParamUnverified != 0 {
+		t.Fatalf("still held after the range verified and corrected: %+v", after.RetentionUncertainty)
+	}
+	if after.Faults != 0 || after.Obligations.Broken != 0 {
+		t.Fatalf("faults=%d broken=%d after the correction, want 0/0", after.Faults, after.Obligations.Broken)
+	}
+}
+
+// A row the corrector cannot re-derive keeps its range open, so nothing it
+// covers is released under a deadline nothing checked. The comment in the
+// corrector said this; before this commit the code marked the range
+// corrected anyway.
+func TestARowThatCannotBeReDerivedKeepsTheRangeHeld(t *testing.T) {
+	gone := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomeNotFound}
+	st, created, msu := heldFixture(t, map[string][]probe.Outcome{"v1": gone, "v2": gone})
+	seedParams(t, st, 100, created, msu.Sub(created))
+	seedParams(t, st, 181, created, shortWindow)
+
+	// The retention pass strips raw_json after 30 days; a row without it
+	// cannot be graded the way it was graded.
+	if _, err := st.DB().Exec(`UPDATE probes SET raw_json = '' WHERE validator_address = 'v2'`); err != nil {
+		t.Fatal(err)
+	}
+	runCorrector(t, st, verifiedRange(created, msu))
+
+	after := networkHeld(t, st)
+	if after.RetentionUncertainty == nil {
+		t.Fatal("the range closed although a row could not be re-derived")
+	}
+	if after.Faults != 0 {
+		t.Fatalf("faults = %d; a row this observer cannot re-derive must not publish one", after.Faults)
+	}
 }

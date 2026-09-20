@@ -247,7 +247,7 @@ func main() {
 	// would read as the API being wrong. The record carries both files for
 	// exactly this reason.
 	ranges := loadParamRanges(filepath.Join(*dataDir, "param_uncertainty.jsonl"))
-	corrections := loadCorrections(filepath.Join(*dataDir, "corrections.jsonl"))
+	corrections, correctedRanges := loadCorrections(filepath.Join(*dataDir, "corrections.jsonl"))
 	var corrDiffs, corrected int
 	for i := range ms {
 		c, ok := corrections[ms[i].DedupeKey()]
@@ -281,12 +281,12 @@ func main() {
 	}
 	holding := 0
 	for _, u := range ranges {
-		if u.Holds() {
+		if u.Holds() && !correctedRanges[u.ID] {
 			holding++
 		}
 	}
-	fmt.Printf("params| %d x/fibre params range(s) on record, %d still withholding verdicts; %d row(s) corrected, %d differ from corrections.jsonl\n",
-		len(ranges), holding, corrected, corrDiffs)
+	fmt.Printf("params| %d x/fibre params range(s) on record, %d closed by a correction pass, %d still withholding verdicts; %d row(s) corrected, %d differ from corrections.jsonl\n",
+		len(ranges), len(correctedRanges), holding, corrected, corrDiffs)
 
 	// ---- obligations ----
 	rows := make([]verdict.Row, 0, len(ms))
@@ -297,7 +297,7 @@ func main() {
 	for _, p := range pubs {
 		heights[p.PromiseHash] = verdict.PromiseHeights{PromiseHeight: p.Promise.Height, SettlementHeight: p.SettlementHeight}
 	}
-	verdict.MarkRetentionUnverified(rows, heights, ranges)
+	verdict.MarkRetentionUnverified(rows, heights, ranges, correctedRanges)
 	settled := map[string]time.Time{}
 	for _, p := range pubs {
 		settled[p.PromiseHash] = p.SettlementTime
@@ -739,14 +739,16 @@ func loadParamRanges(path string) []scan.ParamUncertainty {
 	return out
 }
 
-// loadCorrections reads corrections.jsonl, keyed by the probe row each
-// verdict correction moved. Publication deadline corrections are skipped:
-// the row corrections carry the deadline they were drawn against, which is
-// what a re-derivation needs.
-func loadCorrections(path string) map[string]store.Correction {
+// loadCorrections reads corrections.jsonl: the probe-row corrections keyed
+// by the row each one moved, and the set of ranges a correction pass
+// finished. Publication deadline corrections are skipped, because the row
+// corrections carry the deadline they were drawn against, which is what a
+// re-derivation needs.
+func loadCorrections(path string) (map[string]store.Correction, map[string]bool) {
+	done := map[string]bool{}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return nil, done
 	}
 	defer f.Close()
 	out := map[string]store.Correction{}
@@ -758,7 +760,14 @@ func loadCorrections(path string) map[string]store.Correction {
 			continue
 		}
 		var c store.Correction
-		if json.Unmarshal(line, &c) != nil || c.Kind != store.CorrectionProbeVerdict || c.DedupeKey == "" {
+		if json.Unmarshal(line, &c) != nil {
+			continue
+		}
+		if c.Kind == store.CorrectionRangeComplete && c.UncertaintyID != "" {
+			done[c.UncertaintyID] = true
+			continue
+		}
+		if c.Kind != store.CorrectionProbeVerdict || c.DedupeKey == "" {
 			continue
 		}
 		if prev, ok := out[c.DedupeKey]; ok && prev.JudgedAt.After(c.JudgedAt) {
@@ -766,5 +775,5 @@ func loadCorrections(path string) map[string]store.Correction {
 		}
 		out[c.DedupeKey] = c
 	}
-	return out
+	return out, done
 }

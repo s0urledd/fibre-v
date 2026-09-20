@@ -113,10 +113,16 @@ type PromiseHeights struct{ PromiseHeight, SettlementHeight int64 }
 // upload interval overlaps a range that still withholds. This is the whole
 // derivation, and it is the same one the collector applies in SQL, so a
 // third party running this package over the export reaches the same rows.
-func MarkRetentionUnverified(rows []Row, pubs map[string]PromiseHeights, us []scan.ParamUncertainty) {
+//
+// corrected is the set of range ids whose corrections have landed, from the
+// range_corrected lines in corrections.jsonl. Verifying a range is not what
+// releases it — applying what the verification proved is — so a verified
+// range with no completion line still withholds here, exactly as it does in
+// the store.
+func MarkRetentionUnverified(rows []Row, pubs map[string]PromiseHeights, us []scan.ParamUncertainty, corrected map[string]bool) {
 	held := map[string]bool{}
 	for _, u := range us {
-		if !u.Holds() {
+		if !u.Holds() || corrected[u.ID] {
 			continue
 		}
 		for hash, p := range pubs {

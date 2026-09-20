@@ -47,10 +47,17 @@ type Correction struct {
 	JudgedAt time.Time `json:"judged_at"`
 }
 
-// The two kinds of correction.
+// The kinds of correction line.
 const (
 	CorrectionPublicationDeadline = "publication_deadline"
 	CorrectionProbeVerdict        = "probe_verdict"
+	// CorrectionRangeComplete closes a range: every deadline and verdict it
+	// covers has been re-derived, so it stops withholding. It is a record
+	// line rather than database-only state because a rebuild from the
+	// export, and sentinel-recompute reading the same files, have to reach
+	// the same holds as the live store. Written only after every other
+	// correction for the range has landed.
+	CorrectionRangeComplete = "range_corrected"
 )
 
 // CorrectionSchemaVersion versions corrections.jsonl.
@@ -66,6 +73,13 @@ const CorrectionSchemaVersion = 1
 // would make one pruned node a permanent hole in the record. verified is
 // terminal: a range that has been read at every height cannot become
 // unread, so nothing may move it back.
+//
+// The holds column is NOT the record's Holds() alone. It is that AND the
+// corrections not having landed yet, because verifying a range and having
+// applied what it proves are two different facts and only the second one
+// releases a row. Re-ingesting a line for a range already corrected must
+// not re-raise its hold, which is what the corrected_at term in the
+// conflict clause is for.
 func (s *Store) UpsertParamUncertainty(u scan.ParamUncertainty, raw []byte) (bool, error) {
 	if u.ID == "" {
 		return false, fmt.Errorf("param uncertainty without an id")
@@ -77,7 +91,7 @@ func (s *Store) UpsertParamUncertainty(u scan.ParamUncertainty, raw []byte) (boo
 			 resolve_error, raw_json)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
-			holds          = excluded.holds,
+			holds          = (excluded.holds AND param_uncertainty.corrected_at IS NULL),
 			resolution     = excluded.resolution,
 			resolved_at    = excluded.resolved_at,
 			resolve_method = excluded.resolve_method,
@@ -97,35 +111,65 @@ func (s *Store) UpsertParamUncertainty(u scan.ParamUncertainty, raw []byte) (boo
 	return n > 0, nil
 }
 
-// HoldingRanges is every range whose verdicts are withheld: a silent
-// params change that has not been closed by reading every height in it.
+// HoldingRanges is every range whose verdicts are still withheld: a silent
+// params change whose corrections have not all landed. A verified range
+// stays in this set until the corrector finishes with it — which is the
+// whole point, since the corrector is what reads this set. Filtering
+// verified ranges out of it, as the first cut did, left the corrector
+// permanently empty while the rows it would have corrected were already
+// released.
 func (s *Store) HoldingRanges(ctx context.Context) ([]scan.ParamUncertainty, error) {
 	return s.paramRanges(ctx, `WHERE holds = 1`)
 }
 
 // ParamRanges is every range on record, newest first, for the disclosure at
 // /v1/meta.
-func (s *Store) ParamRanges(ctx context.Context) ([]scan.ParamUncertainty, error) {
-	return s.paramRanges(ctx, `ORDER BY from_height DESC, to_height DESC`)
+func (s *Store) ParamRanges(ctx context.Context) ([]ParamRange, error) {
+	return s.ParamRangeRows(ctx, `ORDER BY from_height DESC, to_height DESC`)
 }
 
 func (s *Store) paramRanges(ctx context.Context, clause string) ([]scan.ParamUncertainty, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT raw_json FROM param_uncertainty `+clause)
+	rs, err := s.ParamRangeRows(ctx, clause)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]scan.ParamUncertainty, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, r.ParamUncertainty)
+	}
+	return out, nil
+}
+
+// ParamRange is a stored range together with the two facts the record
+// cannot carry: whether it is still withholding, and when its corrections
+// landed. Holds is the stored column, not the record's Holds(), because
+// only the store knows whether the corrections have been applied.
+type ParamRange struct {
+	scan.ParamUncertainty
+	Holds       bool
+	CorrectedAt string
+}
+
+// ParamRangeRows is paramRanges with those two facts kept.
+func (s *Store) ParamRangeRows(ctx context.Context, clause string) ([]ParamRange, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT raw_json, holds, COALESCE(corrected_at, '') FROM param_uncertainty `+clause)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []scan.ParamUncertainty
+	var out []ParamRange
 	for rows.Next() {
 		var raw string
-		if err := rows.Scan(&raw); err != nil {
+		var holds int
+		var corrected string
+		if err := rows.Scan(&raw, &holds, &corrected); err != nil {
 			return nil, err
 		}
 		var u scan.ParamUncertainty
 		if err := json.Unmarshal([]byte(raw), &u); err != nil {
 			return nil, fmt.Errorf("decode stored param uncertainty: %w", err)
 		}
-		out = append(out, u)
+		out = append(out, ParamRange{ParamUncertainty: u, Holds: holds == 1, CorrectedAt: corrected})
 	}
 	return out, rows.Err()
 }
@@ -187,17 +231,38 @@ type PublicationInRange struct {
 	CreationTimestamp time.Time
 	MustServeUntil    time.Time
 	Basis             string
+	// AsStamped is what the scanner stamped: must_serve_until_at_scan when
+	// a correction has moved the deadline, the deadline itself otherwise.
+	AsStamped time.Time
+	// Unreadable is set when the row's own timestamps will not parse, so it
+	// cannot be re-derived. Reported rather than dropped: a publication the
+	// corrector cannot reach keeps its range withholding.
+	Unreadable bool
 }
 
 // PublicationsCoveredBy returns every publication whose upload interval
-// overlaps a range and which carries no correction for that range yet.
+// overlaps a range.
+//
+// It deliberately does not skip a publication that already carries a
+// correction for this range. A publication's deadline is corrected before
+// its rows are re-graded, so a crash or an I/O error between the two leaves
+// the deadline moved and the rows untouched; skipping on the deadline
+// correction alone made that state permanent, because no later pass would
+// look at the publication again. Each row carries its own correction key
+// and is skipped individually, and the publication correction is idempotent
+// on (promise_hash, uncertainty_id).
+//
+// AsStamped is must_serve_until_at_scan, NULL until a correction moved it.
+// The clamp has to be drawn against that rather than against the current
+// value, or a second pass would compare a corrected deadline with itself,
+// find no change, and return before reaching the rows.
 func (s *Store) PublicationsCoveredBy(ctx context.Context, u scan.ParamUncertainty) ([]PublicationInRange, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT promise_hash, promise_height, settlement_height, settlement_tx_index,
-			creation_timestamp, must_serve_until, must_serve_until_basis
+			creation_timestamp, must_serve_until, must_serve_until_basis,
+			COALESCE(must_serve_until_at_scan, must_serve_until)
 		FROM publications
 		WHERE promise_height - 1 <= ? AND settlement_height >= ?
-		  AND promise_hash NOT IN (SELECT promise_hash FROM publication_corrections WHERE uncertainty_id = ?)
-		ORDER BY settlement_height`, u.ToHeight, u.FromHeight, u.ID)
+		ORDER BY settlement_height`, u.ToHeight, u.FromHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -205,15 +270,18 @@ func (s *Store) PublicationsCoveredBy(ctx context.Context, u scan.ParamUncertain
 	var out []PublicationInRange
 	for rows.Next() {
 		var p PublicationInRange
-		var created, msu string
-		if err := rows.Scan(&p.PromiseHash, &p.PromiseHeight, &p.SettlementHeight, &p.SettlementTxIndex, &created, &msu, &p.Basis); err != nil {
+		var created, msu, stamped string
+		if err := rows.Scan(&p.PromiseHash, &p.PromiseHeight, &p.SettlementHeight, &p.SettlementTxIndex, &created, &msu, &p.Basis, &stamped); err != nil {
 			return nil, err
 		}
 		if p.CreationTimestamp, err = time.Parse(TimeLayout, created); err != nil {
-			continue // a row whose own timestamp will not parse cannot be re-derived
+			p.Unreadable = true
 		}
 		if p.MustServeUntil, err = time.Parse(TimeLayout, msu); err != nil {
-			continue
+			p.Unreadable = true
+		}
+		if p.AsStamped, err = time.Parse(TimeLayout, stamped); err != nil {
+			p.AsStamped = p.MustServeUntil
 		}
 		out = append(out, p)
 	}
@@ -332,9 +400,30 @@ func (s *Store) ApplyProbeCorrection(c Correction) (bool, error) {
 
 // MarkRangeCorrected records that every publication a verified range covers
 // has been re-derived against it, so the range stops holding.
-func (s *Store) MarkRangeCorrected(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE param_uncertainty SET holds = 0 WHERE id = ? AND resolution = ?`, id, scan.ResolutionVerified)
+func (s *Store) MarkRangeCorrected(ctx context.Context, id string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE param_uncertainty
+		SET corrected_at = COALESCE(corrected_at, ?), holds = 0
+		WHERE id = ? AND resolution = ?`, ts(at), id, scan.ResolutionVerified)
 	return err
+}
+
+// CorrectedRanges is every range whose corrections have landed, for the
+// derivation a rebuild and sentinel-recompute run from the record.
+func (s *Store) CorrectedRanges(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM param_uncertainty WHERE corrected_at IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
 }
 
 // OpenDaysWithHeldPromises reports whether any promise settled in [lo, hi]

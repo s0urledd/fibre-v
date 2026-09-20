@@ -148,8 +148,12 @@ func TestASilentShorteningWritesARecordAndClosesItByReadingEveryHeight(t *testin
 	if len(u.Values) != 2 || u.Values[0].FromHeight != 120 || u.Values[1].FromHeight != 150 {
 		t.Fatalf("values = %+v, want the old value from 120 and the new one from 150", u.Values)
 	}
-	if !u.Holds() != true {
-		t.Fatal("a verified range must not hold anything")
+	// Verified, but still withholding: reading every height says what the
+	// deadline should have been, the corrections are what move it, and
+	// until they land the store still carries the old deadline and the
+	// rows the verdicts drawn from it.
+	if !u.Holds() {
+		t.Fatal("a silent change withholds until its corrections land, verified or not")
 	}
 	// The proven value is in the history at the height it was really in
 	// force from, not at the h+1 the single read could vouch for.
@@ -245,5 +249,98 @@ func TestARangeTooWideToReadIsRecordedUnresolvable(t *testing.T) {
 	got := readUncertainty(t, path)
 	if len(got) != 1 || got[0].Resolution != ResolutionUnresolvable || !got[0].Holds() {
 		t.Fatalf("record = %+v", got)
+	}
+}
+
+// The record is the only thing that makes a range knowable downstream, so
+// nothing may move past it until it is on disk. Before this, a failed
+// append was logged and the scanner carried on: the param history had
+// already taken the new value and lastReconcile had already moved, so the
+// next check found state and history in agreement and had nothing to
+// report. The range was gone for good, and every publication inside it
+// kept a deadline nothing knew to distrust.
+func TestAReconcileThatCannotRecordItsRangeDoesNotAdvancePastIt(t *testing.T) {
+	old := params(10*time.Minute, 4*time.Hour, 13*time.Hour)
+	shorter := params(10*time.Minute, time.Hour, 13*time.Hour)
+	s := &Scanner{log: NewLogger(10), chainID: "mocha-5", startHeight: 100, params: NewParamHistory(100, old), lastReconcile: 120}
+	st, path := storeFor(t, s)
+	s.store.SetSettledCoverFrom(100)
+
+	// A directory where the record file belongs: every append fails.
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	readAt := func(at int64) (fibretypes.Params, error) {
+		if at >= 150 {
+			return shorter, nil
+		}
+		return old, nil
+	}
+	s.reconcileParamsWith(180, func() (fibretypes.Params, error) { return shorter, nil }, readAt)
+
+	if s.lastReconcile != 120 {
+		t.Fatalf("lastReconcile = %d after a record that could not be written; want it left at 120 so the next check re-detects", s.lastReconcile)
+	}
+	if e := s.params.at(180, 0); e == nil || e.Params.ShardRetention != 4*time.Hour {
+		t.Fatalf("the params history moved past a range nothing recorded: %+v", e)
+	}
+
+	// The file becomes writable. The next check re-detects the same
+	// disagreement over a range that has only grown, and this time the
+	// record lands.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	s.reconcileParamsWith(240, func() (fibretypes.Params, error) { return shorter, nil }, readAt)
+
+	got := readUncertainty(t, path)
+	if len(got) != 1 {
+		t.Fatalf("want one record after the retry, got %d", len(got))
+	}
+	if got[0].FromHeight != 121 || got[0].ToHeight != 240 {
+		t.Fatalf("the retried range is %d-%d, want 121-240: the whole stretch, not just the second check's",
+			got[0].FromHeight, got[0].ToHeight)
+	}
+	if s.lastReconcile != 240 {
+		t.Fatalf("lastReconcile = %d after the record landed", s.lastReconcile)
+	}
+	if e := s.params.at(180, 0); e == nil || e.Params.ShardRetention != time.Hour {
+		t.Fatalf("the proven value did not reach the history once the record landed: %+v", e)
+	}
+	_ = st
+}
+
+// The same rule for the blind-stretch record: the run is latched only once
+// its line is on disk, so a failed write is retried at the next check
+// rather than swallowed by the latch.
+func TestAFailedCheckSkippedRecordIsRetriedRatherThanLatched(t *testing.T) {
+	p := params(10*time.Minute, 4*time.Hour, 13*time.Hour)
+	s := &Scanner{log: NewLogger(10), chainID: "mocha-5", startHeight: 100, params: NewParamHistory(100, p), lastReconcile: 120}
+	_, path := storeFor(t, s)
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fail := func() (fibretypes.Params, error) { return fibretypes.Params{}, errors.New("rpc: connection refused") }
+
+	s.reconcileParamsWith(180, fail, nil)
+	if s.reconcileFailingSince != 0 {
+		t.Fatalf("the run latched at %d although its record could not be written", s.reconcileFailingSince)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	s.reconcileParamsWith(240, fail, nil)
+	if s.reconcileFailingSince != 121 {
+		t.Fatalf("reconcileFailingSince = %d after the record landed, want 121", s.reconcileFailingSince)
+	}
+	if got := readUncertainty(t, path); len(got) != 1 || got[0].ToHeight != 240 {
+		t.Fatalf("records = %+v", got)
 	}
 }

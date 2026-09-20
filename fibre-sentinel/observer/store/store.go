@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 19
+const SchemaVersion = 20
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -568,6 +568,26 @@ var migrations = []migration{
 			`UPDATE publications SET must_serve_until_ambiguous = 1
 			 WHERE raw_json <> '' AND json_valid(raw_json)
 			   AND json_extract(raw_json, '$.must_serve_until_ambiguous') = 1`,
+		},
+	},
+	{
+		version: 20,
+		note:    "param_uncertainty.corrected_at: verifying a range is not the same fact as having applied its corrections, and conflating the two released the rows before anything re-graded them",
+		stmts: []string{
+			// Set when every deadline and verdict the range covers has been
+			// re-derived. Until then the range withholds, whatever its
+			// resolution says: reading every height tells the observer what
+			// the deadline should have been, it does not move the deadlines
+			// already stamped or re-grade the rows drawn against them.
+			//
+			// holds was previously written from the record alone, which made
+			// it false the moment a range was verified — so the corrector,
+			// which reads the holding set, never saw a verified range and
+			// never ran, while the rows it would have corrected were already
+			// released. The column is now derived from both facts.
+			`ALTER TABLE param_uncertainty ADD COLUMN corrected_at TEXT`,
+			`UPDATE param_uncertainty SET holds = 1
+			 WHERE kind = 'silent_change' AND corrected_at IS NULL`,
 		},
 	},
 }

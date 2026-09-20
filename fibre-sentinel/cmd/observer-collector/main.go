@@ -24,6 +24,7 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/correct"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/keybase"
@@ -251,7 +252,7 @@ func main() {
 		log.Fatalf("open %s: %v", *corrPath, err)
 	}
 	defer corrFile.Close()
-	corr := &corrector{st: st, file: corrFile, pruneTol: *pruneTol}
+	corr := correct.New(st, corrFile, *pruneTol)
 
 	log.Printf("collector up: run=%d vantage=%s db=%s data=%s exports=%s", runID, *vantage, *dbPath, *dataDir, *expDir)
 
@@ -369,7 +370,7 @@ func main() {
 		// overlapping ranges keeps its hold until the second one closes
 		// too, because SyncParamHolds recomputes the flag from the ranges
 		// rather than clearing it per range.
-		if n, err := corr.run(ctx, now); err != nil {
+		if n, err := corr.Run(ctx, now); err != nil {
 			log.Printf("corrections: %v", err)
 			live.Error(fmt.Sprintf("corrections: %v", err))
 		} else if n > 0 {

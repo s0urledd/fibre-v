@@ -598,24 +598,27 @@ func (s *Scanner) reconcileParamsWith(h int64, readState func() (fibretypes.Para
 		// nothing: a check that could not happen is not evidence that
 		// anything changed, only that the observer could not look.
 		if s.reconcileFailingSince == 0 {
-			s.reconcileFailingSince = since + 1
-			s.emitUncertainty(ParamUncertainty{
+			if s.emitUncertainty(ParamUncertainty{
 				Kind:               UncertaintyCheckSkipped,
 				FromHeight:         since + 1,
 				ToHeight:           h,
 				IntervalStartKnown: !unknownSince,
 				LastError:          err.Error(),
-			})
+			}) == nil {
+				// Latched only once the line is on disk, so a failed write
+				// is retried at the next check rather than swallowed.
+				s.reconcileFailingSince = since + 1
+			}
 		}
 		return
 	}
 	s.reconcileFailingSince = 0
-	s.lastReconcile = h
 	cur := s.params.at(h, math.MaxInt)
 	if cur != nil && paramsEqual(cur.Params, live) {
+		s.lastReconcile = h
 		return
 	}
-	if s.params.add(h+1, -1, "reconcile", live) {
+	{
 		direction, detail := "unchanged", "unchanged"
 		var before ParamsSnapshot
 		var beforeS int64
@@ -658,7 +661,29 @@ func (s *Scanner) reconcileParamsWith(h int64, readState func() (fibretypes.Para
 			IsFloor:              isFloor,
 		}
 		s.resolveUncertainty(&u, readAt)
-		s.emitUncertainty(u)
+		// The record is the only thing that makes this range knowable to
+		// anything downstream, and nothing here may move past it until it
+		// is on disk. So neither the param history nor the reconcile
+		// marker is touched before the append succeeds: leaving both where
+		// they are means the next check sees the same disagreement and
+		// tries again, over a range that has only grown. Advancing either
+		// one first would lose the range for good — the next check would
+		// find state and history in agreement and have nothing to report,
+		// while the publications inside it kept a deadline nobody knows to
+		// distrust.
+		if err := s.emitUncertainty(u); err != nil {
+			s.log.Printf("WARNING: h=%d: x/fibre params in state differ from the event history over heights %d-%d, and the record of it could not be written (%v); "+
+				"neither the params history nor the reconcile marker is advanced, so the next check re-detects it over a wider range",
+				h, since+1, h, err)
+			return
+		}
+		s.params.add(h+1, -1, "reconcile", live)
+		// The proven values go in at the height each was really in force
+		// from, which is earlier than the h+1 a single read can vouch for.
+		for _, v := range u.Values {
+			s.params.add(v.FromHeight, -1, "verified", v.Params.toParams())
+		}
+		s.lastReconcile = h
 		s.log.Printf("WARNING: h=%d: x/fibre params in state differ from the event history (promise_timeout=%s shard_retention=%s withdrawal_delay=%s in state); "+
 			"a change landed without an event somewhere in heights %d-%d, recorded as in force from height %d; %s; %s; the retention window is %s",
 			h, live.PaymentPromiseTimeout, live.ShardRetention, live.WithdrawalDelay, since+1, h, h+1, counted, u.resolutionNote(), detail)
@@ -724,19 +749,17 @@ func (s *Scanner) resolveUncertainty(u *ParamUncertainty, readAt func(int64) (fi
 	u.ResolveMethod = "exhaustive_read"
 	u.HeightsRead = span
 	u.Values = values
-	// The proven values go into the history at the first height each was
-	// seen at, so every publication from here on is computed against what
-	// was really in force rather than against the h+1 placement, which is
-	// only the earliest point a single read at h can vouch for.
-	for _, v := range values {
-		s.params.add(v.FromHeight, -1, "verified", v.Params.toParams())
-	}
+	// The proven values are NOT put into the history here. The caller does
+	// that, and only once the record is on disk: a history that has moved
+	// past a range nothing recorded is a range that can never be found
+	// again.
 }
 
 func (u ParamUncertainty) resolutionNote() string {
 	switch u.Resolution {
 	case ResolutionVerified:
-		return fmt.Sprintf("the range was closed by reading params at all %d heights in it (%d distinct value(s)), so the deadlines it covers are corrected rather than held",
+		return fmt.Sprintf("params were read at all %d heights in the range (%d distinct value(s)), so the deadlines it covers can be corrected; "+
+			"its obligations stay held until the collector has applied those corrections",
 			u.HeightsRead, len(u.Values))
 	case ResolutionUnresolvable:
 		return "the range could not be closed (" + u.ResolveError + "), so the obligations it covers are held out of every rate until it is"
@@ -744,10 +767,10 @@ func (u ParamUncertainty) resolutionNote() string {
 	return "the range is open, so the obligations it covers are held out of every rate"
 }
 
-// emitUncertainty stamps a record and appends it. A failure to write it is
-// loud: the log line beside it is then the only trace of the range, which
-// is exactly the state this record exists to leave behind.
-func (s *Scanner) emitUncertainty(u ParamUncertainty) {
+// emitUncertainty stamps a record and appends it, returning whatever went
+// wrong. The caller is expected to hold its own progress back on an error:
+// this record is the only thing that makes the range knowable downstream.
+func (s *Scanner) emitUncertainty(u ParamUncertainty) error {
 	u.SchemaVersion = ParamUncertaintySchemaVersion
 	u.ChainID = s.chainID
 	u.ID = u.Key(s.chainID)
@@ -757,11 +780,9 @@ func (s *Scanner) emitUncertainty(u ParamUncertainty) {
 		u.ToTime = &t
 	}
 	if s.store == nil {
-		return // reconcile_test.go builds a Scanner with no store
+		return nil // reconcile_test.go builds a Scanner with no store
 	}
-	if err := s.store.AppendParamUncertainty(u); err != nil {
-		s.log.Printf("WARNING: could not record the params uncertainty range %s: %v; the log line is the only record of it", u.ID, err)
-	}
+	return s.store.AppendParamUncertainty(u)
 }
 
 func windowSeconds(p fibretypes.Params) int64 {

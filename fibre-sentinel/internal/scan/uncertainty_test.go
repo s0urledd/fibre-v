@@ -145,17 +145,22 @@ func TestCoversIsTheOverlapOfTheUploadIntervalAndTheRange(t *testing.T) {
 	}
 }
 
-// Only an unresolved silent change withholds anything.
-func TestOnlyAnUnresolvedSilentChangeHolds(t *testing.T) {
+// Only a silent change withholds anything, and verifying it does not stop
+// it: verification says what the deadline should have been, the corrections
+// are what move it. A range that stopped withholding the moment it was
+// verified would release the rows before anything re-graded them, which is
+// exactly the hole the first cut of this code had.
+func TestASilentChangeWithholdsUntilItsCorrectionsLand(t *testing.T) {
 	cases := []struct {
 		kind, resolution string
 		want             bool
 	}{
 		{UncertaintySilentChange, ResolutionOpen, true},
 		{UncertaintySilentChange, ResolutionUnresolvable, true},
-		{UncertaintySilentChange, ResolutionVerified, false},
+		{UncertaintySilentChange, ResolutionVerified, true},
 		{UncertaintyCheckSkipped, ResolutionOpen, false},
 		{UncertaintyCheckSkipped, ResolutionUnresolvable, false},
+		{UncertaintyCheckSkipped, ResolutionVerified, false},
 	}
 	for _, c := range cases {
 		u := ParamUncertainty{Kind: c.kind, Resolution: c.resolution}

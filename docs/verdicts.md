@@ -68,6 +68,18 @@ validators, or a share under the threshold, walks straight through it. The
 guard is for a correlated outage; this is for the observer being wrong about
 the deadline, which is a different fact and needs a different mechanism.
 
+**Verifying a range is not what lifts the hold.** Reading every height says
+what the deadline should have been; it does not move the deadlines already
+stamped on the publications, or re-grade the rows drawn against them. Until
+those corrections have actually landed, the store still holds the wrong
+deadline and the rows still carry the verdicts drawn from it, so a verified
+range keeps withholding. The hold lifts only when the correction pass has
+re-derived **every** publication the range covers and **every** row of those
+publications, and it says so in the record with a `range_corrected` line. A
+row whose own record the retention pass has already stripped cannot be
+re-derived, so its range stays open and its verdicts stay withheld — a row
+this observer cannot re-derive is one it must not publish a verdict for.
+
 When a range is verified, the deadlines it covers are recomputed against the
 proven values and every row re-graded, as append-only corrections
 (`corrections.jsonl`, `publication_corrections`, `probe_corrections`). The

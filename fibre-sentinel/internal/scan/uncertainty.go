@@ -36,13 +36,14 @@ const (
 	// and neither proven nor abandoned.
 	ResolutionOpen = ""
 	// ResolutionVerified: x/fibre params were read at every height in
-	// [FromHeight-1, ToHeight] and the values are on the record. The range
-	// no longer holds anything, and the deadlines it covers are corrected
-	// against the proven timeline.
+	// [FromHeight-1, ToHeight] and the values are on the record, so the
+	// deadlines the range covers can be corrected against the proven
+	// timeline. It does NOT by itself end the withholding — see Holds.
 	ResolutionVerified = "verified"
-	// ResolutionUnresolvable: the node cannot answer for those heights and
-	// no other will. The range is closed so the day can roll and the prune
-	// can run, and the hold on it is permanent.
+	// ResolutionUnresolvable: the node cannot answer for those heights.
+	// Nothing can be corrected against it, so its hold is permanent unless
+	// an archive node closes it later; the latch allows unresolvable to
+	// become verified, only not the reverse.
 	ResolutionUnresolvable = "unresolvable"
 )
 
@@ -118,12 +119,23 @@ func (u ParamUncertainty) Key(chainID string) string {
 	return chainID + ":" + u.Kind + ":" + strconv.FormatInt(u.FromHeight, 10) + "-" + strconv.FormatInt(u.ToHeight, 10)
 }
 
-// Holds reports whether this range withholds the verdicts it covers. Only
-// an unresolved silent change does: a check that did not happen is not
-// evidence that anything changed, and a verified range has been replaced by
-// the values it proved.
+// Holds reports whether this kind of range withholds the verdicts it
+// covers at all. A check that did not happen is not evidence that anything
+// changed, so check_skipped never withholds; a silent change always does.
+//
+// Verifying the params is NOT what ends the withholding, and this is the
+// distinction the first cut of this code got wrong. Reading every height
+// tells the observer what the deadline should have been; it does not move
+// the deadlines already stamped on the publications, or re-grade the rows
+// drawn against them. Until those corrections have actually landed, the
+// store still holds the wrong deadline and the rows still carry the
+// verdicts drawn from it. So a range stops withholding only once its
+// corrections are complete, which is the collector's state and not the
+// record's: see store.MarkRangeCorrected and the range_corrected line in
+// corrections.jsonl, which is what carries that fact into the record so a
+// rebuild and sentinel-recompute reach the same holds.
 func (u ParamUncertainty) Holds() bool {
-	return u.Kind == UncertaintySilentChange && u.Resolution != ResolutionVerified
+	return u.Kind == UncertaintySilentChange
 }
 
 // Covers reports whether a publication's upload could have fallen inside
