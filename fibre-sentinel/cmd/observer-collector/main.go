@@ -24,6 +24,7 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/correct"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/ingest"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/keybase"
@@ -53,6 +54,8 @@ func main() {
 		secPath   = flag.String("sampling-secrets", "", "path to sampling-secrets.jsonl, the prober's revealed day secrets (default <data-dir>/sampling-secrets.jsonl)")
 		amendPath = flag.String("amendments", "", "path to amendments.jsonl, this collector's own log of late shadow verdicts (default <data-dir>/amendments.jsonl)")
 		hostsPath = flag.String("host-history", "", "path to host_history.jsonl, the scanner's record of Fibre host registrations from the chain's events (default <data-dir>/host_history.jsonl)")
+		uncPath   = flag.String("param-uncertainty", "", "path to param_uncertainty.jsonl, the scanner's record of the height ranges it could not say which x/fibre params were in force over (default <data-dir>/param_uncertainty.jsonl)")
+		corrPath  = flag.String("corrections", "", "path to corrections.jsonl, this collector's own log of the deadlines and verdicts a verified params range moved (default <data-dir>/corrections.jsonl)")
 		pruneTol  = flag.Duration("prune-tolerance", 5*time.Minute, "how long past must_serve_until a promise's shard is still taken to be on disk when judging a deferred shadow verdict")
 		expDir    = flag.String("exports-dir", "", "where the daily export tarballs are built (default <data-dir>/exports)")
 		expHour   = flag.Int("export-hour", 3, "UTC hour after which a day's export is built, the grace for late rows (-1 = never build exports)")
@@ -97,6 +100,12 @@ func main() {
 	}
 	if *amendPath == "" {
 		*amendPath = filepath.Join(*dataDir, "amendments.jsonl")
+	}
+	if *uncPath == "" {
+		*uncPath = filepath.Join(*dataDir, "param_uncertainty.jsonl")
+	}
+	if *corrPath == "" {
+		*corrPath = filepath.Join(*dataDir, "corrections.jsonl")
 	}
 	if *hostsPath == "" {
 		*hostsPath = filepath.Join(*dataDir, "host_history.jsonl")
@@ -197,6 +206,32 @@ func main() {
 		}
 		applied := 0
 		for _, a := range ams {
+			// The line is appended and fsynced BEFORE the amendment is
+			// applied. The two can only fail in one direction: a line whose
+			// amendment did not apply replays as a no-op, because
+			// ApplyAmendment is idempotent on (dedupe_key, judged_at) and a
+			// rebuild replays this file before anything is re-judged. An
+			// applied amendment with no line is the other way round, and it
+			// is permanent: the store would carry a verdict that changed
+			// with nothing on record saying why, and the export would no
+			// longer reproduce it. That is the state this ordering exists to
+			// prevent, and it is the same ordering the store uses for its own
+			// records.
+			b, err := json.Marshal(a)
+			if err != nil {
+				log.Printf("amendments: marshal %s: %v", a.DedupeKey, err)
+				continue
+			}
+			if _, err := amendFile.Write(append(b, '\n')); err != nil {
+				log.Printf("amendments: write: %v", err)
+				live.Error(fmt.Sprintf("amendments write: %v", err))
+				continue
+			}
+			if err := amendFile.Sync(); err != nil {
+				log.Printf("amendments: sync: %v", err)
+				live.Error(fmt.Sprintf("amendments sync: %v", err))
+				continue
+			}
 			ok, err := st.ApplyAmendment(a)
 			if err != nil {
 				log.Printf("late verdicts: apply %s: %v", a.DedupeKey, err)
@@ -206,19 +241,19 @@ func main() {
 				continue
 			}
 			applied++
-			if b, err := json.Marshal(a); err == nil {
-				if _, err := amendFile.Write(append(b, '\n')); err != nil {
-					log.Printf("amendments: write: %v", err)
-					live.Error(fmt.Sprintf("amendments write: %v", err))
-				}
-			}
 			log.Printf("late verdict: %s %s %s: %s -> %s", a.PromiseHash[:min(12, len(a.PromiseHash))], a.ValidatorAddress, a.ScheduledAt.UTC().Format(time.RFC3339), a.From, a.To)
 		}
 		if applied > 0 {
-			_ = amendFile.Sync()
 			live.Set("late_verdicts", applied)
 		}
 	}
+	corrFile, err := os.OpenFile(*corrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Fatalf("open %s: %v", *corrPath, err)
+	}
+	defer corrFile.Close()
+	corr := correct.New(st, corrFile, *pruneTol)
+
 	log.Printf("collector up: run=%d vantage=%s db=%s data=%s exports=%s", runID, *vantage, *dbPath, *dataDir, *expDir)
 
 	retention := rollup.Config{RetainRaw: *retainRaw, RetainRawJSON: *retainRJ, RollupAfter: *rollAfter}
@@ -249,6 +284,27 @@ func main() {
 			if r.Skipped > 0 {
 				log.Printf("publications: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
 			}
+		}
+		// Before the measurements, deliberately. A range says how to read
+		// the rows of the publications it covers, and InsertProbe decides
+		// there and then whether a row is born withheld. Ingesting the
+		// ranges after the measurements left every row of the pass that
+		// first carried a range readable as FAULT until the hold sync at
+		// the end of that pass — and for as long as the collector stayed
+		// down, if it stopped in between.
+		//
+		// The ranges come in before the corrections that close them, and
+		// both come in before the holds are synced, so a range and the
+		// correction that lifts it can never be half-applied in one pass.
+		if r, err := ingest.ParamUncertainty(st, *uncPath, now); err != nil {
+			fail("param uncertainty", err)
+		} else if r.Inserted > 0 {
+			log.Printf("param uncertainty: +%d range(s) (read %d, line %d)", r.Inserted, r.Read, r.Line)
+		}
+		if r, err := ingest.Corrections(st, *corrPath, now); err != nil {
+			fail("corrections", err)
+		} else if r.Inserted > 0 {
+			log.Printf("corrections: +%d deadline/verdict correction(s) replayed (read %d, line %d)", r.Inserted, r.Read, r.Line)
 		}
 		if r, err := ingest.Measurements(st, *measPath, now); err != nil {
 			fail("measurements", err)
@@ -315,6 +371,27 @@ func main() {
 			log.Printf("wal checkpoint: %d of %d frame(s) written back and the log truncated", done, inLog)
 		}
 		judgeLate(now)
+		// Corrections first, then the hold sync. A verified range only
+		// stops holding once every deadline it covers has actually been
+		// re-derived, so the flag can never be cleared on a row the
+		// correction has not reached — and a publication covered by two
+		// overlapping ranges keeps its hold until the second one closes
+		// too, because SyncParamHolds recomputes the flag from the ranges
+		// rather than clearing it per range.
+		if n, err := corr.Run(ctx, now); err != nil {
+			log.Printf("corrections: %v", err)
+			live.Error(fmt.Sprintf("corrections: %v", err))
+		} else if n > 0 {
+			live.Set("param_corrections", n)
+			bumpHoldsRevision(st, now)
+		}
+		if changed, err := st.SyncParamHolds(ctx); err != nil {
+			log.Printf("param holds: %v", err)
+			live.Error(fmt.Sprintf("param holds: %v", err))
+		} else if changed > 0 {
+			log.Printf("param holds: %d row(s) changed", changed)
+			bumpHoldsRevision(st, now)
+		}
 		if *retEvery > 0 && time.Since(lastRetention) >= *retEvery {
 			lastRetention = now
 			if rep, err := rollup.Run(ctx, st, now, retention); err != nil {

@@ -35,7 +35,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 18
+const SchemaVersion = 20
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -463,6 +463,133 @@ var migrations = []migration{
 				(started_at, sampling_commitment, sampling_binding, sampling_p, classification, promise_hash)`,
 		},
 	},
+	{
+		version: 19,
+		note:    "params uncertainty: the height ranges this observer cannot say which x/fibre params were in force over, the hold they place on the verdicts they cover, and the append-only log of every deadline and verdict a verification moved",
+		stmts: []string{
+			// The ranges. Everything but the resolution is written once;
+			// the resolution latches from open to verified or unresolvable
+			// and is never cleared, because a range that was closed cannot
+			// become open again.
+			`CREATE TABLE IF NOT EXISTS param_uncertainty (
+				id                             TEXT PRIMARY KEY,
+				chain_id                       TEXT NOT NULL,
+				kind                           TEXT NOT NULL,
+				from_height                    INTEGER NOT NULL,
+				to_height                      INTEGER NOT NULL,
+				effective_from_height          INTEGER NOT NULL DEFAULT 0,
+				interval_start_known           INTEGER NOT NULL DEFAULT 1,
+				direction                      TEXT NOT NULL DEFAULT '',
+				window_before_s                INTEGER NOT NULL DEFAULT 0,
+				window_after_s                 INTEGER NOT NULL DEFAULT 0,
+				publications_affected          INTEGER NOT NULL DEFAULT 0,
+				publications_affected_is_floor INTEGER NOT NULL DEFAULT 0,
+				detected_at                    TEXT NOT NULL,
+				to_time                        TEXT,
+				last_error                     TEXT NOT NULL DEFAULT '',
+				holds                          INTEGER NOT NULL DEFAULT 0,
+				resolution                     TEXT NOT NULL DEFAULT '',
+				resolved_at                    TEXT,
+				resolve_method                 TEXT NOT NULL DEFAULT '',
+				heights_read                   INTEGER NOT NULL DEFAULT 0,
+				resolve_error                  TEXT NOT NULL DEFAULT '',
+				raw_json                       TEXT NOT NULL
+			)`,
+			// The one query that matters runs every collector pass: which
+			// ranges still hold, and which heights do they cover.
+			`CREATE INDEX IF NOT EXISTS param_uncertainty_holding
+				ON param_uncertainty (holds, from_height, to_height)`,
+
+			// The correction log. No FOREIGN KEY to probes, deliberately:
+			// probe_amendments references probes(dedupe_key) ON DELETE
+			// CASCADE, so the retention prune destroys the log of the
+			// amendments it once published. A record of what this observer
+			// withdrew has to outlive the row it withdrew it from.
+			`CREATE TABLE IF NOT EXISTS publication_corrections (
+				promise_hash          TEXT NOT NULL,
+				uncertainty_id        TEXT NOT NULL,
+				from_must_serve_until TEXT NOT NULL,
+				to_must_serve_until   TEXT NOT NULL,
+				from_basis            TEXT NOT NULL,
+				to_basis              TEXT NOT NULL,
+				reason                TEXT NOT NULL,
+				judged_at             TEXT NOT NULL,
+				PRIMARY KEY (promise_hash, uncertainty_id)
+			)`,
+			`CREATE TABLE IF NOT EXISTS probe_corrections (
+				dedupe_key            TEXT NOT NULL,
+				uncertainty_id        TEXT NOT NULL,
+				promise_hash          TEXT NOT NULL,
+				validator_address     TEXT NOT NULL,
+				scheduled_at          TEXT NOT NULL,
+				from_phase            TEXT NOT NULL,
+				to_phase              TEXT NOT NULL,
+				from_classification   TEXT NOT NULL,
+				to_classification     TEXT NOT NULL,
+				from_must_serve_until TEXT NOT NULL,
+				to_must_serve_until   TEXT NOT NULL,
+				reason                TEXT NOT NULL,
+				prune_tolerance_s     INTEGER NOT NULL DEFAULT 0,
+				judged_at             TEXT NOT NULL,
+				PRIMARY KEY (dedupe_key, uncertainty_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS probe_corrections_promise ON probe_corrections (promise_hash)`,
+
+			// The verdict as it was stamped, kept beside the corrected one.
+			// NULL means uncorrected, never "the same as".
+			`ALTER TABLE publications ADD COLUMN must_serve_until_at_scan       TEXT`,
+			`ALTER TABLE publications ADD COLUMN must_serve_until_basis_at_scan TEXT`,
+			`ALTER TABLE publications ADD COLUMN corrected_at                   TEXT`,
+			`ALTER TABLE probes       ADD COLUMN must_serve_until_at_probe      TEXT`,
+			`ALTER TABLE probes       ADD COLUMN phase_at_probe                 TEXT`,
+			`ALTER TABLE probes       ADD COLUMN corrected_at                   TEXT`,
+
+			// The hold, denormalised onto the rows so every rate query is a
+			// column test rather than a join against a range table. It is
+			// derived state: SyncParamHolds recomputes it from
+			// param_uncertainty every pass, in both directions, so it
+			// cannot drift or stick.
+			`ALTER TABLE publications ADD COLUMN retention_unverified INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE probes       ADD COLUMN retention_unverified INTEGER NOT NULL DEFAULT 0`,
+			`CREATE INDEX IF NOT EXISTS probes_held ON probes (promise_hash) WHERE retention_unverified = 1`,
+
+			// Publication.must_serve_until_ambiguous has been written to
+			// publications.jsonl since the field was added and read by
+			// nothing: no column, no ingest, no API. Shipping a second
+			// uncertainty axis while the first stays invisible would be
+			// worse than having one. Backfilled from raw_json, which the
+			// retention pass strips after 30 days; older rows keep 0, which
+			// understates rather than invents.
+			// The ninth obligation bucket. Rolled days from before this
+			// migration keep 0, which is honest: nothing was held then.
+			`ALTER TABLE obligation_daily ADD COLUMN held_param_unverified INTEGER NOT NULL DEFAULT 0`,
+
+			`ALTER TABLE publications ADD COLUMN must_serve_until_ambiguous INTEGER NOT NULL DEFAULT 0`,
+			`UPDATE publications SET must_serve_until_ambiguous = 1
+			 WHERE raw_json <> '' AND json_valid(raw_json)
+			   AND json_extract(raw_json, '$.must_serve_until_ambiguous') = 1`,
+		},
+	},
+	{
+		version: 20,
+		note:    "param_uncertainty.corrected_at: verifying a range is not the same fact as having applied its corrections, and conflating the two released the rows before anything re-graded them",
+		stmts: []string{
+			// Set when every deadline and verdict the range covers has been
+			// re-derived. Until then the range withholds, whatever its
+			// resolution says: reading every height tells the observer what
+			// the deadline should have been, it does not move the deadlines
+			// already stamped or re-grade the rows drawn against them.
+			//
+			// holds was previously written from the record alone, which made
+			// it false the moment a range was verified — so the corrector,
+			// which reads the holding set, never saw a verified range and
+			// never ran, while the rows it would have corrected were already
+			// released. The column is now derived from both facts.
+			`ALTER TABLE param_uncertainty ADD COLUMN corrected_at TEXT`,
+			`UPDATE param_uncertainty SET holds = 1
+			 WHERE kind = 'silent_change' AND corrected_at IS NULL`,
+		},
+	},
 }
 
 // Store wraps one SQLite database.
@@ -699,6 +826,51 @@ func splitSQL(src string) []string {
 // that string comparison in SQL (>=, ORDER BY, MAX) is chronological.
 // RFC3339Nano trims trailing zeros, which breaks that: "...:00Z" sorts after
 // "...:00.5Z".
+// MetaParamHoldsRev is bumped whenever a params hold is raised or lifted
+// or a correction moves a verdict, so the API's cached aggregates — which
+// run to a thirty-minute TTL — can tell that a figure they hold has been
+// withdrawn instead of republishing it until the TTL runs out. Its value is
+// a counter; see bumpParamHoldsRev for why it is not a timestamp.
+const MetaParamHoldsRev = "param_holds_rev"
+
+// execer is satisfied by *sql.DB and by *sql.Tx, so a revision bump can
+// join a transaction that is already open or stand on its own.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// bumpParamHoldsRev advances the revision the API's cached aggregates key
+// on, as one atomic statement.
+//
+// It counts rather than stamping the clock. The collector takes one
+// time.Now() at the top of a pass and threads it through every record it
+// ingests, so two ranges landing in the same pass wrote the same
+// nanosecond: a snapshot computed between them carried that value, still
+// matched it afterwards, and went on serving the verdicts the second range
+// had just withheld. Two bumps must never produce the same token, and a
+// counter cannot.
+//
+// The increment is done by SQLite inside the statement, not read-then-
+// written in Go, so two writers cannot both read the same value first.
+//
+// A value left by the earlier timestamp scheme is an integer, so it
+// increments from there and the token keeps rising across the change.
+// Anything that will not parse casts to 0 and the next value is 1, which is
+// still a change — the API only ever compares for equality, and treats the
+// token as opaque.
+func bumpParamHoldsRev(db execer, now time.Time) error {
+	_, err := db.Exec(`INSERT INTO meta (key, value, updated_at) VALUES (?, '1', ?)
+		ON CONFLICT(key) DO UPDATE SET
+			value      = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT),
+			updated_at = excluded.updated_at`, MetaParamHoldsRev, ts(now))
+	return err
+}
+
+// BumpParamHoldsRev advances the revision from outside a transaction, for
+// the collector's hold sync and correction passes. Every path that moves
+// this key goes through the same counter; none of them writes a timestamp.
+func (s *Store) BumpParamHoldsRev(now time.Time) error { return bumpParamHoldsRev(s.db, now) }
+
 const TimeLayout = "2006-01-02T15:04:05.000000000Z"
 
 // TS formats a time for a timestamp column or a comparison argument.
@@ -910,9 +1082,16 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 		 validator_set_height, total_voting_power, sigma_rows, distinct_rows, wrap_overlaps, validators_with_rows,
 		 recorded_at, raw_json,
 		 attested_with_rows, attested_voting_power, signature_entries, signatures_verified,
-		 signatures_unmatched, signatures_out_of_position)
+		 signatures_unmatched, signatures_out_of_position, retention_unverified)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		        ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?,
+		-- Born withheld when a range that still withholds already covers
+		-- this publication's upload interval. Publications are ingested
+		-- before the ranges in a pass, so one settling into a range
+		-- recorded on an earlier pass would otherwise arrive unheld and
+		-- stay that way until the hold sync at the end of the pass.
+		EXISTS (SELECT 1 FROM param_uncertainty u
+			WHERE u.holds = 1 AND ? - 1 <= u.to_height AND ? >= u.from_height))
 		ON CONFLICT(promise_hash) DO NOTHING`,
 		p.PromiseHash, p.Promise.Commitment, p.Promise.BlobVersion, p.Promise.BlobSize, p.Promise.Namespace,
 		p.Promise.ChainID, p.Promise.Height, ts(p.Promise.CreationTimestamp),
@@ -923,7 +1102,8 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 		a.ValidatorSetHeight, a.TotalVotingPower, a.Sigma, a.Distinct, a.WrapOverlaps, a.ValidatorsWithRows,
 		ts(p.RecordedAt), string(raw),
 		att(int64(a.AttestedWithRows)), att(a.AttestedVotingPower), att(int64(a.SignatureEntries)),
-		att(int64(a.SignaturesVerified)), att(int64(a.SignaturesUnmatched)), att(int64(a.SignaturesOutOfPosition)))
+		att(int64(a.SignaturesVerified)), att(int64(a.SignaturesUnmatched)), att(int64(a.SignaturesOutOfPosition)),
+		p.Promise.Height, p.SettlementHeight)
 	if err != nil {
 		return false, fmt.Errorf("publication %s: %w", p.PromiseHash, err)
 	}
@@ -975,9 +1155,15 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		 assignment_verified, phase, outcome, classification, classification_reason, raw_error, total_duration_ms, raw_json,
 		 attested, bytes_returned, row_indices, rows_sha256, rpc_code, shadowed_by, observer_build, app_version,
 		 sampling_p, sampling_binding, sampling_commitment, retry_first_outcome, clock_offset_ms, shadow_gap,
-		 host_at_settlement, settlement_host_outcome, settlement_host_served)
+		 host_at_settlement, settlement_host_outcome, settlement_host_served, retention_unverified)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		-- Born withheld when this row must be: see ProbeHeldAtInsert for
+		-- the three cases and why each is needed. Deciding it here rather
+		-- than in the pass that follows is what makes the withholding a
+		-- property of the row instead of a race the collector usually
+		-- wins.
+		`+ProbeHeldAtInsert+`)
 		ON CONFLICT(dedupe_key) DO NOTHING`,
 		m.DedupeKey(), m.Vantage, m.PromiseHash, m.Commitment, m.BlobVersion, ts(m.MustServeUntil), m.ValidatorSetHeight,
 		m.ValidatorAddress, m.ValidatorHost, b2i(m.Assigned), m.AssignedRowCount, m.ScheduleLabel, ts(m.ScheduledAt),
@@ -993,7 +1179,8 @@ func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err
 		nullIfEmpty(m.Download.ShadowedBy), nullIfEmpty(observerBuild(m)), observerAppVersion(m),
 		samplingP(m), samplingField(m, func(d *probe.SamplingDecision) string { return d.Binding }),
 		samplingField(m, func(d *probe.SamplingDecision) string { return d.DayCommitment }), retryFirstOutcome(m), m.ClockOffsetMS,
-		nullIfEmpty(m.Download.ShadowGap), nullIfEmpty(m.HostAtSettlement), settlementOutcome(m), settlementServed(m))
+		nullIfEmpty(m.Download.ShadowGap), nullIfEmpty(m.HostAtSettlement), settlementOutcome(m), settlementServed(m),
+		ts(m.MustServeUntil), m.PromiseHash)
 	if err != nil {
 		return false, fmt.Errorf("probe %s: %w", m.DedupeKey(), err)
 	}

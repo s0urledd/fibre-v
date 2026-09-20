@@ -94,9 +94,15 @@ func (c *blobCache) put(hash string, v blobVerdict) {
 // no probes at all is absent from the map and gets the zero fingerprint, which
 // is still a fingerprint: it stops being the zero one the moment a probe lands.
 func (s *Server) probeFingerprints(ctx context.Context, where string, limit int, args ...any) (map[string]string, error) {
+	// The corrected_at and retention_unverified terms are here for the same
+	// reason the amended_at ones are: neither a hold nor a correction adds
+	// a row or moves MAX(rowid), so without them a cached verdict outlives
+	// the moment this observer stopped standing behind it.
 	rows, err := s.st.DB().QueryContext(ctx, blobSel(where, limit)+`
 		SELECT p.promise_hash, COUNT(*), COALESCE(MAX(p.rowid), 0),
-		       COUNT(p.amended_at), COALESCE(MAX(p.amended_at), '')
+		       COUNT(p.amended_at), COALESCE(MAX(p.amended_at), ''),
+		       COUNT(p.corrected_at), COALESCE(MAX(p.corrected_at), ''),
+		       COALESCE(MAX(p.retention_unverified), 0)
 		FROM probes p JOIN sel ON sel.promise_hash = p.promise_hash
 		GROUP BY p.promise_hash`, args...)
 	if err != nil {
@@ -105,13 +111,15 @@ func (s *Server) probeFingerprints(ctx context.Context, where string, limit int,
 	defer rows.Close()
 	out := map[string]string{}
 	for rows.Next() {
-		var hash, lastAmended string
-		var n, maxRowID, amended int64
-		if err := rows.Scan(&hash, &n, &maxRowID, &amended, &lastAmended); err != nil {
+		var hash, lastAmended, lastCorrected string
+		var n, maxRowID, amended, corrected, held int64
+		if err := rows.Scan(&hash, &n, &maxRowID, &amended, &lastAmended, &corrected, &lastCorrected, &held); err != nil {
 			return nil, err
 		}
 		out[hash] = strconv.FormatInt(n, 10) + ":" + strconv.FormatInt(maxRowID, 10) +
-			":" + strconv.FormatInt(amended, 10) + ":" + lastAmended
+			":" + strconv.FormatInt(amended, 10) + ":" + lastAmended +
+			":" + strconv.FormatInt(corrected, 10) + ":" + lastCorrected +
+			":" + strconv.FormatInt(held, 10)
 	}
 	return out, rows.Err()
 }

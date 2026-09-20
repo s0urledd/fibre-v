@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 )
 
 // The correlated-failure guard. At or above UnreachableThreshold of the
@@ -79,7 +80,60 @@ type Row struct {
 	Attested       bool
 	Phase          probe.Phase
 	Classification probe.Classification
-	TLSOK          bool
+	Outcome        probe.Outcome
+	// RetentionUnverified is set when this row's publication sits inside
+	// an x/fibre params range the observer has not read every height of,
+	// so the deadline the phase and the verdict were drawn against may not
+	// be the one the server used. Derived from the records by
+	// MarkRetentionUnverified, never from the row itself.
+	RetentionUnverified bool
+	TLSOK               bool
+}
+
+// EffectiveClass is the classification every rule below is built from: the
+// row's own, except that a row whose deadline the observer cannot vouch for
+// publishes no serve verdict. The SQL twin is rollup.EffectiveClass, and a
+// test runs both over every cell of (classification, outcome, held).
+//
+// It is an override on the same row rather than a filter that removes it,
+// which is what keeps the published response reconciling against itself:
+// the row stays in every population it was in, under a different name.
+func (r Row) EffectiveClass() probe.Classification {
+	if r.RetentionUnverified && probe.DeadlineDerived(r.Classification, r.Outcome) {
+		return probe.ClassRetentionUnverified
+	}
+	return r.Classification
+}
+
+// PromiseHeights is the pair a hold is derived from: the interval a
+// publication's upload could have fallen in.
+type PromiseHeights struct{ PromiseHeight, SettlementHeight int64 }
+
+// MarkRetentionUnverified sets the hold on every row whose publication's
+// upload interval overlaps a range that still withholds. This is the whole
+// derivation, and it is the same one the collector applies in SQL, so a
+// third party running this package over the export reaches the same rows.
+//
+// corrected is the set of range ids whose corrections have landed, from the
+// range_corrected lines in corrections.jsonl. Verifying a range is not what
+// releases it — applying what the verification proved is — so a verified
+// range with no completion line still withholds here, exactly as it does in
+// the store.
+func MarkRetentionUnverified(rows []Row, pubs map[string]PromiseHeights, us []scan.ParamUncertainty, corrected map[string]bool) {
+	held := map[string]bool{}
+	for _, u := range us {
+		if !u.Holds() || corrected[u.ID] {
+			continue
+		}
+		for hash, p := range pubs {
+			if u.Covers(p.PromiseHeight, p.SettlementHeight) {
+				held[hash] = true
+			}
+		}
+	}
+	for i := range rows {
+		rows[i].RetentionUnverified = held[rows[i].PromiseHash]
+	}
 }
 
 // FromMeasurement reduces a measurement to a Row.
@@ -88,7 +142,7 @@ func FromMeasurement(m probe.Measurement) Row {
 		PromiseHash: m.PromiseHash, Validator: m.ValidatorAddress, ScheduleLabel: m.ScheduleLabel,
 		ScheduledAt: m.ScheduledAt, StartedAt: m.StartedAt, MustServeUntil: m.MustServeUntil,
 		Assigned: m.Assigned, Attested: m.Attested && m.HasAttestation(),
-		Phase: m.Phase, Classification: m.Classification, TLSOK: m.TLS.OK,
+		Phase: m.Phase, Classification: m.Classification, Outcome: m.Outcome, TLSOK: m.TLS.OK,
 	}
 }
 
@@ -121,11 +175,13 @@ type SuspectPoint struct {
 
 // SuspectPoints applies the correlated-failure guard: over assigned
 // in-window rows started in the window, grouped by scheduled time, with
-// more than one validator probed at the point. "Probed" is a row that is
-// not a gap: a validator the load cap turned away, or a slot that elapsed,
-// says nothing about the point and does not dilute the share. Rows counts
-// every row at the point, gaps included, because the exclusion removes
-// them all.
+// more than one validator probed at the point. "Probed" is a row that
+// carries a reachability verdict for the endpoint, which is the only kind
+// of row that could land in either numerator — see noReachVerdict. A row
+// that could not be in the numerator whatever happened at the point must
+// not sit in the denominator either, or it drags the share down by its
+// mere presence. Rows counts every row at the point, excluded ones
+// included, because the exclusion removes them all.
 func SuspectPoints(rows []Row, w Window) []SuspectPoint {
 	type acc struct {
 		label                  string
@@ -144,11 +200,12 @@ func SuspectPoints(rows []Row, w Window) []SuspectPoint {
 			groups[k] = g
 		}
 		g.n++
-		if isGap(r.Classification) {
+		cls := r.EffectiveClass()
+		if noReachVerdict(cls) {
 			continue
 		}
 		g.vals[r.Validator] = true
-		switch r.Classification {
+		switch cls {
 		case probe.ClassUnreachable:
 			g.unreach[r.Validator] = true
 		case probe.ClassFault:
@@ -188,6 +245,7 @@ type Obligations struct {
 	Served                int64 `json:"served"`
 	Broken                int64 `json:"broken"`
 	EndUnobserved         int64 `json:"end_unobserved"`
+	HeldParamUnverified   int64 `json:"held_param_unverified"`
 	Unobserved            int64 `json:"unobserved"`
 	UnobservedReachable   int64 `json:"unobserved_reachable"`
 	UnobservedUnreachable int64 `json:"unobserved_unreachable"`
@@ -200,6 +258,7 @@ func (o *Obligations) add(x Obligations) {
 	o.Served += x.Served
 	o.Broken += x.Broken
 	o.EndUnobserved += x.EndUnobserved
+	o.HeldParamUnverified += x.HeldParamUnverified
 	o.Unobserved += x.Unobserved
 	o.UnobservedReachable += x.UnobservedReachable
 	o.UnobservedUnreachable += x.UnobservedUnreachable
@@ -219,6 +278,46 @@ func isGap(c probe.Classification) bool {
 	return c == probe.ClassNotProbed || c == probe.ClassProbeError
 }
 
+// GuardSilentClasses is every classification that leaves the observer
+// without a reachability verdict for the endpoint at that point, so that
+// the rollup's SQL twin can spell the same list into its query and a test
+// can hold the two to it.
+//
+// The guard asks whether many validators failed at once. A row can answer
+// that only if it could itself have come back UNREACHABLE or FAULT:
+//
+//   - NOT_PROBED, PROBE_ERROR: the observer never asked, or could not carry
+//     the probe out.
+//   - NOT_REGISTERED: no reachable Fibre host was registered, so no
+//     connection was attempted.
+//   - UNATTESTED: Classify returns it before it looks at reachability at
+//     all, so the row reads UNATTESTED whether the endpoint answered or
+//     refused. On mocha a publisher stops collecting at two thirds of
+//     stake, which leaves roughly a third of assigned rows unattested at
+//     every point — enough, left in the denominator, to hold the guard
+//     below its threshold through a real outage.
+//   - RETENTION_UNVERIFIED: the override replaces exactly HEALTHY and
+//     FAULT, so a held row can never be the FAULT in the numerator, and it
+//     was never going to be the UNREACHABLE either.
+//
+// Everything else kept in the denominator means a connection was attempted
+// and the endpoint answered or refused: an identity failure, a throttle or
+// a server error is positive evidence that the network was up, so it
+// belongs there.
+var GuardSilentClasses = []probe.Classification{
+	probe.ClassNotProbed, probe.ClassProbeError, probe.ClassNotRegistered, probe.ClassUnattested,
+	probe.ClassRetentionUnverified,
+}
+
+func noReachVerdict(c probe.Classification) bool {
+	for _, s := range GuardSilentClasses {
+		if c == s {
+			return true
+		}
+	}
+	return false
+}
+
 // ComputeObligations buckets every proven obligation: an assigned,
 // attested (validator, promise) pair whose promise settled in the window,
 // judged over its in-window rows started by the window's end, at schedule
@@ -232,9 +331,9 @@ func ComputeObligations(rows []Row, settled map[string]time.Time, w Window, susp
 	}
 	type key struct{ validator, promise string }
 	type obl struct {
-		faults, healthy, lateHealthy, attempted, reached int64
-		pending                                          bool
-		last                                             *Row
+		faults, healthy, lateHealthy, held, attempted, reached int64
+		pending                                                bool
+		last                                                   *Row
 	}
 	obls := map[key]*obl{}
 	for i := range rows {
@@ -252,7 +351,8 @@ func ComputeObligations(rows []Row, settled map[string]time.Time, w Window, susp
 			o = &obl{}
 			obls[k] = o
 		}
-		switch r.Classification {
+		cls := r.EffectiveClass()
+		switch cls {
 		case probe.ClassFault:
 			o.faults++
 		case probe.ClassHealthy:
@@ -260,8 +360,10 @@ func ComputeObligations(rows []Row, settled map[string]time.Time, w Window, susp
 			if !r.ScheduledAt.Before(EndSegment(st, r.MustServeUntil)) {
 				o.lateHealthy++
 			}
+		case probe.ClassRetentionUnverified:
+			o.held++
 		}
-		if !isGap(r.Classification) {
+		if !isGap(cls) {
 			o.attempted++
 			if r.TLSOK {
 				o.reached++
@@ -281,7 +383,7 @@ func ComputeObligations(rows []Row, settled map[string]time.Time, w Window, susp
 	for k, o := range obls {
 		var b Obligations
 		b.Total = 1
-		last := o.last.Classification
+		last := o.last.EffectiveClass()
 		switch {
 		case o.pending:
 			b.Pending = 1
@@ -291,6 +393,13 @@ func ComputeObligations(rows []Row, settled map[string]time.Time, w Window, susp
 			b.Served = 1
 		case o.healthy > 0:
 			b.EndUnobserved = 1
+		// An obligation whose only serve evidence was withheld is not one
+		// this observer failed to observe: it looked, and cannot speak for
+		// what it saw. Filing it under unobserved would report the
+		// observer's own uncertainty about the deadline as a gap in
+		// coverage.
+		case o.held > 0:
+			b.HeldParamUnverified = 1
 		case o.reached > 0:
 			b.UnobservedReachable = 1
 		case o.attempted > 0:

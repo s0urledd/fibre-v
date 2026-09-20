@@ -43,10 +43,98 @@ as in force from the block after the check. Publications settled between
 the change and the check keep the window computed from the old params (the
 record is append-only); when that change shortened the window their
 recorded deadline is later than the server's prune time, and an in-window
-`NOT_FOUND` between the two would be a fault. The scanner logs the interval
-and the count; every validator prunes at the same moment, so such a point
-is caught by the correlated-failure guard as a fault suspect point, which
-is the only protection the record offers there.
+`NOT_FOUND` between the two would be a fault.
+
+That range is written down (`param_uncertainty.jsonl`, published at
+`/v1/meta.param_uncertainty`) and the scanner tries to close it in the same
+pass, by reading `x/fibre` params at **every height in it**. Not a
+bisection: a bisection locates a transition but cannot prove there was no
+third value between the endpoints, and a third value whose window dipped
+shorter is the entire reason the two endpoints are not a proof. Sixty
+heights is about a second against the node the scanner already follows, so
+the common case closes immediately and the values that were really in force
+go into the param history at the heights they were in force from.
+
+While a range is open — the node could not answer, or the range is wider
+than one pass will read — every obligation it covers is **held**: the rows
+publish `RETENTION_UNVERIFIED` instead of the `HEALTHY` or `FAULT` they were
+stamped with, and neither the fault nor the credit reaches a rate. A
+publication is covered when its upload interval, from the block before the
+promise height to the settlement tx, overlaps the range.
+
+The correlated-failure guard is *not* the protection here and never was: it
+needs three faulting validators and half the point, so two affected
+validators, or a share under the threshold, walks straight through it. The
+guard is for a correlated outage; this is for the observer being wrong about
+the deadline, which is a different fact and needs a different mechanism.
+
+**A row is held while its deadline disagrees with its publication's**, not
+while its range is open. Those are different sets, and the difference is the
+whole steady state: the prober schedules from `publications.jsonl`, which is
+append-only and still carries the deadline the scanner stamped, so it keeps
+producing measurements against a withdrawn deadline for as long as the *old*
+window runs — hours after the range that corrected it was closed. A rule
+keyed on the range cannot see those rows at all. A rule keyed on the
+disagreement cannot miss them, whenever they arrive.
+
+The hold is stamped in the same statement that writes the row, so a
+measurement that should be withheld is born withheld: there is no moment at
+which it exists and reads `FAULT`. Three things put it there, and each
+covers a case the others cannot — the publication is already withheld
+(the normal state while a range is open and nothing has been corrected),
+the row's deadline disagrees with its publication's (every row the prober
+produces after a correction), or the publication is covered by a range that
+still withholds (the pass where the range itself has only just arrived).
+The collector ingests the ranges before the measurements for the same
+reason: a range says how to read the rows it covers.
+
+Rows **already stored** when a range lands are withheld in the same
+transaction that records it. A range is a statement that the verdicts of
+the publications it covers cannot be published, and the rows carrying
+those verdicts are in the store before it arrives; leaving them to the
+hold sync at the end of the pass left every one of them readable as a
+fault in the meantime, and for as long as the collector stayed down if it
+stopped in between. The cache revision moves in that transaction too, so
+a snapshot holding the withdrawn fault cannot outlive it. The collector's next pass re-grades it against the deadline
+its publication now carries and the hold lifts. A row whose own record the
+retention pass has stripped cannot be re-graded, so it stays withheld.
+
+**Verifying a range is not what lifts the hold.** Reading every height says
+what the deadline should have been; it does not move the deadlines already
+stamped on the publications, or re-grade the rows drawn against them. Until
+those corrections have actually landed, the store still holds the wrong
+deadline and the rows still carry the verdicts drawn from it, so a verified
+range keeps withholding. The hold lifts only when the correction pass has
+re-derived **every** publication the range covers and **every** row of those
+publications, and it says so in the record with a `range_corrected` line. A
+row whose own record the retention pass has already stripped cannot be
+re-derived, so its range stays open and its verdicts stay withheld — a row
+this observer cannot re-derive is one it must not publish a verdict for.
+
+When a range is verified, the deadlines it covers are recomputed against the
+proven values and every row re-graded, as append-only corrections
+(`corrections.jsonl`, `publication_corrections`, `probe_corrections`). The
+row keeps what it was stamped with beside the corrected value
+(`must_serve_until_at_probe`, `phase_at_probe`, `classification_at_probe`,
+`corrected_at`), and the correction log carries no foreign key to the probe
+row, so the retention prune cannot delete the record of a verdict this
+observer withdrew.
+
+**A correction only ever moves a deadline earlier.** Verifying a range can
+make the recomputed deadline *later* — a value proven to have started before
+the promise height replaces what the history had there rather than joining
+it, and a longer replacement raises the earliest bound — and that would turn
+a validator that read clean into a `FAULT` on evidence this observer did not
+hold when it published the clean reading. So the correction is clamped: it
+can withdraw an accusation, never make one. The cost is real and is taken
+deliberately: a window that was silently *lengthened* leaves obligations
+under-claimed, and a validator that pruned on the old shorter deadline keeps
+a verdict this observer will not revisit.
+
+What this still does not catch: a change that lands and reverts inside one
+60-block period produces no disagreement at the check, so no range opens.
+Detection is endpoint sampling at 60-block granularity, and that is the
+bound.
 
 ## Who is actually obliged
 
@@ -84,18 +172,27 @@ does not average out.
 A publisher stops collecting signatures the moment it has two thirds of
 stake, so the validators that end up *proven* obliged for a blob are, by
 construction, the ones that answered the upload first. Speed of response to
-an upload and reliability of retention are not independent: the same disk,
-the same host, the same operator. The serve rate is therefore computed over a
-population selected for having been fast, which is not the population an
-operator or a delegator has in mind when they read it.
+an upload decides who is in the denominator, and the serve rate is therefore
+computed over a population selected for having been fast — which is not the
+population an operator or a delegator has in mind when they read it.
 
-The direction is knowable even though the size is not. A validator that is
-slow to accept uploads is under-represented in the denominator, so the
-published rate is, if anything, **better** than the network's true retention —
-it flatters the set rather than accusing it. That is the safer direction for a
-figure printed beside operators' names, and it is the reason this observer
-does not correct for it: any correction would have to model the missing
-population, and a model is not an observation.
+Neither the size nor the direction of the bias is measured here. The
+expectation is that it flatters: a validator slow to accept uploads is
+under-represented in the denominator, and if slow-to-accept and
+poor-at-retaining are the same operators, the published rate reads better
+than the network's true retention. But that is an assumption about a
+correlation this observer has never measured — it probes retention, not
+upload latency, and it holds no reading of the two together. Two things
+could turn it the other way: completion order depends on shard size, which
+scales with stake, so the quorum leans toward smaller validators, and
+nothing here establishes that smaller validators retain better; and a host
+fast to accept an upload is not thereby a host that still has it thirteen
+hours later.
+
+So the direction is stated as what it is — the likelier of the two, not a
+property of the measurement — and it is not the reason the rate goes
+uncorrected. The reason is that any correction would have to model the
+missing population, and a model is not an observation.
 
 What is published instead is the size of the bias's input:
 `attestation.coverage` (the proven share of assigned probes),
@@ -165,6 +262,7 @@ One sentence each, and what a reader should conclude.
 | `UNATTESTED` | assigned validator, any phase, where no verified signature from that validator appears on the settled promise and the probe reached the question of the shard at all (an observer-side outcome, a stale assignment pin, a missing registry entry or an unusable certificate is named first, as `PROBE_ERROR`, `NOT_REGISTERED` or `IDENTITY_MISMATCH`, none of which enters a rate) | nothing on chain proves this validator ever stored the shard, so no verdict is owed either way. Outside every rate, in both directions |
 | `PROBE_ERROR` | the observer could not carry out the probe, or gave up on it (`PROBE_ERROR`, `RPC_DEADLINE`) | an observer problem, shown as a gap |
 | `NOT_PROBED` | the slot elapsed unprobed (observer down or late), or the download was skipped by policy (`MISSED`, `REACHABLE`) | a gap in observation, never a zero |
+| `RETENTION_UNVERIFIED` | the publication's upload interval overlaps a range of heights over which an `x/fibre` params change landed with no event and this observer has not read the params at every height (see "Phases"). Applied over the stored row rather than returned by `Classify`: the measurement record says what happened on the wire and is append-only, while whether this observer trusts its own deadline is a judgement that has to be revisable | this observer cannot say when the obligation ended, so it publishes no serve verdict — **neither the fault nor the credit**. Withholding only the accusations would raise every rate it touched, which is the same argument this document makes for `UNATTESTED` and for grace probes. Replaces exactly `HEALTHY` and `FAULT`; `INVALID_ROWS` is carved out, because bytes that fail the commitment are a fault in every phase and no deadline rescues them. Never a statement about the validator |
 
 ## How the dashboard derives its numbers
 
@@ -314,10 +412,23 @@ One sentence each, and what a reader should conclude.
   before it can be a `FAULT`), so half the set faulting at one minute is
   the network, a release, or the observer's coder, and is shown as such
   with a link to its rows (`/v1/probes?at=<scheduled_at>`). "Probed" is a
-  row that is not a gap: a validator the load cap turned away or a slot
-  that elapsed (`NOT_PROBED`, `PROBE_ERROR`) is not in the share's
-  denominator, so a burst among the validators that were asked is caught
-  however many were not. The points, the shares and the number of rows
+  row that carries a reachability verdict for the endpoint, which is the
+  only kind of row that could land in either numerator. A row that could
+  not have been `UNREACHABLE` or `FAULT` whatever happened at that point is
+  not in the share's denominator either, or it would drag the share down by
+  its mere presence: a validator the load cap turned away or a slot that
+  elapsed (`NOT_PROBED`, `PROBE_ERROR`), one with no reachable Fibre host so
+  that no connection was attempted (`NOT_REGISTERED`), and one whose
+  assignment carries no signature on the settled promise (`UNATTESTED`),
+  which the taxonomy decides before it looks at reachability at all. That
+  last one is not a rare case: a publisher stops collecting at two thirds of
+  stake, so a third of the assigned rows at a typical point are
+  `UNATTESTED`, and leaving them in the denominator held the guard below its
+  threshold through outages it exists to catch. Everything kept in the
+  denominator means a connection was attempted and the endpoint answered or
+  refused — an identity failure, a throttle or a server error is positive
+  evidence that the network was up. So a burst among the validators that
+  actually answered is caught however many did not. The points, the shares and the number of rows
   removed (gaps included) are published so the exclusion is visible, and
   the rows keep their classification in the store: a verifier sees what
   was excluded and why. The points are judged over every vantage together

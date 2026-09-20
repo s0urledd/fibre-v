@@ -66,8 +66,13 @@ type Scanner struct {
 	chainID     string
 	startHeight int64 // resolved fresh-scan start (persisted across restarts)
 	// lastReconcile is the height of the last params reconcile in this
-	// process; a silent change found at the next one landed after it.
+	// process that actually read state; a silent change found at the next
+	// one landed after it.
 	lastReconcile int64
+	// reconcileFailingSince is the first height of the current run of
+	// failed reconciles, or zero when the last one read state. One
+	// check_skipped record covers a whole run rather than one per check.
+	reconcileFailingSince int64
 	// unavailableRun counts heights declared unavailable back to back. The
 	// first costs the full grace, because a node briefly behind and a node
 	// that will never have the height look the same for the first minutes;
@@ -228,7 +233,9 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 			s.seedHosts(ctx, st.LastScannedHeight+1)
 		}
 		s.lastReconcile = st.LastReconcileHeight
+		s.reconcileFailingSince = st.ReconcileFailingSince
 		resumeAt := st.LastScannedHeight + 1
+		s.store.SetSettledCoverFrom(resumeAt)
 		s.log.Printf("resuming: last_scanned=%d, %d param-history entries%s", st.LastScannedHeight, len(st.ParamHistory),
 			map[bool]string{true: " (x/fibre not active yet)", false: ""}[s.fibreInactive])
 		return resumeAt, nil
@@ -257,21 +264,23 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 		return 0, fmt.Errorf("seed params at height %d: %w", start, err)
 	}
 	s.startHeight = start
+	s.store.SetSettledCoverFrom(start)
 	s.seedHosts(ctx, start)
 
 	// persist the seed immediately so a crash before the first block still
 	// resumes with the right history.
 	seeded, seedAt := s.hosts.Seeded()
 	if err := s.store.SaveState(PersistState{
-		ChainID:             s.chainID,
-		StartHeight:         start,
-		LastScannedHeight:   start - 1,
-		ParamFingerprint:    assign.ParamsV10BlobV0.Fingerprint(),
-		ParamHistory:        s.params.Entries(),
-		LastReconcileHeight: s.lastReconcile,
-		HostHistory:         s.hosts.Entries(),
-		HostSeeded:          seeded,
-		HostSeedAt:          seedAt,
+		ChainID:               s.chainID,
+		StartHeight:           start,
+		LastScannedHeight:     start - 1,
+		ParamFingerprint:      assign.ParamsV10BlobV0.Fingerprint(),
+		ParamHistory:          s.params.Entries(),
+		LastReconcileHeight:   s.lastReconcile,
+		ReconcileFailingSince: s.reconcileFailingSince,
+		HostHistory:           s.hosts.Entries(),
+		HostSeeded:            seeded,
+		HostSeedAt:            seedAt,
 	}); err != nil {
 		return 0, err
 	}
@@ -293,17 +302,18 @@ func (s *Scanner) checkpoint(lastScanned int64) {
 	}
 	seeded, seedAt := s.hosts.Seeded()
 	if err := s.store.SaveState(PersistState{
-		ChainID:             s.chainID,
-		StartHeight:         s.startHeight,
-		LastScannedHeight:   lastScanned,
-		LastScannedTime:     s.lastBlockTime,
-		ParamFingerprint:    assign.ParamsV10BlobV0.Fingerprint(),
-		ParamHistory:        s.params.Entries(),
-		LastReconcileHeight: s.lastReconcile,
-		Gaps:                s.gaps,
-		HostHistory:         s.hosts.Entries(),
-		HostSeeded:          seeded,
-		HostSeedAt:          seedAt,
+		ChainID:               s.chainID,
+		StartHeight:           s.startHeight,
+		LastScannedHeight:     lastScanned,
+		LastScannedTime:       s.lastBlockTime,
+		ParamFingerprint:      assign.ParamsV10BlobV0.Fingerprint(),
+		ParamHistory:          s.params.Entries(),
+		LastReconcileHeight:   s.lastReconcile,
+		ReconcileFailingSince: s.reconcileFailingSince,
+		Gaps:                  s.gaps,
+		HostHistory:           s.hosts.Entries(),
+		HostSeeded:            seeded,
+		HostSeedAt:            seedAt,
 	}); err != nil {
 		s.log.Fatalf("save state: %v", err)
 	}
@@ -530,7 +540,10 @@ const paramReconcileEvery = 60
 // would let a lengthened window stand alone as the only candidate for a
 // promise the server may have validated against the old, shorter one).
 //
-// The change really landed somewhere in (last check, h]. Publications
+// The change really landed somewhere in (last check, h], where "last
+// check" is the last one that actually read state: a reconcile whose RPC
+// failed leaves the marker alone, so an outage widens the interval
+// instead of hiding part of it. Publications
 // settled in that interval were recorded with the old params and are not
 // rewritten: when the window got shorter, the observer's must_serve_until
 // for them is later than the server's prune time, and a NOT_FOUND between
@@ -540,6 +553,26 @@ const paramReconcileEvery = 60
 // fault suspect point, and a re-scan from the interval's start rewrites
 // nothing (the record is append-only), so the log line is the record.
 func (s *Scanner) reconcileParams(ctx context.Context, h int64) {
+	s.reconcileParamsWith(h, func() (fibretypes.Params, error) {
+		var live fibretypes.Params
+		err := s.retryRPC(ctx, fmt.Sprintf("params reconcile at height %d", h), func() error {
+			var err error
+			live, err = s.chain.FibreParamsAt(ctx, h)
+			return err
+		})
+		return live, err
+	}, func(at int64) (fibretypes.Params, error) {
+		// One try per height, no retry loop: the read is bounded work
+		// inside the block loop and a range that cannot be read now is
+		// recorded unresolvable rather than stalling the scan. A later
+		// pass can close it.
+		return s.chain.FibreParamsAt(ctx, at)
+	})
+}
+
+// reconcileParamsWith is reconcileParams with the two state reads injected,
+// so a test can fail either without a chain.
+func (s *Scanner) reconcileParamsWith(h int64, readState func() (fibretypes.Params, error), readAt func(int64) (fibretypes.Params, error)) {
 	since := s.lastReconcile
 	unknownSince := since == 0
 	if unknownSince {
@@ -549,44 +582,215 @@ func (s *Scanner) reconcileParams(ctx context.Context, h int64) {
 		// the only record of which publications carry the old deadline.
 		since = s.startHeight - 1
 	}
-	s.lastReconcile = h
-	var live fibretypes.Params
-	if err := s.retryRPC(ctx, fmt.Sprintf("params reconcile at height %d", h), func() error {
-		var err error
-		live, err = s.chain.FibreParamsAt(ctx, h)
-		return err
-	}); err != nil {
-		s.log.Printf("h=%d: params reconcile skipped: %v", h, err)
-		return
-	}
-	cur := s.params.at(h, math.MaxInt)
-	if cur != nil && paramsEqual(cur.Params, live) {
-		return
-	}
-	if s.params.add(h+1, -1, "reconcile", live) {
-		direction := "unchanged"
-		if cur != nil {
-			oldW, _ := windowFrom(cur.Params, time.Time{})
-			newW, _ := windowFrom(live, time.Time{})
-			switch {
-			case newW.Before(oldW):
-				direction = "SHORTER: their recorded must_serve_until may be later than the server's prune time, and an in-window NOT_FOUND between the two would be a false fault"
-			case newW.After(oldW):
-				direction = "longer: their recorded must_serve_until is earlier than the server's prune time, which can only produce SERVED_PAST_WINDOW, never a fault"
+	live, err := readState()
+	if err != nil {
+		// The marker stays where it was. It is the start of the interval a
+		// silent change could have landed in, and a check that did not
+		// happen narrows nothing: moving it here would drop
+		// (previous check, h] out of the interval the next successful
+		// check reports, and that interval is the only record of which
+		// publications carry a deadline computed from the old params.
+		// Under a long RPC outage the interval widens, which is the truth.
+		s.log.Printf("h=%d: params reconcile skipped: %v (the uncertainty interval still starts at height %d)", h, err, since+1)
+		// One record per run of failures, not one per check. The run's
+		// start is persisted, so a restart mid-outage does not write a
+		// second record for a stretch already on the record. It holds
+		// nothing: a check that could not happen is not evidence that
+		// anything changed, only that the observer could not look.
+		if s.reconcileFailingSince == 0 {
+			if s.emitUncertainty(ParamUncertainty{
+				Kind:               UncertaintyCheckSkipped,
+				FromHeight:         since + 1,
+				ToHeight:           h,
+				IntervalStartKnown: !unknownSince,
+				LastError:          err.Error(),
+			}) == nil {
+				// Latched only once the line is on disk, so a failed write
+				// is retried at the next check rather than swallowed.
+				s.reconcileFailingSince = since + 1
 			}
 		}
-		n := s.store.CountSettledBetween(since+1, h)
-		counted := fmt.Sprintf("%d publication(s) settled in that interval were recorded with the old params and are not rewritten", n)
-		if unknownSince {
-			// The count is over this process's own appends, so after a
-			// restart it is a floor, not a total. Say which it is rather
-			// than printing a number that reads as complete.
-			counted = fmt.Sprintf("at least %d publication(s) settled in that interval were recorded with the old params and are not rewritten "+
-				"(no earlier reconcile is on record, so the interval is the whole scan and the count covers only this process's appends)", n)
-		}
-		s.log.Printf("WARNING: h=%d: x/fibre params in state differ from the event history (promise_timeout=%s shard_retention=%s withdrawal_delay=%s in state); a change landed without an event somewhere in heights %d-%d, recorded as in force from height %d; %s; the retention window is %s",
-			h, live.PaymentPromiseTimeout, live.ShardRetention, live.WithdrawalDelay, since+1, h, h+1, counted, direction)
+		return
 	}
+	s.reconcileFailingSince = 0
+	cur := s.params.at(h, math.MaxInt)
+	if cur != nil && paramsEqual(cur.Params, live) {
+		s.lastReconcile = h
+		return
+	}
+	{
+		direction, detail := "unchanged", "unchanged"
+		var before ParamsSnapshot
+		var beforeS int64
+		afterW, _ := windowFrom(live, time.Time{})
+		if cur != nil {
+			before, beforeS = cur.ParamsJSON, windowSeconds(cur.Params)
+			oldW, _ := windowFrom(cur.Params, time.Time{})
+			switch {
+			case afterW.Before(oldW):
+				direction = "shorter"
+				detail = "SHORTER: their recorded must_serve_until may be later than the server's prune time, and an in-window NOT_FOUND between the two would be a false fault"
+			case afterW.After(oldW):
+				direction = "longer"
+				detail = "longer: their recorded must_serve_until is earlier than the server's prune time, which can only produce SERVED_PAST_WINDOW, never a fault"
+			}
+		}
+		n := int64(s.store.CountSettledBetween(since+1, h))
+		// The count covers only publications this process appended, so it
+		// is a floor whenever the range starts before this process's first
+		// height — after any restart, not only when no earlier reconcile is
+		// on record.
+		isFloor := since+1 < s.store.SettledCoverFrom()
+		counted := fmt.Sprintf("%d publication(s) settled in that interval were recorded with the old params", n)
+		if isFloor {
+			counted = fmt.Sprintf("at least %d publication(s) settled in that interval were recorded with the old params "+
+				"(the count covers only this process's appends)", n)
+		}
+		u := ParamUncertainty{
+			Kind:                 UncertaintySilentChange,
+			FromHeight:           since + 1,
+			ToHeight:             h,
+			EffectiveFromHeight:  h + 1,
+			IntervalStartKnown:   !unknownSince,
+			Before:               before,
+			After:                snapshotParams(live, h+1, -1, "reconcile"),
+			Direction:            direction,
+			WindowBeforeS:        beforeS,
+			WindowAfterS:         windowSeconds(live),
+			PublicationsAffected: n,
+			IsFloor:              isFloor,
+		}
+		s.resolveUncertainty(&u, readAt)
+		// The record is the only thing that makes this range knowable to
+		// anything downstream, and nothing here may move past it until it
+		// is on disk. So neither the param history nor the reconcile
+		// marker is touched before the append succeeds: leaving both where
+		// they are means the next check sees the same disagreement and
+		// tries again, over a range that has only grown. Advancing either
+		// one first would lose the range for good — the next check would
+		// find state and history in agreement and have nothing to report,
+		// while the publications inside it kept a deadline nobody knows to
+		// distrust.
+		if err := s.emitUncertainty(u); err != nil {
+			s.log.Printf("WARNING: h=%d: x/fibre params in state differ from the event history over heights %d-%d, and the record of it could not be written (%v); "+
+				"neither the params history nor the reconcile marker is advanced, so the next check re-detects it over a wider range",
+				h, since+1, h, err)
+			return
+		}
+		s.params.add(h+1, -1, "reconcile", live)
+		// The proven values go in at the height each was really in force
+		// from, which is earlier than the h+1 a single read can vouch for.
+		for _, v := range u.Values {
+			s.params.add(v.FromHeight, -1, "verified", v.Params.toParams())
+		}
+		s.lastReconcile = h
+		s.log.Printf("WARNING: h=%d: x/fibre params in state differ from the event history (promise_timeout=%s shard_retention=%s withdrawal_delay=%s in state); "+
+			"a change landed without an event somewhere in heights %d-%d, recorded as in force from height %d; %s; %s; the retention window is %s",
+			h, live.PaymentPromiseTimeout, live.ShardRetention, live.WithdrawalDelay, since+1, h, h+1, counted, u.resolutionNote(), detail)
+	}
+}
+
+// maxVerifyHeights bounds the reads one detection may spend closing a
+// range. A healthy range is paramReconcileEvery heights, so the bound only
+// bites after an RPC outage or on a first reconcile with no marker on
+// record, where the range can be the whole scan. Beyond it the range is
+// recorded unresolvable and its verdicts stay held, which is the honest
+// answer: the observer did not read those heights.
+const maxVerifyHeights = 5000
+
+// resolveUncertainty tries to close a range the only way it can be closed:
+// by reading x/fibre params at every height in it. A bisection would locate
+// a transition, but it cannot prove there was no third value in between,
+// and a third value is the whole reason the two endpoints are not enough —
+// a window that dipped shorter between them would leave exactly the false
+// fault this record exists to prevent. So it is every height or none.
+//
+// It runs inline, at detection, because sixty heights is about a second of
+// reads against a node that certainly still has state that recent: the node
+// the scanner is already following. That keeps the common case closed
+// within one reconcile instead of waiting on a separate process, and it is
+// why nothing downstream has to hold a verdict for long.
+func (s *Scanner) resolveUncertainty(u *ParamUncertainty, readAt func(int64) (fibretypes.Params, error)) {
+	if readAt == nil {
+		return
+	}
+	from, to := u.FromHeight-1, u.ToHeight
+	if from < 1 {
+		from = 1
+	}
+	span := to - from + 1
+	now := time.Now().UTC()
+	if span > maxVerifyHeights {
+		u.Resolution = ResolutionUnresolvable
+		u.ResolvedAt = &now
+		u.ResolveMethod = "exhaustive_read"
+		u.ResolveError = fmt.Sprintf("the range is %d heights, over the %d this scanner will read in one pass; nothing was read, so nothing is proven", span, maxVerifyHeights)
+		return
+	}
+	var values []ResolvedValue
+	for at := from; at <= to; at++ {
+		p, err := readAt(at)
+		if err != nil {
+			u.Resolution = ResolutionUnresolvable
+			u.ResolvedAt = &now
+			u.ResolveMethod = "exhaustive_read"
+			u.HeightsRead = at - from
+			u.ResolveError = fmt.Sprintf("params at height %d: %v", at, err)
+			u.Values = nil // a partial read proves nothing about the heights it skipped
+			return
+		}
+		if n := len(values); n > 0 && paramsEqual(values[n-1].Params.toParams(), p) {
+			continue
+		}
+		values = append(values, ResolvedValue{FromHeight: at, Params: snapshotParams(p, at, -1, "verified")})
+	}
+	u.Resolution = ResolutionVerified
+	u.ResolvedAt = &now
+	u.ResolveMethod = "exhaustive_read"
+	u.HeightsRead = span
+	u.Values = values
+	// The proven values are NOT put into the history here. The caller does
+	// that, and only once the record is on disk: a history that has moved
+	// past a range nothing recorded is a range that can never be found
+	// again.
+}
+
+func (u ParamUncertainty) resolutionNote() string {
+	switch u.Resolution {
+	case ResolutionVerified:
+		return fmt.Sprintf("params were read at all %d heights in the range (%d distinct value(s)), so the deadlines it covers can be corrected; "+
+			"its obligations stay held until the collector has applied those corrections",
+			u.HeightsRead, len(u.Values))
+	case ResolutionUnresolvable:
+		return "the range could not be closed (" + u.ResolveError + "), so the obligations it covers are held out of every rate until it is"
+	}
+	return "the range is open, so the obligations it covers are held out of every rate"
+}
+
+// emitUncertainty stamps a record and appends it, returning whatever went
+// wrong. The caller is expected to hold its own progress back on an error:
+// this record is the only thing that makes the range knowable downstream.
+func (s *Scanner) emitUncertainty(u ParamUncertainty) error {
+	u.SchemaVersion = ParamUncertaintySchemaVersion
+	u.ChainID = s.chainID
+	u.ID = u.Key(s.chainID)
+	u.DetectedAt = time.Now().UTC()
+	if !s.lastBlockTime.IsZero() {
+		t := s.lastBlockTime.UTC()
+		u.ToTime = &t
+	}
+	if s.store == nil {
+		return nil // reconcile_test.go builds a Scanner with no store
+	}
+	return s.store.AppendParamUncertainty(u)
+}
+
+func windowSeconds(p fibretypes.Params) int64 {
+	w := p.PaymentPromiseTimeout
+	if p.ShardRetention > w {
+		w = p.ShardRetention
+	}
+	return int64(w / time.Second)
 }
 
 // seedParamsFor returns the params in force at the first tx of block h, which

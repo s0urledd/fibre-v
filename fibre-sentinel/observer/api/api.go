@@ -170,6 +170,13 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 		}
 		return validatorSnapshot{Window: win, Rows: rows}, nil
 	})
+	// Both of these publish faults beside named validators, and both are
+	// cached for up to half an hour. A hold landing in the database moves
+	// nothing they hold, so without this the figure a hold withdrew stays
+	// on the front page until the TTL runs out. The market snapshot carries
+	// no verdicts and needs none.
+	s.net.revision = s.paramHoldsRevision
+	s.vals.revision = s.paramHoldsRevision
 	// Serve the previous process's snapshots at once, then warm every window
 	// so the first visitor is not the one who waits.
 	if s.dataDir != "" {
@@ -390,6 +397,7 @@ func addRolledObligations(o *obligationStats, r rollup.Obligations) {
 	o.Served += r.Served
 	o.Broken += r.Broken
 	o.EndUnobserved += r.EndUnobserved
+	o.HeldParamUnverified += r.HeldParamUnverified
 	o.UnobservedReachable += r.UnobservedReachable
 	o.UnobservedUnreachable += r.UnobservedUnreachable
 	o.UnobservedNotProbed += r.UnobservedNotProbed
@@ -579,6 +587,13 @@ type metaResponse struct {
 	// ScanGaps are height ranges the scanner could not read from its node.
 	// A publication in one of them is unknown to this observer.
 	ScanGaps []scan.ScanGap `json:"scan_gaps,omitempty"`
+	// ParamUncertainty is every range of heights this observer could not
+	// say which x/fibre params were in force over, with what came of
+	// trying to close it. Published whether or not it still holds
+	// anything: a range that was closed is part of the record of what this
+	// observer did and did not know, and a reader checking a corrected
+	// deadline needs the range that moved it.
+	ParamUncertainty []paramUncertainty `json:"param_uncertainty,omitempty"`
 	// PinStatus says whether the chain's app version matches the celestia-app
 	// major this build's assignment constants are pinned to: matches,
 	// chain_ahead, chain_behind or unknown.
@@ -692,8 +707,15 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	var pinned string
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT pinned_celestia_app FROM publications ORDER BY settlement_height DESC LIMIT 1`).Scan(&pinned)
 	h := s.health(ctx, now)
+	var ranges []paramUncertainty
+	if us, err := s.st.ParamRanges(ctx); err == nil {
+		for _, u := range us {
+			ranges = append(ranges, paramUncertaintyOf(u))
+		}
+	}
 	writeJSON(w, 200, metaResponse{
 		Components: h.Components, Health: h.Status, ScanGaps: h.ScanGaps, PinStatus: h.PinStatus,
+		ParamUncertainty:         ranges,
 		UnassignablePublications: s.unassignablePublications(ctx),
 		APIVersion:               Version, Vantage: s.vantage, VantageInfo: s.info,
 		VantageCount: vantages, ObservedFromOneVantage: vantages == 1,
@@ -768,8 +790,12 @@ type networkResponse struct {
 	AsOfNote string `json:"as_of_note,omitempty"`
 	// RolledUp is set when figures rest partly on the daily rollup.
 	RolledUp *rolledUp `json:"rolled_up,omitempty"`
-	Window   Window    `json:"window"`
-	Vantage  string    `json:"vantage"`
+	// RetentionUncertainty is set only while something is withheld because
+	// an x/fibre params range has not been read at every height. Absent on
+	// a healthy deployment, so its presence is the signal.
+	RetentionUncertainty *retentionUncertainty `json:"retention_uncertainty,omitempty"`
+	Window               Window                `json:"window"`
+	Vantage              string                `json:"vantage"`
 	// Previous is the same span ending where this window starts, for the
 	// change beside a headline figure. Absent on "all" and on a pinned
 	// window.
@@ -888,7 +914,11 @@ func (s *Server) latencyWhere(ctx context.Context, where string, args ...any) (p
 }
 
 func (s *Server) classCountsWhere(ctx context.Context, where string, args ...any) (classCounts, int64, error) {
-	rows, err := s.st.DB().QueryContext(ctx, `SELECT classification, COUNT(*) FROM probes WHERE `+where+` GROUP BY classification`, args...)
+	// The effective class, not the stored one: a row whose deadline this
+	// observer cannot vouch for publishes no serve verdict. It is an
+	// override on the same row, so the tally still covers exactly the
+	// population `where` selects and coverage.den is unchanged.
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT `+rollup.EffectiveClass("")+`, COUNT(*) FROM probes WHERE `+where+` GROUP BY `+rollup.EffectiveClass(""), args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -972,6 +1002,7 @@ var excludedFromRate = []excludedClass{
 	{"THROTTLED", "the endpoint was reached and refused the download with a rate limit; that says nothing about the shard, and the prober backs off from a validator that says so"},
 	{"NOT_PROBED", "the slot elapsed unprobed or the policy sampled it out; a gap in observation, never a zero"},
 	{"PROBE_ERROR", "the observer's own probe failed"},
+	{"RETENTION_UNVERIFIED", "x/fibre params changed without an event somewhere in a range of heights covering this publication's upload, and this observer has not read the params at every height in that range; must_serve_until is computed from those params, so it cannot say when the obligation ended. Both the fault it would otherwise publish and the credit it would otherwise give are withheld, because withholding only the accusations would raise every rate it touched. The ranges are published under param_uncertainty in /v1/meta, and the verdict returns as an append-only correction once the range has been read"},
 }
 
 type excludedClass struct {
@@ -1042,10 +1073,16 @@ func serveRate(c classCounts) Rate {
 // The window's end is the moment the verdict is drawn (as_of); an obligation
 // whose must_serve_until is later than that is pending.
 type obligationStats struct {
-	Total                 int64 `json:"total"`
-	Served                int64 `json:"served"`
-	Broken                int64 `json:"broken"`
-	EndUnobserved         int64 `json:"end_unobserved"`
+	Total         int64 `json:"total"`
+	Served        int64 `json:"served"`
+	Broken        int64 `json:"broken"`
+	EndUnobserved int64 `json:"end_unobserved"`
+	// HeldParamUnverified is obligations whose only serve evidence sits
+	// inside an x/fibre params range this observer has not read every
+	// height of, so it publishes neither the fault nor the credit. It is
+	// deliberately not folded into Unobserved: the observer looked, and
+	// cannot speak for what it saw.
+	HeldParamUnverified   int64 `json:"held_param_unverified"`
 	Unobserved            int64 `json:"unobserved"`
 	UnobservedReachable   int64 `json:"unobserved_reachable"`
 	UnobservedUnreachable int64 `json:"unobserved_unreachable"`
@@ -1103,7 +1140,7 @@ func (s *Server) obligationsWhere(ctx context.Context, win Window, ss suspectSet
 	var o obligationStats
 	err := s.st.DB().QueryRowContext(ctx, `SELECT `+obligationSums+` FROM (`+obligationBuckets+ss.clause("pr.scheduled_at")+extra+`)
 			GROUP BY validator_address, promise_hash)`, s.obligationArgs(win, ss, extraArgs...)...).
-		Scan(&o.Total, &o.Broken, &o.Served, &o.EndUnobserved, &o.UnobservedReachable, &o.UnobservedUnreachable, &o.UnobservedNotProbed, &o.Pending)
+		Scan(&o.Total, &o.Broken, &o.Served, &o.EndUnobserved, &o.HeldParamUnverified, &o.UnobservedReachable, &o.UnobservedUnreachable, &o.UnobservedNotProbed, &o.Pending)
 	if err != nil {
 		return obligationStats{}, err
 	}
@@ -1123,7 +1160,7 @@ func (s *Server) obligationsByValidator(ctx context.Context, win Window, ss susp
 	for rows.Next() {
 		var addr string
 		var o obligationStats
-		if err := rows.Scan(&addr, &o.Total, &o.Broken, &o.Served, &o.EndUnobserved, &o.UnobservedReachable, &o.UnobservedUnreachable, &o.UnobservedNotProbed, &o.Pending); err != nil {
+		if err := rows.Scan(&addr, &o.Total, &o.Broken, &o.Served, &o.EndUnobserved, &o.HeldParamUnverified, &o.UnobservedReachable, &o.UnobservedUnreachable, &o.UnobservedNotProbed, &o.Pending); err != nil {
 			return nil, err
 		}
 		o.finish()
@@ -1352,8 +1389,8 @@ func (s *Server) suspectPoints(ctx context.Context, win Window) (vantageHealth, 
 // breakdown is published so a reader can look rather than assume.
 func (s *Server) rateByPoint(ctx context.Context, where string, args ...any) ([]stratum, error) {
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT schedule_label,
-			COALESCE(SUM(CASE WHEN classification = 'HEALTHY' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN `+rollup.EffectiveClass("")+` = 'HEALTHY' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+rollup.EffectiveClass("")+` = 'FAULT' THEN 1 ELSE 0 END), 0)
 		FROM probes WHERE `+where+` GROUP BY schedule_label ORDER BY schedule_label`, args...)
 	if err != nil {
 		return nil, err
@@ -1578,11 +1615,12 @@ func (s *Server) computeNetwork(ctx context.Context, win Window, ex excludeSet, 
 		return nil, err
 	}
 	resp.Classes = classes
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at")+exv, popArgs...).Scan(&resp.Faults)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND `+rollup.EffectiveClass("")+` = 'FAULT'`+ss.clause("scheduled_at")+exv, popArgs...).Scan(&resp.Faults)
 	resp.ServeRate = serveRate(classes)
 	resp.Coverage = coverage(classes)
 	resp.HeldOut = heldOut(classes)
 	resp.ExcludedClasses = excludedFromRate
+	resp.RetentionUncertainty = s.retentionUncertaintyNow(ctx)
 	if resp.Obligations, err = s.obligationsWhere(ctx, win, ss, ex.clause("pr.validator_address"), ex.addrs...); err != nil {
 		return nil, err
 	}
@@ -3397,6 +3435,17 @@ type probeRow struct {
 	ShadowedBy    string   `json:"shadowed_by,omitempty"`
 	ObserverBuild string   `json:"observer_build,omitempty"`
 	AppVersion    int64    `json:"app_version,omitempty"`
+	// RetentionUnverified says this row's publication sits inside an
+	// x/fibre params range this observer has not read every height of, so
+	// the deadline its phase and verdict were drawn against may not be the
+	// one the server used. While it is set, classification reads
+	// RETENTION_UNVERIFIED rather than the HEALTHY or FAULT the row was
+	// stamped with, and classification_at_probe is not that stamp — see
+	// corrected_at, which is set only once a verified range actually moved
+	// the row.
+	RetentionUnverified bool   `json:"retention_unverified,omitempty"`
+	PhaseAtProbe        string `json:"phase_at_probe,omitempty"`
+	CorrectedAt         string `json:"corrected_at,omitempty"`
 	// ShadowGap says why the verdict on genuine rows no scanned promise
 	// assigns was deferred at the probe (the store serves by promise-hash
 	// order, so a promise settling after the probe can own them), or that
@@ -3418,12 +3467,21 @@ type probeRow struct {
 }
 
 func (s *Server) probeRows(ctx context.Context, where string, limit int, args ...any) ([]probeRow, error) {
+	// The effective classification, not the stored one. /v1/probes,
+	// /v1/blobs/{hash}.probes and a validator's recent probes are all
+	// served from here, and a held row published as a bare "FAULT" beside
+	// validator_address is the accusation this whole mechanism exists to
+	// withhold — a third party counting classifications would count it.
+	// retention_unverified rides along so a reader can see why, and
+	// phase_at_probe / classification_at_probe / corrected_at say what the
+	// row was stamped with before a correction moved it.
 	q := `SELECT vantage, promise_hash, validator_address, validator_host, assigned, attested, assigned_row_count, schedule_label, scheduled_at,
-		started_at, phase, outcome, classification, classification_reason, rows_returned, rows_expected, total_duration_ms, tls_ok, identity_ok, raw_error,
+		started_at, phase, outcome, ` + rollup.EffectiveClass("") + `, classification_reason, rows_returned, rows_expected, total_duration_ms, tls_ok, identity_ok, raw_error,
 		COALESCE(retry_first_outcome, ''), COALESCE(clock_offset_ms, 0),
 		COALESCE(row_indices, ''), COALESCE(rows_sha256, ''), COALESCE(rpc_code, ''), COALESCE(shadowed_by, ''), COALESCE(observer_build, ''), COALESCE(app_version, 0),
 		COALESCE(shadow_gap, ''), COALESCE(classification_at_probe, ''), COALESCE(amended_at, ''),
-		COALESCE(host_at_settlement, ''), COALESCE(settlement_host_outcome, ''), settlement_host_served
+		COALESCE(host_at_settlement, ''), COALESCE(settlement_host_outcome, ''), settlement_host_served,
+		retention_unverified, COALESCE(phase_at_probe, ''), COALESCE(corrected_at, '')
 		FROM probes`
 	if where != "" {
 		q += " WHERE " + where
@@ -3440,7 +3498,7 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 	out := []probeRow{}
 	for rows.Next() {
 		var p probeRow
-		var assigned, tls, id int
+		var assigned, tls, id, held int
 		var att sql.NullInt64
 		var idxJSON string
 		var served sql.NullInt64
@@ -3448,9 +3506,11 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 			&p.ScheduledAt, &p.StartedAt, &p.Phase, &p.Outcome, &p.Classification, &p.Reason, &p.RowsReturned, &p.RowsExpected,
 			&p.TotalDurationMS, &tls, &id, &p.RawError, &p.RetryFirstOutcome, &p.ClockOffsetMS,
 			&idxJSON, &p.RowsSHA256, &p.RPCCode, &p.ShadowedBy, &p.ObserverBuild, &p.AppVersion,
-			&p.ShadowGap, &p.ClassificationAtProbe, &p.AmendedAt, &p.HostAtSettlement, &p.SettlementHostOutcome, &served); err != nil {
+			&p.ShadowGap, &p.ClassificationAtProbe, &p.AmendedAt, &p.HostAtSettlement, &p.SettlementHostOutcome, &served,
+			&held, &p.PhaseAtProbe, &p.CorrectedAt); err != nil {
 			return nil, err
 		}
+		p.RetentionUnverified = held == 1
 		p.HostChanged = p.HostAtSettlement != "" && p.ValidatorHost != "" && p.ValidatorHost != p.HostAtSettlement
 		if served.Valid {
 			b := served.Int64 == 1

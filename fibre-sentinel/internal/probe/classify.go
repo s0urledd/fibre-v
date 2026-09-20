@@ -171,17 +171,75 @@ const (
 	// and keeps delivering in the background. These probes are reported
 	// separately and are counted neither for nor against the validator.
 	ClassUnattested Classification = "UNATTESTED"
+
+	// ClassRetentionUnverified: an x/fibre params change that emitted no
+	// event landed somewhere in a range of heights covering this
+	// publication's upload, and the observer has not read the params at
+	// every height in that range. must_serve_until is computed from those
+	// params, the phase from must_serve_until, and this row's place in the
+	// serve rate from the phase, so the rate cannot speak for this row
+	// until the range is read.
+	//
+	// Classify never returns it. It is applied afterwards, over the stored
+	// row, by rollup.EffectiveClass and verdict.Row.EffectiveClass: the
+	// measurement record says what happened on the wire and is append-only,
+	// while whether the observer trusts its own deadline is a judgement
+	// that has to be revisable when the range closes. Both directions are
+	// withheld, the FAULT it would otherwise publish and the HEALTHY it
+	// would otherwise credit, because withholding only the accusations
+	// would raise every rate it touched. Never a statement about the
+	// validator.
+	ClassRetentionUnverified Classification = "RETENTION_UNVERIFIED"
 )
 
-// AllClassifications is every class the taxonomy can return. The product
-// test walks the whole evidence space and checks that every cell lands on
-// one of these with a reason, so a new class or a new default arm cannot
-// go unnoticed.
+// AllClassifications is every class this observer publishes. All but one
+// are returned by Classify, and the product test walks the whole evidence
+// space to check that every cell lands on one of them with a reason, so a
+// new class or a new default arm cannot go unnoticed.
+//
+// The exception is ClassRetentionUnverified, which is applied over a stored
+// row rather than derived from one probe's evidence; see its comment. It is
+// in this list because it appears in published class tallies and a reader
+// must be able to find it named.
 var AllClassifications = []Classification{
 	ClassHealthy, ClassFault, ClassUnreachable, ClassNotRegistered, ClassShadowedShard, ClassUnmatchedGenuine,
 	ClassIdentityExpired, ClassIdentityMismatch, ClassServerError, ClassThrottled, ClassTolerated, ClassExpectedGone,
 	ClassExpectedUnassigned, ClassServedPastWindow, ClassServingUnassigned, ClassUnreachablePostWindow,
-	ClassProbeError, ClassNotProbed, ClassUnattested,
+	ClassProbeError, ClassNotProbed, ClassUnattested, ClassRetentionUnverified,
+}
+
+// DeadlineDerivedClasses is every classification whose membership of the
+// serve rate depends on which side of must_serve_until the probe fell. It
+// is exactly the two the rate is built from: HEALTHY is SERVED_PAST_WINDOW
+// on the other side of the deadline, and FAULT is EXPECTED_GONE.
+//
+// Everything else the phase switch produces only changes its name across
+// the boundary — UNREACHABLE becomes UNREACHABLE_POST_WINDOW, THROTTLED
+// becomes TOLERATED — and is held out of the rate on both sides, so
+// withholding it would move no published figure while costing the
+// correlated-failure guard real evidence about the observer's own path.
+//
+// rollup.DeadlineDerivedSQL is the same list for the SQL twin, held to this
+// one by TestTheSQLAndTheGoTwinHoldTheSameRows.
+var DeadlineDerivedClasses = []Classification{ClassHealthy, ClassFault}
+
+// DeadlineDerived reports whether a row's verdict would change if
+// must_serve_until moved.
+//
+// INVALID_ROWS is carved out: bytes that do not verify against the blob
+// commitment are a FAULT in the window, in the grace phase and after it
+// alike (classify.go, all three phase arms), so no deadline can rescue that
+// fault and no hold should discard it.
+func DeadlineDerived(c Classification, o Outcome) bool {
+	if o == OutcomeInvalidRows {
+		return false
+	}
+	for _, d := range DeadlineDerivedClasses {
+		if c == d {
+			return true
+		}
+	}
+	return false
 }
 
 // CountsAgainst reports whether a class is held against the validator. Exactly

@@ -8,6 +8,7 @@ package ingest
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -159,8 +160,27 @@ func tail(st *store.Store, path string, fn handler, now time.Time) (Result, erro
 				err = fmt.Errorf("%w: %v after %d passes", ErrBadRecord, err, retryPasses)
 			}
 			if !errors.Is(err, ErrBadRecord) {
-				_ = flush()
-				return res, fmt.Errorf("%s line %d: %w", path, res.Line, err)
+				// The store refused this line, so the cursor must not move
+				// past it. res.Offset was advanced before the handler ran,
+				// and flush() writes whatever it holds whenever any earlier
+				// line in this pass has not been flushed yet — so without
+				// this rewind a failed insert followed by a successful
+				// cursor write left the line in the JSONL and nowhere in
+				// SQL, permanently, because the next pass starts after it.
+				// Only a full re-ingest from zero would have found it.
+				//
+				// Rewinding is exactly what the ErrRetryLater path above
+				// does, for the same reason. A flush that fails here is the
+				// more serious of the two errors: the cursor is then ahead
+				// of what was stored, which is the state this rewind exists
+				// to prevent, so it is reported rather than discarded.
+				res.Read--
+				res.Line--
+				res.Offset -= int64(len(raw))
+				if ferr := flush(); ferr != nil {
+					return res, fmt.Errorf("%s line %d: %w (and the ingest cursor could not be written: %v)", path, res.Line+1, err, ferr)
+				}
+				return res, fmt.Errorf("%s line %d: %w", path, res.Line+1, err)
 			}
 			res.Skipped++
 			res.LastSkipped = fmt.Sprintf("%s line %d: %v", path, res.Line, err)
@@ -345,6 +365,71 @@ func HostEvents(st *store.Store, path string, now time.Time) (Result, error) {
 			return false, fmt.Errorf("%w: host event without address or source", ErrBadRecord)
 		}
 		return st.ReplayHostEvent(e)
+	}, now)
+}
+
+// ParamUncertainty ingests param_uncertainty.jsonl: the height ranges the
+// scanner could not say which x/fibre params were in force over, and what
+// came of trying to close them. A range is written once when it opens and
+// again if it later closes, both under the same id, so the handler is an
+// upsert whose second write only latches the resolution.
+func ParamUncertainty(st *store.Store, path string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var u scan.ParamUncertainty
+		if err := json.Unmarshal(raw, &u); err != nil {
+			return false, fmt.Errorf("%w: decode param uncertainty: %v", ErrBadRecord, err)
+		}
+		if u.ID == "" || u.Kind == "" || u.ToHeight < u.FromHeight {
+			return false, fmt.Errorf("%w: param uncertainty without an id, a kind or a usable range", ErrBadRecord)
+		}
+		return st.UpsertParamUncertainty(u, raw, now)
+	}, now)
+}
+
+// Corrections replays corrections.jsonl, the collector's own log of the
+// deadlines and verdicts a verified params range moved, so a rebuilt
+// database carries them without re-deriving.
+func Corrections(st *store.Store, path string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var c store.Correction
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return false, fmt.Errorf("%w: decode correction: %v", ErrBadRecord, err)
+		}
+		if c.UncertaintyID == "" || c.JudgedAt.IsZero() {
+			return false, fmt.Errorf("%w: correction without an uncertainty id or a judged_at", ErrBadRecord)
+		}
+		switch c.Kind {
+		case store.CorrectionRangeComplete:
+			// Every deadline and verdict the range covers has been
+			// re-derived. Replaying this is what lets a database rebuilt
+			// from the export reach the same holds as the live one,
+			// instead of re-holding rows whose corrections are already in
+			// the file above it.
+			return true, st.MarkRangeCorrected(context.Background(), c.UncertaintyID, c.JudgedAt)
+		case store.CorrectionPublicationDeadline:
+			if c.PromiseHash == "" {
+				return false, fmt.Errorf("%w: publication correction without a promise_hash", ErrBadRecord)
+			}
+			ok, err := st.ApplyPublicationCorrection(c)
+			if errors.Is(err, store.ErrNoSuchRow) {
+				// The publication line has not been ingested yet, or came
+				// after this one in the same pass. Defer rather than skip:
+				// a correction dropped on the floor leaves a deadline this
+				// observer has already decided is wrong.
+				return false, fmt.Errorf("%w: no publication %s yet", ErrRetryLater, c.PromiseHash)
+			}
+			return ok, err
+		case store.CorrectionProbeVerdict:
+			if c.DedupeKey == "" {
+				return false, fmt.Errorf("%w: probe correction without a dedupe_key", ErrBadRecord)
+			}
+			ok, err := st.ApplyProbeCorrection(c)
+			if errors.Is(err, store.ErrNoSuchRow) {
+				return false, fmt.Errorf("%w: no probe row %s yet", ErrRetryLater, c.DedupeKey)
+			}
+			return ok, err
+		}
+		return false, fmt.Errorf("%w: correction of unknown kind %q", ErrBadRecord, c.Kind)
 	}, now)
 }
 
