@@ -168,7 +168,13 @@ export default function Overview() {
             {notLive ? (
               <>
                 {meta!.chain_id || "This chain"} is on app version {meta!.app_version}. Fibre arrives with version {meta!.fibre_app_version || "10"}.
-                The observer is following the chain at height {Number(meta!.chain_height || meta!.last_scanned_height || 0).toLocaleString("en-US")} and starts measuring after the upgrade.
+                {meta!.upgrade_signal && (
+                  <> {(meta!.upgrade_signal.share * 100).toFixed(1)}% of voting power has signalled for version {meta!.upgrade_signal.version} (threshold {(meta!.upgrade_signal.threshold_share * 100).toFixed(1)}%);
+                  {" "}{meta!.upgrade_signal.missing_validators.length === 0 ? "every bonded validator has signalled" : `${meta!.upgrade_signal.missing_validators.length} bonded validator${meta!.upgrade_signal.missing_validators.length === 1 ? " has" : "s have"} not`}
+                  {meta!.upgrade_signal.upgrade_height ? `; the upgrade is scheduled at height #${meta!.upgrade_signal.upgrade_height.toLocaleString("en-US")}` : ""}.
+                  {" "}Read from x/signal {ago(meta!.upgrade_signal.polled_at)}.</>
+                )}
+                {" "}The observer is following the chain at height {Number(meta!.chain_height || meta!.last_scanned_height || 0).toLocaleString("en-US")} and starts measuring after the upgrade.
                 {list.length > 0 && ` The ${list.length} bonded validators below come from the staking module.`}
               </>
             ) : (

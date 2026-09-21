@@ -96,7 +96,7 @@ export function Header() {
     health === "ok" ? "Every observer process is running." : health === "degraded"
       ? `Observer degraded: ${dead.length ? `not running: ${dead.join(", ")}` : ""}${dead.length && failing.length ? "; " : ""}${failing.length ? `failing: ${failing.join(", ")}` : ""}.`
       : "No observer process is running; figures are from the last run.",
-    meta?.app_version ? (meta.fibre_active ? `App version ${meta.app_version}: Fibre is live.` : `App version ${meta.app_version}; Fibre needs ${meta.fibre_app_version || "10"}.`) : "",
+    meta?.app_version ? (meta.fibre_active ? `App version ${meta.app_version}: Fibre is live.` : `App version ${meta.app_version}; Fibre needs ${meta.fibre_app_version || "10"}.${meta.upgrade_signal ? ` ${(meta.upgrade_signal.share * 100).toFixed(1)}% of voting power has signalled for it (threshold ${(meta.upgrade_signal.threshold_share * 100).toFixed(1)}%)${meta.upgrade_signal.upgrade_height ? `; scheduled at height ${meta.upgrade_signal.upgrade_height.toLocaleString("en-US")}` : ""}.` : ""}`) : "",
   ].filter(Boolean).join(" ");
   return (
     <header className="top blur">

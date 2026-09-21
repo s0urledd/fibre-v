@@ -464,6 +464,14 @@ journalctl -u fibre-scan@mocha -n 50 --no-pager | grep -iE "seed|param|host hist
 curl -s localhost:${API_LISTEN}/v1/network | jq '{registered_endpoints, reachability, validators_probed}'
 ```
 
+Before that, the "not live yet" notice on the overview and the header chip
+carry x/signal's tally for the version that brings Fibre — how much voting
+power has signalled, the threshold, how many bonded validators have not, and
+the scheduled height once there is one — and the validator table marks each
+bonded validator `signalled` or `not signalled` (`upgrade_signal` on
+`/v1/meta`, `signaled_upgrade` on each row; both disappear once the chain is
+on that version).
+
 `registered_endpoints` moving off zero is the first sign the registry is being
 read. `reachability` follows within a heartbeat interval. Publications appear
 only once somebody actually pays for a blob, which may be hours later; an

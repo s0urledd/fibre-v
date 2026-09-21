@@ -12,6 +12,7 @@ import (
 	"time"
 
 	fibretypes "github.com/celestiaorg/celestia-app/v10/x/fibre/types"
+	signaltypes "github.com/celestiaorg/celestia-app/v10/x/signal/types"
 	valaddrtypes "github.com/celestiaorg/celestia-app/v10/x/valaddr/types"
 	abci "github.com/cometbft/cometbft/abci/types"
 	cmtbytes "github.com/cometbft/cometbft/libs/bytes"
@@ -225,6 +226,71 @@ func (c *Chain) FibreParamsAt(parent context.Context, height int64) (fibretypes.
 		return fibretypes.Params{}, fmt.Errorf("unmarshal params response: %w", err)
 	}
 	return resp.Params, nil
+}
+
+// UpgradeSignal is what x/signal says about one app version: how much of the
+// bonded voting power has signalled for it, the threshold it needs, which
+// validators have not signalled (by moniker, which is how the module answers
+// — it has no per-validator query by address), and the height the upgrade is
+// scheduled at once the threshold was met and a TryUpgrade landed. Before
+// Fibre exists on a chain this is the one Fibre-relevant fact the chain
+// carries: who is ready for the version that brings it.
+type UpgradeSignal struct {
+	Version          uint64
+	VotingPower      uint64
+	ThresholdPower   uint64
+	TotalVotingPower uint64
+	// Missing is the monikers x/signal reports as not having signalled for
+	// Version; only bonded validators are counted by the module.
+	Missing []string
+	// UpgradeHeight is set once an upgrade is scheduled; zero until then.
+	// UpgradeAppVersion is the version it schedules, which need not be
+	// Version.
+	UpgradeHeight     int64
+	UpgradeAppVersion uint64
+}
+
+// UpgradeSignal reads the tally, the missing validators and any scheduled
+// upgrade for version from x/signal, at the latest height.
+func (c *Chain) UpgradeSignal(parent context.Context, version uint64) (UpgradeSignal, error) {
+	ctx, cancel := c.ctx(parent)
+	defer cancel()
+	out := UpgradeSignal{Version: version}
+	query := func(path string, req interface{ Marshal() ([]byte, error) }, resp interface{ Unmarshal([]byte) error }) error {
+		data, err := req.Marshal()
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", path, err)
+		}
+		res, err := c.rpc.ABCIQueryWithOptions(ctx, path, cmtbytes.HexBytes(data), rpcclient.ABCIQueryOptions{Prove: false})
+		if err != nil {
+			return fmt.Errorf("abci query %s: %w", path, err)
+		}
+		if res.Response.Code != 0 {
+			return &ABCIError{Path: path, Code: res.Response.Code, Codespace: res.Response.Codespace, Log: res.Response.Log}
+		}
+		if err := resp.Unmarshal(res.Response.Value); err != nil {
+			return fmt.Errorf("unmarshal %s: %w", path, err)
+		}
+		return nil
+	}
+	var tally signaltypes.QueryVersionTallyResponse
+	if err := query("/celestia.signal.v1.Query/VersionTally", &signaltypes.QueryVersionTallyRequest{Version: version}, &tally); err != nil {
+		return out, err
+	}
+	out.VotingPower, out.ThresholdPower, out.TotalVotingPower = tally.VotingPower, tally.ThresholdPower, tally.TotalVotingPower
+	var missing signaltypes.QueryGetMissingValidatorsResponse
+	if err := query("/celestia.signal.v1.Query/GetMissingValidators", &signaltypes.QueryGetMissingValidatorsRequest{Version: version}, &missing); err != nil {
+		return out, err
+	}
+	out.Missing = missing.MissingValidators
+	var up signaltypes.QueryGetUpgradeResponse
+	if err := query("/celestia.signal.v1.Query/GetUpgrade", &signaltypes.QueryGetUpgradeRequest{}, &up); err != nil {
+		return out, err
+	}
+	if up.Upgrade != nil {
+		out.UpgradeHeight, out.UpgradeAppVersion = up.Upgrade.UpgradeHeight, up.Upgrade.AppVersion
+	}
+	return out, nil
 }
 
 // Escrow is one publisher's x/fibre escrow account as the chain holds it.

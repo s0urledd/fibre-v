@@ -68,6 +68,22 @@ export type Meta = {
   /** per headline figure, which of evidence_kinds it rests on */
   evidence?: Record<string, string>;
   evidence_kinds?: Record<string, string>;
+  /**
+   * x/signal's tally for the app version that brings Fibre, published only
+   * while the chain is below it: a chain record, nothing measured here.
+   */
+  upgrade_signal?: {
+    version: number;
+    voting_power: number;
+    threshold_power: number;
+    total_voting_power: number;
+    share: number;
+    threshold_share: number;
+    upgrade_height?: number;
+    /** monikers, as x/signal reports them */
+    missing_validators: string[];
+    polled_at: string;
+  };
 };
 
 /** "through #987,616" for a header line, with the block time in the title */
@@ -278,6 +294,8 @@ export type Validator = {
   /** the chain's own words about the validator, unlike everything we measure */
   jailed: boolean;
   bond_status?: string;
+  /** signalled for the app version that brings Fibre; only while the chain is below it, and unset when the moniker cannot be attributed */
+  signaled_upgrade?: boolean;
   host: string;
   endpoint_since: string | null;
   /** for a validator with no open endpoint: what was registered, and when it left the bonded list */

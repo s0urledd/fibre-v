@@ -482,6 +482,30 @@ func main() {
 				}
 				_ = st.SetMeta("fibre_active", active, now)
 				_ = st.SetMeta("fibre_app_version", itoa(scan.FibreAppVersion), now)
+				// Until Fibre is live, the one Fibre-relevant fact the chain
+				// carries is who has signalled for the version that brings
+				// it. Read from x/signal on the same cadence as the rest;
+				// the site shows the tally, the scheduled height and, per
+				// validator, whether it has signalled. Dropped the moment
+				// the chain is on that version.
+				if av < scan.FibreAppVersion {
+					if sig, err := chain.UpgradeSignal(ctx, scan.FibreAppVersion); err != nil {
+						log.Printf("upgrade signal: %v", err)
+					} else {
+						missing, _ := json.Marshal(sig.Missing)
+						for k, v := range map[string]string{
+							"signal_version":            fmt.Sprint(sig.Version),
+							"signal_voting_power":       fmt.Sprint(sig.VotingPower),
+							"signal_threshold_power":    fmt.Sprint(sig.ThresholdPower),
+							"signal_total_voting_power": fmt.Sprint(sig.TotalVotingPower),
+							"signal_upgrade_height":     fmt.Sprint(sig.UpgradeHeight),
+							"signal_missing":            string(missing),
+							"signal_polled_at":          store.TS(now),
+						} {
+							_ = st.SetMeta(k, v, now)
+						}
+					}
+				}
 			}
 			chainID, height, tipTime, err := chain.StatusAt(ctx)
 			if err != nil {

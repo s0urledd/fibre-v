@@ -89,6 +89,8 @@ function Page() {
             {!v.host && !v.last_host && <span className="chip">no Fibre endpoint</span>}
             {v.jailed && <span className="chip" title="Jailed by the chain. Out of the bonded provider list, so no handshake is attempted; shards it signed for are still owed.">jailed</span>}
             {v.bond_status && v.bond_status !== "BOND_STATUS_BONDED" && <span className="chip">{v.bond_status.replace("BOND_STATUS_", "").toLowerCase()}</span>}
+            {v.signaled_upgrade === true && <span className="chip" title="Signalled for the app version that brings Fibre (x/signal, a chain record).">signalled for the upgrade</span>}
+            {v.signaled_upgrade === false && <span className="chip" title="Has not signalled for the app version that brings Fibre (x/signal, a chain record).">not signalled for the upgrade</span>}
           </span>
         </div>
         <dl className="kv">

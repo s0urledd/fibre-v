@@ -617,6 +617,71 @@ type metaResponse struct {
 	// evidence it rests on; EvidenceKinds defines the three.
 	Evidence      map[string]string `json:"evidence"`
 	EvidenceKinds map[string]string `json:"evidence_kinds"`
+	// UpgradeSignal is x/signal's tally for the app version that brings
+	// Fibre, published only while the chain is below it: how much voting
+	// power has signalled, the threshold, who has not, and the scheduled
+	// height once there is one. A chain record, nothing measured here.
+	UpgradeSignal *upgradeSignal `json:"upgrade_signal,omitempty"`
+}
+
+type upgradeSignal struct {
+	Version          int64   `json:"version"`
+	VotingPower      int64   `json:"voting_power"`
+	ThresholdPower   int64   `json:"threshold_power"`
+	TotalVotingPower int64   `json:"total_voting_power"`
+	Share            float64 `json:"share"`           // voting_power / total_voting_power
+	ThresholdShare   float64 `json:"threshold_share"` // threshold_power / total_voting_power
+	UpgradeHeight    int64   `json:"upgrade_height,omitempty"`
+	// MissingValidators is the monikers x/signal reports as not having
+	// signalled; the module answers by moniker, not by address.
+	MissingValidators []string `json:"missing_validators"`
+	PolledAt          string   `json:"polled_at"`
+}
+
+// upgradeSignalOf builds the block from the collector's meta keys, or nil
+// once Fibre is live or nothing was polled yet.
+func upgradeSignalOf(meta map[string]string) *upgradeSignal {
+	if meta["fibre_active"] == "yes" || meta["signal_version"] == "" {
+		return nil
+	}
+	n := func(k string) int64 { v, _ := strconv.ParseInt(meta[k], 10, 64); return v }
+	u := &upgradeSignal{
+		Version: n("signal_version"), VotingPower: n("signal_voting_power"), ThresholdPower: n("signal_threshold_power"),
+		TotalVotingPower: n("signal_total_voting_power"), UpgradeHeight: n("signal_upgrade_height"), PolledAt: meta["signal_polled_at"],
+		MissingValidators: []string{},
+	}
+	if u.TotalVotingPower > 0 {
+		u.Share = float64(u.VotingPower) / float64(u.TotalVotingPower)
+		u.ThresholdShare = float64(u.ThresholdPower) / float64(u.TotalVotingPower)
+	}
+	_ = json.Unmarshal([]byte(meta["signal_missing"]), &u.MissingValidators)
+	return u
+}
+
+// upgradeMissing is the set of monikers that have not signalled, while the
+// signal is being published; ok is false otherwise.
+func (s *Server) upgradeMissing(ctx context.Context) (map[string]bool, bool) {
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT key, value FROM meta WHERE key IN ('fibre_active', 'signal_version', 'signal_missing')`)
+	if err != nil {
+		return nil, false
+	}
+	defer rows.Close()
+	meta := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err == nil {
+			meta[k] = v
+		}
+	}
+	u := upgradeSignalOf(meta)
+	if u == nil {
+		return nil, false
+	}
+	set := map[string]bool{}
+	for _, m := range u.MissingValidators {
+		set[m] = true
+	}
+	return set, true
 }
 
 type runStatus struct {
@@ -730,7 +795,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, metaResponse{
 		Components: h.Components, Health: h.Status, Checks: h.Checks, ScanGaps: h.ScanGaps, PinStatus: h.PinStatus,
-		Evidence: evidenceOf, EvidenceKinds: evidenceKinds,
+		Evidence: evidenceOf, EvidenceKinds: evidenceKinds, UpgradeSignal: upgradeSignalOf(meta),
 		ParamUncertainty:         ranges,
 		UnassignablePublications: s.unassignablePublications(ctx),
 		APIVersion:               Version, Vantage: s.vantage, VantageInfo: s.info,
@@ -1961,10 +2026,15 @@ type validatorRow struct {
 	// unlike everything else on this row, which this observer measured. A
 	// jailed validator still owes the shards it signed for, so these are
 	// shown rather than used to drop anyone from the table.
-	Jailed        bool    `json:"jailed"`
-	BondStatus    string  `json:"bond_status,omitempty"`
-	Host          string  `json:"host"`
-	EndpointSince *string `json:"endpoint_since"`
+	Jailed     bool   `json:"jailed"`
+	BondStatus string `json:"bond_status,omitempty"`
+	// SignaledUpgrade says whether this validator has signalled for the app
+	// version that brings Fibre, from x/signal, only while the chain is
+	// below it. x/signal answers by moniker, so a moniker shared by two
+	// bonded validators cannot be attributed and is left unset.
+	SignaledUpgrade *bool   `json:"signaled_upgrade,omitempty"`
+	Host            string  `json:"host"`
+	EndpointSince   *string `json:"endpoint_since"`
 	// LastHost and EndpointClosedAt describe the newest endpoint row that
 	// has closed, for a validator with no open one: the host this observer
 	// last saw registered and when it stopped appearing in the bonded
@@ -2591,6 +2661,26 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	irows.Close()
 	if err := irows.Err(); err != nil {
 		return nil, err
+	}
+
+	// While the chain is below the version that brings Fibre, x/signal says
+	// who has signalled for it — by moniker, the only key it offers. A
+	// moniker two bonded validators share cannot be attributed and is left
+	// unset rather than guessed.
+	if missing, ok := s.upgradeMissing(ctx); ok {
+		count := map[string]int{}
+		for _, v := range byAddr {
+			if v.Moniker != "" && v.BondStatus == "BOND_STATUS_BONDED" {
+				count[v.Moniker]++
+			}
+		}
+		for _, v := range byAddr {
+			if v.Moniker == "" || v.BondStatus != "BOND_STATUS_BONDED" || count[v.Moniker] != 1 {
+				continue
+			}
+			signaled := !missing[v.Moniker]
+			v.SignaledUpgrade = &signaled
+		}
 	}
 
 	// one observation per (validator, blob): see obligationStats.
