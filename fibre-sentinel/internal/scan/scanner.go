@@ -115,11 +115,19 @@ func New(cfg Config, log *Logger) (*Scanner, error) {
 		return nil, err
 	}
 	return &Scanner{
-		status:  status.New(cfg.DataDir, "scanner", "", status.BuildRevision()),
-		cfg:     cfg,
-		log:     log,
-		chain:   ch,
-		store:   st,
+		status: status.New(cfg.DataDir, "scanner", "", status.BuildRevision()),
+		cfg:    cfg,
+		log:    log,
+		chain:  ch,
+		store:  st,
+		// An empty history from the start. A resume replaces it with the
+		// persisted one; a fresh scan seeds into it — and when the seed
+		// cannot be read (x/valaddr not there yet, the node down) it stays
+		// empty and is asked Seeded() for the first state.json. Left nil,
+		// that first question was a nil dereference: every scanner started
+		// on an empty data directory died in resume, on any chain, while
+		// one with a state.json to load never noticed.
+		hosts:   NewHostHistory(),
 		valSets: map[int64]valSetEntry{},
 	}, nil
 }
