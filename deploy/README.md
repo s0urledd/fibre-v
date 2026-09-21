@@ -504,6 +504,41 @@ whois -h whois.radb.net "$(curl -4 -s https://ifconfig.co)" | grep -i origin
 Before Fibre activates on the chain, `publications` stays 0 and the site
 shows the "0 Fibre publications" notice; that is the expected state.
 
+### Acceptance tests
+
+Six scripts under `deploy/test/` turn the questions an operator should be
+able to answer before trusting the site into checks that pass or fail. Each
+reads `/etc/fibre-observer/<instance>.env`, needs only `python3`, `curl` and
+the installed binaries, and exits 0 only when every check passed. Run them in
+this order the first time; the first two take seconds, the middle three take
+minutes and touch the running services, the last one takes a day.
+
+| script | question | touches | time |
+|---|---|---|---|
+| `rpc-check.sh <rpc> [rpc2]` | is the RPC node on `mocha-5`, in sync, and keeping `block_results`, the validator set and historical state as far back as the observer reads (6000 blocks)? With a second node, do the two agree on a block hash? | nothing | seconds |
+| `exposure.sh` | is only ssh/http/https reachable from outside, is every unit enabled for a reboot, does HTTPS reach the API through Caddy, does a test alert actually arrive, is the master key `600`? | posts one test message | seconds |
+| `persistence.sh` | do the checkpoints survive a restart, is the database sound, has the record no duplicate line, does a rebuild from the JSONL alone match the record, and does `sentinel-recompute` agree with the live API? | restarts collector + scanner; rebuilds into a temp dir | minutes |
+| `restore.sh` | can the nightly copy be pulled back, rebuilt and served by a second API on a spare port, with counts the live host explains? | starts a throwaway API on `:18081` | minutes |
+| `outage.sh` | when the chain source is cut, does the site say so within twelve minutes and keep serving its last figures; when it returns, does the scanner catch up with no gap, no lost row and no duplicate; when every process is stopped and started, is nothing lost? | edits the env file (restored on every exit path), restarts and stops units | ~30 min |
+| `resource-watch.sh run` / `summarize` | over a day, what grows (memory per unit, data directory), what lags (scanner behind the chain, newest block age, collector behind `measurements.jsonl`, snapshot compute time) and what fails (RPC-shaped journal errors, health)? | nothing | 24 h |
+
+```bash
+sudo deploy/test/rpc-check.sh "$RPC" https://rpc.celestia-mocha.com
+sudo deploy/test/exposure.sh mocha
+sudo deploy/test/persistence.sh mocha
+sudo deploy/test/restore.sh mocha
+sudo deploy/test/outage.sh mocha
+sudo nohup deploy/test/resource-watch.sh run mocha 300 86400 > /var/log/fibre-resource-watch-mocha.log 2>&1 &
+# a day later
+deploy/test/resource-watch.sh summarize /var/log/fibre-resource-watch-mocha.csv
+```
+
+`rpc-check` is the one to run before anything else, and against any public
+endpoint you consider: a node started with `storage.discard_abci_responses =
+true` answers `/status` like any other and fails `block_results` at every
+height, which the scanner needs at every height. The public mocha endpoints
+differ on exactly this.
+
 ## 9. What has been exercised
 
 The units, the environment file, the Caddyfile and the whole process chain
