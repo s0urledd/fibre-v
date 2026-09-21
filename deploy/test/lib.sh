@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+#
+# lib.sh: what the acceptance tests share. Sourced, never run.
+#
+# Every function here exists because a script got it wrong once:
+#   http_code    curl's -w prints "000" on a transport failure AND exits
+#                non-zero, so `... || echo 000` printed "000000" and every
+#                comparison against it was false. One normalised code, one
+#                place.
+#   health_*     "not 200" is not "degraded": a dead API is 000 and a
+#                degraded one is 503 with a body that names the check. A
+#                test that accepts either proves neither.
+#   parse_envfile `env "$(grep ... | xargs)"` handed every variable to env as
+#                one argument. This reads KEY=VALUE lines the way systemd
+#                reads EnvironmentFile= for the values it uses (one layer of
+#                matching quotes), prints one KEY=VALUE per line, and never
+#                evaluates anything.
+#   run_as_service runs a command exactly as the units do: the service user
+#                and the instance's EnvironmentFile, through systemd-run when
+#                it is there, through the parser above when it is not.
+
+: "${FAILED:=0}"
+pass() { echo "  ok   $*"; }
+fail() { echo "  FAIL $*"; FAILED=1; }
+warn() { echo "  warn $*"; }
+ts() { date -u +%H:%M:%S; }
+
+# envval <file> <KEY>: the value of KEY in an env file, first match, one layer
+# of matching quotes removed. Empty when absent.
+envval() {
+  local line
+  line=$(grep -m1 -E "^$2=" "$1" 2>/dev/null || true)
+  strip_quotes "${line#*=}"
+}
+strip_quotes() {
+  local v=$1
+  case "$v" in
+    \"*\") v=${v#\"}; v=${v%\"} ;;
+    \'*\') v=${v#\'}; v=${v%\'} ;;
+  esac
+  printf '%s' "$v"
+}
+
+# parse_envfile <file>: KEY=VALUE per line for every assignment in the file,
+# comments and blank lines skipped, quotes stripped as above. Consume with
+# `mapfile -t pairs < <(parse_envfile f)` and pass "${pairs[@]}" to env.
+parse_envfile() {
+  local line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key=${line%%=*}
+    [ "$key" = "$line" ] && continue          # no '=' at all
+    key=${key#export }; key=${key// /}
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    val=$(strip_quotes "${line#*=}")
+    printf '%s=%s\n' "$key" "$val"
+  done < "$1"
+}
+
+# http_code <url> [outfile]: the HTTP status as three digits, or 000 when
+# there was no HTTP answer at all. Never anything else. The body goes to
+# outfile (default /dev/null). HTTP_TIMEOUT seconds (default 10).
+http_code() {
+  local out="${2:-/dev/null}" code
+  code=$(curl -sS -m "${HTTP_TIMEOUT:-10}" -o "$out" -w '%{http_code}' "$1" 2>/dev/null) || code=000
+  case "$code" in
+    [1-5][0-9][0-9]) printf '%s\n' "$code" ;;
+    *) printf '000\n' ;;
+  esac
+}
+
+# health_bad_checks <health.json>: "name: detail; ..." for every check that
+# is not ok. Empty when none, or when the body is not a health body.
+health_bad_checks() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    h = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+print("; ".join(f"{c.get('name','?')}: {c.get('detail','')}" for c in h.get("checks", []) if not c.get("ok")))
+PY
+}
+
+# health_has_reason <health.json> <name,name,...>: exit 0 when the body's
+# status is not "ok" AND at least one failing check has one of the given
+# names AND that check carries a non-empty detail. A failing check with
+# another name (disk, say) does not count: the test that calls this is
+# asking whether the observer reported a specific thing.
+health_has_reason() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null
+import json, sys
+try:
+    h = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+if h.get("status") == "ok":
+    sys.exit(1)
+names = set(sys.argv[2].split(","))
+for c in h.get("checks", []):
+    if not c.get("ok") and c.get("name") in names and (c.get("detail") or "").strip():
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# run_as_service <envfile> <user> <cmd...>: run cmd as the service user with
+# the instance's environment, the way the units run. As root on a systemd
+# host, systemd-run reads the EnvironmentFile with systemd's own parser and
+# runs the command under the unit's user; otherwise (no systemd, or not
+# root — a transient unit with --uid needs root, and CI is neither) the
+# fallback parses the file here and passes each pair as its own argument
+# to env. The self-test covers the fallback; the systemd-run path is what
+# exposure.sh takes under sudo on the host.
+run_as_service() {
+  local envfile=$1 user=$2; shift 2
+  if [ "$(id -u)" = 0 ] && command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemd-run --quiet --wait --pipe --collect --uid="$user" -p "EnvironmentFile=$envfile" "$@"
+  else
+    local pairs=()
+    mapfile -t pairs < <(parse_envfile "$envfile")
+    if [ "$(id -un)" = "$user" ]; then env "${pairs[@]}" "$@"; else sudo -u "$user" env "${pairs[@]}" "$@"; fi
+  fi
+}
+
+# free_port: a TCP port nothing listens on right now.
+free_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
+}
+
+# wait_http <url> <seconds> [codes]: wait until http_code is one of codes
+# (default 200), polling every 2 s. Exit 1 on timeout.
+wait_http() {
+  local url=$1 secs=$2 codes="${3:-200}" until c
+  until=$(( $(date +%s) + secs ))
+  while :; do
+    c=$(http_code "$url")
+    case " $codes " in *" $c "*) return 0 ;; esac
+    [ "$(date +%s)" -ge "$until" ] && return 1
+    sleep 2
+  done
+}

@@ -91,9 +91,11 @@ jobs:
       - name: bash -n (syntax)
         run: for f in fibre-devnet/*.sh fibre-sentinel/*.sh deploy/test/*.sh; do bash -n "$f"; done
       - name: python syntax (deploy helpers)
-        run: for f in deploy/test/*.py; do python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$f"; done
+        run: for f in deploy/*.py deploy/test/*.py; do python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$f"; done
       - name: shellcheck (errors only)
-        run: shellcheck --severity=error fibre-devnet/*.sh fibre-sentinel/*.sh deploy/test/*.sh
+        run: shellcheck --severity=error fibre-devnet/*.sh fibre-sentinel/*.sh deploy/*.sh deploy/test/*.sh
+      - name: acceptance-test self-test
+        run: deploy/test/selftest.sh
 
   # ---- the dashboard: static Next.js export ----
   web:

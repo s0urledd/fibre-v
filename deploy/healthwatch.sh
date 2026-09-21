@@ -25,6 +25,24 @@ repeat="${ALERT_REPEAT_MIN:-60}"
 state="${DATA_DIR:-/var/lib/fibre-observer/$instance}/status/healthwatch.state"
 name="${NETWORK:-$instance}"
 
+# --test: post one message to the webhook and exit with curl's verdict,
+# touching no state. A webhook that was pasted wrong, or a channel that
+# dropped the integration, looks exactly like a healthy observer until the
+# day it is not; this is how an operator proves delivery before that day.
+# deploy/test/exposure.sh runs it.
+if [ "${2:-}" = "--test" ]; then
+  [ -n "$webhook" ] || { echo "healthwatch[$name]: ALERT_WEBHOOK is empty; nothing to test" >&2; exit 1; }
+  msg="Fibre observer [$name] test: alert delivery check from $(hostname) at $(date -u +%Y-%m-%dT%H:%M:%SZ); no action needed"
+  payload=$(printf '%s' "$msg" | python3 -c 'import json,sys; m=sys.stdin.read()[:1900]; print(json.dumps({"content": m, "text": m}))')
+  # Only the status code is printed: curl's own error text can carry the
+  # URL, and the URL is the secret.
+  code=$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$payload" "$webhook" 2>/dev/null) || code=000
+  case "$code" in
+    2*) echo "healthwatch[$name]: test message delivered (HTTP $code)"; exit 0 ;;
+    *)  echo "healthwatch[$name]: webhook post failed (HTTP ${code:-000})" >&2; exit 1 ;;
+  esac
+fi
+
 body=$(curl -sS -m 20 -o /dev/stdout -w '\n%{http_code}' "$url" 2>/dev/null || echo -e '\n000')
 code="${body##*$'\n'}"
 json="${body%$'\n'*}"

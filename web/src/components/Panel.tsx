@@ -31,7 +31,19 @@ export function Panel({ title, live, right, children, className }: {
  * underneath. The sample never wraps; its longer reading is the line's
  * tooltip.
  */
-export function Cell({ label, value, unit, sub, detail, tone, info, loading }: {
+/**
+ * The three kinds of evidence a figure can rest on. They are different
+ * claims, and a reader should never have to guess which one a number is:
+ * a count of what the chain recorded, bytes this observer fetched and
+ * verified, or what this observer's own network saw from one place.
+ */
+export const EVIDENCE: Record<"chain" | "verified" | "observed", { label: string; title: string }> = {
+  chain: { label: "chain", title: "Chain record: a count of something the chain recorded. Nothing here was measured by this observer." },
+  verified: { label: "verified", title: "Verified response: bytes this observer fetched and verified against the on-chain commitment, or a certificate checked against the validator\u2019s consensus key." },
+  observed: { label: "observed", title: "Vantage observation: what this observer\u2019s own network saw from one location. It says nothing about any shard." },
+};
+
+export function Cell({ label, value, unit, sub, detail, tone, info, loading, evidence }: {
   label: string;
   value: ReactNode;
   unit?: string;
@@ -40,12 +52,15 @@ export function Cell({ label, value, unit, sub, detail, tone, info, loading }: {
   tone?: "ok" | "fault" | "absent";
   info?: ReactNode;
   loading?: boolean;
+  /** which kind of evidence the figure rests on; printed as a small tag by the label */
+  evidence?: keyof typeof EVIDENCE;
 }) {
   const vcls = ["value", tone ?? "", loading ? "loading" : ""].filter(Boolean).join(" ");
   return (
     <div className="cell" aria-busy={loading || undefined}>
       <span className="label">
         {label}
+        {evidence && <span className={`evidence evidence--${evidence}`} title={EVIDENCE[evidence].title}>{EVIDENCE[evidence].label}</span>}
         {info && <Info label={label}>{info}</Info>}
       </span>
       <span className={vcls}>

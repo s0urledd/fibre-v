@@ -24,6 +24,8 @@ instance="${1:?instance}"
 data="${DATA_DIR:-/var/lib/fibre-observer/$instance}"
 remote="${BACKUP_REMOTE:-}"
 export RCLONE_CONFIG="${RCLONE_CONFIG:-/etc/fibre-observer/rclone.conf}"
+manifest_tool="${FIBRE_BACKUP_MANIFEST:-/usr/local/bin/fibre-backup-manifest}"
+[ -x "$manifest_tool" ] || manifest_tool="$(dirname "$0")/backup-manifest.py"
 
 if [ -z "$remote" ]; then
   echo "fibre-backup[$instance]: BACKUP_REMOTE is not set; nothing copied (litestream still covers the database if enabled)"
@@ -33,14 +35,34 @@ command -v rclone >/dev/null || { echo "fibre-backup: rclone is not installed" >
 
 dest="$remote/$instance"
 echo "fibre-backup[$instance]: $data -> $dest"
+# One consistent cut of the record before anything is copied: state.json
+# first (read whole and carried in the manifest), then the byte length of
+# every record file up to its last complete line (dependents before what
+# they refer to), then the SHA-256, the parse and the record count of
+# exactly those bytes. The files keep growing while rclone reads them, so
+# the copy is at least the cut; deploy/test/restore.sh trims a restored copy
+# back to the cut, checks every hash and puts the cut's state.json beside
+# it. Missing, short, different or unparseable is a failed restore — and a
+# record that is not a sequence of JSON lines fails the cut here, before
+# anything is copied, so the timer unit shows it.
+if [ -x "$manifest_tool" ]; then
+  "$manifest_tool" write "$data" "$data/backup-manifest.json"
+else
+  echo "fibre-backup[$instance]: backup-manifest tool not found; copying without a manifest (restore.sh will refuse to verify this copy)" >&2
+fi
 # copy, not sync. The record is append-only, so copy is the correct verb, and
 # sync would mirror a deletion: deploy/README.md tells the operator that the
 # answer to a full disk is to move the oldest JSONL files off the box, and the
 # next nightly run would then delete exactly those files from the remote —
 # which is the only copy, since litestream replicates the derived database and
 # not the record. --max-delete 0 is belt and braces for the same reason.
+# --local-no-check-updated: the JSONL files are being appended while they
+# are read, and rclone would otherwise abort with "source file is being
+# updated". The copy is whatever length the file had when the transfer
+# began, which is at least the manifest's cut.
 rclone copy "$data" "$dest" \
-  --include '*.jsonl' --include 'state.json' --include 'registry.jsonl' --include 'status/**' --include 'exports/**' \
+  --include '*.jsonl' --include 'state.json' --include 'backup-manifest.json' --include 'status/**' --include 'exports/**' \
   --exclude 'sampling-master.key' --exclude 'observer.db*' --exclude 'snapshots/**' \
+  --local-no-check-updated \
   --transfers 4 --checkers 8 --stats-one-line --stats 0 --log-level NOTICE
 echo "fibre-backup[$instance]: done"

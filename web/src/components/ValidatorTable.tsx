@@ -293,6 +293,8 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
                         <span className="addr" title={v.cons_address || v.address}>
                           {v.cons_address ? shortBech(v.cons_address) : v.address.slice(0, 12) + "…"}
                           {isSelf(v) && <span className="ours" title="This observer's own operator runs this validator. It is measured by the same code from the same rows as every other row here, and nothing about it is filtered, excluded or adjusted.">ours</span>}
+                          {notLive && v.signaled_upgrade === true && <span className="ours" title="Signalled for the app version that brings Fibre (x/signal, a chain record).">signalled</span>}
+                          {notLive && v.signaled_upgrade === false && <span className="ours" title="Has not signalled for the app version that brings Fibre (x/signal, a chain record).">not signalled</span>}
                         </span>
                       </span>
                     </span>
@@ -322,7 +324,7 @@ export default function ValidatorTable({ rows, notLive }: { rows: Validator[]; n
           </tbody>
         </table>
       </div>
-      {notLive && <p className="coverage">Nothing measured yet: Fibre is not live on this chain. Names and voting power come from the staking module.</p>}
+      {notLive && <p className="coverage">Nothing measured yet: Fibre is not live on this chain. Names and voting power come from the staking module; &ldquo;signalled&rdquo; is x/signal&rsquo;s word on whether the validator has signalled for the version that brings Fibre.</p>}
     </>
   );
 }

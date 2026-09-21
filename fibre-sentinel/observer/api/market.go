@@ -98,7 +98,9 @@ type marketResponse struct {
 	Window     Window `json:"window"`
 	Vantage    string `json:"vantage"`
 	ComputedAt string `json:"computed_at,omitempty"`
-	ComputeMs  int64  `json:"compute_ms,omitempty"`
+	// RecordThrough is the point of the chain these figures rest on.
+	RecordThrough *recordThrough `json:"record_through,omitempty"`
+	ComputeMs     int64          `json:"compute_ms,omitempty"`
 	// Source says where every number on this response comes from.
 	Source string `json:"source"`
 
@@ -248,7 +250,7 @@ func perMiB(fees, bytes int64) *float64 {
 
 func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse, error) {
 	db := s.st.DB()
-	r := &marketResponse{Window: win, Vantage: s.vantage, Source: marketSource, PriceFormula: formula, Notes: marketNotes}
+	r := &marketResponse{Window: win, Vantage: s.vantage, Source: marketSource, PriceFormula: formula, Notes: marketNotes, RecordThrough: s.recordThrough(ctx)}
 	// Both bounds, on every query below. Without the upper one a pinned
 	// window answered with the payments that arrived after the pin while
 	// the response's own window said otherwise, so ?as_of= on this route

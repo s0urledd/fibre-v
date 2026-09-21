@@ -92,9 +92,12 @@ is what CI runs; `make build` produces the binaries and the site.
 
 ## Pinned upstream
 
-celestia-app `v10.1.0-corto` (commit `fa5b523b7e3b2b83bd16bc072a45cbd3819fa369`,
-15 September 2026; `v10.1.0-mocha`, released 17 September, is the same commit
-under a second tag, so this is also the build Mocha runs), celestia-core `v0.42.0`, cosmos-sdk
+celestia-app `v10.2.0-mocha` (commit `3b77dc2f5b00e1a646a2e9dd98b5c024a0d9ad8a`,
+19 September 2026, the build Mocha runs for the v10 upgrade; against
+`v10.1.0-corto` / `v10.1.0-mocha`, `fa5b523b`, it changes the Fibre client,
+the app's blob-tx handling and celestia-core, and none of
+`fibre/protocol_params.go`, `fibre/blob.go`, `fibre/validator`, `x/fibre`,
+`x/valaddr`, `proto` or `specs`), celestia-core `v0.42.1`, cosmos-sdk
 fork `v0.52.11`. TLS golden vectors from celestia-app commit
 `dba155084505a8f6c5d37260a94f70f939fb96de`. `fibre-assign/reftest/go.mod` and
 `fibre-sentinel/go.mod` each carry a verbatim copy of celestia-app's `replace`

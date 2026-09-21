@@ -157,6 +157,7 @@ sudo install -d -o fibre-observer -m 0750 /var/lib/fibre-observer/mocha
 sudo install -m 0755 fibre-sentinel/bin/* /usr/local/bin/
 sudo install -m 0755 deploy/healthwatch.sh /usr/local/bin/fibre-healthwatch
 sudo install -m 0755 deploy/backup.sh /usr/local/bin/fibre-backup
+sudo install -m 0755 deploy/backup-manifest.py /usr/local/bin/fibre-backup-manifest
 sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now fibre-scan@mocha fibre-probe@mocha fibre-heartbeat@mocha fibre-collector@mocha fibre-api@mocha
@@ -339,7 +340,22 @@ publication rate is many times mocha's, which is why the decision is
 written down now: a rollup added later could not reconstruct the "all"
 window it replaced.
 
-Two copies, both shipped:
+Two copies, both shipped. The record copy carries `backup-manifest.json`,
+written by `fibre-backup-manifest` before the copy starts: one consistent
+cut — `state.json` read whole first (the scanner fsyncs its record files
+before it replaces the state, so a record file read afterwards holds
+everything the checkpoint covers), then every record file's length up to
+its last complete line (dependents cut before what they refer to), then
+the SHA-256 of exactly those bytes with every line parsed and counted as a
+JSON record. The manifest carries the checkpoint and the bytes of
+`state.json` as they were. The files keep growing while rclone reads them,
+so the copy is at least the cut; `deploy/test/restore.sh` trims a restored
+copy back to the cut, checks every hash, parses every line, and puts the
+cut's own `state.json` in place of the copy's, which was read later and
+points past the records the cut holds. A copy that came back missing,
+short, altered or unparseable is a failed restore, not a surprise. The
+master key is never in it.
+
 
 - **litestream** for the database: copy `deploy/litestream.yml` to
   `/etc/fibre-observer/litestream-mocha.yml` (fix the `path` to the
@@ -455,6 +471,14 @@ journalctl -u fibre-scan@mocha -n 50 --no-pager | grep -iE "seed|param|host hist
 curl -s localhost:${API_LISTEN}/v1/network | jq '{registered_endpoints, reachability, validators_probed}'
 ```
 
+Before that, the "not live yet" notice on the overview and the header chip
+carry x/signal's tally for the version that brings Fibre — how much voting
+power has signalled, the threshold, how many bonded validators have not, and
+the scheduled height once there is one — and the validator table marks each
+bonded validator `signalled` or `not signalled` (`upgrade_signal` on
+`/v1/meta`, `signaled_upgrade` on each row; both disappear once the chain is
+on that version).
+
 `registered_endpoints` moving off zero is the first sign the registry is being
 read. `reachability` follows within a heartbeat interval. Publications appear
 only once somebody actually pays for a blob, which may be hours later; an
@@ -503,6 +527,48 @@ whois -h whois.radb.net "$(curl -4 -s https://ifconfig.co)" | grep -i origin
 
 Before Fibre activates on the chain, `publications` stays 0 and the site
 shows the "0 Fibre publications" notice; that is the expected state.
+
+### Acceptance tests
+
+Six scripts under `deploy/test/` turn the questions an operator should be
+able to answer before trusting the site into checks that pass or fail. Each
+reads `/etc/fibre-observer/<instance>.env`, needs only `python3`, `curl` and
+the installed binaries, and exits 0 only when every check passed. Run them in
+this order the first time; the first two take seconds, the middle three take
+minutes and touch the running services, the last one takes a day.
+
+| script | question | touches | time |
+|---|---|---|---|
+| `rpc-check.sh <rpc> [rpc2]` | is the RPC node on `mocha-5`, in sync, and keeping `block_results`, the validator set and historical state as far back as the observer reads (6000 blocks)? With a second node, do the two agree on a block hash? | nothing | seconds |
+| `exposure.sh` | is only ssh/http/https reachable from outside, is every unit enabled for a reboot, does HTTPS reach the API through Caddy, does a test alert actually arrive, is the master key `600`? | posts one test message | seconds |
+| `persistence.sh` | live: do the checkpoints survive a restart, is the database sound? On one consistent cut of the record: no duplicate line, a rebuild from the cut alone holds exactly its records, and `sentinel-recompute` agrees with a second API serving that same cut, both as of the cut's timestamp | restarts collector + scanner; rebuilds into a temp dir; a throwaway API on `:18082` | minutes |
+| `restore.sh` | does the nightly copy verify against its manifest (every file present, at least the cut, hash and record count equal, every line a JSON record, the cut's own `state.json` put in place of the copy's, no master key), rebuild to exactly the cut's records, and serve them from a second API on a spare port? | starts a throwaway API on `:18081` | minutes |
+| `outage.sh` | when the chain source is cut, does the site say so within twelve minutes and keep serving its last figures; when it returns, does the scanner catch up with no gap, no lost row and no duplicate; when every process is stopped and started, is nothing lost? | edits the env file (restored on every exit path), restarts and stops units | ~30 min |
+| `resource-watch.sh run` / `summarize` | over a day, what grows (memory per unit, data directory), what lags (scanner behind the chain, newest block age, collector behind `measurements.jsonl`, snapshot compute time) and what fails (RPC-shaped journal errors, health)? | nothing | 24 h |
+
+```bash
+sudo deploy/test/rpc-check.sh "$RPC" https://rpc.celestia-mocha.com
+sudo deploy/test/exposure.sh mocha
+sudo deploy/test/persistence.sh mocha
+sudo deploy/test/restore.sh mocha
+sudo deploy/test/outage.sh mocha
+sudo nohup deploy/test/resource-watch.sh run mocha 300 86400 > /var/log/fibre-resource-watch-mocha.log 2>&1 &
+# a day later
+deploy/test/resource-watch.sh summarize /var/log/fibre-resource-watch-mocha.csv
+```
+
+The scripts have regression tests of their own: `deploy/test/selftest.sh`
+(also `make test-deploy`, and CI) runs them against fake API and RPC servers
+on loopback — a closed port, healthy and degraded answers, env values with
+spaces and quotes, a backup that grew, was truncated, altered or lost a
+file, and app version 9/10 against the x/fibre query — with no root, no
+systemd and no rclone.
+
+`rpc-check` is the one to run before anything else, and against any public
+endpoint you consider: a node started with `storage.discard_abci_responses =
+true` answers `/status` like any other and fails `block_results` at every
+height, which the scanner needs at every height. The public mocha endpoints
+differ on exactly this.
 
 ## 9. What has been exercised
 
