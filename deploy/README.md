@@ -342,12 +342,19 @@ window it replaced.
 
 Two copies, both shipped. The record copy carries `backup-manifest.json`,
 written by `fibre-backup-manifest` before the copy starts: one consistent
-cut of every record file (byte length, SHA-256 of exactly those bytes,
-record count; dependents cut before what they refer to) plus the scanner's
-checkpoint. The files keep growing while rclone reads them, so the copy is
-at least the cut; `deploy/test/restore.sh` trims a restored copy back to
-the cut and checks every hash. A copy that came back missing, short or
-altered is a failed restore, not a surprise. The master key is never in it.
+cut — `state.json` read whole first (the scanner fsyncs its record files
+before it replaces the state, so a record file read afterwards holds
+everything the checkpoint covers), then every record file's length up to
+its last complete line (dependents cut before what they refer to), then
+the SHA-256 of exactly those bytes with every line parsed and counted as a
+JSON record. The manifest carries the checkpoint and the bytes of
+`state.json` as they were. The files keep growing while rclone reads them,
+so the copy is at least the cut; `deploy/test/restore.sh` trims a restored
+copy back to the cut, checks every hash, parses every line, and puts the
+cut's own `state.json` in place of the copy's, which was read later and
+points past the records the cut holds. A copy that came back missing,
+short, altered or unparseable is a failed restore, not a surprise. The
+master key is never in it.
 
 
 - **litestream** for the database: copy `deploy/litestream.yml` to
@@ -535,7 +542,7 @@ minutes and touch the running services, the last one takes a day.
 | `rpc-check.sh <rpc> [rpc2]` | is the RPC node on `mocha-5`, in sync, and keeping `block_results`, the validator set and historical state as far back as the observer reads (6000 blocks)? With a second node, do the two agree on a block hash? | nothing | seconds |
 | `exposure.sh` | is only ssh/http/https reachable from outside, is every unit enabled for a reboot, does HTTPS reach the API through Caddy, does a test alert actually arrive, is the master key `600`? | posts one test message | seconds |
 | `persistence.sh` | live: do the checkpoints survive a restart, is the database sound? On one consistent cut of the record: no duplicate line, a rebuild from the cut alone holds exactly its records, and `sentinel-recompute` agrees with a second API serving that same cut, both as of the cut's timestamp | restarts collector + scanner; rebuilds into a temp dir; a throwaway API on `:18082` | minutes |
-| `restore.sh` | does the nightly copy verify against its manifest (every file present, at least the cut, hash and record count equal, checkpoint at or past, no master key), rebuild to exactly the cut's records, and serve them from a second API on a spare port? | starts a throwaway API on `:18081` | minutes |
+| `restore.sh` | does the nightly copy verify against its manifest (every file present, at least the cut, hash and record count equal, every line a JSON record, the cut's own `state.json` put in place of the copy's, no master key), rebuild to exactly the cut's records, and serve them from a second API on a spare port? | starts a throwaway API on `:18081` | minutes |
 | `outage.sh` | when the chain source is cut, does the site say so within twelve minutes and keep serving its last figures; when it returns, does the scanner catch up with no gap, no lost row and no duplicate; when every process is stopped and started, is nothing lost? | edits the env file (restored on every exit path), restarts and stops units | ~30 min |
 | `resource-watch.sh run` / `summarize` | over a day, what grows (memory per unit, data directory), what lags (scanner behind the chain, newest block age, collector behind `measurements.jsonl`, snapshot compute time) and what fails (RPC-shaped journal errors, health)? | nothing | 24 h |
 

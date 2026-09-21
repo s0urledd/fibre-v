@@ -658,14 +658,19 @@ func upgradeSignalOf(meta map[string]string) *upgradeSignal {
 	return u
 }
 
-// upgradeMissing is the set of monikers that have not signalled, while the
-// signal is being published; ok is false otherwise.
-func (s *Server) upgradeMissing(ctx context.Context) (map[string]bool, bool) {
+// upgradeSignalSets is what attributing the signal to a validator needs,
+// while the signal is being published: the monikers x/signal reports as
+// not having signalled, and the monikers that more than one bonded
+// validator carries — which cannot be attributed to either. The second set
+// is counted over every bonded identity the observer knows, never over the
+// rows a request happens to be building: a request for one validator sees
+// one row, and would count its moniker as unique with its twin out of
+// sight. ok is false when nothing is published.
+func (s *Server) upgradeSignalSets(ctx context.Context) (missing, shared map[string]bool, ok bool) {
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT key, value FROM meta WHERE key IN ('fibre_active', 'signal_version', 'signal_missing')`)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
-	defer rows.Close()
 	meta := map[string]string{}
 	for rows.Next() {
 		var k, v string
@@ -673,15 +678,29 @@ func (s *Server) upgradeMissing(ctx context.Context) (map[string]bool, bool) {
 			meta[k] = v
 		}
 	}
+	rows.Close()
 	u := upgradeSignalOf(meta)
 	if u == nil {
-		return nil, false
+		return nil, nil, false
 	}
-	set := map[string]bool{}
+	missing = map[string]bool{}
 	for _, m := range u.MissingValidators {
-		set[m] = true
+		missing[m] = true
 	}
-	return set, true
+	shared = map[string]bool{}
+	srows, err := s.st.DB().QueryContext(ctx, `SELECT moniker FROM validator_identities
+		WHERE status = 'BOND_STATUS_BONDED' AND moniker <> '' GROUP BY moniker HAVING COUNT(*) > 1`)
+	if err != nil {
+		return nil, nil, false
+	}
+	defer srows.Close()
+	for srows.Next() {
+		var m string
+		if err := srows.Scan(&m); err == nil {
+			shared[m] = true
+		}
+	}
+	return missing, shared, true
 }
 
 type runStatus struct {
@@ -2666,16 +2685,12 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	// While the chain is below the version that brings Fibre, x/signal says
 	// who has signalled for it — by moniker, the only key it offers. A
 	// moniker two bonded validators share cannot be attributed and is left
-	// unset rather than guessed.
-	if missing, ok := s.upgradeMissing(ctx); ok {
-		count := map[string]int{}
+	// unset rather than guessed, on the list and on the single-validator
+	// route alike: the shared set is counted over every bonded identity,
+	// not over the rows this request is building.
+	if missing, shared, ok := s.upgradeSignalSets(ctx); ok {
 		for _, v := range byAddr {
-			if v.Moniker != "" && v.BondStatus == "BOND_STATUS_BONDED" {
-				count[v.Moniker]++
-			}
-		}
-		for _, v := range byAddr {
-			if v.Moniker == "" || v.BondStatus != "BOND_STATUS_BONDED" || count[v.Moniker] != 1 {
+			if v.Moniker == "" || v.BondStatus != "BOND_STATUS_BONDED" || shared[v.Moniker] {
 				continue
 			}
 			signaled := !missing[v.Moniker]

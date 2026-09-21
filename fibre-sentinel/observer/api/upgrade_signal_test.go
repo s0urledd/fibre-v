@@ -19,6 +19,8 @@ import (
 // missing validators reach /v1/meta, each bonded validator says whether it
 // signalled, and a moniker two validators share is left unattributed rather
 // than guessed. Once Fibre is live the block is gone.
+func ptr(b bool) *bool { return &b }
+
 func TestTheUpgradeSignalIsPublishedUntilFibreIsLive(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "observer.db"))
@@ -91,6 +93,33 @@ func TestTheUpgradeSignalIsPublishedUntilFibreIsLive(t *testing.T) {
 	}
 	if s := got["twin"]; len(s) != 2 || s[0] != nil || s[1] != nil {
 		t.Fatalf("two validators named twin cannot be attributed; both must be unset: %v", s)
+	}
+
+	// The single-validator route builds one row and must reach the same
+	// answer: it used to count monikers over the rows it was building, so a
+	// twin asked for alone looked unique and got its sibling's signal.
+	for _, c := range []struct {
+		addr string
+		want *bool
+	}{
+		{ids[0].ConsAddressHex, ptr(true)}, {ids[1].ConsAddressHex, ptr(false)},
+		{ids[2].ConsAddressHex, nil}, {ids[3].ConsAddressHex, nil},
+	} {
+		var one struct {
+			Validator struct {
+				Moniker  string `json:"moniker"`
+				Signaled *bool  `json:"signaled_upgrade"`
+			} `json:"validator"`
+		}
+		if code := get(t, ts, "/v1/validators/"+c.addr+"?window=24h", &one); code != 200 {
+			t.Fatalf("validator %s: %d", c.addr, code)
+		}
+		switch {
+		case c.want == nil && one.Validator.Signaled != nil:
+			t.Fatalf("%s (%s): ambiguous moniker attributed on the detail route: %v", c.addr[:2], one.Validator.Moniker, *one.Validator.Signaled)
+		case c.want != nil && (one.Validator.Signaled == nil || *one.Validator.Signaled != *c.want):
+			t.Fatalf("%s (%s): want %v, got %v", c.addr[:2], one.Validator.Moniker, *c.want, one.Validator.Signaled)
+		}
 	}
 
 	// Fibre live: the block is gone from /v1/meta.

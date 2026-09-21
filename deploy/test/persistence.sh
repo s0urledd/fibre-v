@@ -14,8 +14,10 @@
 #
 #   cut (3-5): everything that compares one figure with another is done on
 #     ONE consistent cut of the record, taken with backup-manifest snapshot
-#     (byte lengths first, dependents before what they refer to, then
-#     hashed). The cut has no duplicate line; the database rebuilt from it
+#     (state.json first, then byte lengths up to each file's last complete
+#     line, dependents before what they refer to, then hashed and parsed;
+#     the snapshot's state.json is the one read at the cut). The cut has
+#     no duplicate line; the database rebuilt from it
 #     alone holds exactly its records; and sentinel-recompute, reading the
 #     same cut, agrees with a second observer-api serving the database
 #     built from that cut, both evaluated as of the cut's own timestamp. No

@@ -11,9 +11,13 @@
 #
 #   - verifies the copy against the manifest: every listed file present,
 #     at least as long as the cut (the files only grow; a copy taken after
-#     the cut is trimmed back to it), the hash of the cut equal, the record
-#     count equal, state.json at or past the checkpoint, and no sampling
-#     master key. Missing, truncated or altered fails.
+#     the cut is trimmed back to it), the hash of the cut equal, every line
+#     a complete JSON record, the record count equal, and no sampling
+#     master key. The copy's state.json was read later than the cut and
+#     points past it; verify puts the cut's own state.json (carried whole
+#     in the manifest) in its place, so the scanner resumes from the
+#     checkpoint these records were cut with. Missing, truncated, altered
+#     or unparseable fails.
 #   - rebuilds the database from the verified cut and requires it to hold
 #     exactly the cut's records;
 #   - starts a second observer-api on a spare port against it and reads

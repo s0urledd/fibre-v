@@ -35,14 +35,18 @@ command -v rclone >/dev/null || { echo "fibre-backup: rclone is not installed" >
 
 dest="$remote/$instance"
 echo "fibre-backup[$instance]: $data -> $dest"
-# One consistent cut of the record before anything is copied: the byte
-# length of every file (dependents before what they refer to), the SHA-256
-# and record count of exactly those bytes, and the scanner's checkpoint.
-# The files keep growing while rclone reads them, so the copy is at least
-# the cut; deploy/test/restore.sh trims a restored copy back to the cut and
-# checks every hash. Missing, short or different is a failed restore.
+# One consistent cut of the record before anything is copied: state.json
+# first (read whole and carried in the manifest), then the byte length of
+# every record file up to its last complete line (dependents before what
+# they refer to), then the SHA-256, the parse and the record count of
+# exactly those bytes. The files keep growing while rclone reads them, so
+# the copy is at least the cut; deploy/test/restore.sh trims a restored copy
+# back to the cut, checks every hash and puts the cut's state.json beside
+# it. Missing, short, different or unparseable is a failed restore — and a
+# record that is not a sequence of JSON lines fails the cut here, before
+# anything is copied, so the timer unit shows it.
 if [ -x "$manifest_tool" ]; then
-  "$manifest_tool" write "$data" "$data/backup-manifest.json" | head -1
+  "$manifest_tool" write "$data" "$data/backup-manifest.json"
 else
   echo "fibre-backup[$instance]: backup-manifest tool not found; copying without a manifest (restore.sh will refuse to verify this copy)" >&2
 fi

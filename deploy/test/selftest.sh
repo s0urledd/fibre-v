@@ -13,7 +13,13 @@
 #                   own argument (the xargs bug)
 #   manifest        a copy that grew after the cut verifies (and is trimmed);
 #                   a truncated, altered or missing file fails; the master
-#                   key in the copy fails; a checkpoint behind the cut fails
+#                   key in the copy fails; a state.json the copy took later
+#                   (records at 100, checkpoint at 101) is replaced by the
+#                   cut's own, whole, not just its height; a manifest that
+#                   carries no state cannot accept one past its checkpoint;
+#                   the cut ends on a line boundary while a writer is
+#                   mid-line; a cut that ends inside a line fails verify; a
+#                   line that is not a JSON record is refused at the cut
 #   rpc-check       app version 9 + fibre code 6 passes; 10 + 6 fails; 10 + 0
 #                   passes; no block_results fails; a second RPC that does
 #                   not answer fails; two nodes disagreeing on a hash fails;
@@ -114,13 +120,73 @@ check not python3 "$MANIFEST" verify "$T/copy" "$T/manifest.json"
 # the key came along
 copy; cp "$D/sampling-master.key" "$T/copy/"
 check not python3 "$MANIFEST" verify "$T/copy" "$T/manifest.json"
-# checkpoint behind the cut
+ckpt() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("last_scanned_height", 0))' "$1"; }
+# records at 100, checkpoint at 101: after the cut the scanner appended a
+# record and moved its checkpoint past it, and the copy carried both. The
+# record is trimmed back to the cut and state.json is the cut's own — the
+# whole file, gaps and all — not the copy's: a checkpoint past the records
+# it sits beside would resume the scanner past blocks this cut never held.
+copy; printf '{"promise_hash":"p101","x":101}\n' >> "$T/copy/publications.jsonl"
+printf '{"last_scanned_height":501,"last_scanned_time":"2026-09-21T00:00:03Z","gaps":[{"from":501,"to":501}]}\n' > "$T/copy/state.json"
+check python3 "$MANIFEST" verify "$T/copy" "$T/manifest.json" >/dev/null
+check eq "$(wc -l < "$T/copy/publications.jsonl")" 3
+check eq "$(ckpt "$T/copy/state.json")" 500
+check cmp -s "$T/copy/state.json" "$D/state.json"
+# a checkpoint behind the cut is replaced the same way, and a copy with no
+# state.json gets the cut's
 copy; printf '{"last_scanned_height":400}\n' > "$T/copy/state.json"
-check not python3 "$MANIFEST" verify "$T/copy" "$T/manifest.json"
-# snapshot copies exactly the cut, never the key
+check python3 "$MANIFEST" verify "$T/copy" "$T/manifest.json" >/dev/null
+check eq "$(ckpt "$T/copy/state.json")" 500
+copy; rm "$T/copy/state.json"
+check python3 "$MANIFEST" verify "$T/copy" "$T/manifest.json" >/dev/null
+check cmp -s "$T/copy/state.json" "$D/state.json"
+# a manifest from before the state was carried cannot repair one: a copy
+# whose state.json is past (or behind) its checkpoint fails, not passes
+python3 - "$T/manifest.json" "$T/manifest-v1.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m.pop("state_raw"); m.pop("state"); m["version"] = 1
+json.dump(m, open(sys.argv[2], "w"))
+PY
+copy; printf '{"last_scanned_height":501}\n' > "$T/copy/state.json"
+check not python3 "$MANIFEST" verify "$T/copy" "$T/manifest-v1.json"
+copy; check python3 "$MANIFEST" verify "$T/copy" "$T/manifest-v1.json" >/dev/null
+# the manifest's own state must match its hash: an altered manifest fails
+python3 - "$T/manifest.json" "$T/manifest-forged.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["state_raw"] = '{"last_scanned_height":900}\n'
+json.dump(m, open(sys.argv[2], "w"))
+PY
+copy; check not python3 "$MANIFEST" verify "$T/copy" "$T/manifest-forged.json"
+# a writer mid-line at the cut: the cut ends at the last complete line
+printf '{"promise_hash":"p4","x":4}\n{"promise_hash":"p5","x":' >> "$D/publications.jsonl"
+check python3 "$MANIFEST" write "$D" "$T/manifest2.json" >/dev/null
+check eq "$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["files"]["publications.jsonl"]["records"])' "$T/manifest2.json")" 4
+check eq "$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["files"]["publications.jsonl"]["bytes"])' "$T/manifest2.json")" \
+         "$(python3 -c 'import sys; b=open(sys.argv[1],"rb").read(); print(b.rfind(b"\n")+1)' "$D/publications.jsonl")"
+copy; check python3 "$MANIFEST" verify "$T/copy" "$T/manifest2.json" >/dev/null
+check eq "$(tail -c 1 "$T/copy/publications.jsonl" | od -An -c | tr -d ' ')" '\n'
+# a cut that ends inside a line — a manifest that hashes half a record —
+# fails verify even though the hash over those bytes matches: every line
+# is parsed, and the last one is not a record
+python3 - "$T/manifest2.json" "$D/publications.jsonl" "$T/manifest-torn.json" <<'PY'
+import hashlib, json, sys
+m = json.load(open(sys.argv[1])); n = m["files"]["publications.jsonl"]["bytes"] - 3
+b = open(sys.argv[2], "rb").read()[:n]
+m["files"]["publications.jsonl"] = {"bytes": n, "sha256": hashlib.sha256(b).hexdigest(), "records": b.count(b"\n")}
+json.dump(m, open(sys.argv[3], "w"))
+PY
+copy; check not python3 "$MANIFEST" verify "$T/copy" "$T/manifest-torn.json"
+# snapshot copies exactly the cut (no torn tail), never the key, and its
+# state.json is the cut's
 rm -rf "$T/snap"; check python3 "$MANIFEST" snapshot "$D" "$T/snap" >/dev/null
 check test ! -e "$T/snap/sampling-master.key"
+check eq "$(wc -l < "$T/snap/publications.jsonl")" 4
+check cmp -s "$T/snap/state.json" "$D/state.json"
 check python3 "$MANIFEST" verify "$T/snap" >/dev/null
+# a line that is not a JSON record is refused at the cut, whatever its length
+printf 'not a record\n' >> "$D/measurements.jsonl"
+check not python3 "$MANIFEST" write "$D" "$T/manifest3.json"
+check test ! -e "$T/manifest3.json"
 
 echo "== rpc-check"
 RC="$HERE/rpc-check.sh"
