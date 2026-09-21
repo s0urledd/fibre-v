@@ -1,5 +1,5 @@
 // observer-heartbeat runs the reachability probe: every interval it dials
-// every registered Fibre endpoint (DNS, TCP, TLS 1.3, consensus-key identity)
+// every bonded validator's registered Fibre endpoint (DNS, TCP, TLS 1.3, consensus-key identity)
 // and stops there; no DownloadShard, about 3 KB per validator. It is what the
 // network overview's "reachable now" and "TLS identity" columns are built
 // from on days when a validator has no assignment to probe.
