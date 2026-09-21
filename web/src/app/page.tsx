@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Network, type Validator, type Meta, type Market, fmtCount, fmtPct, bytes, utc, ago, tia, API_BASE } from "@/lib/api";
+import { useApi, type Network, type Validator, type Meta, type Market, fmtCount, fmtPct, bytes, utc, ago, tia, through, API_BASE } from "@/lib/api";
 import ValidatorTable from "@/components/ValidatorTable";
 import { Panel, Cell } from "@/components/Panel";
 import { Mark } from "@/components/Verdict";
@@ -57,7 +57,7 @@ export default function Overview() {
         <h1 className="sr-only">Network</h1>
         {net?.computed_at && (
           <span className="sample" title={`${net.window.start && !net.window.start.startsWith("0001-") ? `${utc(net.window.start)} → now` : "since the first record"}. Snapshot taken ${utc(net.computed_at)}, computed in ${net.compute_ms} ms.`}>
-            updated {ago(net.computed_at)}
+            updated {ago(net.computed_at)}{through(net.record_through) && <> · <span title={through(net.record_through)!.title}>{through(net.record_through)!.text}</span></>}
           </span>
         )}
         <span className="spacer" />
@@ -91,7 +91,7 @@ export default function Overview() {
 
       <Panel title="Service" live={!!net && meta?.health === "ok"} right={net ? <>{win === "all" ? "since the first record" : `${win} window`} · <Link href="/methodology/#verdicts">methodology →</Link></> : undefined}>
         <div className="cells three">
-          <Cell label="Serve rate" loading={busy}
+          <Cell label="Serve rate" loading={busy} evidence="verified"
             value={!ob || !decided ? "—" : fmtPct(ob.rate)}
             tone={!decided ? "absent" : band(ob!.rate, "serve") === "ok" ? "ok" : band(ob!.rate, "serve") === "fault" ? "fault" : undefined}
             sub={!net ? undefined : !decided ? (ob && ob.unobserved > 0 ? `${ob.unobserved.toLocaleString("en-US")} unobserved` : "nothing decided")
@@ -103,7 +103,7 @@ export default function Overview() {
               <p>An obligation we never saw served and never saw broken is counted beside the rate, not inside it. Unreachable, unproven and unregistered cases are never faults.</p>
               <p><Link href="/methodology/#verdicts">How a probe is judged</Link></p>
             </>} />
-          <Cell label="Faults" loading={busy}
+          <Cell label="Faults" loading={busy} evidence="verified"
             value={!net || !ob ? "—" : ob.broken > 0 ? ob.broken.toLocaleString("en-US") : rated ? "0" : "—"}
             tone={ob && ob.broken > 0 ? "fault" : "absent"}
             sub={!net || !ob ? undefined : ob.broken > 0 ? <><b>obligation{ob.broken === 1 ? "" : "s"} broken</b> · {faulted} validator{faulted === 1 ? "" : "s"}</> : rated ? "no unserved shard" : "nothing rated"}
@@ -116,7 +116,7 @@ export default function Overview() {
               <p>Counted <strong>per obligation</strong>, one per shard broken. The probe count behind it is larger by roughly the number of times the schedule visits each shard, and it is in the API and on the tile&rsquo;s detail line rather than in this number: a four-figure count beside an operator&rsquo;s name is an accusation four times the size of the finding.</p>
               <p>This is the only number counted against a validator.</p>
             </>} />
-          <Cell label="Reachability" loading={busy}
+          <Cell label="Reachability" loading={busy} evidence="observed"
             value={net?.reachability_window?.den ? fmtPct(net.reachability_window) : "—"}
             tone={net?.reachability_window?.den ? undefined : "absent"}
             sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} handshakes` : "no handshake yet"}
@@ -129,10 +129,10 @@ export default function Overview() {
 
       <Panel title="Chain" right={<>from the chain&rsquo;s own records · <Link href="/publishers/">publishers →</Link></>}>
         <div className="cells four">
-          <Cell label="Publications" loading={busy}
+          <Cell label="Publications" loading={busy} evidence="chain"
             value={net ? net.publications.toLocaleString("en-US") : "—"}
             sub={net ? `${bytes(net.publication_bytes)} uploaded` : undefined} />
-          <Cell label="Signed shards" loading={busy}
+          <Cell label="Signed shards" loading={busy} evidence="chain"
             value={net?.attestation?.blob_coverage?.den ? fmtPct(net.attestation.blob_coverage) : "—"}
             tone={net?.attestation?.blob_coverage?.den ? undefined : "absent"}
             sub={net?.attestation?.blob_coverage?.den ? `${net.attestation.attested_blobs.toLocaleString("en-US")} / ${net.attestation.blob_coverage.den.toLocaleString("en-US")} · two-thirds quorum` : "no assignment yet"}
@@ -141,11 +141,11 @@ export default function Overview() {
               <p>Assigned shards whose validator&rsquo;s signature reached the chain. Only these are proven stored and count in the serve rate.</p>
               <p>Publishers stop collecting signatures at two thirds of stake, so this is the size of the quorum in practice, not a duty anyone missed.</p>
             </>} />
-          <Cell label="Endpoints" loading={busy}
+          <Cell label="Endpoints" loading={busy} evidence="chain"
             value={net ? net.registered_endpoints.toLocaleString("en-US") : "—"}
             sub={net ? (net.reachability.den ? `${fmtCount(net.reachability)} answering now · ${net.validators_probed} probed` : `no handshake yet · ${net.validators_probed} probed`) : undefined}
             detail={net ? `${net.registered_endpoints.toLocaleString("en-US")} registered Fibre endpoints; ${net.reachability.den ? `${fmtCount(net.reachability)} of them answering the latest handshake` : "none has answered a handshake yet"}; ${net.validators_probed} probed in this window.` : undefined} />
-          <Cell label="Fees settled" loading={busy}
+          <Cell label="Fees settled" loading={busy} evidence="chain"
             value={market ? tia(market.fees_settled_utia, { unit: false }) : "—"} unit={market ? "TIA" : undefined}
             tone={market && market.settlements === 0 ? "absent" : undefined}
             sub={market ? `${market.publishers_active} publisher${market.publishers_active === 1 ? "" : "s"}${market.timeouts > 0 ? ` · ${market.timeouts} timed out` : ""}` : undefined}

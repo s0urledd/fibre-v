@@ -160,7 +160,11 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	// computed per request and never stored here: writing it into the shared
 	// snapshot would publish one reader's filter as everyone's headline.
 	s.net = newSnapshotCache("network", func(ctx context.Context, win Window) (*networkResponse, error) {
-		return s.computeNetwork(ctx, win, excludeSet{}, nil)
+		resp, err := s.computeNetwork(ctx, win, excludeSet{}, nil)
+		if err == nil {
+			resp.RecordThrough = s.recordThrough(ctx)
+		}
+		return resp, err
 	})
 	s.market = newSnapshotCache("market", s.computeMarket)
 	s.vals = newSnapshotCache("validators", func(ctx context.Context, win Window) (validatorSnapshot, error) {
@@ -168,7 +172,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 		if err != nil {
 			return validatorSnapshot{}, err
 		}
-		return validatorSnapshot{Window: win, Rows: rows}, nil
+		return validatorSnapshot{Window: win, Rows: rows, RecordThrough: s.recordThrough(ctx)}, nil
 	})
 	// Both of these publish faults beside named validators, and both are
 	// cached for up to half an hour. A hold landing in the database moves
@@ -609,6 +613,10 @@ type metaResponse struct {
 	// assignment (a blob version this build does not know), and so are never
 	// probed.
 	UnassignablePublications int64 `json:"unassignable_publications"`
+	// Evidence says, per headline figure, which of the three kinds of
+	// evidence it rests on; EvidenceKinds defines the three.
+	Evidence      map[string]string `json:"evidence"`
+	EvidenceKinds map[string]string `json:"evidence_kinds"`
 }
 
 type runStatus struct {
@@ -722,6 +730,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, metaResponse{
 		Components: h.Components, Health: h.Status, Checks: h.Checks, ScanGaps: h.ScanGaps, PinStatus: h.PinStatus,
+		Evidence: evidenceOf, EvidenceKinds: evidenceKinds,
 		ParamUncertainty:         ranges,
 		UnassignablePublications: s.unassignablePublications(ctx),
 		APIVersion:               Version, Vantage: s.vantage, VantageInfo: s.info,
@@ -792,6 +801,73 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 
 type classCounts map[string]int64
 
+// recordThrough says which point of the chain a set of figures rests on: the
+// scanner's checkpoint, and its block time, as they stood when the snapshot
+// was computed, beside the tip the collector had last seen. computed_at says
+// when the figures were taken; this says through which block. A reader who
+// wants to check a figure needs the height the record ran to, not the wall
+// clock, because the record is indexed by height and the clock is not.
+type recordThrough struct {
+	// Height is the last height the scanner had read into the record.
+	Height int64 `json:"height"`
+	// BlockTime is that block's time on the chain's own clock.
+	BlockTime string `json:"block_time,omitempty"`
+	// ChainHeight and ChainTipTime are the chain's tip as the collector last
+	// polled it; the difference to Height is how far the record lags.
+	ChainHeight  int64  `json:"chain_height,omitempty"`
+	ChainTipTime string `json:"chain_tip_time,omitempty"`
+}
+
+// recordThrough reads the four meta keys the collector keeps for this. Nil
+// when the scanner has not written a checkpoint yet.
+func (s *Server) recordThrough(ctx context.Context) *recordThrough {
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT key, value FROM meta
+		WHERE key IN ('last_scanned_height', 'last_scanned_time', 'chain_height', 'chain_tip_time')`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	rt := &recordThrough{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil
+		}
+		switch k {
+		case "last_scanned_height":
+			rt.Height, _ = strconv.ParseInt(v, 10, 64)
+		case "last_scanned_time":
+			rt.BlockTime = v
+		case "chain_height":
+			rt.ChainHeight, _ = strconv.ParseInt(v, 10, 64)
+		case "chain_tip_time":
+			rt.ChainTipTime = v
+		}
+	}
+	if rt.Height == 0 {
+		return nil
+	}
+	return rt
+}
+
+// evidenceKinds names the three kinds of evidence a figure on the site can
+// rest on, and evidenceOf says which each headline figure rests on. They
+// are published on /v1/meta so an API reader has the same labels the site
+// prints, and so the three are never blurred: a count of what the chain
+// recorded, bytes this observer fetched and verified, and what this
+// observer's own network saw from one place are different claims.
+var evidenceKinds = map[string]string{
+	"chain_record":        "a count of something the chain recorded; nothing here was measured by this observer",
+	"verified_response":   "bytes this observer fetched and verified against the on-chain commitment, or a certificate checked against the validator's consensus key",
+	"vantage_observation": "what this observer's own network saw from one location; it says nothing about any shard",
+}
+var evidenceOf = map[string]string{
+	"serve_rate": "verified_response", "faults": "verified_response", "obligations": "verified_response", "endorsed": "verified_response",
+	"reachability": "vantage_observation", "throughput": "vantage_observation",
+	"publications": "chain_record", "signed_shards": "chain_record", "registered_endpoints": "chain_record", "fees_settled": "chain_record",
+	"publishers": "chain_record", "paid_per_mib": "chain_record", "timed_out": "chain_record", "settlement_rate": "chain_record", "escrow_held": "chain_record",
+}
+
 type networkResponse struct {
 	// AsOfNote is set on a pinned window (see Window.AsOf).
 	AsOfNote string `json:"as_of_note,omitempty"`
@@ -810,9 +886,12 @@ type networkResponse struct {
 	// ComputedAt and ComputeMs say when this summary was taken and how long it
 	// took. It is a snapshot refreshed on a schedule, not a live query, so its
 	// age is published rather than left for a reader to assume.
-	ComputedAt             string `json:"computed_at,omitempty"`
-	ComputeMs              int64  `json:"compute_ms,omitempty"`
-	ObservedFromOneVantage bool   `json:"observed_from_one_location"`
+	ComputedAt string `json:"computed_at,omitempty"`
+	ComputeMs  int64  `json:"compute_ms,omitempty"`
+	// RecordThrough is the point of the chain these figures rest on, taken
+	// when they were computed.
+	RecordThrough          *recordThrough `json:"record_through,omitempty"`
+	ObservedFromOneVantage bool           `json:"observed_from_one_location"`
 	// Excluded and ExcludeNote are set when a reader asked for figures
 	// without named validators (?exclude=); see excludeSet.
 	Excluded            []string `json:"excluded,omitempty"`
@@ -1515,6 +1594,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 			s.writeInternal(w, r.URL.Path, err)
 			return
 		}
+		resp.RecordThrough = s.recordThrough(r.Context())
 		resp.ComputedAt, resp.ComputeMs = t0.UTC().Format(time.RFC3339Nano), time.Since(t0).Milliseconds()
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, 200, resp)
@@ -2624,8 +2704,9 @@ func parseAddr(s string) (string, error) {
 // computed over, and this API's whole claim is that a reader can recompute
 // what it prints. computed_at says when; this says over what.
 type validatorSnapshot struct {
-	Window Window         `json:"window"`
-	Rows   []validatorRow `json:"rows"`
+	Window        Window         `json:"window"`
+	Rows          []validatorRow `json:"rows"`
+	RecordThrough *recordThrough `json:"record_through,omitempty"`
 }
 
 func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
@@ -2655,7 +2736,8 @@ func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, 200, map[string]any{
 			"window": win, "vantage": s.vantage, "validators": rows, "as_of_note": AsOfNote,
-			"computed_at": t0.UTC().Format(time.RFC3339Nano), "compute_ms": time.Since(t0).Milliseconds(),
+			"record_through": s.recordThrough(r.Context()),
+			"computed_at":    t0.UTC().Format(time.RFC3339Nano), "compute_ms": time.Since(t0).Milliseconds(),
 		})
 		return
 	}
@@ -2670,7 +2752,8 @@ func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{
 		"window": snap.Window, "vantage": s.vantage, "validators": rows,
-		"computed_at": at.UTC().Format(time.RFC3339Nano), "compute_ms": ms,
+		"record_through": snap.RecordThrough,
+		"computed_at":    at.UTC().Format(time.RFC3339Nano), "compute_ms": ms,
 	}
 	if _, label, err := s.rolledFor(r.Context(), win, ""); err == nil && label != nil {
 		out["rolled_up"] = label
@@ -2805,6 +2888,7 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	probes, moreProbes := trim(probes, 50)
 	out := map[string]any{
 		"window":                      win,
+		"record_through":              s.recordThrough(r.Context()),
 		"validator":                   rows[0],
 		"windows":                     spans,
 		"recent_probes":               probes,

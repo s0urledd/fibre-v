@@ -744,6 +744,18 @@ what the measurement cannot separate.
 
 ## Reproducing the figures
 
+Every snapshot response — `/v1/network`, `/v1/validators`, `/v1/market` and
+`/v1/validators/<addr>` — carries `record_through`: the scanner's checkpoint
+height and block time as they stood when the figures were computed, beside
+the chain tip the collector had last seen (`last_scanned_height`,
+`last_scanned_time`, `chain_height`, `chain_tip_time` in `meta`).
+`computed_at` says when the figures were taken; `record_through` says over
+which part of the record, which is what a reader needs to check them against
+the chain. `/v1/meta` also publishes `evidence`, the kind of evidence each
+headline figure rests on — `chain_record`, `verified_response` or
+`vantage_observation`, defined under `evidence_kinds` — and the site prints
+the same three as tags beside the figures.
+
 Every figure on the site is a function of the record and the code, and the
 pieces needed to re-run that function are published:
 

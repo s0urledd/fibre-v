@@ -2,7 +2,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type Window, type Rate, fmtPct, fmtCount, utc, ago, shortHex, bytesPerSecond, API_BASE } from "@/lib/api";
+import { useApi, type Validator, type Probe, type Window, type Rate, fmtPct, fmtCount, utc, ago, shortHex, bytesPerSecond, through, type RecordThrough, API_BASE } from "@/lib/api";
 import { Avatar } from "@/components/ValidatorTable";
 import Verdict, { Mark } from "@/components/Verdict";
 import Info from "@/components/Info";
@@ -12,6 +12,7 @@ import { band } from "@/components/Rate";
 
 type Detail = {
   window: Window;
+  record_through?: RecordThrough;
   validator: Validator;
   recent_probes: Probe[];
   /** set when this window rests partly on the daily rollup (the "all" window past the raw retention) */
@@ -31,11 +32,11 @@ function identityWord(status: string): string {
   }
 }
 
-function Layer({ label, r, what, sample, kind }: { label: string; r: Rate | null | undefined; what: React.ReactNode; sample?: string; kind?: "serve" | "reach" }) {
+function Layer({ label, r, what, sample, kind, evidence }: { label: string; r: Rate | null | undefined; what: React.ReactNode; sample?: string; kind?: "serve" | "reach"; evidence?: "chain" | "verified" | "observed" }) {
   const absent = !r || r.den === 0;
   const b = kind ? band(r, kind) : "";
   return (
-    <Cell label={label} info={what}
+    <Cell label={label} info={what} evidence={evidence}
       value={absent ? "—" : fmtPct(r)}
       tone={absent ? "absent" : b === "ok" ? "ok" : b === "fault" ? "fault" : undefined}
       sub={absent ? "not observed" : (sample ?? fmtCount(r))} />
@@ -127,7 +128,7 @@ function Page() {
           serve-rate table below lists all four spans, so without this the
           reader has no way to tell which one the readings above are from. */}
       <div className="head-row" style={{ marginTop: "var(--s5)" }}>
-        <span className="sample" title={`${utc(data.window.start)} → ${utc(data.window.end)}`}>{data.window.name} window</span>
+        <span className="sample" title={`${utc(data.window.start)} → ${utc(data.window.end)}.${through(data.record_through) ? " " + through(data.record_through)!.title : ""}`}>{data.window.name} window{through(data.record_through) && <> · {through(data.record_through)!.text}</>}</span>
         <span className="spacer" />
         <div className="pills" role="group" aria-label="window">
           {["24h", "7d", "30d", "all"].map((w) => <button key={w} aria-pressed={win === w} onClick={() => setWin(w)}>{w}</button>)}
@@ -139,18 +140,18 @@ function Page() {
           <p>No figure has a threshold. Checks run from one location.</p>
         </Info></>} right={<>{data.window.name} window · <Link href="/methodology/#verdicts">methodology →</Link></>}>
       <div className="cells four">
-        <Layer label="Reachability" kind="reach" r={v.reachability_window}
+        <Layer label="Reachability" kind="reach" evidence="observed" r={v.reachability_window}
           sample={v.reachability_window?.den ? `${v.reachability_window.den.toLocaleString("en-US")} handshakes` : undefined}
           what={<>
             <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes, from one location. Nothing is downloaded.</p>
             <p>This is not signing uptime. A validator can sign every block with its Fibre endpoint down, and the reverse.</p>
           </>} />
-        <Layer label="Endorsed" kind="reach" r={v.identity_rate_window}
+        <Layer label="Endorsed" kind="reach" evidence="verified" r={v.identity_rate_window}
           what={<>
             <p>Of the handshakes that reached a certificate, how many were signed by this validator&rsquo;s consensus key. Clients refuse the rest.</p>
             <p>Handshakes that never reached a certificate are not counted here, so an outage is not reported twice.</p>
           </>} />
-        <Cell label="Faults"
+        <Cell label="Faults" evidence="verified"
           value={broken > 0 ? <><Mark tier="fault" />{broken.toLocaleString("en-US")}</> : faults > 0 ? "0" : rated ? "0" : "—"}
           tone={broken > 0 ? "fault" : "absent"}
           sub={broken > 0
@@ -167,7 +168,7 @@ function Page() {
             <p>The only number counted against a validator. Unreachable, unproven and unregistered are not faults.</p>
             <p>A fault can also be recorded after the deadline, when a shard that is gone comes back wrong. There is no obligation to break there, so it is a fault probe and not a broken obligation.</p>
           </>} />
-        <Cell label="Obligations"
+        <Cell label="Obligations" evidence="verified"
           value={decided ? fmtPct(o!.rate) : "—"}
           tone={!decided ? "absent" : band(o!.rate, "serve") === "ok" ? "ok" : band(o!.rate, "serve") === "fault" ? "fault" : undefined}
           sub={!o || o.total === 0 ? "none proven"
@@ -185,7 +186,7 @@ function Page() {
 
       <Panel title="Throughput" right="download step only, from one location">
       <div className="cells four">
-        <Cell label="Throughput"
+        <Cell label="Throughput" evidence="observed"
           value={v.serve_bytes_per_second == null ? "—" : bytesPerSecond(v.serve_bytes_per_second)}
           tone={v.serve_bytes_per_second == null ? "absent" : undefined}
           sub={v.serve_bytes_per_second == null ? "not observed" : `median over ${v.serve_throughput_sample.toLocaleString("en-US")} healthy probes`}

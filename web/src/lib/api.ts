@@ -65,7 +65,20 @@ export type Meta = {
   /** matches | chain_ahead | chain_behind | unknown */
   pin_status: string;
   unassignable_publications: number;
+  /** per headline figure, which of evidence_kinds it rests on */
+  evidence?: Record<string, string>;
+  evidence_kinds?: Record<string, string>;
 };
+
+/** "through #987,616" for a header line, with the block time in the title */
+export function through(rt: RecordThrough | null | undefined): { text: string; title: string } | null {
+  if (!rt || !rt.height) return null;
+  const lag = rt.chain_height && rt.chain_height > rt.height ? ` (${(rt.chain_height - rt.height).toLocaleString("en-US")} behind the tip)` : "";
+  return {
+    text: `through #${rt.height.toLocaleString("en-US")}`,
+    title: `Figures rest on the record through block ${rt.height.toLocaleString("en-US")}${rt.block_time ? `, ${utc(rt.block_time)}` : ""}${lag}.`,
+  };
+}
 /** where this observer watches from; the first three are operator-declared */
 export type VantageInfo = {
   name: string;
@@ -113,6 +126,21 @@ export type Health = {
 
 export type RolledUp = { raw_from: string; days: number; note: string };
 
+/**
+ * The point of the chain a set of figures rests on: the scanner's checkpoint
+ * (and its block time) when the snapshot was computed, beside the tip the
+ * collector had last seen. computed_at says when; this says through which
+ * block, which is what a reader checking a figure against the chain needs.
+ */
+export type RecordThrough = {
+  height: number;
+  block_time?: string;
+  chain_height?: number;
+  chain_tip_time?: string;
+};
+/** the three kinds of evidence a figure can rest on; /v1/meta defines them */
+export type Evidence = "chain" | "verified" | "observed";
+
 export type Network = {
   /**
    * When this summary was computed and how long it took. It is a snapshot
@@ -122,6 +150,7 @@ export type Network = {
    */
   computed_at?: string;
   compute_ms?: number;  window: Window;
+  record_through?: RecordThrough;
   vantage: string;
   observed_from_one_location: boolean;
   registered_endpoints: number;
@@ -450,6 +479,7 @@ export type Market = {
   vantage: string;
   computed_at?: string;
   compute_ms?: number;
+  record_through?: RecordThrough;
   source: string;
   settlements: number;
   fees_settled_utia: number;
