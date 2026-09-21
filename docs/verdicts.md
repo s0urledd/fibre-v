@@ -404,14 +404,19 @@ One sentence each, and what a reader should conclude.
   alike. The attestation counts are in that list so a reader can reconcile
   the response against itself: `serve_rate_coverage.den` equals
   `attested_probes + unattested_probes + unknown_probes`, and
-  `serve_rate_held_out.UNATTESTED` equals `attestation.unattested_probes`. Validators fail
-  independently; one observer's network does not. The two reasons are
-  shown differently: an `unreachable` point is a problem on our side; a
-  `fault` point is a **network incident**, because a stale assignment pin
-  is caught separately (every probe under a stale pin is `PROBE_ERROR`
-  before it can be a `FAULT`), so half the set faulting at one minute is
-  the network, a release, or the observer's coder, and is shown as such
-  with a link to its rows (`/v1/probes?at=<scheduled_at>`). "Probed" is a
+  `serve_rate_held_out.UNATTESTED` equals `attestation.unattested_probes`. That validators fail
+  independently while one observer's network does not is the working
+  assumption behind this guard, not a measurement; on a day when many
+  endpoints really are down at once it errs toward publishing nothing.
+  Both reasons are shown with their share and a link to the rows
+  (`/v1/probes?at=<scheduled_at>`), and neither is given a cause. An
+  `unreachable` point cannot be told, from one location, from a network
+  problem on the observer's own side. A `fault` point has the observer
+  errors this site can check for ruled out — a stale assignment pin is
+  caught separately (every probe under a stale pin is `PROBE_ERROR` before
+  it can be a `FAULT`), and a params-uncertainty range on record withholds
+  its rows before they can be faults — and the ones it cannot check for
+  are not ruled out, which is why the point is not called an incident. "Probed" is a
   row that carries a reachability verdict for the endpoint, which is the
   only kind of row that could land in either numerator. A row that could
   not have been `UNREACHABLE` or `FAULT` whatever happened at that point is
@@ -567,7 +572,7 @@ column:
 |---|---|---|
 | no signature from this validator on the settled promise | `UNATTESTED` | nothing proves it was ever sent the shard |
 | no answer from the endpoint at all | `UNREACHABLE` | from one vantage, indistinguishable from the observer's own path failing |
-| no Fibre host in the registry | `NOT_REGISTERED` | jailing and unbonding remove the provider from the bonded list; the chain keeps the entry |
+| no Fibre host in the registry | `NOT_REGISTERED` | jailing and unbonding remove the provider from the bonded list; the chain keeps the entry until the validator leaves staking state or has been jailed and unbonded a week past its unbonding time |
 | exactly another settled promise's rows for the same blob | `SHADOWED_SHARD` | `DownloadShard` takes a commitment, not a promise hash, and the store serves the first shard by promise-hash order; the validator cannot tell them apart |
 | genuine rows of the blob that match no settled promise | `UNMATCHED_GENUINE` | an upload whose promise never settled can answer under hash-order serving; held out, beside the rate |
 | genuine rows matching no promise the observer has scanned | `PROBE_ERROR` at the probe, then the late verdict | the owning promise may settle after the probe; `download.shadow_gap` says so, and the collector judges the row once the scanner has read past probe time + `payment_promise_timeout`: `SHADOWED_SHARD` if a promise on record assigns the rows, `UNMATCHED_GENUINE` if none does, `PROBE_ERROR` for good if a scan gap covers the interval |

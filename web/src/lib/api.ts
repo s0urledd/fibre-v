@@ -59,6 +59,8 @@ export type Meta = {
   /** every observer process with its liveness; health is the /v1/health verdict */
   components: Component[];
   health: "ok" | "degraded" | "down";
+  /** the /v1/health rows behind that verdict, so a page can say which check failed when no process did */
+  checks?: { name: string; ok: boolean; detail: string }[];
   scan_gaps?: ScanGap[];
   /** matches | chain_ahead | chain_behind | unknown */
   pin_status: string;

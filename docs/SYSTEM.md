@@ -65,7 +65,7 @@ chain block
        ├─ Classify(Evidence) → one classification + a reason
        └─→ measurements.jsonl
 
-  heartbeat: every 5 min, every registered endpoint, layers 1-3 only
+  heartbeat: every 5 min, every bonded provider's endpoint, layers 1-3 only
        └─→ reachability.jsonl
 
   collector: tails all of it into SQLite with byte-offset cursors

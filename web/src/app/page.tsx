@@ -33,6 +33,15 @@ export default function Overview() {
   const list = vals?.validators ?? [];
   const faulted = list.filter((v) => (v.obligations?.broken ?? 0) > 0).length;
   const busy = loading && !net;
+  // Every reason the observer is not "ok", process or not. A check that is
+  // not a process (the chain producing no block, a scan gap, a stale pin)
+  // used to leave the banner with nothing after its heading.
+  const stopped = !!meta && meta.components.some((c) => !c.alive);
+  const observerReasons = !meta ? [] : [
+    ...meta.components.filter((c) => !c.alive).map((c) => `${c.component}: ${c.present ? (c.stopped_at ? `stopped (${c.stop_reason || "?"})` : `no update for ${Math.round(c.age_s / 60)} min`) : "never started"}`),
+    ...meta.components.filter((c) => c.alive && !c.ok).map((c) => `${c.component}: ${c.last_error || "failing"}`),
+    ...(meta.checks ?? []).filter((c) => !c.ok && !meta.components.some((k) => k.component === c.name)).map((c) => `${c.name}: ${c.detail}`),
+  ];
 
   const sr = net?.serve_rate;
   const rated = !!sr && sr.den > 0;
@@ -62,10 +71,8 @@ export default function Overview() {
         <div className="note hold">
           <span className="label">{meta.health === "down" ? "Observer is not running" : "Observer degraded"}</span>
           <p>
-            {meta.components.filter((c) => !c.alive).map((c) => `${c.component}: ${c.present ? (c.stopped_at ? `stopped (${c.stop_reason || "?"})` : `no update for ${Math.round(c.age_s / 60)} min`) : "never started"}`).join(" · ")}
-            {meta.components.some((c) => !c.alive) && meta.components.some((c) => c.alive && !c.ok) ? " · " : ""}
-            {meta.components.filter((c) => c.alive && !c.ok).map((c) => `${c.component}: ${c.last_error || "failing"}`).join(" · ")}
-{". "}Figures from a stopped process stay on the page as they were; the sample counts say how old they are.
+            {observerReasons.join(" · ")}
+            {stopped ? ". Figures from a stopped process stay on the page as they were; the sample counts say how old they are." : "."}
           </p>
         </div>
       )}
@@ -114,7 +121,7 @@ export default function Overview() {
             tone={net?.reachability_window?.den ? undefined : "absent"}
             sub={net?.reachability_window?.den ? `${net.reachability_window.den.toLocaleString("en-US")} handshakes` : "no handshake yet"}
             info={<>
-              <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes with every registered Fibre endpoint, from one location. Nothing is downloaded.</p>
+              <p>TLS handshakes completed, over handshakes attempted: one every 5 minutes with every bonded validator&rsquo;s registered Fibre endpoint, from one location. Nothing is downloaded.</p>
               <p>This is not signing uptime. A validator can sign every block with its Fibre endpoint down, and the reverse.</p>
             </>} />
         </div>
@@ -178,18 +185,19 @@ export default function Overview() {
 
       {net && ourSide.length > 0 && (
         <div className="note hold">
-          <span className="label">Problem on our side at {ourSide.length} probe point{ourSide.length === 1 ? "" : "s"}</span>
+          <span className="label">{ourSide.length} probe point{ourSide.length === 1 ? "" : "s"} left out: half the validators asked were unreachable at once</span>
           <p>
-            {ourSide.slice(0, 3).map((s) => `${utc(s.at)} (${s.label}): ${fmtCount(s.unreachable)} validators unreachable at once`).join("; ")}
+            {ourSide.slice(0, 3).map((s, i) => (
+              <span key={s.at}>{i > 0 ? "; " : ""}{utc(s.at)} ({s.label}): {fmtCount(s.unreachable)} of the validators asked were unreachable <a href={`${API_BASE}/v1/probes?at=${encodeURIComponent(s.at)}&limit=1000`}>rows</a></span>
+            ))}
             {ourSide.length > 3 ? `; and ${ourSide.length - 3} more` : ""}.
-            {" "}Validators fail independently; half the set unreachable at the same minute is a network problem at the observer.
-            The probes at these points are left out of every rate, bucket and fault count on this site.
+            {" "}From one location that cannot be told from a network problem at the observer, so the probes at these points are left out of every rate, bucket and fault count on this site. The rows are kept and linked.
           </p>
         </div>
       )}
       {net && incidents.length > 0 && (
         <div className="note hold">
-          <span className="label">Network incident: {incidents.length} probe point{incidents.length === 1 ? "" : "s"} where half the validators asked faulted at once</span>
+          <span className="label">{incidents.length} probe point{incidents.length === 1 ? "" : "s"} left out: half the validators asked faulted at once</span>
           <p>
             {incidents.slice(0, 4).map((s, i) => (
               <span key={s.at}>{i > 0 ? "; " : ""}{utc(s.at)} ({s.label}): {fmtCount(s.fault)} of the validators asked faulted <a href={`${API_BASE}/v1/probes?at=${encodeURIComponent(s.at)}&limit=1000`}>rows</a></span>
@@ -197,8 +205,8 @@ export default function Overview() {
             {incidents.length > 4 ? `; and ${incidents.length - 4} more` : ""}.
             {" "}The share is over the validators this observer actually asked at that point, not over the whole set:
             one it never reached says nothing about the point and is not in the denominator.
-            This observer&rsquo;s assignment pin matched the chain at the time, so these faults are not an observer error;
-            operators losing data at the same minute points at the network, a release, or the observer&rsquo;s coder. No validator&rsquo;s rate counts these points; the rows are kept and linked.
+            This observer&rsquo;s assignment pin matched the chain at the time, and no params-uncertainty range on record covers these rows;
+            that rules out the observer errors this site can check for, not every one. No validator&rsquo;s rate counts these points; the rows are kept and linked.
           </p>
         </div>
       )}

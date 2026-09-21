@@ -72,7 +72,7 @@ export default function PublishersPage() {
           sub={m ? (m.timeouts > 0 ? `${tia(m.timed_out_utia)} charged` : "none reported") : undefined}
           detail={m && m.timeouts > 0 ? `${tia(m.timed_out_utia)} charged on abandoned promises, reported by ${m.timeout_processors} account${m.timeout_processors === 1 ? "" : "s"}.` : undefined}
           info={<>
-            <p>Promises a publisher obtained signatures for and never settled, charged anyway once someone submitted the timeout. Usually that is a validator that stored the shards for nothing.</p>
+            <p>Promises a publisher obtained signatures for and never settled, charged anyway once anyone submits the timeout; the chain pays nothing for doing so.</p>
             <p>This is a floor. A promise nobody reports leaves no trace on chain at all.</p>
           </>} />
         <Cell label="Settlement rate" loading={busy}

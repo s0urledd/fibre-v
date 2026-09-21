@@ -584,6 +584,13 @@ type metaResponse struct {
 	// same verdict /v1/health returns: ok, degraded or down.
 	Components []componentStatus `json:"components"`
 	Health     string            `json:"health"`
+	// Checks is every row behind Health, the same list /v1/health serves.
+	// Health alone told the site that something was wrong; the components
+	// told it which process, and nothing told it about a check that is not
+	// a process — a chain that stopped producing blocks, a scan gap, a stale
+	// pin — so the site announced "degraded" with nothing after the colon,
+	// on the one day (an upgrade halt) when everyone was looking.
+	Checks []healthCheck `json:"checks"`
 	// ScanGaps are height ranges the scanner could not read from its node.
 	// A publication in one of them is unknown to this observer.
 	ScanGaps []scan.ScanGap `json:"scan_gaps,omitempty"`
@@ -714,7 +721,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, metaResponse{
-		Components: h.Components, Health: h.Status, ScanGaps: h.ScanGaps, PinStatus: h.PinStatus,
+		Components: h.Components, Health: h.Status, Checks: h.Checks, ScanGaps: h.ScanGaps, PinStatus: h.PinStatus,
 		ParamUncertainty:         ranges,
 		UnassignablePublications: s.unassignablePublications(ctx),
 		APIVersion:               Version, Vantage: s.vantage, VantageInfo: s.info,
@@ -993,7 +1000,7 @@ type attestationStats struct {
 var excludedFromRate = []excludedClass{
 	{"UNATTESTED", "the settled promise carries no verified signature from this validator, so nothing proves it ever stored the shard"},
 	{"UNREACHABLE", "the observer could not complete a conversation with the endpoint; from one vantage that is not distinguishable from a problem on the observer's own path"},
-	{"NOT_REGISTERED", "the validator had no Fibre host in x/valaddr at the time of the probe; jailing and unbonding remove a provider from the bonded list while the chain keeps the entry"},
+	{"NOT_REGISTERED", "the validator had no Fibre host in x/valaddr at the time of the probe; jailing and unbonding remove a provider from the bonded list; the chain keeps the entry until the validator leaves staking state or has been jailed and unbonded for a week past its unbonding time"},
 	{"SHADOWED_SHARD", "the rows returned verify against the blob commitment but are not this promise's assignment; DownloadShard is addressed by commitment alone, so another promise over the same blob answers in its place"},
 	{"UNMATCHED_GENUINE", "the rows returned verify against the blob commitment but match no settled promise's assignment; the store serves the first shard by promise-hash order and an upload for a promise that never settled is never on chain, so no fault is supported; the row carries the indices"},
 	{"IDENTITY_EXPIRED", "the certificate is endorsed by the right consensus key but its signed validity window has lapsed; endpoint hygiene, not a retention failure"},

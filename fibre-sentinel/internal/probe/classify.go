@@ -87,8 +87,10 @@ const (
 	ClassUnreachable Classification = "UNREACHABLE"
 	// ClassNotRegistered: the validator has no Fibre host in x/valaddr at the
 	// moment of the probe. Nobody can fetch its rows, but this is a registry
-	// state (jailing and unbonding remove a provider from the bonded list
-	// while the chain keeps the entry), not a refusal to serve.
+	// state (jailing and unbonding remove a provider from the bonded list;
+	// the chain keeps the entry until the validator leaves staking state or
+	// has been jailed and unbonded for a week past its unbonding time), not
+	// a refusal to serve.
 	ClassNotRegistered Classification = "NOT_REGISTERED"
 	// ClassShadowedShard: the rows that came back are genuine rows of this
 	// blob — they verify against the commitment — but their indices are not
