@@ -13,33 +13,31 @@
 #   - HTTPS: the Caddyfile validates and https://$DOMAIN/api/v1/health
 #     answers 200 or 503 — either proves the proxy, the certificate and the
 #     API are wired; 000 means one of them is not.
-#   - alerts: fibre-healthwatch --test posts a real message to ALERT_WEBHOOK.
-#     Delivery is the point of an alert; a webhook that was never exercised
-#     is a guess.
+#   - alerts: fibre-healthwatch --test posts a real message to ALERT_WEBHOOK,
+#     run as the service user with the instance's EnvironmentFile exactly as
+#     the timer runs it. Delivery is the point of an alert; a webhook that
+#     was never exercised is a guess. The webhook is never printed.
 #
 # Usage: sudo deploy/test/exposure.sh [instance]   (default mocha)
 # Reads /etc/fibre-observer/<instance>.env. Exit 0 when every check passes.
 set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 
 INSTANCE="${1:-mocha}"
 ENVFILE=/etc/fibre-observer/$INSTANCE.env
 ALLOWED="${ALLOWED_PORTS:-22 80 443}"
-FAILED=0
-pass() { echo "  ok   $*"; }
-fail() { echo "  FAIL $*"; FAILED=1; }
-warn() { echo "  warn $*"; }
+SERVICE_USER=fibre-observer
 
 [ -r "$ENVFILE" ] || { echo "no $ENVFILE" >&2; exit 2; }
-envval() { sed -n "s/^$1=//p" "$ENVFILE" | head -1; }
-API_LISTEN=$(envval API_LISTEN)
-DOMAIN=$(envval DOMAIN)
-DATA_DIR=$(envval DATA_DIR)
+API_LISTEN=$(envval "$ENVFILE" API_LISTEN)
+DOMAIN=$(envval "$ENVFILE" DOMAIN)
+DATA_DIR=$(envval "$ENVFILE" DATA_DIR)
 
 echo "== listeners reachable from outside"
-# ss prints one line per listening socket; the local address is column 4.
-# Loopback (127., ::1) is fine; everything else must be on the allowed list.
 exposed=0
 while read -r addr; do
+  [ -n "$addr" ] || continue
   host="${addr%:*}"; port="${addr##*:}"
   case "$host" in 127.*|"[::1]"|"::1"|"[::ffff:127."*) continue ;; esac
   allowed=0
@@ -57,11 +55,11 @@ for u in fibre-scan@$INSTANCE fibre-probe@$INSTANCE fibre-heartbeat@$INSTANCE fi
          fibre-healthwatch@$INSTANCE.timer fibre-backup@$INSTANCE.timer; do
   en=$(systemctl is-enabled "$u" 2>/dev/null || true)
   ac=$(systemctl is-active "$u" 2>/dev/null || true)
-  if [ "$en" = "enabled" ]; then pass "$u enabled, $ac"; else fail "$u is '$en' (want enabled): it will not start after a reboot"; fi
+  if [ "$en" = "enabled" ]; then pass "$u enabled, $ac"; else fail "$u is '${en:-absent}' (want enabled): it will not start after a reboot"; fi
 done
 if command -v caddy >/dev/null 2>&1; then
   en=$(systemctl is-enabled caddy 2>/dev/null || true)
-  [ "$en" = "enabled" ] && pass "caddy enabled" || fail "caddy is '$en'"
+  [ "$en" = "enabled" ] && pass "caddy enabled" || fail "caddy is '${en:-absent}'"
 fi
 
 echo "== HTTPS through the proxy"
@@ -71,24 +69,23 @@ else
   warn "caddy not installed or no /etc/caddy/Caddyfile: the site is not served publicly from this host"
 fi
 if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "observer.example.org" ]; then
-  code=$(curl -sS -m 20 -o /dev/null -w '%{http_code}' "https://$DOMAIN/api/v1/health" 2>/dev/null || echo 000)
+  code=$(HTTP_TIMEOUT=20 http_code "https://$DOMAIN/api/v1/health")
   case "$code" in
     200|503) pass "https://$DOMAIN/api/v1/health -> $code (TLS, proxy and API are wired)" ;;
     *) fail "https://$DOMAIN/api/v1/health -> $code" ;;
   esac
   hsts=$(curl -sS -m 20 -I "https://$DOMAIN/" 2>/dev/null | grep -i -c '^strict-transport-security' || true)
-  [ "$hsts" -ge 1 ] && pass "HSTS header present" || warn "no Strict-Transport-Security header on https://$DOMAIN/"
+  [ "${hsts:-0}" -ge 1 ] && pass "HSTS header present" || warn "no Strict-Transport-Security header on https://$DOMAIN/"
 else
   warn "DOMAIN is unset or the example value; HTTPS not checked"
 fi
 
 echo "== alert delivery"
-if [ -z "$(envval ALERT_WEBHOOK)" ]; then
+if [ -z "$(envval "$ENVFILE" ALERT_WEBHOOK)" ]; then
   fail "ALERT_WEBHOOK is empty: healthwatch only logs; nobody is told when the observer breaks"
 elif [ -x /usr/local/bin/fibre-healthwatch ]; then
-  # as the service user with the instance's environment, exactly as the timer runs it
-  if sudo -u fibre-observer env "$(grep -v '^#' "$ENVFILE" | xargs)" /usr/local/bin/fibre-healthwatch "$INSTANCE" --test; then
-    pass "test alert delivered to ALERT_WEBHOOK; check that it arrived where a human looks"
+  if run_as_service "$ENVFILE" "$SERVICE_USER" /usr/local/bin/fibre-healthwatch "$INSTANCE" --test; then
+    pass "test alert delivered to ALERT_WEBHOOK as $SERVICE_USER with $ENVFILE; check that it arrived where a human looks"
   else
     fail "test alert not delivered"
   fi
@@ -99,7 +96,7 @@ fi
 echo "== the master key stays on the host"
 if [ -n "$DATA_DIR" ] && [ -f "$DATA_DIR/sampling-master.key" ]; then
   mode=$(stat -c '%a %U' "$DATA_DIR/sampling-master.key")
-  case "$mode" in "600 fibre-observer") pass "sampling-master.key is 600 fibre-observer" ;; *) fail "sampling-master.key is $mode (want 600 fibre-observer)" ;; esac
+  case "$mode" in "600 $SERVICE_USER") pass "sampling-master.key is 600 $SERVICE_USER" ;; *) fail "sampling-master.key is $mode (want 600 $SERVICE_USER)" ;; esac
 else
   warn "no sampling-master.key under $DATA_DIR yet (the prober writes it on first start)"
 fi

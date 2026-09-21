@@ -1,43 +1,59 @@
 #!/usr/bin/env bash
 #
 # restore: a backup is only a backup once something has been brought back
-# from it and served. This pulls the nightly copy from BACKUP_REMOTE into a
-# temporary directory, rebuilds the database from it, starts a second
-# observer-api on a spare port against that directory, and reads figures
-# from it.
+# from it, checked against what was written down when it was taken, and
+# served.
 #
-# What must hold:
-#   - the copy contains the record (publications.jsonl at least) and not the
-#     sampling master key, which backup.sh excludes on purpose;
-#   - observer-collector --once turns the copy into a database;
-#   - observer-api starts on it and answers /v1/meta and /v1/network;
-#   - the restored counts are at most the live ones (the copy is older) and
-#     the gap is explained by the copy's age.
+# backup.sh writes a manifest before it copies anything: the byte length
+# of every record file at one cut, the SHA-256 of exactly those bytes, the
+# record count in them, and the scanner's checkpoint. This pulls the copy
+# and the manifest from BACKUP_REMOTE, and:
+#
+#   - verifies the copy against the manifest: every listed file present,
+#     at least as long as the cut (the files only grow; a copy taken after
+#     the cut is trimmed back to it), the hash of the cut equal, the record
+#     count equal, state.json at or past the checkpoint, and no sampling
+#     master key. Missing, truncated or altered fails.
+#   - rebuilds the database from the verified cut and requires it to hold
+#     exactly the cut's records;
+#   - starts a second observer-api on a spare port against it and reads
+#     /v1/meta, /v1/network and /v1/validators; the counts it serves must
+#     be the rebuilt ones.
+#
+# The live host's counts are printed for orientation and compared with
+# nothing: they are a different moment.
 #
 # Usage: sudo deploy/test/restore.sh [instance] [spare-port]   (mocha, 18081)
 # Needs rclone with RCLONE_CONFIG (/etc/fibre-observer/rclone.conf) and
 # BACKUP_REMOTE set in the env file. Exit 0 when every check passes.
 set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 
 INSTANCE="${1:-mocha}"
 PORT="${2:-18081}"
 ENVFILE=/etc/fibre-observer/$INSTANCE.env
-FAILED=0
-pass() { echo "  ok   $*"; }
-fail() { echo "  FAIL $*"; FAILED=1; }
-warn() { echo "  warn $*"; }
+MANIFEST_TOOL="$(dirname "$0")/../backup-manifest.py"
+[ -x "$MANIFEST_TOOL" ] || MANIFEST_TOOL=/usr/local/bin/fibre-backup-manifest
 
 [ -r "$ENVFILE" ] || { echo "no $ENVFILE" >&2; exit 2; }
-envval() { sed -n "s/^$1=//p" "$ENVFILE" | head -1; }
-REMOTE=$(envval BACKUP_REMOTE); RPC=$(envval RPC); VANTAGE=$(envval VANTAGE); API_LISTEN=$(envval API_LISTEN)
+REMOTE=$(envval "$ENVFILE" BACKUP_REMOTE); RPC=$(envval "$ENVFILE" RPC); VANTAGE=$(envval "$ENVFILE" VANTAGE); API_LISTEN=$(envval "$ENVFILE" API_LISTEN)
 export RCLONE_CONFIG="${RCLONE_CONFIG:-/etc/fibre-observer/rclone.conf}"
 [ -n "$REMOTE" ] || { echo "BACKUP_REMOTE is empty in $ENVFILE: there is no backup to restore from" >&2; exit 1; }
 command -v rclone >/dev/null || { echo "rclone is not installed" >&2; exit 1; }
+[ -x "$MANIFEST_TOOL" ] || { echo "backup-manifest tool not found" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fibre-restore.XXXXXX")
 API_PID=""
 cleanup() { [ -n "$API_PID" ] && kill "$API_PID" 2>/dev/null || true; rm -rf "$TMP"; }
 trap cleanup EXIT
+counts() {
+  python3 - "$1" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+print(*con.execute("SELECT (SELECT COUNT(*) FROM publications), (SELECT COUNT(*) FROM probes)").fetchone())
+PY
+}
 
 echo "== 1. pull the copy from $REMOTE/$INSTANCE"
 if rclone copy "$REMOTE/$INSTANCE" "$TMP" --transfers 4 --checkers 8 --stats-one-line --stats 0 --log-level NOTICE; then
@@ -45,51 +61,56 @@ if rclone copy "$REMOTE/$INSTANCE" "$TMP" --transfers 4 --checkers 8 --stats-one
 else
   fail "rclone copy failed"; exit 1
 fi
-[ -f "$TMP/publications.jsonl" ] && pass "publications.jsonl present" || fail "no publications.jsonl in the copy"
-[ -f "$TMP/measurements.jsonl" ] && pass "measurements.jsonl present" || warn "no measurements.jsonl in the copy (none written yet?)"
-[ -f "$TMP/state.json" ] && pass "state.json present" || warn "no state.json in the copy"
-[ -f "$TMP/sampling-master.key" ] && fail "sampling-master.key is in the backup: it must never leave the host" || pass "sampling-master.key not in the copy"
-[ -f "$TMP/observer.db" ] && warn "observer.db is in the copy (backup.sh excludes it; litestream is the database's copy)" || true
+if [ ! -f "$TMP/backup-manifest.json" ]; then
+  fail "no backup-manifest.json in the copy: this backup predates manifests, or backup.sh did not run since; nothing here can be verified"
+  echo "restore: FAILED"; exit 1
+fi
+
+echo "== 2. verify the copy against the manifest"
+if "$MANIFEST_TOOL" verify "$TMP" "$TMP/backup-manifest.json" > "$TMP/verify.log" 2>&1; then
+  pass "every file matches the manifest"
+  sed 's/^/       /' "$TMP/verify.log" | head -20
+else
+  fail "the copy does not match the manifest:"
+  sed 's/^/       /' "$TMP/verify.log" | tail -20
+  echo "restore: FAILED"; exit 1
+fi
 newest=$(find "$TMP" -name '*.jsonl' -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)
 if [ -n "$newest" ]; then
   age=$(( $(date +%s) - newest ))
-  echo "  newest record file in the copy is $((age / 3600))h $(( (age % 3600) / 60 ))m old"
+  echo "  the copy's newest record file is $((age / 3600))h $(( (age % 3600) / 60 ))m old; manifest taken $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["taken_at"])' "$TMP/backup-manifest.json")"
 fi
+want_pub=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["files"].get("publications.jsonl",{}).get("records",0))' "$TMP/backup-manifest.json")
+want_probe=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["files"].get("measurements.jsonl",{}).get("records",0))' "$TMP/backup-manifest.json")
 
-echo "== 2. rebuild the database from the copy"
+echo "== 3. rebuild the database from the verified cut"
 if timeout 1200 /usr/local/bin/observer-collector -rpc "$RPC" -data-dir "$TMP" -vantage "$VANTAGE" -once \
      -endpoints-every 0 -escrow-every 0 -avatars-every 0 -export-hour -1 > "$TMP/rebuild.log" 2>&1; then
   pass "rebuilt: $(tail -1 "$TMP/rebuild.log")"
 else
   fail "rebuild failed: $(tail -3 "$TMP/rebuild.log")"; exit 1
 fi
+read -r rpub rprobe <<<"$(counts "$TMP/observer.db")"
+[ "$rpub" = "$want_pub" ] && pass "rebuilt publications ($rpub) == manifest records ($want_pub)" || fail "rebuilt publications $rpub != manifest records $want_pub"
+[ "$rprobe" = "$want_probe" ] && pass "rebuilt probes ($rprobe) == manifest records ($want_probe)" || fail "rebuilt probes $rprobe != manifest records $want_probe"
 
-echo "== 3. serve it"
+echo "== 4. serve it on :$PORT"
 /usr/local/bin/observer-api -data-dir "$TMP" -listen "127.0.0.1:$PORT" -vantage "$VANTAGE" > "$TMP/api.log" 2>&1 &
 API_PID=$!
-up=0
-for _ in $(seq 1 30); do
-  sleep 2
-  code=$(curl -sS -m 5 -o "$TMP/meta.json" -w '%{http_code}' "http://127.0.0.1:$PORT/v1/meta" 2>/dev/null || echo 000)
-  [ "$code" = "200" ] && { up=1; break; }
-  kill -0 "$API_PID" 2>/dev/null || break
-done
-if [ "$up" = 1 ]; then
-  pass "observer-api answers /v1/meta on :$PORT from the restored directory"
+if wait_http "http://127.0.0.1:$PORT/v1/meta" 60; then
+  pass "observer-api answers /v1/meta from the restored directory"
 else
   fail "observer-api did not come up on :$PORT: $(tail -3 "$TMP/api.log")"; exit 1
 fi
-rc=$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1]))["counts"]; print(c["Publications"], c["Probes"])' "$TMP/meta.json")
-lc=$(curl -sS -m 10 "http://$API_LISTEN/v1/meta" | python3 -c 'import json,sys; c=json.load(sys.stdin)["counts"]; print(c["Publications"], c["Probes"])' 2>/dev/null || echo "? ?")
-read -r rpub rprobe <<<"$rc"; read -r lpub lprobe <<<"$lc"
-echo "  restored counts: publications=$rpub probes=$rprobe · live: publications=$lpub probes=$lprobe"
-if [ "$lpub" != "?" ]; then
-  if [ "$rpub" -le "$lpub" ] && [ "$rprobe" -le "$lprobe" ]; then pass "restored counts are at most the live ones; the difference is what arrived since the copy"; else fail "restored counts exceed live: something in the copy is not on the live host"; fi
-fi
-code=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/v1/network?window=24h" 2>/dev/null || echo 000)
-[ "$code" = "200" ] && pass "/v1/network answers from the restored data" || fail "/v1/network -> $code"
-code=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/v1/validators?window=24h" 2>/dev/null || echo 000)
-[ "$code" = "200" ] && pass "/v1/validators answers from the restored data" || fail "/v1/validators -> $code"
+code=$(http_code "http://127.0.0.1:$PORT/v1/meta" "$TMP/meta.json")
+read -r apub aprobe <<<"$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1]))["counts"]; print(c["Publications"], c["Probes"])' "$TMP/meta.json")"
+[ "$code" = 200 ] && [ "$apub" = "$rpub" ] && [ "$aprobe" = "$rprobe" ] && pass "/v1/meta counts are the rebuilt ones (publications=$apub probes=$aprobe)" || fail "/v1/meta -> $code counts publications=$apub probes=$aprobe, rebuilt $rpub/$rprobe"
+code=$(HTTP_TIMEOUT=30 http_code "http://127.0.0.1:$PORT/v1/network?window=24h")
+[ "$code" = 200 ] && pass "/v1/network answers from the restored data" || fail "/v1/network -> $code"
+code=$(HTTP_TIMEOUT=30 http_code "http://127.0.0.1:$PORT/v1/validators?window=24h")
+[ "$code" = 200 ] && pass "/v1/validators answers from the restored data" || fail "/v1/validators -> $code"
+lc=$(curl -sS -m 10 "http://$API_LISTEN/v1/meta" 2>/dev/null | python3 -c 'import json,sys; c=json.load(sys.stdin)["counts"]; print(c["Publications"], c["Probes"])' 2>/dev/null || echo "? ?")
+echo "  live host now: publications/probes = $lc (a different moment; not compared)"
 
 echo
 if [ "$FAILED" = 0 ]; then echo "restore: every check passed (restored API stopped, $TMP removed)"; else echo "restore: FAILED"; exit 1; fi

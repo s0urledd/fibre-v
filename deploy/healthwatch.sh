@@ -34,13 +34,13 @@ if [ "${2:-}" = "--test" ]; then
   [ -n "$webhook" ] || { echo "healthwatch[$name]: ALERT_WEBHOOK is empty; nothing to test" >&2; exit 1; }
   msg="Fibre observer [$name] test: alert delivery check from $(hostname) at $(date -u +%Y-%m-%dT%H:%M:%SZ); no action needed"
   payload=$(printf '%s' "$msg" | python3 -c 'import json,sys; m=sys.stdin.read()[:1900]; print(json.dumps({"content": m, "text": m}))')
-  if out=$(curl -sS --fail-with-body -m 20 -X POST -H 'content-type: application/json' -d "$payload" "$webhook" 2>&1); then
-    echo "healthwatch[$name]: test message delivered"
-  else
-    echo "healthwatch[$name]: webhook post failed: $out" >&2
-    exit 1
-  fi
-  exit 0
+  # Only the status code is printed: curl's own error text can carry the
+  # URL, and the URL is the secret.
+  code=$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$payload" "$webhook" 2>/dev/null) || code=000
+  case "$code" in
+    2*) echo "healthwatch[$name]: test message delivered (HTTP $code)"; exit 0 ;;
+    *)  echo "healthwatch[$name]: webhook post failed (HTTP ${code:-000})" >&2; exit 1 ;;
+  esac
 fi
 
 body=$(curl -sS -m 20 -o /dev/stdout -w '\n%{http_code}' "$url" 2>/dev/null || echo -e '\n000')
