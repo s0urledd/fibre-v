@@ -106,12 +106,16 @@ PY
 }
 
 # run_as_service <envfile> <user> <cmd...>: run cmd as the service user with
-# the instance's environment, the way the units run. systemd-run reads the
-# EnvironmentFile with systemd's own parser; without systemd the fallback
-# parses it here and passes each pair as its own argument to env.
+# the instance's environment, the way the units run. As root on a systemd
+# host, systemd-run reads the EnvironmentFile with systemd's own parser and
+# runs the command under the unit's user; otherwise (no systemd, or not
+# root — a transient unit with --uid needs root, and CI is neither) the
+# fallback parses the file here and passes each pair as its own argument
+# to env. The self-test covers the fallback; the systemd-run path is what
+# exposure.sh takes under sudo on the host.
 run_as_service() {
   local envfile=$1 user=$2; shift 2
-  if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  if [ "$(id -u)" = 0 ] && command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     systemd-run --quiet --wait --pipe --collect --uid="$user" -p "EnvironmentFile=$envfile" "$@"
   else
     local pairs=()
