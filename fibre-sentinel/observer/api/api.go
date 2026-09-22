@@ -632,11 +632,26 @@ type upgradeSignal struct {
 	Share            float64 `json:"share"`           // voting_power / total_voting_power
 	ThresholdShare   float64 `json:"threshold_share"` // threshold_power / total_voting_power
 	UpgradeHeight    int64   `json:"upgrade_height,omitempty"`
+	// BlocksRemaining is upgrade_height minus the chain tip the collector
+	// last saw, while the upgrade is scheduled and still ahead.
+	BlocksRemaining int64 `json:"blocks_remaining,omitempty"`
+	// BlockTimeS is the chain's average seconds per block, measured from the
+	// older pace anchor the collector keeps (store.NotePace) to the tip, over
+	// PaceWindowS seconds; ETASeconds is BlocksRemaining at that pace. Absent
+	// until the measurement spans at least half an hour. An estimate at the
+	// chain's recent pace, not a promise about its next block.
+	BlockTimeS  float64 `json:"block_time_s,omitempty"`
+	PaceWindowS int64   `json:"pace_window_s,omitempty"`
+	ETASeconds  int64   `json:"eta_seconds,omitempty"`
 	// MissingValidators is the monikers x/signal reports as not having
 	// signalled; the module answers by moniker, not by address.
 	MissingValidators []string `json:"missing_validators"`
 	PolledAt          string   `json:"polled_at"`
 }
+
+// paceMinWindow is the least span the block-time measurement must cover
+// before the API states it.
+const paceMinWindow = 30 * time.Minute
 
 // upgradeSignalOf builds the block from the collector's meta keys, or nil
 // once Fibre is live or nothing was polled yet.
@@ -655,6 +670,20 @@ func upgradeSignalOf(meta map[string]string) *upgradeSignal {
 		u.ThresholdShare = float64(u.ThresholdPower) / float64(u.TotalVotingPower)
 	}
 	_ = json.Unmarshal([]byte(meta["signal_missing"]), &u.MissingValidators)
+	tip := n("chain_height")
+	if u.UpgradeHeight > 0 && tip > 0 && u.UpgradeHeight > tip {
+		u.BlocksRemaining = u.UpgradeHeight - tip
+		fromH := n("chain_pace_from_height")
+		fromT, errFrom := time.Parse(store.TimeLayout, meta["chain_pace_from_time"])
+		tipT, errTip := time.Parse(store.TimeLayout, meta["chain_tip_time"])
+		if errFrom == nil && errTip == nil && fromH > 0 && tip > fromH {
+			if window := tipT.Sub(fromT); window >= paceMinWindow {
+				u.BlockTimeS = window.Seconds() / float64(tip-fromH)
+				u.PaceWindowS = int64(window.Seconds())
+				u.ETASeconds = int64(float64(u.BlocksRemaining)*u.BlockTimeS + 0.5)
+			}
+		}
+	}
 	return u
 }
 

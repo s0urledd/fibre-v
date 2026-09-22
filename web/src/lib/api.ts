@@ -80,6 +80,13 @@ export type Meta = {
     share: number;
     threshold_share: number;
     upgrade_height?: number;
+    /** upgrade_height minus the chain tip, while the upgrade is scheduled and ahead */
+    blocks_remaining?: number;
+    /** the chain's average seconds per block, measured over pace_window_s; absent under half an hour of measurement */
+    block_time_s?: number;
+    pace_window_s?: number;
+    /** blocks_remaining at that pace: an estimate, not a promise */
+    eta_seconds?: number;
     /** monikers, as x/signal reports them */
     missing_validators: string[];
     polled_at: string;
@@ -725,6 +732,15 @@ export function dateUTC(s: string | null | undefined): string {
   const d = new Date(s);
   if (isNaN(d.getTime())) return s;
   return d.toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+}
+/** "2 d 4 h", "4 h 36 min", "36 min": a span in seconds, two units at most */
+export function span(seconds: number): string {
+  const m = Math.round(seconds / 60);
+  if (m < 60) return `${Math.max(m, 1)} min`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  if (h < 24) return rm ? `${h} h ${rm} min` : `${h} h`;
+  const d = Math.floor(h / 24), rh = h % 24;
+  return rh ? `${d} d ${rh} h` : `${d} d`;
 }
 /** "4 h 0 min" between two instants */
 export function dur(a: string, b: string): string {
