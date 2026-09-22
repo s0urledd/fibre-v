@@ -277,9 +277,17 @@ export type Obligations = {
   unobserved_not_probed: number;
   /** the retention window has not ended: no verdict yet, outside the rate */
   pending: number;
+  /** the deadline rests on a parameter range the observer has not read; no verdict either way */
+  held_param_unverified?: number;
   /** served / (served + broken) */
   rate: Rate;
 };
+
+/** end-unobserved + never observed + held: the obligations the rate does not speak for, pending aside */
+export function undecided(o: Obligations | null | undefined): number {
+  if (!o) return 0;
+  return o.end_unobserved + o.unobserved + (o.held_param_unverified ?? 0);
+}
 
 export type Validator = {
   address: string;
@@ -558,7 +566,12 @@ export type Payment = {
   available_at?: string;
 };
 
-export type Fetch<T> = { data: T | null; error: string | null; loading: boolean };
+/**
+ * fetchedAt is when the payload on screen last arrived from the API. A refresh
+ * that fails keeps the payload and the old fetchedAt beside the new error, so
+ * a page can say "showing data as of 08:13" instead of pretending it is now.
+ */
+export type Fetch<T> = { data: T | null; error: string | null; loading: boolean; fetchedAt: string | null };
 
 // One in-flight request and one timer per (path, interval), however many
 // components ask for it: the header, the banner, the footer and the page all
@@ -572,18 +585,18 @@ async function fetchOnce(path: string): Promise<Fetch<unknown>> {
     if (!r.ok) {
       let msg = `${r.status}`;
       try { msg = (await r.json()).error ?? msg; } catch { /* keep status */ }
-      return { data: null, error: msg, loading: false };
+      return { data: null, error: msg, loading: false, fetchedAt: null };
     }
-    return { data: await r.json(), error: null, loading: false };
+    return { data: await r.json(), error: null, loading: false, fetchedAt: new Date().toISOString() };
   } catch (e) {
-    return { data: null, error: e instanceof Error ? e.message : String(e), loading: false };
+    return { data: null, error: e instanceof Error ? e.message : String(e), loading: false, fetchedAt: null };
   }
 }
 
 function subscribe(key: string, path: string, refreshMs: number, fn: (f: Fetch<unknown>) => void): () => void {
   let st = streams.get(key);
   if (!st) {
-    st = { subs: new Set(), timer: null, last: { data: null, error: null, loading: true } };
+    st = { subs: new Set(), timer: null, last: { data: null, error: null, loading: true, fetchedAt: null } };
     streams.set(key, st);
     const load = async () => {
       const next = await fetchOnce(path);
@@ -597,7 +610,7 @@ function subscribe(key: string, path: string, refreshMs: number, fn: (f: Fetch<u
       // page to show, and the figures keep their own computed_at so nobody
       // reads stale numbers as fresh ones.
       cur.last = next.error && cur.last.data !== null
-        ? { data: cur.last.data, error: next.error, loading: false }
+        ? { data: cur.last.data, error: next.error, loading: false, fetchedAt: cur.last.fetchedAt }
         : next;
       const out = cur.last;
       cur.subs.forEach((s) => s(out));
@@ -621,7 +634,7 @@ function subscribe(key: string, path: string, refreshMs: number, fn: (f: Fetch<u
 }
 
 export function useApi<T>(path: string | null, refreshMs = 30000): Fetch<T> {
-  const [state, setState] = useState<Fetch<T>>({ data: null, error: null, loading: !!path });
+  const [state, setState] = useState<Fetch<T>>({ data: null, error: null, loading: !!path, fetchedAt: null });
   useEffect(() => {
     if (!path) return;
     return subscribe(`${refreshMs}|${path}`, path, refreshMs, (f) => setState(f as Fetch<T>));
@@ -636,6 +649,7 @@ export function useApi<T>(path: string | null, refreshMs = 30000): Fetch<T> {
  *  record with a success down to 0.0%: those print as bounds. */
 export function fmtPct(r: Rate | undefined | null): string {
   if (!r || r.den === 0 || r.value === null) return "—";
+  if (r.num === r.den) return "100%";
   const s = (r.value * 100).toFixed(1);
   if (s === "100.0" && r.num < r.den) return ">99.9%";
   if (s === "0.0" && r.num > 0) return "<0.1%";
@@ -645,6 +659,13 @@ export function fmtPct(r: Rate | undefined | null): string {
 /** whether a rate has enough observations behind it to rank or compare. */
 export function enoughToRank(r: Rate | undefined | null): boolean {
   return !!r && r.den >= MIN_RATED;
+}
+/** the same, from two counts */
+export function pctOf(num: number, den: number): string {
+  return fmtPct({ num, den, value: den > 0 ? num / den : null });
+}
+export function int(n: number | null | undefined): string {
+  return n == null ? "—" : n.toLocaleString("en-US");
 }
 export function fmtCount(r: Rate | undefined | null): string {
   if (!r) return "";
@@ -667,16 +688,56 @@ export function held(s: string | null | undefined): string {
   if (h < 48) return `${h} h`;
   return `${Math.round(h / 24)} d`;
 }
-export function ago(s: string | null | undefined): string {
+/** "just now", "12 min", "3 h 12 min", "2 d": how long since s, without the word */
+export function since(s: string | null | undefined): string {
   if (!s) return "";
   const ms = Date.now() - new Date(s).getTime();
   if (isNaN(ms)) return "";
-  const m = Math.round(ms / 60000);
+  const m = Math.max(0, Math.round(ms / 60000));
   if (m < 1) return "just now";
-  if (m < 60) return `${m} min ago`;
-  const h = Math.round(m / 60);
-  if (h < 48) return `${h} h ago`;
-  return `${Math.round(h / 24)} d ago`;
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  if (h < 24) return rm ? `${h} h ${rm} min` : `${h} h`;
+  return `${Math.floor(h / 24)} d`;
+}
+export function ago(s: string | null | undefined): string {
+  const w = since(s);
+  return w === "" || w === "just now" ? w : `${w} ago`;
+}
+/** "2026-09-22 08:59:09 UTC" */
+export function utcWord(s: string | null | undefined): string {
+  const u = utc(s);
+  return u.endsWith("Z") ? u.slice(0, -1) + " UTC" : u;
+}
+/** "08:59 UTC" */
+export function hhmm(s: string | null | undefined): string {
+  const u = utc(s);
+  return u.length >= 16 ? u.slice(11, 16) + " UTC" : u;
+}
+/** "08:59:09 UTC" */
+export function hhmmss(s: string | null | undefined): string {
+  const u = utc(s);
+  return u.length >= 19 ? u.slice(11, 19) + " UTC" : u;
+}
+/** "22 Sep 2026" */
+export function dateUTC(s: string | null | undefined): string {
+  if (!s) return "—";
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return s;
+  return d.toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+}
+/** "4 h 0 min" between two instants */
+export function dur(a: string, b: string): string {
+  const m = Math.round((new Date(b).getTime() - new Date(a).getTime()) / 60000);
+  if (isNaN(m)) return "—";
+  const h = Math.floor(Math.abs(m) / 60), rm = Math.abs(m) % 60;
+  return h ? `${h} h ${rm} min` : `${rm} min`;
+}
+/** head…tail of a long identifier */
+export function shortMid(s: string | null | undefined, head = 16, tail = 4): string {
+  if (!s) return "";
+  if (s.length <= head + tail + 1) return s;
+  return `${s.slice(0, head)}…${s.slice(-tail)}`;
 }
 export function shortHex(s: string, n = 8): string {
   if (!s || s.length <= 2 * n + 3) return s;

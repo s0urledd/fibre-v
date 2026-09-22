@@ -13,6 +13,12 @@ npm run build                                               # writes out/ for Ca
 `NEXT_PUBLIC_API_BASE` defaults to same-origin `/api`, which is what the
 Caddyfile in `deploy/` proxies to `observer-api`.
 
-Design tokens, badge set and layout follow
-`docs/research/R9-presentation-and-celestia-design.md`; verdict arithmetic
-follows `docs/verdicts.md`.
+The pages share one small system, all in `src/app/globals.css`: white paper
+and hairlines rather than cards, IBM Plex Sans for prose and figures with
+Plex Mono only for addresses, hashes and heights, nothing heavier than 600,
+and one accent. Green marks only "reachable", amber only "unreachable" and
+observer-side notices, and red only a broken obligation, because that is the
+only accusation the site makes. Every headline figure maps to one field of
+the API; definitions stay on the methodology page, one disclosure away.
+Verdict arithmetic follows `docs/verdicts.md`; `test/README.md` describes
+the fixture and the audit that check the pages at scale.
