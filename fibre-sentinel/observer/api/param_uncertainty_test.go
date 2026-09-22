@@ -3,10 +3,14 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1129,6 +1133,79 @@ func TestPerValidatorFiguresHonourTheHoldAndAddUpToTheNetwork(t *testing.T) {
 	for _, p := range probes.Probes {
 		if p.Classification != "RETENTION_UNVERIFIED" {
 			t.Fatalf("filtered row published as %s", p.Classification)
+		}
+	}
+}
+
+// The validator page is served from a short cache that a hold still clears
+// at once, and an address nothing is on record for is refused before any
+// aggregate is built.
+func TestTheValidatorPageIsCachedUntilAHoldLandsAndRefusesUnknownAddresses(t *testing.T) {
+	a := strings.Repeat("a1", 20)
+	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
+	gone := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomeNotFound}
+	outcomes := map[string][]probe.Outcome{a: gone}
+	for i := 2; i <= 8; i++ {
+		outcomes[strings.Repeat(fmt.Sprintf("b%d", i), 20)] = ok
+	}
+	st, _, _ := heldFixture(t, outcomes)
+	srv := api.New(st, "test")
+	ts := httptest.NewServer(srv)
+	defer func() { ts.Close(); srv.Close() }()
+
+	if code := get(t, ts, "/v1/validators/"+strings.Repeat("cd", 20), nil); code != 404 {
+		t.Fatalf("an address with nothing on record: %d, want 404", code)
+	}
+
+	type detail struct {
+		Validator struct {
+			Faults int64 `json:"faults"`
+		} `json:"validator"`
+		Recent []any `json:"recent_probes"`
+	}
+	var d detail
+	if code := get(t, ts, "/v1/validators/"+a+"?window=24h", &d); code != 200 || d.Validator.Faults != 2 || len(d.Recent) != 4 {
+		t.Fatalf("before: %d %+v", code, d)
+	}
+	// Within the TTL the answer is the cached one: the rows behind it are
+	// gone and it still reads as it did.
+	if _, err := st.DB().Exec(`DELETE FROM probes WHERE validator_address = ?`, a); err != nil {
+		t.Fatal(err)
+	}
+	d = detail{}
+	if code := get(t, ts, "/v1/validators/"+a+"?window=24h", &d); code != 200 || len(d.Recent) != 4 {
+		t.Fatalf("cached: %d %+v", code, d)
+	}
+	// A hold clears it at once.
+	openRange(t, st)
+	d = detail{}
+	if code := get(t, ts, "/v1/validators/"+a+"?window=24h", &d); code != 200 || d.Validator.Faults != 0 || len(d.Recent) != 0 {
+		t.Fatalf("after the hold: %d %+v", code, d)
+	}
+
+	// Many readers of one page at once get one answer.
+	b := strings.Repeat("b2", 20)
+	bodies := make([]string, 8)
+	var wg sync.WaitGroup
+	for i := range bodies {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resp, err := http.Get(ts.URL + "/v1/validators/" + b + "?window=7d")
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode == 200 {
+				bodies[i] = string(raw)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := range bodies {
+		if bodies[i] == "" || bodies[i] != bodies[0] {
+			t.Fatalf("reader %d of 8 got a different or failed answer", i)
 		}
 	}
 }

@@ -113,6 +113,8 @@ type Server struct {
 	blobs *blobCache
 	// asOf rations pinned-window requests (see asOfLimiter).
 	asOf asOfLimiter
+	// details caches the validator page (see validator_detail.go).
+	details detailCache
 	// bg counts the server's own background work (the blob-page warm-up),
 	// for Close.
 	bg sync.WaitGroup
@@ -2958,9 +2960,9 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	}
 	if win.AsOf {
 		// This route builds the aggregates the network and validator lists
-		// do, four spans of them, and none of it is cached — so it was the
-		// one uncapped way to buy a full pinned computation. Rationed like
-		// the others.
+		// do, four spans of them, and a pinned answer is never cached — so it
+		// was the one uncapped way to buy a full pinned computation. Rationed
+		// like the others.
 		if !s.asOf.allow(time.Now()) {
 			w.Header().Set("Retry-After", "2")
 			writeErr(w, 429, "as_of requests are limited to one every two seconds")
@@ -2973,7 +2975,23 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		}
 		defer s.asOf.leave()
 		w.Header().Set("Cache-Control", "no-store")
+		status, out, err := s.validatorDetail(ctx, addr, win, now)
+		if err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		writeJSON(w, status, out)
+		return
 	}
+	s.serveValidatorDetail(w, r, addr, win, now)
+}
+
+const validatorNotSeen = "validator not seen in the registry or in any probe"
+
+// validatorDetail builds the /v1/validators/{addr} answer: the row over win,
+// the four standard spans beside it, and the newest probes. status is 200, or
+// 404 with an error body when nothing about addr is on record.
+func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, now time.Time) (int, any, error) {
 	// The spans beside the row are anchored on the same moment the row is:
 	// the pin when there is one, the clock otherwise. Anchoring them on the
 	// clock while the row was pinned put a rewound validator beside four
@@ -3007,8 +3025,7 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		}
 		_, ss, err := s.suspectPoints(ctx, sw)
 		if err != nil {
-			s.writeInternal(w, r.URL.Path, err)
-			return
+			return 0, nil, err
 		}
 		if sw.Name == "all" {
 			suspectAll = ss.points
@@ -3016,18 +3033,15 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+ss.clause("scheduled_at"),
 			append([]any{addr, sw.startArg(), sw.endArg()}, ss.args...)...)
 		if err != nil {
-			s.writeInternal(w, r.URL.Path, err)
-			return
+			return 0, nil, err
 		}
 		obl, err := s.obligationsWhere(ctx, sw, ss, ` AND pr.validator_address = ?`, addr)
 		if err != nil {
-			s.writeInternal(w, r.URL.Path, err)
-			return
+			return 0, nil, err
 		}
 		rolled, label, err := s.rolledFor(ctx, sw, addr)
 		if err != nil {
-			s.writeInternal(w, r.URL.Path, err)
-			return
+			return 0, nil, err
 		}
 		if rolled != nil {
 			if rp, ok := rolled.ProbesByVal[addr]; ok {
@@ -3046,12 +3060,10 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.validatorRows(ctx, win, addr)
 	if err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return 0, nil, err
 	}
 	if len(rows) == 0 {
-		writeErr(w, 404, "validator not seen in the registry or in any probe")
-		return
+		return 404, map[string]any{"error": validatorNotSeen}, nil
 	}
 	probeWhere, probeArgs := `validator_address = ?`, []any{addr}
 	if win.AsOf {
@@ -3060,13 +3072,12 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	}
 	probes, err := s.probeRows(ctx, probeWhere, 50, probeArgs...)
 	if err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return 0, nil, err
 	}
 	probes, moreProbes := trim(probes, 50)
 	out := map[string]any{
 		"window":                      win,
-		"record_through":              s.recordThrough(r.Context()),
+		"record_through":              s.recordThrough(ctx),
 		"validator":                   rows[0],
 		"windows":                     spans,
 		"recent_probes":               probes,
@@ -3081,7 +3092,7 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	if _, label, err := s.rolledFor(ctx, win, addr); err == nil && label != nil {
 		out["rolled_up"] = label
 	}
-	writeJSON(w, 200, out)
+	return 200, out, nil
 }
 
 // ---- blobs ----

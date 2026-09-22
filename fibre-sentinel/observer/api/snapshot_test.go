@@ -198,3 +198,35 @@ func TestSnapshotPersistsAcrossProcesses(t *testing.T) {
 		t.Fatal("a snapshot file of another label was loaded")
 	}
 }
+
+// A hold that lands while a window is being computed must not be stamped onto
+// the figure computed before it. The revision is read before the queries, so
+// the next reader sees a snapshot from the old revision and recomputes; read
+// after, the stale figure passed for current until its TTL ran out.
+func TestASnapshotComputedAcrossARevisionChangeIsNotServedAsCurrent(t *testing.T) {
+	rev := "r1"
+	computed := 0
+	c := newSnapshotCache("test", func(ctx context.Context, win Window) (int, error) {
+		computed++
+		if computed == 1 {
+			rev = "r2" // a hold lands while the first computation runs
+		}
+		return computed, nil
+	})
+	c.revision = func() string { return rev }
+	ctx := context.Background()
+	win := testWindow("24h")
+
+	v, _, _, err := c.get(ctx, nil, win)
+	if err != nil || v != 1 {
+		t.Fatalf("first read: %d %v", v, err)
+	}
+	v, _, _, err = c.get(ctx, nil, win)
+	if err != nil || v != 2 {
+		t.Fatalf("second read served %d (computations %d); the figure from before the hold must be recomputed", v, computed)
+	}
+	v, _, _, err = c.get(ctx, nil, win)
+	if err != nil || v != 2 || computed != 2 {
+		t.Fatalf("third read: %d after %d computations; nothing changed since the second", v, computed)
+	}
+}

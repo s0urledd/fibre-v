@@ -327,6 +327,11 @@ func (c *snapshotCache[T]) background(log logf, win Window) {
 
 func (c *snapshotCache[T]) fill(ctx context.Context, win Window) (*snap[T], error) {
 	start := time.Now()
+	// The revision the figures were computed under is the one read before
+	// the queries ran. Read after, a hold landing mid-compute stamped a
+	// pre-hold figure with the post-hold revision, and get served it as
+	// current until the TTL ran out: the withheld fault republished.
+	rev := c.rev()
 	v, err := c.compute(ctx, win)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -334,7 +339,7 @@ func (c *snapshotCache[T]) fill(ctx context.Context, win Window) (*snap[T], erro
 	if err != nil {
 		return nil, err
 	}
-	s := &snap[T]{v: v, rev: c.rev(), at: start, ms: time.Since(start).Milliseconds()}
+	s := &snap[T]{v: v, rev: rev, at: start, ms: time.Since(start).Milliseconds()}
 	c.entries[win.Name] = s
 	c.persist(win.Name, s)
 	return s, nil
