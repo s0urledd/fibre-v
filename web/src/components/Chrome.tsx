@@ -112,7 +112,7 @@ function NetworkChip({ meta, error }: { meta: Meta | null; error: string | null 
     <details className="net menu" title={title} ref={box}>
       <summary><i className={"dot " + dot} />{label}</summary>
       <div className="list" role="menu">
-        <span aria-current="true">{label}<i className="tagx">this site</i></span>
+        <span aria-current="true">{label}</span>
         {others.map(([name, url]) => <a key={name} href={url} role="menuitem">{netName(name)}</a>)}
         {!mainnetHere && !mainnetLinked && (
           <span className="soon" aria-disabled="true" title="Fibre is not on mainnet yet. This observer will follow it there.">Mainnet<i className="tagx">soon</i></span>
