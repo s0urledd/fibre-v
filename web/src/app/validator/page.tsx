@@ -2,7 +2,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, int, pctOf, bytes, ago, utcWord, hhmm, hhmmss, dateUTC, shortMid, undecided, MIN_RATED, API_BASE } from "@/lib/api";
+import { useApi, type Validator, type Probe, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, MIN_RATED, API_BASE } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
@@ -27,7 +27,7 @@ type Detail = {
 
 /** the verdict as a word and a mark; the classification is the observer's, never re-derived here */
 const WORDS: Record<string, [string, string]> = {
-  HEALTHY: ["Served", "ok"], FAULT: ["Broken", "fault"], UNATTESTED: ["Served, unsigned", "unsigned"], NOT_PROBED: ["Not probed", "gone"],
+  HEALTHY: ["Served", "ok"], FAULT: ["Broken", "fault"], UNATTESTED: ["Unsigned", "unsigned"], NOT_PROBED: ["Not probed", "gone"],
   EXPECTED_GONE: ["Expected gone", "gone"], UNREACHABLE: ["Unreachable", "other"], NOT_REGISTERED: ["No endpoint", "none"],
   IDENTITY_EXPIRED: ["Certificate expired", "other"], IDENTITY_MISMATCH: ["Wrong certificate", "other"], THROTTLED: ["Rate limited", "other"],
   SERVER_ERROR: ["Server error", "other"], RETENTION_UNVERIFIED: ["Deadline unverified", "gone"], TOLERATED: ["Tolerated", "other"],
@@ -36,6 +36,11 @@ const WORDS: Record<string, [string, string]> = {
   EXPECTED_UNASSIGNED: ["Unassigned", "gone"], SERVING_UNASSIGNED: ["Serving unassigned", "other"],
 };
 const wordOf = (cls: string): [string, string] => WORDS[cls] ?? [cls.toLowerCase().replace(/_/g, " "), "other"];
+/** an unsigned probe is not rated either way; the word says what came back, and nothing more */
+const probeWord = (p: Probe): [string, string] => {
+  if (p.classification === "UNATTESTED") return (p.outcome === "SERVED_OK" || p.outcome === "PARTIAL") ? ["Served, unsigned", "unsigned"] : ["Unsigned", "unsigned"];
+  return wordOf(p.classification);
+};
 const PHASE: Record<string, string> = { in_window: "in window", grace: "grace", post: "after window" };
 const POINT: Record<string, string> = { w1: "w1 · 12% of the window", w2: "w2 · 45%", w3: "w3 · 72%", w4: "w4 · within 2 min 30 s of the deadline" };
 const identityWord: Record<string, string> = { verified: "verified", expired: "expired", mismatch: "not this validator’s key", no_tls: "no TLS", unverified: "unverified", unreachable: "unreachable" };
@@ -45,13 +50,15 @@ function Page() {
   const [win, setWin] = useWindow("24h");
   const { data: meta, error: metaErr } = useApi<Meta>("/v1/meta");
   const d = useApi<Detail>(addr ? `/v1/validators/${addr}?window=${win}` : null);
+  const notLive = !!meta?.app_version && !meta.fibre_active;
   if (!addr) return <p className="notice">Open a validator from the <Link href="/">overview</Link>, or add <code>?addr=&lt;consensus address&gt;</code> to the address.</p>;
   const data = d.data;
   if (!data) {
     return (
       <>
-        <div className="head"><div><p className="crumb"><Link href="/">Validators</Link> › …</p><h1>{d.error ? "Validator" : "Loading…"}</h1></div></div>
-        <StatusLine meta={meta} metaError={metaErr} snap={null} client={{ error: d.error, fetchedAt: d.fetchedAt }} />
+        <div className="head"><div><p className="crumb"><Link href="/">Validators</Link> › …</p><h1>{notFound(d) ? "Validator not found" : d.error ? "Validator" : "Loading…"}</h1></div></div>
+        <StatusLine meta={meta} metaError={metaErr} snap={null} client={{ error: d.error, fetchedAt: d.fetchedAt, status: d.status }} />
+        {notFound(d) && <p className="notice">No validator with the address <span className="mono">{addr}</span> is on record: neither in the staking set nor in any probe. Check the address, or open one from the <Link href="/">overview</Link>.</p>}
       </>
     );
   }
@@ -66,7 +73,8 @@ function Page() {
   const self = !!SELF_VALIDATOR && [v.address, v.cons_address, v.operator_address].some((a) => !!a && a.toLowerCase() === SELF_VALIDATOR);
   const suspect = new Map((data.suspect_points ?? []).map((s) => [s.at, s.reason.replace(",", " and ")]));
   const probes = [...data.recent_probes].sort((a, b) => b.started_at.localeCompare(a.started_at));
-  const lastFault = probes.find((p) => p.classification === "FAULT");
+  // a failed probe at a point the observer does not trust itself at is not this validator's
+  const lastFault = probes.find((p) => p.classification === "FAULT" && !suspect.has(p.scheduled_at));
   const lastOk = probes.find((p) => p.classification === "HEALTHY");
   const points = v.serve_rate_by_point ?? [];
   const defaultPoints = points.length === 4 && points.every((p, i) => p.key === `w${i + 1}`);
@@ -96,18 +104,18 @@ function Page() {
         </div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
-      <StatusLine meta={meta} metaError={metaErr} snap={{ record_through: data.record_through, window: data.window }} client={{ error: d.error, fetchedAt: d.fetchedAt }} measuring={measuring} />
+      <StatusLine meta={meta} metaError={metaErr} snap={{ record_through: data.record_through, window: data.window }} client={{ error: d.error, fetchedAt: d.fetchedAt, status: d.status }} measuring={measuring} />
 
       <Metrics>
-        <Metric label="Kept obligations"
-          value={!o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}
-          tone={!o || decided === 0 ? "absent" : undefined}
-          help={!o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed`} />
+        <Metric label="Service rate"
+          value={notLive || !o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}
+          tone={notLive || !o || decided === 0 ? "absent" : undefined}
+          help={notLive ? "nothing to measure yet" : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed`} />
         <Metric label="Broken obligations"
-          value={int(o?.broken ?? 0)} tone={(o?.broken ?? 0) > 0 ? "fault" : !o || o.total === 0 ? "absent" : undefined}
-          help={(o?.broken ?? 0) > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}` : faults > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}, none under a proven obligation` : "none in this period"}
-          title={(o?.broken ?? 0) > 0 ? "One obligation counts once, however many probes of it failed. The probe rows are in the evidence below." : undefined} />
-        <Metric label="Undecided" value={int(und)} tone={!o || o.total === 0 ? "absent" : undefined} help={`${int(o?.pending ?? 0)} pending`} />
+          value={notLive ? "—" : int(o?.broken ?? 0)} tone={notLive ? "absent" : (o?.broken ?? 0) > 0 ? "fault" : !o || o.total === 0 ? "absent" : undefined}
+          help={notLive ? "nothing to measure yet" : (o?.broken ?? 0) > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}` : faults > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"} · none broken in this period` : "none in this period"}
+          title={(o?.broken ?? 0) > 0 ? "One obligation counts once, however many probes of it failed. The probe rows are in the evidence below." : faults > 0 ? "A failed probe of an obligation still inside its retention window is not a verdict yet; the obligation is decided at the end of the window." : undefined} />
+        <Metric label="Undecided" value={notLive ? "—" : int(und)} tone={notLive || !o || o.total === 0 ? "absent" : undefined} help={notLive ? "nothing to measure yet" : `${int(o?.pending ?? 0)} pending`} />
         <Metric label="Reachability"
           value={!bonded ? "—" : rw && rw.den > 0 ? int(rw.num) : "—"} den={bonded && rw && rw.den > 0 ? int(rw.den) : undefined}
           tone={!bonded || !rw || rw.den === 0 ? "absent" : undefined}
@@ -121,20 +129,19 @@ function Page() {
       <section className="band" id="outcomes">
         <div>
           <h2>Obligation outcomes</h2>
-          <OutcomeBar o={o} />
+          <OutcomeBar o={o} absent={notLive} />
           <table className="periods">
-            <thead><tr><th>Period</th><th>Service rate</th><th>Assessed</th><th>Broken</th><th>Pending</th></tr></thead>
+            <thead><tr><th>Period</th><th>Service rate</th><th>Broken</th><th>Pending</th></tr></thead>
             <tbody>
               {data.windows.map((w) => {
                 const wo = w.obligations, wd = wo.served + wo.broken;
                 const name = w.window.name;
                 return (
-                  <tr key={name} className={name === win ? "on" : undefined} onClick={() => setWin(name as typeof win)} style={{ cursor: "pointer" }} title={`show the ${windowLabel(name)} period`}>
-                    <td>{windowLabel(name)}</td>
-                    <td>{wd === 0 ? "—" : pctOf(wo.served, wd)}</td>
-                    <td>{int(wd)}</td>
-                    <td>{wo.broken > 0 ? <span className="word fault">{int(wo.broken)}</span> : "0"}</td>
-                    <td>{int(wo.pending)}</td>
+                  <tr key={name} className={name === win ? "on" : undefined}>
+                    <td><button type="button" className="rowlink" aria-pressed={name === win} onClick={() => setWin(name as typeof win)} title={`show the ${windowLabel(name)} period`}>{windowLabel(name)}</button></td>
+                    <td>{notLive || wd === 0 ? "—" : <>{pctOf(wo.served, wd)}<span className="den"> · {int(wo.served)}/{int(wd)}</span></>}</td>
+                    <td>{notLive ? "—" : wo.broken > 0 ? <span className="word fault">{int(wo.broken)}</span> : "0"}</td>
+                    <td>{notLive ? "—" : int(wo.pending)}</td>
                   </tr>
                 );
               })}
@@ -159,9 +166,9 @@ function Page() {
           )}
           <p className="errs">
             {lastFault
-              ? <>Last failed probe <b>{hhmm(lastFault.started_at)}</b> · <code>{lastFault.raw_error || lastFault.classification_reason || lastFault.outcome}</code> · blob <Link className="mono" href={`/blob/?hash=${lastFault.promise_hash}`}>{lastFault.promise_hash.slice(0, 10)}…</Link></>
+              ? <>Last failed probe <b>{whenUTC(lastFault.started_at)}</b> · <code>{lastFault.raw_error || lastFault.classification_reason || lastFault.outcome}</code> · blob <Link className="mono" href={`/blob/?hash=${lastFault.promise_hash}`}>{lastFault.promise_hash.slice(0, 10)}…</Link></>
               : <>No failed probe among the newest {int(probes.length)} rows</>}
-            <br />Last successful probe <b>{lastOk ? hhmm(lastOk.started_at) : "—"}</b> · last failed handshake <b>{v.last_unreachable_at ? hhmm(v.last_unreachable_at) : "none on record"}</b>
+            <br />Last successful probe <b>{lastOk ? whenUTC(lastOk.started_at) : "—"}</b> · last failed handshake <b>{v.last_unreachable_at ? whenUTC(v.last_unreachable_at) : "none on record"}</b>
           </p>
         </div>
       </section>
@@ -177,8 +184,9 @@ function Page() {
             <tbody>
               {probes.length === 0 && <tr className="empty"><td colSpan={8}>No probe of this validator on record yet.</td></tr>}
               {probes.map((p) => {
-                const [word, mk] = wordOf(p.classification);
                 const sus = suspect.get(p.scheduled_at);
+                // at a point the observer does not trust itself at, nothing is this validator's: no red, no verdict word
+                const [word, mk] = sus ? ["Not counted", "gone"] : probeWord(p);
                 const notes = [
                   p.attested === false && "no signature from this validator on this promise, so the probe is outside the rate",
                   p.retry_first_outcome && `first attempt ${p.retry_first_outcome}, retried once from the same location`,
@@ -189,13 +197,13 @@ function Page() {
                   p.observer_build && `observer build ${p.observer_build}`,
                 ].filter(Boolean).join(" · ");
                 return (
-                  <tr key={`${p.vantage}|${p.promise_hash}|${p.scheduled_at}`} className={[p.classification === "FAULT" ? "fault-row" : "", sus ? "suspect" : ""].filter(Boolean).join(" ") || undefined}
-                    title={sus ? `At this point ${sus} of the validators probed failed at once. That is the observer's problem, not this validator's: nothing at this point counts in any figure.` : notes || undefined}>
+                  <tr key={`${p.vantage}|${p.promise_hash}|${p.scheduled_at}`} className={sus ? "suspect" : p.classification === "FAULT" ? "fault-row" : undefined}
+                    title={sus ? `At this point ${sus} of the validators probed failed at once. From one location that cannot be told from this observer's own network, so nothing at this point counts in any figure. Filed as ${p.classification.toLowerCase().replace(/_/g, " ")}.` : notes || undefined}>
                     <td title={utcWord(p.started_at)}>{hhmmss(p.started_at)}<span className="soft"> · {dateUTC(p.started_at)}</span></td>
                     <td><Link className="mono" href={`/blob/?hash=${p.promise_hash}`}>{p.promise_hash.slice(0, 10)}…</Link></td>
                     <td>{p.schedule_label} <span className="soft">· {PHASE[p.phase] ?? p.phase.replace("_", " ")}</span></td>
-                    <td title={p.classification_reason || undefined}><span className={"mk " + mk} /> <span className={"word" + (mk === "fault" ? " fault" : "")}>{word}</span>{sus && <span className="soft"> (not counted)</span>}</td>
-                    <td className="soft">{p.outcome.toLowerCase().replace(/_/g, " ")}{p.classification === "FAULT" && p.raw_error && <> · <code>{p.raw_error}</code></>}{p.attested === false && <> · unsigned</>}</td>
+                    <td title={p.classification_reason || undefined}><span className={"mk " + mk} /> <span className={"word" + (mk === "fault" ? " fault" : "")}>{word}</span></td>
+                    <td className="soft">{p.outcome.toLowerCase().replace(/_/g, " ")}{p.classification === "FAULT" && !sus && p.raw_error && <> · <code>{p.raw_error}</code></>}{p.attested === false && <> · unsigned</>}</td>
                     <td className="num">{p.rows_expected ? `${int(p.rows_returned)} / ${int(p.rows_expected)}` : "—"}</td>
                     <td className="num">{int(p.total_duration_ms)}</td>
                     <td className="go"><Link href={`/blob/?hash=${p.promise_hash}`} aria-label="open the blob">→</Link></td>

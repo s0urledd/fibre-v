@@ -2,7 +2,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Publisher, type Payment, type Blob, type Window, type PriceFormula, utc, ago, bytes, tia, shortHex, shortBech, nsDisplay, fmtShare } from "@/lib/api";
+import { useApi, notFound, type Publisher, type Payment, type Blob, type Window, type PriceFormula, utc, ago, bytes, tia, shortHex, shortBech, nsDisplay, fmtShare } from "@/lib/api";
 import { Panel, Cell } from "@/components/Panel";
 
 const WINDOWS = ["24h", "7d", "30d", "all"];
@@ -28,9 +28,10 @@ const KIND: Record<Payment["kind"], string> = {
 function Page() {
   const addr = useSearchParams().get("addr") ?? "";
   const [win, setWin] = useState("7d");
-  const { data, error, loading } = useApi<Detail>(addr ? `/v1/publishers/${addr}?window=${win}` : null);
+  const pub = useApi<Detail>(addr ? `/v1/publishers/${addr}?window=${win}` : null);
+  const { data, error, loading } = pub;
   if (!addr) return <p className="notice err">No publisher address given.</p>;
-  if (error) return <p className="notice err">{error}</p>;
+  if (!data && error) return <p className="notice">{notFound(pub) ? <>No publisher with this address is on record.</> : <>The observer API is not answering ({error}); the page retries every 30 seconds.</>}</p>;
   if (loading || !data) return <p className="muted">Loading…</p>;
   const p = data.publisher;
   return (

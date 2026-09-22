@@ -95,7 +95,8 @@ function NetworkChip({ meta, error }: { meta: Meta | null; error: string | null 
     return () => { document.removeEventListener("click", close); document.removeEventListener("keydown", key); };
   }, []);
   const health = meta?.health;
-  const dot = error && !meta ? "none" : !meta ? "none" : health === "ok" ? "ok" : "hold";
+  // unknown while the API does not answer, whatever the last reading said
+  const dot = error || !meta ? "none" : health === "ok" ? "ok" : "hold";
   const title = !meta
     ? (error ? `Observer API unreachable: ${error}` : "Connecting to the observer API…")
     : [

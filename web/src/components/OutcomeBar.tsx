@@ -6,8 +6,8 @@ import { type Obligations, int, undecided } from "@/lib/api";
  * and the kept rate's denominator (served + broken) is visible as the first
  * two segments.
  */
-export default function OutcomeBar({ o }: { o: Obligations | null | undefined }) {
-  const total = o?.total ?? 0;
+export default function OutcomeBar({ o, absent }: { o: Obligations | null | undefined; /** nothing to measure yet: dashes, not zeros */ absent?: boolean }) {
+  const total = absent ? 0 : o?.total ?? 0;
   const und = undecided(o);
   const segs: [string, string, number][] = [["s", "Served", o?.served ?? 0], ["b", "Broken", o?.broken ?? 0], ["u", "Undecided", und], ["p", "Pending", o?.pending ?? 0]];
   return (
@@ -16,7 +16,7 @@ export default function OutcomeBar({ o }: { o: Obligations | null | undefined })
         {total > 0 && segs.map(([c, l, n]) => n > 0 && <i key={c} className={c} style={{ width: `${(n / total * 100).toFixed(2)}%` }} title={`${l} ${int(n)}`} />)}
       </div>
       <div className="key">
-        {segs.map(([c, l, n]) => <div key={c}><span className={"sw " + c} />{l}<span className="v">{int(n)}</span></div>)}
+        {segs.map(([c, l, n]) => <div key={c}><span className={"sw " + c} />{l}<span className="v">{absent ? "—" : int(n)}</span></div>)}
       </div>
     </>
   );

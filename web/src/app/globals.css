@@ -506,3 +506,16 @@ dl.kv dd { margin: 0; word-break: break-all; }
   input[type=search] { min-width: 0; width: 100%; }
   .section-head input[type=search] { flex-basis: 100%; }
 }
+
+/* a row's own control, in the per-period table: a real button, reachable by keyboard */
+button.rowlink { background: none; border: 0; padding: 0; font: inherit; color: var(--text); cursor: pointer; text-align: left; }
+button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
+
+/* phone width: the pinned identity column gives the figures room */
+@media (max-width: 480px) {
+  .vt .addr { display: none; }
+  .vt .col-pin { min-width: 0; max-width: 150px; }
+  .vt .col-pin .mon { display: inline-block; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+  .vt .avatar { display: none; }
+  .metric .value { white-space: normal; font-size: 24px; }
+}
