@@ -85,6 +85,10 @@ type Scanner struct {
 	// the params seed every inactiveRetryEvery heights, and seeds at once if
 	// a MsgPayForFibre shows up.
 	fibreInactive bool
+	// activationSeen is set at the first block this process reads that ran
+	// at FibreAppVersion or later; the seeds are tried there once rather
+	// than at the next inactiveRetryEvery boundary.
+	activationSeen bool
 
 	// valSets caches the validator set per promise height: the fibre-assign
 	// view used for row assignment and the raw members (with consensus keys)
@@ -476,6 +480,16 @@ func (s *Scanner) retryRPCAt(ctx context.Context, what string, height int64, fn 
 		if IsModuleInactive(err) {
 			return err
 		}
+		// A recovered panic the node repeats is not an outage. Proven to be
+		// the module not existing yet, it returned above; otherwise it is
+		// given a few tries and handed back, so a caller that can skip (a
+		// reconcile, a registry seed) does, instead of holding the scan on
+		// an answer no wait changes.
+		var ae *ABCIError
+		panicked := errors.As(err, &ae) && ae.Code == abciPanicCode
+		if panicked && attempt+1 >= appPanicTries {
+			return err
+		}
 		unavailable := IsHeightUnavailable(err)
 		if unavailable {
 			grace := unavailableGrace
@@ -490,6 +504,9 @@ func (s *Scanner) retryRPCAt(ctx context.Context, what string, height int64, fn 
 		wait := rpcBackoff(attempt)
 		if unavailable {
 			wait = 30 * time.Second
+		}
+		if panicked {
+			wait = appPanicWait
 		}
 		if attempt < 3 || time.Now().After(nextWarn) {
 			level := ""
@@ -514,13 +531,28 @@ func (s *Scanner) retryRPCAt(ctx context.Context, what string, height int64, fn 
 // x/fibre params while the module is inactive.
 const inactiveRetryEvery = 100
 
+// appPanicTries is how many times a query answered with a recovered panic,
+// at a height where the module exists, is asked before the error is returned,
+// appPanicWait apart: the answer is the app's, not load, so backing off buys
+// nothing.
+const appPanicTries = 5
+
+var appPanicWait = 2 * time.Second
+
 // IsModuleInactive reports whether an ABCI query error means the queried
-// module does not exist on the chain (app version before Fibre).
+// module does not exist on the chain (app version before Fibre), or did not
+// exist yet at the height asked about. The second is what a node already on
+// the Fibre binary says about a height from before the upgrade: a recovered
+// panic, not "unknown query path", and without this every such query was
+// retried for as long as the process lived.
 func IsModuleInactive(err error) bool {
 	if err == nil {
 		return false
 	}
 	var ae *ABCIError
+	if errors.As(err, &ae) && ae.BeforeModule {
+		return true
+	}
 	if errors.As(err, &ae) && ae.Code == 6 && (ae.Codespace == "sdk" || ae.Codespace == "") {
 		return true // cosmos-sdk ErrUnknownRequest
 	}
@@ -736,8 +768,17 @@ func (s *Scanner) resolveUncertainty(u *ParamUncertainty, readAt func(int64) (fi
 		return
 	}
 	var values []ResolvedValue
+	skipped := int64(0)
 	for at := from; at <= to; at++ {
 		p, err := readAt(at)
+		if err != nil && at == from && at < to && IsModuleInactive(err) {
+			// The range starts at the params seed, the module's first
+			// block, and the height before it has no x/fibre to read. The
+			// seed itself was read after that block, so the reads from
+			// FromHeight on are the whole answer.
+			skipped++
+			continue
+		}
 		if err != nil {
 			u.Resolution = ResolutionUnresolvable
 			u.ResolvedAt = &now
@@ -755,7 +796,7 @@ func (s *Scanner) resolveUncertainty(u *ParamUncertainty, readAt func(int64) (fi
 	u.Resolution = ResolutionVerified
 	u.ResolvedAt = &now
 	u.ResolveMethod = "exhaustive_read"
-	u.HeightsRead = span
+	u.HeightsRead = span - skipped
 	u.Values = values
 	// The proven values are NOT put into the history here. The caller does
 	// that, and only once the record is on disk: a history that has moved
@@ -838,6 +879,11 @@ func (s *Scanner) trySeed(ctx context.Context, h int64) bool {
 	}
 	s.params = NewParamHistory(h, seed)
 	s.fibreInactive = false
+	// The seed is a read of state, so the first reconcile's interval starts
+	// here. Left at zero it started at the scan's start height, which on a
+	// scanner that lived through activation is the whole pre-Fibre stretch:
+	// a range too long to verify, whose heights have no params to read.
+	s.lastReconcile = h - 1
 	s.log.Printf("x/fibre ACTIVE at h=%d: promise_timeout=%s shard_retention=%s withdrawal_delay=%s",
 		h, seed.PaymentPromiseTimeout, seed.ShardRetention, seed.WithdrawalDelay)
 	return true
@@ -872,6 +918,18 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 	// The frontier on the chain's clock, persisted with the next checkpoint:
 	// the deferred shadow verdict is drawn against it.
 	s.lastBlockTime = blk.Time.UTC()
+	// The first block run at FibreAppVersion is the first whose state holds
+	// x/fibre and x/valaddr: seed both there, once, instead of waiting for
+	// the next inactiveRetryEvery boundary with activation already past.
+	if !s.activationSeen && blk.AppVersion >= FibreAppVersion {
+		s.activationSeen = true
+		if s.fibreInactive {
+			s.trySeed(ctx, h)
+		}
+		if seeded, _ := s.hosts.Seeded(); !seeded {
+			s.seedHosts(ctx, h)
+		}
+	}
 	if err := s.retryRPCAt(ctx, fmt.Sprintf("fetch block_results %d", h), h, func() error {
 		var err error
 		res, err = s.chain.BlockResults(ctx, h)
