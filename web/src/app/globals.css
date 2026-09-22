@@ -252,6 +252,15 @@ a.mon:hover { color: var(--accent-ink); text-decoration: none; }
 td .fault, td a.fault { color: var(--fault); font-weight: 500; }
 td a.plain { color: var(--text); }
 td a.plain:hover, td a.fault:hover { text-decoration: underline; }
+/* The validators table: the identity column reads left, every measured
+   column sits centred under its heading with a share of the width, so a
+   period with nothing decided (every cell a dash) reads as a grid rather
+   than a pile against the right edge. Figures keep tabular numerals. */
+.vt th.num, .vt td.num { text-align: center; }
+.vt th:nth-child(1) { width: 28%; }
+.vt th:nth-child(2) { width: 15%; }
+.vt th:nth-child(n+3):not(.go) { width: 11%; }
+.vt td .den { margin-left: 6px; }
 .col-pin { position: sticky; left: 0; z-index: 1; background: var(--paper); }
 tbody tr:hover .col-pin { background: color-mix(in srgb, var(--paper) 96%, var(--text)); }
 tr.warn .col-pin { background: color-mix(in srgb, var(--paper) 93%, var(--hold)); }
