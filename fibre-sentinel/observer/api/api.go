@@ -2034,7 +2034,7 @@ func (s *Server) reachabilityNow(ctx context.Context, only, asOf string) (map[st
 
 type validatorRow struct {
 	Address     string `json:"address"`      // 20-byte consensus address, hex
-	ConsAddress string `json:"cons_address"` // celestiavalcons1... when known from the registry
+	ConsAddress string `json:"cons_address"` // celestiavalcons1...: from the registry when registered, else derived from the hex address
 	// Moniker is the name the operator set in the staking module, read from
 	// the chain itself. Empty when the chain has no validator at this
 	// consensus address, or before identities have been polled once. A reader
@@ -2766,6 +2766,14 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		if v.Operator != "" {
 			v.TimeoutsEnforced = timeouts[accountKey(v.Operator)]
 		}
+		// The registry supplies the bech32 form only for validators that
+		// registered an endpoint; before Fibre is live that is nobody, and
+		// every row printed its raw hex. The two are the same 20 bytes.
+		if v.ConsAddress == "" {
+			if bech, err := consBech(addr); err == nil {
+				v.ConsAddress = bech
+			}
+		}
 		out = append(out, *v)
 	}
 	// voting power desc, then address
@@ -2783,6 +2791,19 @@ func sortRows(v []validatorRow) {
 			v[j-1], v[j] = v[j], v[j-1]
 		}
 	}
+}
+
+// consBech is the reverse of consHex: the form the chain prints
+// (celestiavalcons1…) for a 20-byte consensus address in hex.
+func consBech(hexAddr string) (string, error) {
+	raw, err := hex.DecodeString(hexAddr)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) != 20 {
+		return "", fmt.Errorf("consensus address %d bytes, want 20", len(raw))
+	}
+	return bech32.ConvertAndEncode("celestiavalcons", raw)
 }
 
 func consHex(bech string) (string, error) {
