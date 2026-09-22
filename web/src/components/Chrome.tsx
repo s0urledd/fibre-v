@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useApi, type Meta, int, ago, utcWord } from "@/lib/api";
 import { SOURCE_URL } from "@/lib/site";
 
@@ -69,20 +69,31 @@ function ThemeToggle() {
   );
 }
 
-/** "mocha-5" as the chip prints it */
+/** "mocha-5" as the chip prints it; the mainnet chain id is "celestia" */
 function netName(id: string | undefined): string {
   if (!id) return "network";
+  if (id === "celestia" || /^mainnet$/i.test(id)) return "Mainnet";
   return id.charAt(0).toUpperCase() + id.slice(1);
 }
 
 /**
  * The network chip: which chain this observer watches, with the observer's
- * own state as its dot. With sibling deployments configured it opens as a
- * menu of them; alone, it is a label.
+ * own state as its dot. It opens as a menu: this site's network, any sibling
+ * deployment configured in NEXT_PUBLIC_NETWORKS as a link, and Mainnet as a
+ * placeholder until Fibre is there and an observer follows it.
  */
 function NetworkChip({ meta, error }: { meta: Meta | null; error: string | null }) {
   const [origin, setOrigin] = useState("");
+  const box = useRef<HTMLDetailsElement>(null);
   useEffect(() => { setOrigin(window.location.origin); }, []);
+  // a click elsewhere or Escape closes the menu, as a menu is expected to
+  useEffect(() => {
+    const close = (e: Event) => { const el = box.current; if (el?.open && !(e instanceof KeyboardEvent ? false : el.contains(e.target as Node))) el.open = false; };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape" && box.current?.open) box.current.open = false; };
+    document.addEventListener("click", close);
+    document.addEventListener("keydown", key);
+    return () => { document.removeEventListener("click", close); document.removeEventListener("keydown", key); };
+  }, []);
   const health = meta?.health;
   const dot = error && !meta ? "none" : !meta ? "none" : health === "ok" ? "ok" : "hold";
   const title = !meta
@@ -94,17 +105,18 @@ function NetworkChip({ meta, error }: { meta: Meta | null; error: string | null 
       meta.app_version ? (meta.fibre_active ? `Fibre live on app v${meta.app_version}` : `Fibre not live: app v${meta.app_version}`) : "",
     ].filter(Boolean).join(" · ");
   const label = meta ? netName(meta.chain_id) : "connecting…";
-  if (NETWORKS.length < 2) {
-    return <span className="net" title={title}><i className={"dot " + dot} />{label}</span>;
-  }
+  const others = NETWORKS.filter(([, url]) => origin === "" || url.replace(/\/$/, "") !== origin);
+  const mainnetHere = meta?.chain_id === "celestia";
+  const mainnetLinked = others.some(([name]) => netName(name) === "Mainnet");
   return (
-    <details className="net menu" title={title}>
+    <details className="net menu" title={title} ref={box}>
       <summary><i className={"dot " + dot} />{label}</summary>
       <div className="list" role="menu">
-        {NETWORKS.map(([name, url]) => {
-          const here = origin !== "" && url.replace(/\/$/, "") === origin;
-          return here ? <span key={name} aria-current="true">{name} · this site</span> : <a key={name} href={url} role="menuitem">{name}</a>;
-        })}
+        <span aria-current="true">{label}</span>
+        {others.map(([name, url]) => <a key={name} href={url} role="menuitem">{netName(name)}</a>)}
+        {!mainnetHere && !mainnetLinked && (
+          <span className="soon" aria-disabled="true" title="Fibre is not on mainnet yet. This observer will follow it there.">Mainnet<i className="tagx">soon</i></span>
+        )}
       </div>
     </details>
   );
