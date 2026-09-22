@@ -1,0 +1,194 @@
+"use client";
+import Link from "next/link";
+import { useMemo, useState } from "react";
+import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATED } from "@/lib/api";
+import Avatar from "./Avatar";
+import { SELF_VALIDATOR } from "@/lib/site";
+
+/**
+ * The validators table: who, whether the endpoint answers right now, how
+ * much stake, what happened to the obligations in the selected period, and
+ * when the newest evidence is from. Default order is voting power,
+ * descending, which is the chain's own order and never a performance rank;
+ * the filters are for inspection. Throughput, per-point rates and the raw
+ * rows are on the validator's page.
+ */
+
+const bonded = (v: Validator) => !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED");
+
+// Whether a row is the validator this observer's own operator runs. It marks
+// and nothing else: no filter, no exclusion, no adjustment.
+function isSelf(v: Validator): boolean {
+  if (!SELF_VALIDATOR) return false;
+  return [v.address, v.cons_address, v.operator_address].some((a) => !!a && a.toLowerCase() === SELF_VALIDATOR);
+}
+
+type Filter = "all" | "broken" | "unreachable" | "collecting" | "nohost";
+type SortKey = "power" | "kept" | "broken" | "undecided" | "seen";
+
+/** the endpoint right now: the chain's own words first, then the newest handshake */
+export function endpoint(v: Validator): { dot: string; word: string; title: string; warn?: boolean } {
+  if (v.jailed) return { dot: "none", word: "Jailed", title: "Jailed by the chain: out of the bonded provider list, so no handshake is attempted. Shards it signed for are still owed." };
+  if (!bonded(v)) return { dot: "none", word: "Not bonded", title: `${v.bond_status!.replace("BOND_STATUS_", "").toLowerCase()} by the chain: out of the bonded provider list, so no handshake is attempted.` };
+  if (!v.host) return { dot: "none", word: "No endpoint", title: v.last_host ? `No open Fibre endpoint. Last registered ${v.last_host}; the registration stays on chain.` : "No Fibre endpoint registered in x/valaddr. Not a fault: nothing can be asked of it." };
+  if (v.reachable === null) return { dot: "none", word: "Not checked yet", title: `${v.host}: no handshake attempted yet.` };
+  if (v.reachable === false) return { dot: "hold", word: "Unreachable", title: `${v.host} did not complete a TLS handshake at the newest check${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}${v.last_reachable_at ? `; last reachable ${ago(v.last_reachable_at)}` : ""}. From one location this is never counted as broken.`, warn: true };
+  if (v.identity_status && v.identity_status !== "verified") {
+    const w = v.identity_status === "expired" ? "Certificate expired" : v.identity_status === "mismatch" ? "Wrong certificate" : v.identity_status === "no_tls" ? "No TLS" : "Reachable, unverified";
+    return { dot: "hold", word: w, title: v.identity_reason || `${v.host} answered, but its certificate is not one a client would accept. Not a fault.`, warn: true };
+  }
+  return { dot: "ok", word: "Reachable", title: `${v.host} completed a TLS handshake with a certificate endorsed by its consensus key at the newest check${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}.` };
+}
+
+function sortValue(v: Validator, k: SortKey): number | null {
+  const o = v.obligations;
+  switch (k) {
+    case "power": return v.voting_power;
+    case "kept": { const d = o ? o.served + o.broken : 0; return d >= MIN_RATED ? o.served / d : null; }
+    case "broken": return o?.broken ?? 0;
+    case "undecided": return o && o.total > 0 ? undecided(o) : null;
+    case "seen": return v.last_seen_at ? new Date(v.last_seen_at).getTime() : null;
+  }
+}
+
+export default function Validators({ rows, window: win, notLive, loading }: { rows: Validator[]; window: string; notLive?: boolean; loading?: boolean }) {
+  const [q, setQ] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "power", dir: -1 });
+
+  const counts = useMemo(() => ({
+    all: rows.length,
+    broken: rows.filter((v) => (v.obligations?.broken ?? 0) > 0).length,
+    unreachable: rows.filter((v) => bonded(v) && !!v.host && v.reachable === false).length,
+    collecting: rows.filter((v) => { const o = v.obligations; return !!o && o.total > 0 && o.served + o.broken < MIN_RATED; }).length,
+    nohost: rows.filter((v) => bonded(v) && !v.host).length,
+  }), [rows]);
+
+  const needle = q.trim().toLowerCase();
+  const list = useMemo(() => {
+    const pool = rows.filter((v) => {
+      const o = v.obligations;
+      switch (filter) {
+        case "broken": return (o?.broken ?? 0) > 0;
+        case "unreachable": return bonded(v) && !!v.host && v.reachable === false;
+        case "collecting": return !!o && o.total > 0 && o.served + o.broken < MIN_RATED;
+        case "nohost": return bonded(v) && !v.host;
+        default: return true;
+      }
+    }).filter((v) => !needle
+      || v.address.toLowerCase().includes(needle)
+      || (v.cons_address ?? "").toLowerCase().includes(needle)
+      || (v.moniker ?? "").toLowerCase().includes(needle)
+      || (v.operator_address ?? "").toLowerCase().includes(needle)
+      || (v.host || v.last_host || "").toLowerCase().includes(needle));
+    return [...pool].sort((a, b) => {
+      const av = sortValue(a, sort.key), bv = sortValue(b, sort.key);
+      if (av === null && bv === null) return b.voting_power - a.voting_power;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      return (av - bv) * sort.dir || b.voting_power - a.voting_power;
+    });
+  }, [rows, filter, needle, sort]);
+
+  const clickSort = (k: SortKey, dflt: 1 | -1) => setSort((s) => (s.key === k ? { key: k, dir: (s.dir * -1) as 1 | -1 } : { key: k, dir: dflt }));
+  const Th = ({ k, dflt, label, title }: { k: SortKey; dflt: 1 | -1; label: string; title: string }) => (
+    <th className="num" title={title}>
+      <button type="button" className="sort" aria-pressed={sort.key === k} onClick={() => clickSort(k, dflt)}>
+        {label}{sort.key === k && <span className="arrow" aria-hidden="true">{sort.dir === -1 ? "↓" : "↑"}</span>}
+      </button>
+    </th>
+  );
+  const href = (v: Validator, hash = "") => `/validator/?addr=${v.address}${win !== "24h" ? `&window=${win}` : ""}${hash}`;
+
+  const kept = (v: Validator) => {
+    const o = v.obligations;
+    if (!o || o.total === 0) return <span className="muted" title="No obligation the settled promises prove for this validator in the period.">—</span>;
+    const d = o.served + o.broken;
+    if (d === 0) return <span className="soft" title={`${int(o.total)} obligations in the period, none decided yet.`}>Collecting evidence</span>;
+    if (d < MIN_RATED) return <><span className="soft" title={`Under ${MIN_RATED} decided obligations: printed, not rated.`}>Collecting evidence</span><span className="den">{int(o.served)} / {int(d)}</span></>;
+    return <><span className="rate">{pctOf(o.served, d)}</span><span className="den">{int(o.served)} / {int(d)}</span></>;
+  };
+  const count = (v: Validator, n: number, kind: "broken" | "undecided") => {
+    const o = v.obligations;
+    if (!o || o.total === 0) return <span className="muted">—</span>;
+    if (n === 0) return <span className="muted">0</span>;
+    if (kind === "broken") return <Link className="fault" href={href(v, "#evidence")} title={`${int(n)} obligation${n === 1 ? "" : "s"} broken: the validator answered and did not hand over a shard it had signed for. Opens the evidence.`}>{int(n)}</Link>;
+    return <Link className="plain" href={href(v, "#outcomes")} title={`${int(n)} obligation${n === 1 ? "" : "s"} the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault.`}>{int(n)}</Link>;
+  };
+
+  return (
+    <section>
+      <div className="vhead">
+        <div><h2>Validators</h2><p className="sub">{notLive ? "Names and voting power from the staking module; nothing to measure until Fibre is live." : "Current reachability and service over the selected period."}</p></div>
+        <div className="tools">
+          <label className="search"><span className="sr-only">Search validators</span><input type="search" placeholder="Search name or address" value={q} onChange={(e) => setQ(e.target.value)} /></label>
+          <label className="select"><span className="sr-only">Filter</span>
+            <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)}>
+              <option value="all">All validators · {counts.all}</option>
+              <option value="broken">Broken obligations · {counts.broken}</option>
+              <option value="unreachable">Unreachable now · {counts.unreachable}</option>
+              <option value="collecting">Collecting evidence · {counts.collecting}</option>
+              <option value="nohost">No endpoint · {counts.nohost}</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div className="tablewrap">
+        <table className="vt">
+          <thead>
+            <tr>
+              <th className="col-pin">Validator</th>
+              <th title="The newest handshake with the registered endpoint; the chain's own words (jailed, not bonded) come first.">Endpoint now</th>
+              <Th k="power" dflt={-1} label="Voting power" title="From the staking module. The default order, and never a performance rank." />
+              <Th k="kept" dflt={1} label="Kept / decided" title="Obligations kept over obligations decided (served + broken) in the period. Under 20 decided the row is not rated." />
+              <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />
+              <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />
+              <Th k="seen" dflt={-1} label="Last evidence" title="When the observer last had any reading from this endpoint." />
+              <th className="go" />
+            </tr>
+          </thead>
+          <tbody>
+            {list.length === 0 && (
+              <tr className="empty"><td colSpan={8}>
+                {loading && rows.length === 0 ? "Loading…"
+                  : rows.length === 0 ? "No validators on record yet."
+                  : needle ? `Nothing matches “${q}”.`
+                  : filter === "broken" ? "No broken obligation in this period."
+                  : filter === "unreachable" ? "Every registered endpoint answered its newest check."
+                  : filter === "collecting" ? "Every validator with obligations has 20 or more decided."
+                  : "Every bonded validator has registered a Fibre endpoint."}
+              </td></tr>
+            )}
+            {list.map((v) => {
+              const e = endpoint(v);
+              const o = v.obligations;
+              return (
+                <tr key={v.address} className={e.warn ? "warn" : undefined}>
+                  <td className="id col-pin">
+                    <span className="who">
+                      <Avatar v={v} />
+                      <span>
+                        <Link className="mon" href={href(v)}>{v.moniker || shortMid(v.cons_address || v.address, 18, 4)}</Link>
+                        {isSelf(v) && <span className="ours" title="Run by this observer’s operator. Measured by the same code as every other row; never filtered or adjusted.">ours</span>}
+                        {notLive && v.signaled_upgrade === true && <span className="ours" title="Signalled for the app version that brings Fibre (x/signal, a chain record).">signalled</span>}
+                        {notLive && v.signaled_upgrade === false && <span className="ours" title="Has not signalled for the app version that brings Fibre (x/signal, a chain record).">not signalled</span>}
+                        <span className="addr mono" title={v.cons_address || v.address}>{shortMid(v.cons_address || v.address, 16, 4)}</span>
+                      </span>
+                    </span>
+                  </td>
+                  <td><span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span></td>
+                  <td className="num">{int(v.voting_power)}</td>
+                  <td className="num">{kept(v)}</td>
+                  <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>
+                  <td className="num">{count(v, undecided(o), "undecided")}</td>
+                  <td className="num" title={v.last_seen_at ? utcWord(v.last_seen_at) : "no reading yet"}>{v.last_seen_at ? ago(v.last_seen_at) : <span className="muted">—</span>}</td>
+                  <td className="go"><Link href={href(v)} aria-label={`open ${v.moniker || v.address}`}>→</Link></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}

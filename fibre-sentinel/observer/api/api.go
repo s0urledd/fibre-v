@@ -1949,6 +1949,12 @@ type reachState struct {
 // registeredValidators is the set of validators with an open Fibre endpoint,
 // as of the window's end when it is pinned and as of now otherwise — the
 // same population registered_endpoints is counted over.
+// registeredValidators is the set of validators with an open Fibre endpoint
+// (at the window's end when it is pinned), keyed by the 20-byte consensus
+// address in hex: the form every probe and heartbeat row carries. The
+// endpoints table stores the bech32 form, and a set keyed by that matched
+// nothing in the census above, which printed the network's reachability as
+// 0 of 0 while every row in the table said otherwise.
 func (s *Server) registeredValidators(ctx context.Context, win Window) (map[string]bool, error) {
 	q, args := `SELECT DISTINCT validator_cons_address FROM endpoints WHERE closed_at IS NULL`, []any{}
 	if win.AsOf {
@@ -1966,7 +1972,13 @@ func (s *Server) registeredValidators(ctx context.Context, win Window) (map[stri
 		if err := rows.Scan(&a); err != nil {
 			return nil, err
 		}
-		out[a] = true
+		if hexAddr, err := consHex(a); err == nil {
+			out[hexAddr] = true
+		} else {
+			// Not a bech32 consensus address: keep the value as stored, so
+			// a registry written in another form still matches its rows.
+			out[a] = true
+		}
 	}
 	return out, rows.Err()
 }

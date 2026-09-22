@@ -2,141 +2,227 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Blob, type Probe, utc, ago, bytes, nsDisplay, tia, shortBech } from "@/lib/api";
-import Verdict from "@/components/Verdict";
-import ProbeMatrix from "@/components/ProbeMatrix";
-import Meter from "@/components/Meter";
-import Info from "@/components/Info";
+import { useApi, type Blob, type Probe, type Meta, int, bytes, tia, utcWord, hhmm, hhmmss, dur, shortMid, nsDisplay, API_BASE } from "@/lib/api";
+import StatusLine from "@/components/StatusLine";
+import { Metric, Metrics } from "@/components/Metrics";
+import Copy from "@/components/Copy";
 
+type Assignment = { validator_address: string; moniker?: string; voting_power: number; row_count: number; attested: boolean | null; host_at_settlement: string | null };
 type Detail = {
   blob: Blob;
   params: { shard_retention_s: number; payment_promise_timeout_s: number };
-  assignments: { validator_address: string; moniker?: string; voting_power: number; row_count: number; attested: boolean | null }[];
+  assignments: Assignment[];
   probes: Probe[];
 };
 
-function Recon({ b }: { b: Blob }) {
-  const r = b.reconstructable;
-  if (!r || r.status === "unknown") {
-    return <div className="note"><span className="label">Reconstructable: unknown</span><p>{b.probe_count === 0 ? "No probe has run for this blob yet." : "No in-window probe point has been completed yet."}</p></div>;
-  }
-  if (r.status === "pending") {
-    return <div className="note"><span className="label">Reconstructable: pending</span><p>{r.probed_validators} of {r.assigned_validators} assigned validators have a result at probe {r.point}. A validator without a result is a gap, not a failure.</p></div>;
-  }
-  const total = r.total_rows > 0 ? r.total_rows : r.needed_rows;
-  const tone = r.status === "yes" ? "ok" : r.status === "degraded" ? "hold" : "fault";
-  const word = r.status === "yes" ? "yes" : r.status === "degraded" ? "degraded" : "no";
-  return (
-    <div className="recon">
-      <div className="card-head">
-        <span className="label">Reconstructable</span>
-        <span className={"chip " + tone}>{word}</span>
-        <span className="sample">at probe {r.point} · {utc(r.point_at)}{r.window_over && " · window closed since"}</span>
-        <span className="spacer" />
-        <Info label="Reconstructable">
-          <p>Whether the blob could be rebuilt from the rows that came back at the last probe inside the retention window. Rows not probed are not counted; everything is measured from one location.</p>
-          <p><strong>yes</strong>: enough rows, and every validator that signed for the blob answered. <strong>degraded</strong>: enough rows, but a signed validator did not answer. <strong>no</strong>: fewer rows than the blob needs.</p>
-          {r.attestation_known && r.attested_validators < r.assigned_validators && (
-            <p>{r.assigned_validators - r.attested_validators} of the {r.assigned_validators} assigned validators carry no signature on this promise; they cannot lower this verdict by staying quiet.</p>
-          )}
-        </Info>
-      </div>
-      <div className="recon-body">
-        <div className="recon-figs">
-          <div className="cell">
-            <span className="label">Rows served</span>
-            <span className="value">{r.served_distinct_rows.toLocaleString("en-US")}<span className="unit">/ {total.toLocaleString("en-US")}</span></span>
-            <span className="sub">{r.needed_rows.toLocaleString("en-US")} needed to rebuild</span>
-          </div>
-          <div className="cell">
-            <span className="label">Validators served</span>
-            <span className="value">{r.served_by_validators}<span className="unit">/ {r.assigned_validators}</span></span>
-            <span className="sub">{r.attestation_known ? `${r.served_by_attested} of ${r.attested_validators} that signed` : "signatures not recorded"}</span>
-          </div>
-        </div>
-        <Meter value={r.served_distinct_rows} threshold={r.needed_rows} total={total} unit="rows" />
-      </div>
-    </div>
-  );
-}
+/** one mark per classification; the word is in the title and the legend */
+const MARK: Record<string, [string, string]> = {
+  HEALTHY: ["ok", "served"], FAULT: ["fault", "broken"], UNATTESTED: ["unsigned", "served, unsigned"], EXPECTED_GONE: ["gone", "expected gone after the window"],
+  NOT_REGISTERED: ["none", "no endpoint"], NOT_PROBED: ["gone", "not probed"], SERVER_ERROR: ["other", "server error"], UNREACHABLE: ["other", "unreachable"],
+  THROTTLED: ["other", "rate limited"], IDENTITY_EXPIRED: ["other", "certificate expired"], IDENTITY_MISMATCH: ["other", "wrong certificate"],
+  TOLERATED: ["gone", "tolerated after the deadline"], UNREACHABLE_POST_WINDOW: ["gone", "unreachable after the window"], SERVED_PAST_WINDOW: ["gone", "served after the window"],
+  RETENTION_UNVERIFIED: ["gone", "deadline unverified"], SHADOWED_SHARD: ["other", "shadowed by another promise"], UNMATCHED_GENUINE: ["other", "unmatched genuine rows"],
+  PROBE_ERROR: ["gone", "probe error"], EXPECTED_UNASSIGNED: ["gone", "unassigned"], SERVING_UNASSIGNED: ["other", "serving unassigned"],
+};
+const markOf = (cls: string): [string, string] => MARK[cls] ?? ["other", cls.toLowerCase().replace(/_/g, " ")];
 
 function Page() {
   const hash = useSearchParams().get("hash") ?? "";
-  const { data, error, loading } = useApi<Detail>(hash ? `/v1/blobs/${hash}` : null);
-  if (!hash) return <p className="notice">Open a blob from the <Link href="/blobs/">list</Link>, or add <code>?hash=&lt;promise hash&gt;</code>.</p>;
-  if (error) return <p className="notice err">{error}</p>;
-  if (loading || !data) return <p className="muted">Loading…</p>;
-  const b = data.blob;
-  const byPower = [...data.assignments].sort((a, c) => c.voting_power - a.voting_power || a.validator_address.localeCompare(c.validator_address));
-  const lastByVal = new Map<string, Probe>();
-  for (const p of data.probes) {
-    const cur = lastByVal.get(p.validator_address);
-    if (!cur || p.started_at > cur.started_at) lastByVal.set(p.validator_address, p);
+  const { data: meta, error: metaErr } = useApi<Meta>("/v1/meta");
+  const d = useApi<Detail>(hash ? `/v1/blobs/${hash}` : null);
+  if (!hash) return <p className="notice">Open a blob from the <Link href="/blobs/">list</Link>, or add <code>?hash=&lt;promise hash&gt;</code> to the address.</p>;
+  const data = d.data;
+  if (!data) {
+    return (
+      <>
+        <div className="head"><div><p className="crumb"><Link href="/blobs/">Blobs</Link> › {hash.slice(0, 10)}…</p><h1>{d.error ? "Blob" : "Loading…"}</h1></div></div>
+        <StatusLine meta={meta} metaError={metaErr} snap={null} client={{ error: d.error, fetchedAt: d.fetchedAt }} />
+      </>
+    );
   }
+  const b = data.blob;
+  const rc = b.reconstructable;
+  const judged = !!rc && (rc.status === "yes" || rc.status === "degraded" || rc.status === "no");
+  const over = new Date(b.must_serve_until).getTime() <= Date.now();
+  const state: [string, string, string] =
+    rc?.status === "yes" ? ["ok", "Fully served", `Every validator proven to hold a shard served its rows at ${rc.point}.`]
+    : rc?.status === "degraded" ? ["hold", "Rebuildable, not fully served", `Enough distinct rows were observed to rebuild the blob, but not every validator proven to hold a shard served at ${rc.point}.`]
+    : rc?.status === "no" ? ["hold", "Not rebuildable", `Fewer than the ${int(rc.needed_rows)} rows needed came back at ${rc.point}. Which validators answered is in the table below; unreachable from here is never counted as broken.`]
+    : rc?.status === "pending" ? ["none", "Not judged yet", `${int(rc.probed_validators)} of ${int(rc.assigned_validators)} assigned validators have a result at ${rc.point}. A validator without a result is a gap, not a failure.`]
+    : !over ? ["none", "In window", "The retention window has not ended; nothing is judged before the last in-window point completes."]
+    : ["none", "Not judged", b.probe_count === 0 ? "No probe has run for this blob." : "Row lists were not recorded for this publication, or no in-window point was completed."];
+
+  // the probe points, in the order they ran; a point's time is the earliest probe scheduled for it
+  const byLabel = new Map<string, { at: string; phase: string; cls: Record<string, number> }>();
+  for (const p of data.probes) {
+    const cur = byLabel.get(p.schedule_label);
+    if (!cur) byLabel.set(p.schedule_label, { at: p.scheduled_at, phase: p.phase, cls: {} });
+    else if (p.scheduled_at < cur.at) cur.at = p.scheduled_at;
+  }
+  // the newest probe per (validator, point) is the cell; its classification counts once per point
+  const cell = new Map<string, Probe>();
+  for (const p of data.probes) {
+    const k = p.validator_address + "|" + p.schedule_label;
+    const cur = cell.get(k);
+    if (!cur || p.started_at > cur.started_at) cell.set(k, p);
+  }
+  for (const p of cell.values()) { const e = byLabel.get(p.schedule_label)!; e.cls[p.classification] = (e.cls[p.classification] ?? 0) + 1; }
+  const order = [...byLabel.entries()].sort((a, c) => a[1].at.localeCompare(c[1].at)).map(([k]) => k);
+  const t0 = new Date(b.settlement_time).getTime(), tEnd = new Date(b.must_serve_until).getTime();
+  const tMax = Math.max(tEnd, ...order.map((k) => new Date(byLabel.get(k)!.at).getTime())) + 2 * 60000;
+  const hasPost = order.some((k) => new Date(byLabel.get(k)!.at).getTime() > tEnd);
+  // the window takes 60% of the axis when points fall after the deadline (those minutes are stretched into the rest), else all of it
+  const winShare = hasPost ? 60 : 100;
+  const x = (t: number) => (t <= tEnd ? Math.max(0, (t - t0) / (tEnd - t0)) * winShare : winShare + (t - tEnd) / (tMax - tEnd) * (100 - winShare)).toFixed(2) + "%";
+  const lastIn = [...order].reverse().find((k) => new Date(byLabel.get(k)!.at).getTime() <= tEnd);
+  const countLine = (k: string) => {
+    const c = byLabel.get(k)!.cls;
+    const served = c.HEALTHY ?? 0, gone = (c.EXPECTED_GONE ?? 0) + (c.TOLERATED ?? 0), unsigned = c.UNATTESTED ?? 0, broken = c.FAULT ?? 0;
+    const other = Object.entries(c).filter(([n]) => !["HEALTHY", "EXPECTED_GONE", "TOLERATED", "UNATTESTED", "FAULT"].includes(n)).reduce((s, [, n]) => s + n, 0);
+    const post = byLabel.get(k)!.phase === "post";
+    return (
+      <div key={k}>
+        <b>{k} <span className="soft">· {hhmm(byLabel.get(k)!.at).replace(" UTC", "")}</span></b>
+        {post ? `${int(gone)} expected gone` : `${int(served)} served`}
+        {broken > 0 && <> · <span className="word fault">{int(broken)} broken</span></>}
+        {unsigned > 0 && <> · {int(unsigned)} unsigned</>}
+        {other > 0 && <> · {int(other)} other</>}
+      </div>
+    );
+  };
+  const rows = [...data.assignments].sort((a, c) => c.voting_power - a.voting_power || a.validator_address.localeCompare(c.validator_address));
+  const winLen = dur(b.settlement_time, b.must_serve_until);
+  const fill = rc && rc.total_rows > 0 ? Math.min(100, rc.served_distinct_rows / rc.total_rows * 100) : 0;
+  const tick = rc && rc.total_rows > 0 ? Math.min(100, rc.needed_rows / rc.total_rows * 100) : 0;
+
   return (
     <>
-      <section className="card">
-      <div className="card-head"><h1 className="mono" style={{ margin: 0 }}>{b.promise_hash.slice(0, 16)}…</h1><span className="chip">{nsDisplay(b.namespace)}</span><span className="chip">{bytes(b.blob_size)}</span></div>
-      <dl className="kv">
-        <dt>promise hash</dt><dd className="mono">{b.promise_hash}</dd>
-        <dt>commitment</dt><dd className="mono">{b.commitment}</dd>
-        <dt>namespace</dt><dd className="mono">{nsDisplay(b.namespace)} <span className="faint">{b.namespace}</span></dd>
-        <dt>size</dt><dd className="mono" title="The padded upload size the module charges for, not the payload.">{bytes(b.blob_size)}</dd>
-        <dt>publisher</dt><dd className="mono"><Link href={`/publisher/?addr=${b.signer}`}>{b.signer}</Link></dd>
-        <dt>fee</dt><dd className="mono">{b.charge
-          ? <span title={`${b.charge.gas_units.toLocaleString("en-US")} gas at 1 utia per gas, from the padded size`}>{tia(b.charge.fee_utia)}
-              {b.charge.timed_out
-                ? <span className="chip fault" title={b.charge.processor && b.charge.processor !== b.signer ? `Timeout reported by ${shortBech(b.charge.processor)}` : "The promise was never settled; its timeout charged the escrow"}>timed out</span>
-                : <span className="chip ok">settled</span>}</span>
-          : <span className="muted" title="Recorded before this observer kept payments.">—</span>}</dd>
-        <dt>settled</dt><dd className="mono">height {b.settlement_height.toLocaleString("en-US")} · {utc(b.settlement_time)} ({ago(b.settlement_time)})</dd>
-        <dt>created</dt><dd className="mono">{utc(b.creation_timestamp)}</dd>
-        <dt>must serve until</dt><dd className="mono" title={`creation + max(payment_promise_timeout ${data.params.payment_promise_timeout_s}s, shard_retention ${data.params.shard_retention_s}s)`}>{utc(b.must_serve_until)} <span className="faint">({ago(b.must_serve_until)})</span></dd>
-        <dt>assignment</dt><dd className="mono">{b.validators_with_rows} validators · {b.sigma_rows} rows assigned · {b.distinct_rows} distinct{b.assignment_error && <span className="err"> · {b.assignment_error}</span>}</dd>
-      </dl>
-      </section>
-      <section className="card"><Recon b={b} /></section>
-      <h2>Probes <span className="sample">latest verdict per validator and probe point</span></h2>
-      {data.probes.length === 0 ? <p className="muted">No probes yet.</p> : (
-        <ProbeMatrix probes={data.probes} validators={byPower.map((a) => ({ address: a.validator_address, row_count: a.row_count, moniker: a.moniker }))} />
-      )}
-      
-      <h2>Assigned validators</h2>
-      <div className="tablewrap">
-        <table>
-          <caption>Rows recomputed with fibre-assign from the validator set at the promise height. Last verdict per validator.</caption>
-          <thead><tr><th>validator</th><th className="right">voting power</th><th className="right">rows</th><th>obligation</th><th>last verdict</th><th>last probe (UTC)</th><th className="right">rows served</th></tr></thead>
-          <tbody>
-            {byPower.map((a) => {
-              const p = lastByVal.get(a.validator_address);
-              return (
-                <tr key={a.validator_address}>
-                  <td>
-                    <Link href={`/validator/?addr=${a.validator_address}`}>{a.moniker || <span className="mono">{a.validator_address.slice(0, 12)}…</span>}</Link>
-                    {a.moniker && <div className="faint mono">{a.validator_address.slice(0, 12)}…</div>}
-                  </td>
-                  <td className="right mono">{a.voting_power.toLocaleString("en-US")}</td>
-                  <td className="right mono">{a.row_count}</td>
-                  <td className={a.attested === false ? "muted" : ""} title={a.attested === true
-                    ? "This validator's signature on the settled promise verified against its consensus key. The Fibre server writes the shard before it signs, so the signature is proof of storage."
-                    : a.attested === false
-                      ? "The settled promise carries no verified signature from this validator. The publisher stops collecting signatures once it has a safe quorum, so this means unproven, not absent: the validator may well hold the shard."
-                      : "Recorded before the observer verified signatures."}>
-                    {a.attested === true ? "proven" : a.attested === false ? "unproven" : "—"}
-                  </td>
-                  <td>{p ? <Verdict cls={p.classification} title={p.classification_reason} /> : <Verdict cls="NOT_PROBED" />}</td>
-                  <td className="mono">{p ? `${utc(p.started_at)} (${p.schedule_label})` : "—"}</td>
-                  <td className="right mono">{p && p.rows_expected ? `${p.rows_returned}/${p.rows_expected}` : "—"}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="head">
+        <div>
+          <p className="crumb"><Link href="/blobs/">Blobs</Link> › {b.promise_hash.slice(0, 10)}…</p>
+          <h1>Blob <span className="mono">{shortMid(b.promise_hash, 10, 6)}</span><Copy text={b.promise_hash} label="promise hash" /></h1>
+          <div className="chips">
+            <span className="state" title={state[2]}><i className={"dot " + state[0]} />{state[1]}</span>
+            <span title={utcWord(b.must_serve_until)}>{over ? <>Window over since <b className="word">{hhmm(b.must_serve_until)}</b></> : <>In window until <b className="word">{hhmm(b.must_serve_until)}</b></>}</span>
+            <span title="The padded upload size the module charges for, not the payload.">{bytes(b.blob_size)}</span>
+            <span>publisher <Link className="mono" href={`/publisher/?addr=${b.signer}`} title={b.signer}>{shortMid(b.signer, 14, 6)}</Link></span>
+          </div>
+          <div className="idkv">
+            <span>namespace <span className="mono" title={b.namespace}>{nsDisplay(b.namespace)}</span><Copy text={b.namespace} label="namespace" /></span>
+            <span>commitment <span className="mono" title={b.commitment}>{shortMid(b.commitment, 8, 6)}</span><Copy text={b.commitment} label="commitment" /></span>
+            <span>settled <span className="mono">#{int(b.settlement_height)}</span> · {utcWord(b.settlement_time).slice(0, 16)} UTC</span>
+            <span>created {hhmmss(b.creation_timestamp)}</span>
+            {b.assignment_error && <span className="word">assignment: {b.assignment_error}</span>}
+          </div>
+        </div>
       </div>
+      <StatusLine meta={meta} metaError={metaErr} snap={null} client={{ error: d.error, fetchedAt: d.fetchedAt }} />
+
+      <Metrics>
+        <Metric label="Rows observed" value={rc && (judged || rc.status === "pending") ? int(rc.served_distinct_rows) : "—"} tone={rc && (judged || rc.status === "pending") ? undefined : "absent"}
+          help={rc && rc.total_rows > 0 ? `of ${int(rc.total_rows)} · ${int(rc.needed_rows)} needed` : "no in-window point completed"}
+          title="Distinct rows that came back at the latest complete in-window point; the tick is how many rebuild the blob." />
+        <Metric label="Validators served" value={rc && (judged || rc.status === "pending") ? int(rc.served_by_validators) : "—"} den={rc && (judged || rc.status === "pending") ? int(rc.assigned_validators) : undefined}
+          tone={rc && (judged || rc.status === "pending") ? undefined : "absent"}
+          help={rc && (judged || rc.status === "pending") ? `at ${rc.point} · ${hhmm(rc.point_at)}${rc.status === "pending" ? ` · ${int(rc.probed_validators)} with a result` : ""}` : "no in-window point completed"} />
+        <Metric label="Signed" value={rc?.attestation_known ? int(rc.attested_validators) : "—"} den={rc?.attestation_known ? int(rc.assigned_validators) : undefined}
+          tone={rc?.attestation_known ? undefined : "absent"}
+          help={rc?.attestation_known ? "unsigned is not a fault" : "signatures not recorded"}
+          title="Assigned validators whose signature on the settled promise verified against their consensus key. The publisher stops collecting at two thirds of voting power, so about a third of the set is unsigned on any blob." />
+        <Metric label="Service window" value={winLen} help={`${hhmm(b.settlement_time).replace(" UTC", "")} → ${hhmm(b.must_serve_until)}${over ? " · over" : ""}`}
+          title={`creation + max(payment_promise_timeout ${data.params.payment_promise_timeout_s} s, shard_retention ${data.params.shard_retention_s} s)`} />
+        <Metric label="Fee" value={b.charge ? tia(b.charge.fee_utia) : "—"} tone={b.charge ? undefined : "absent"}
+          help={b.charge ? `${int(b.charge.gas_units)} gas · ${b.charge.timed_out ? "timed out" : b.charge.settled ? "settled" : "pending"}` : "recorded before payments were kept"} />
+      </Metrics>
+
+      <section className="band">
+        <div>
+          <h2>Service window</h2>
+          <p className="sub">Settled {hhmm(b.settlement_time)} → deadline {hhmm(b.must_serve_until)} ({winLen}) · probe points are discrete; nothing between them is claimed</p>
+          {order.length === 0 ? <p className="errs">No probe has run for this blob yet.</p> : (
+            <>
+              <div className="tl" role="img" aria-label={`probe points: ${order.join(", ")}`}>
+                <div className="axis" /><div className="win" style={{ left: 0, width: `${winShare}%` }} />
+                <div className="cut" style={{ left: `${winShare}%` }} />
+                <div className="edge l">settled {hhmm(b.settlement_time).replace(" UTC", "")}</div>
+                {hasPost && <div className="edge r">after the deadline · stretched</div>}
+                <div className="cutlbl" style={{ left: `${winShare}%` }}>deadline {hhmm(b.must_serve_until).replace(" UTC", "")}</div>
+                {order.map((k) => {
+                  const at = byLabel.get(k)!.at, t = new Date(at).getTime(), ph = byLabel.get(k)!.phase;
+                  return (
+                    <span key={k}>
+                      <div className={"lbl" + (k === lastIn && hasPost ? " up" : "")} style={{ left: x(t) }}>{k}</div>
+                      <div className={"pt" + (ph === "grace" ? " grace" : ph === "post" ? " post" : "")} style={{ left: x(t) }} title={`${k} · ${utcWord(at)}`} />
+                    </span>
+                  );
+                })}
+              </div>
+              <div className="ptcounts">{order.map(countLine)}</div>
+            </>
+          )}
+        </div>
+        <div>
+          <h2>Rows observed</h2>
+          {rc && rc.total_rows > 0 && (judged || rc.status === "pending") ? (
+            <>
+              <p className="sub">At {rc.point} ({hhmm(rc.point_at)}), across {int(rc.served_by_validators)} validator{rc.served_by_validators === 1 ? "" : "s"}</p>
+              <div className="meter" role="img" aria-label={`${int(rc.served_distinct_rows)} of ${int(rc.total_rows)} rows; ${int(rc.needed_rows)} needed`}>
+                <i style={{ width: `${fill.toFixed(1)}%` }} /><div className="tick" style={{ left: `${tick.toFixed(1)}%` }} /><div className="tl2" style={{ left: `${tick.toFixed(1)}%` }}>{int(rc.needed_rows)} needed</div>
+              </div>
+              <div className="mnums"><span>0</span><span><b>{int(rc.served_distinct_rows)}</b> distinct rows observed</span><span>{int(rc.total_rows)} total</span></div>
+              <p className="errs">
+                {rc.status === "yes" && <>Enough distinct rows to rebuild the blob were observed, and every one of the {int(rc.attested_validators)} validators proven to hold a shard served at that point, so it is <b>fully served</b>.</>}
+                {rc.status === "degraded" && <>Enough distinct rows to rebuild the blob were observed, but {int(rc.attested_validators - rc.served_by_attested)} of the {int(rc.attested_validators)} validators proven to hold a shard did not serve at that point, so it is <b>rebuildable, not fully served</b>.</>}
+                {rc.status === "no" && <>Fewer distinct rows than the {int(rc.needed_rows)} needed were observed, so the blob is <b>not rebuildable</b> from what came back at that point.</>}
+                {rc.status === "pending" && <>{int(rc.probed_validators)} of {int(rc.assigned_validators)} assigned validators have a result at this point; the verdict waits for the rest.</>}
+                {" "}This is an observation of rows at one point — not an actual rebuild.{rc.attestation_known && <> {int(rc.served_by_attested)} of {int(rc.attested_validators)} signed validators served.</>}
+              </p>
+            </>
+          ) : <p className="errs">{state[2]}</p>}
+        </div>
+      </section>
+
+      <section>
+        <div className="vhead">
+          <div><h2>Assigned validators</h2><p className="sub">{int(rows.length)} validators assigned rows of this blob · one mark per probe point, as classified by the observer</p></div>
+          <div className="tools"><a className="dis" href={`${API_BASE}/v1/blobs/${b.promise_hash}`} title="the raw record, probe rows included">Probe rows →</a></div>
+        </div>
+        <div className="tablewrap">
+          <table className="marks">
+            <thead><tr>
+              <th className="col-pin">Validator</th><th className="num">Voting power</th><th className="num">Rows</th><th>Signed</th><th>Host at settlement</th>
+              {order.map((k) => <th key={k} className="m" title={`${k} · ${utcWord(byLabel.get(k)!.at)}`}>{k}</th>)}
+              <th className="go" />
+            </tr></thead>
+            <tbody>
+              {rows.length === 0 && <tr className="empty"><td colSpan={6 + order.length}>No assignment recorded{b.assignment_error ? `: ${b.assignment_error}` : ""}.</td></tr>}
+              {rows.map((a) => (
+                <tr key={a.validator_address}>
+                  <td className="id col-pin"><Link className="mon" href={`/validator/?addr=${a.validator_address}`}>{a.moniker || shortMid(a.validator_address, 12, 4)}</Link></td>
+                  <td className="num">{int(a.voting_power)}</td>
+                  <td className="num">{int(a.row_count)}</td>
+                  <td title={a.attested === true ? "Signature verified against the consensus key: proof of storage." : a.attested === false ? "No verified signature on the settled promise: unproven, not absent. The publisher stops collecting at two thirds of voting power." : "Recorded before the observer verified signatures."}>{a.attested === true ? "yes" : a.attested === false ? <span className="soft">no</span> : "—"}</td>
+                  <td className="mono soft">{a.host_at_settlement ? a.host_at_settlement : a.host_at_settlement === "" ? <span title="no endpoint registered when the promise settled">—</span> : <span className="sans" title="the registry could not be read at that height">not read</span>}</td>
+                  {order.map((k) => {
+                    const p = cell.get(a.validator_address + "|" + k);
+                    const m = p ? markOf(p.classification) : ["none", "no row"];
+                    return <td key={k} className="m"><span className={"mk " + m[0]} title={`${k} · ${m[1]}${p ? ` · ${utcWord(p.started_at)} · ${int(p.rows_returned)} / ${int(p.rows_expected)} rows · ${int(p.total_duration_ms)} ms${p.raw_error ? ` · ${p.raw_error}` : ""}` : ""}`} /></td>;
+                  })}
+                  <td className="go"><Link href={`/validator/?addr=${a.validator_address}`} aria-label={`open ${a.moniker || a.validator_address}`}>→</Link></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="mklegend">
+          <span><span className="mk ok" /> served</span><span><span className="mk fault" /> broken</span><span><span className="mk unsigned" /> served, unsigned — not a fault (two-thirds quorum)</span>
+          <span><span className="mk other" /> other (server error, unreachable, rate limited, certificate)</span><span><span className="mk gone" /> expected gone after the window, or not probed — not a fault</span><span><span className="mk none" /> no endpoint</span>
+        </p>
+      </section>
     </>
   );
 }
 
 export default function BlobPage() {
-  return <Suspense fallback={<p className="muted">Loading…</p>}><Page /></Suspense>;
+  return <Suspense fallback={<p className="crumb" style={{ paddingTop: 22 }}>Loading…</p>}><Page /></Suspense>;
 }
