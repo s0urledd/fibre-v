@@ -100,13 +100,16 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   );
   const href = (v: Validator, hash = "") => `/validator/?addr=${v.address}${win !== "24h" ? `&window=${win}` : ""}${hash}`;
 
-  const kept = (v: Validator) => {
+  // The service rate cell, in one form whatever the sample: the share and
+  // the counts behind it, so 100% · 9/9 shows its own size. A dash with the
+  // reason in its title before anything is assessed. The sample floor only
+  // decides ranking (sortValue), never whether the figure is printed.
+  const rate = (v: Validator) => {
     const o = v.obligations;
-    if (!o || o.total === 0) return <span className="muted" title="No obligation the settled promises prove for this validator in the period.">—</span>;
+    if (!o || o.total === 0) return <span className="muted" title="No observations: the settled promises prove no serving obligation for this validator in this period.">—</span>;
     const d = o.served + o.broken;
-    if (d === 0) return <span className="soft" title={`${int(o.total)} obligations in the period, none decided yet.`}>Collecting evidence</span>;
-    if (d < MIN_RATED) return <><span className="soft" title={`Under ${MIN_RATED} decided obligations: printed, not rated.`}>Collecting evidence</span><span className="den">{int(o.served)} / {int(d)}</span></>;
-    return <><span className="rate">{pctOf(o.served, d)}</span><span className="den">{int(o.served)} / {int(d)}</span></>;
+    if (d === 0) return <span className="muted" title={`Awaiting results: ${int(o.total)} obligation${o.total === 1 ? "" : "s"} in this period, none assessed yet (pending or inconclusive).`}>—</span>;
+    return <span title={d < MIN_RATED ? `Fewer than ${MIN_RATED} assessed obligations: shown, not ranked.` : undefined}><span className="rate">{pctOf(o.served, d)}</span><span className="den"> · {int(o.served)}/{int(d)}</span></span>;
   };
   const count = (v: Validator, n: number, kind: "broken" | "undecided") => {
     const o = v.obligations;
@@ -127,7 +130,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               <option value="all">All validators · {counts.all}</option>
               <option value="broken">Broken obligations · {counts.broken}</option>
               <option value="unreachable">Unreachable now · {counts.unreachable}</option>
-              <option value="collecting">Collecting evidence · {counts.collecting}</option>
+              <option value="collecting">Small sample · {counts.collecting}</option>
               <option value="nohost">No endpoint · {counts.nohost}</option>
             </select>
           </label>
@@ -140,7 +143,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               <th className="col-pin">Validator</th>
               <th title="The newest handshake with the registered endpoint; the chain's own words (jailed, not bonded) come first.">Endpoint now</th>
               <Th k="power" dflt={-1} label="Voting power" title="From the staking module. The default order, and never a performance rank." />
-              <Th k="kept" dflt={1} label="Kept / decided" title="Obligations kept over obligations decided (served + broken) in the period. Under 20 decided the row is not rated." />
+              <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />
               <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />
               <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />
               <Th k="seen" dflt={-1} label="Last evidence" title="When the observer last had any reading from this endpoint." />
@@ -155,7 +158,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                   : needle ? `Nothing matches “${q}”.`
                   : filter === "broken" ? "No broken obligation in this period."
                   : filter === "unreachable" ? "Every registered endpoint answered its newest check."
-                  : filter === "collecting" ? "Every validator with obligations has 20 or more decided."
+                  : filter === "collecting" ? `Every validator with obligations has ${MIN_RATED} or more assessed.`
                   : "Every bonded validator has registered a Fibre endpoint."}
               </td></tr>
             )}
@@ -178,7 +181,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                   </td>
                   <td><span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span></td>
                   <td className="num">{int(v.voting_power)}</td>
-                  <td className="num">{kept(v)}</td>
+                  <td className="num">{rate(v)}</td>
                   <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>
                   <td className="num">{count(v, undecided(o), "undecided")}</td>
                   <td className="num" title={v.last_seen_at ? utcWord(v.last_seen_at) : "no reading yet"}>{v.last_seen_at ? ago(v.last_seen_at) : <span className="muted">—</span>}</td>

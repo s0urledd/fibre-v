@@ -46,9 +46,9 @@ function Overview() {
 
       <Metrics>
         <Metric label="Kept obligations"
-          value={!N ? "—" : notLive ? "—" : !o || o.total === 0 ? "—" : decided === 0 ? "—" : decided < MIN_RATED ? <>{int(o.served)}<span className="den"> / {int(decided)}</span></> : pctOf(o.served, decided)}
+          value={!N || notLive || !o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}
           tone={!N || notLive || !o || decided === 0 ? "absent" : undefined}
-          help={!N ? " " : notLive ? "nothing to measure yet" : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "nothing decided yet" : decided < MIN_RATED ? `Collecting evidence · under ${MIN_RATED} decided` : `${int(o.served)} / ${int(decided)} decided`} />
+          help={!N ? " " : notLive ? "nothing to measure yet" : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed`} />
         <Metric label="Broken obligations"
           value={!N || notLive ? "—" : int(o?.broken ?? 0)}
           tone={!N || notLive ? "absent" : (o?.broken ?? 0) > 0 ? "fault" : undefined}
@@ -80,7 +80,7 @@ function Overview() {
           </p>
           <p className="disc" hidden={disc !== "outcomes"}>
             {o && o.total > 0
-              ? <>The bar shows all <b>{int(o.total)}</b> obligations settled in the period — one per validator and blob it signed for. The kept rate counts only the <b>{int(decided)}</b> decided ones (served + broken); undecided (no reading at the end of the window {int(o.end_unobserved)}, never observed serving {int(o.unobserved)}{(o.held_param_unverified ?? 0) > 0 && <>, deadline unverified {int(o.held_param_unverified)}</>}) and pending stay outside it. Unreachable from here is never counted as broken.</>
+              ? <>The bar shows all <b>{int(o.total)}</b> obligations settled in the period — one per validator and blob it signed for. The kept rate counts only the <b>{int(decided)}</b> assessed ones (served + broken); undecided (no reading at the end of the window {int(o.end_unobserved)}, never observed serving {int(o.unobserved)}{(o.held_param_unverified ?? 0) > 0 && <>, deadline unverified {int(o.held_param_unverified)}</>}) and pending stay outside it. Unreachable from here is never counted as broken.</>
               : <>No obligation settled in this period. An obligation is one validator and one blob it signed for; it is decided by the last probe before the retention deadline.</>}
             {" "}<Link href="/methodology/#rates">Methodology →</Link>
           </p>
