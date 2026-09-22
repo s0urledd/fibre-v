@@ -176,7 +176,7 @@ func TestRunOne_LateSlotBecomesNotProbed(t *testing.T) {
 	pubA := pub(now.Add(-10*time.Minute), now.Add(10*time.Minute))
 	pt := SchedulePoint{At: now.Add(-3 * time.Minute), Label: "w2", Phase: PhaseInWindow}
 	tg := Target{AddressHex: "aa", Host: "192.0.2.1:7980", Assigned: true, RowCount: 148}
-	probed := p.runOne(context.Background(), work{job: job{pubA, pt}, target: tg, key: pointKey("v1", pubA.PromiseHash, pt.At)})
+	probed, _ := p.runOne(context.Background(), work{job: job{pubA, pt}, target: tg, key: pointKey("v1", pubA.PromiseHash, pt.At)})
 	if probed {
 		t.Fatal("late slot was probed")
 	}
@@ -354,5 +354,95 @@ func TestByteSemBoundsInFlightBytes(t *testing.T) {
 	case <-after:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the waiter was not woken")
+	}
+}
+
+// A sweep starts the probe that must start soonest first: the last
+// in-window point, whose allowance ends at the deadline, ahead of early
+// points with minutes to spare, whatever the rotation. Within one deadline
+// the rotation still decides, so the loss a short sweep takes is spread.
+func TestOrderItems_EarliestDeadlineFirst(t *testing.T) {
+	now := time.Now().UTC()
+	mk := func(addr string, dl time.Duration) work {
+		return work{target: Target{AddressHex: addr}, deadline: now.Add(dl)}
+	}
+	for sweep := uint64(0); sweep < 6; sweep++ {
+		items := []work{mk("early1", 12*time.Minute), mk("early2", 12*time.Minute), mk("w4-a", 2*time.Minute),
+			mk("w4-b", 2*time.Minute), mk("early3", 12*time.Minute), mk("grace", 5*time.Minute)}
+		orderItems(items, sweep)
+		got := []string{}
+		for _, it := range items {
+			got = append(got, it.target.AddressHex)
+		}
+		if !strings.HasPrefix(got[0], "w4-") || !strings.HasPrefix(got[1], "w4-") || got[2] != "grace" {
+			t.Fatalf("sweep %d: %v, want the two w4 probes, then grace, then the rest", sweep, got)
+		}
+	}
+	// the rotation still moves which validator of a point goes first
+	a := []work{mk("x", time.Minute), mk("y", time.Minute)}
+	b := []work{mk("x", time.Minute), mk("y", time.Minute)}
+	orderItems(a, 0)
+	orderItems(b, 1)
+	if a[0].target.AddressHex == b[0].target.AddressHex {
+		t.Fatalf("the rotation no longer varies the order within a deadline")
+	}
+}
+
+// A probe that waited for this validator's previous one past its allowance
+// is not started: it would be judged in whatever phase it landed in.
+func TestRunOne_LatenessIsCheckedAgainUnderTheValidatorLock(t *testing.T) {
+	p := testProber(t)
+	now := time.Now().UTC()
+	pubA := pub(now.Add(-10*time.Minute), now.Add(10*time.Minute))
+	// inside the allowance by 300 ms when runOne is called
+	pt := SchedulePoint{At: now.Add(-p.cfg.MaxLateness + 300*time.Millisecond), Label: "w2", Phase: PhaseInWindow}
+	tg := Target{AddressHex: "aa", Host: "192.0.2.1:7980", Assigned: true, RowCount: 148}
+	p.feed = newPubFeed(filepath.Join(t.TempDir(), "publications.jsonl"))
+	lock := p.validatorLock("aa")
+	lock.Lock() // the validator's previous probe
+	res := make(chan bool, 1)
+	go func() {
+		probed, retry := p.runOne(context.Background(), work{job: job{pubA, pt}, target: tg, key: pointKey("v1", pubA.PromiseHash, pt.At)})
+		res <- probed || retry != nil
+	}()
+	time.Sleep(600 * time.Millisecond)
+	lock.Unlock()
+	if <-res {
+		t.Fatal("a slot that went past its allowance waiting for the lock was probed")
+	}
+	if err := p.store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := LoadMeasurements(p.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 || ms[0].Classification != ClassNotProbed || !strings.Contains(ms[0].ClassificationReason, "previous probe") {
+		t.Fatalf("got %+v", ms)
+	}
+}
+
+// A queued retry whose time came after the phase moved on records the first
+// attempt as it stood: a second attempt in another phase would change the
+// verdict, not add evidence.
+func TestRunRetry_AcrossAPhaseBoundaryRecordsTheFirstAttempt(t *testing.T) {
+	p := testProber(t)
+	now := time.Now().UTC()
+	pubA := pub(now.Add(-4*time.Hour), now.Add(-time.Second)) // the window just ended
+	pt := SchedulePoint{At: now.Add(-time.Minute), Label: "w4", Phase: PhaseInWindow}
+	tg := Target{AddressHex: "aa", Host: "192.0.2.1:7980", Assigned: true, RowCount: 148}
+	first := rowFor(pubA, "v1", "aa", pt)
+	first.Outcome, first.Classification, first.FinishedAt = OutcomeTCPTimeout, ClassUnreachable, now.Add(-20*time.Second)
+	it := work{job: job{pubA, pt}, target: tg, key: pointKey("v1", pubA.PromiseHash, pt.At)}
+	p.runRetry(context.Background(), retryReq{it: it, first: first, at: now})
+	if err := p.store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := LoadMeasurements(p.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 || ms[0].Retry != nil || ms[0].Outcome != OutcomeTCPTimeout || ms[0].Phase != PhaseInWindow {
+		t.Fatalf("got %+v", ms)
 	}
 }

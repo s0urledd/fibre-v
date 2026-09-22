@@ -94,7 +94,8 @@ type Measurement struct {
 	Phase Phase `json:"phase"` // from StartedAt
 	// PhaseNote says why Phase differs from the phase at StartedAt, when it
 	// does: "not_found_at_deadline" is a NOT_FOUND that arrived within
-	// NotFoundGuard of must_serve_until and was graded as grace.
+	// NotFoundGuard of must_serve_until (widened by how far the observer's
+	// clock was behind the chain's, ClockOffsetMS) and was graded as grace.
 	PhaseNote            string         `json:"phase_note,omitempty"`
 	Outcome              Outcome        `json:"outcome"`
 	Classification       Classification `json:"classification"`
