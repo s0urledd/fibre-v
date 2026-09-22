@@ -100,9 +100,9 @@ function Page() {
 
       <Metrics>
         <Metric label="Kept obligations"
-          value={!o || o.total === 0 || decided === 0 ? "—" : decided < MIN_RATED ? <>{int(o.served)}<span className="den"> / {int(decided)}</span></> : pctOf(o.served, decided)}
+          value={!o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}
           tone={!o || decided === 0 ? "absent" : undefined}
-          help={!o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "nothing decided yet" : decided < MIN_RATED ? `Collecting evidence · under ${MIN_RATED} decided` : `${int(o.served)} / ${int(decided)} decided`} />
+          help={!o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed`} />
         <Metric label="Broken obligations"
           value={int(o?.broken ?? 0)} tone={(o?.broken ?? 0) > 0 ? "fault" : !o || o.total === 0 ? "absent" : undefined}
           help={(o?.broken ?? 0) > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}` : faults > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}, none under a proven obligation` : "none in this period"}
@@ -123,7 +123,7 @@ function Page() {
           <h2>Obligation outcomes</h2>
           <OutcomeBar o={o} />
           <table className="periods">
-            <thead><tr><th>Period</th><th>Kept</th><th>Decided</th><th>Broken</th><th>Pending</th></tr></thead>
+            <thead><tr><th>Period</th><th>Service rate</th><th>Assessed</th><th>Broken</th><th>Pending</th></tr></thead>
             <tbody>
               {data.windows.map((w) => {
                 const wo = w.obligations, wd = wo.served + wo.broken;
@@ -131,7 +131,7 @@ function Page() {
                 return (
                   <tr key={name} className={name === win ? "on" : undefined} onClick={() => setWin(name as typeof win)} style={{ cursor: "pointer" }} title={`show the ${windowLabel(name)} period`}>
                     <td>{windowLabel(name)}</td>
-                    <td>{wd === 0 ? "—" : wd < MIN_RATED ? <span className="soft">{int(wo.served)} / {int(wd)}</span> : pctOf(wo.served, wd)}</td>
+                    <td>{wd === 0 ? "—" : pctOf(wo.served, wd)}</td>
                     <td>{int(wd)}</td>
                     <td>{wo.broken > 0 ? <span className="word fault">{int(wo.broken)}</span> : "0"}</td>
                     <td>{int(wo.pending)}</td>

@@ -260,7 +260,6 @@ td a.plain:hover, td a.fault:hover { text-decoration: underline; }
 .vt th:nth-child(1) { width: 28%; }
 .vt th:nth-child(2) { width: 15%; }
 .vt th:nth-child(n+3):not(.go) { width: 11%; }
-.vt td .den { margin-left: 6px; }
 .col-pin { position: sticky; left: 0; z-index: 1; background: var(--paper); }
 tbody tr:hover .col-pin { background: color-mix(in srgb, var(--paper) 96%, var(--text)); }
 tr.warn .col-pin { background: color-mix(in srgb, var(--paper) 93%, var(--hold)); }
