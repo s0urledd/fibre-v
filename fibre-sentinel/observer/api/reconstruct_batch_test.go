@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -31,6 +33,7 @@ type valRows struct {
 	attested any // 1, 0 or nil
 	served   bool
 	nullRows bool
+	failLast bool // served at every point but the last, where it answers NOT_FOUND
 }
 
 type blobCase struct {
@@ -109,7 +112,7 @@ func writeBlob(t *testing.T, st *store.Store, idx int, c blobCase) string {
 				continue
 			}
 			outcome, class := "NOT_FOUND", "FAULT"
-			if v.served {
+			if v.served && !(last && v.failLast) {
 				outcome, class = "SERVED_OK", "HEALTHY"
 			}
 			key := fmt.Sprintf("%s-%s-%d", hash, v.addr, p)
@@ -126,7 +129,7 @@ func writeBlob(t *testing.T, st *store.Store, idx int, c blobCase) string {
 				1,1,1,1,1,1,'TLS1.3','', 1,'', ?, 1, ?, ?, 1, 1,
 				'in_window', ?, ?, '', '', 1, '{}', ?)`,
 				key, hash, hash, msu, v.addr, len(v.rows), fmt.Sprintf("w%d", p+1),
-				at, at, at, boolInt(v.served), len(v.rows), len(v.rows),
+				at, at, at, boolInt(v.served && !(last && v.failLast)), len(v.rows), len(v.rows),
 				outcome, class, v.attested); err != nil {
 				t.Fatal(err)
 			}
@@ -217,6 +220,32 @@ func TestReconstructBatchMatchesReference(t *testing.T) {
 			{addr: "h2", rows: full[20:], attested: 0, served: false},
 		},
 	}}
+
+	// Three of four validators failing at the newest point is a point the
+	// correlated-failure guard calls suspect, and every rate leaves it out.
+	// The verdict is drawn at the newest point that is complete and not
+	// suspect; judged at the suspect one it read "no" (one validator's ten
+	// rows against twenty needed) on what is as likely the observer's own
+	// trouble.
+	cases = append(cases, blobCase{
+		name:   "suspect: the newest complete point is excluded, the one before it judges",
+		needed: 20, total: 160, points: 2, complete: true, want: "yes",
+		vals: []valRows{
+			{addr: "j1", rows: full[:10], attested: 1, served: true},
+			{addr: "j2", rows: full[10:20], attested: 1, served: true, failLast: true},
+			{addr: "j3", rows: full[20:30], attested: 1, served: true, failLast: true},
+			{addr: "j4", rows: full[30:40], attested: 1, served: true, failLast: true},
+		},
+	}, blobCase{
+		name:   "suspect: the only point is excluded, nothing is judged",
+		needed: 20, total: 160, points: 1, complete: true, want: "unknown",
+		vals: []valRows{
+			{addr: "k1", rows: full[:10], attested: 1, served: true},
+			{addr: "k2", rows: full[10:20], attested: 1, served: true, failLast: true},
+			{addr: "k3", rows: full[20:30], attested: 1, served: true, failLast: true},
+			{addr: "k4", rows: full[30:40], attested: 1, served: true, failLast: true},
+		},
+	})
 
 	// The ambiguous band. Both validators hold row 0..19, so sigma is 40 and
 	// distinct is 20: excess is 20. One serves, so the bounds on the union are
@@ -376,5 +405,73 @@ func TestReconstructBatchHonoursTheAsOfPin(t *testing.T) {
 	// two hours out, so it had not passed then and has not passed now.
 	if ref.WindowOver {
 		t.Error("window_over is true at a pin two hours before the deadline")
+	}
+}
+
+// The blob page names the points no verdict counts, tallied as the verdict
+// tallies them, and a publication with nothing assigned is empty lists, not
+// nulls a page has to guard against.
+func TestBlobDetailListsItsSuspectPointsAndNoNullLists(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := New(st, "test")
+	ts := httptest.NewServer(srv)
+	defer func() { ts.Close(); srv.Close() }()
+
+	full := []int{}
+	for i := 0; i < 40; i++ {
+		full = append(full, i)
+	}
+	suspect := writeBlob(t, st, 0, blobCase{needed: 20, total: 160, points: 2, complete: true, vals: []valRows{
+		{addr: "j1", rows: full[:10], attested: 1, served: true},
+		{addr: "j2", rows: full[10:20], attested: 1, served: true, failLast: true},
+		{addr: "j3", rows: full[20:30], attested: 1, served: true, failLast: true},
+		{addr: "j4", rows: full[30:40], attested: 1, served: true, failLast: true},
+	}})
+	empty := writeBlob(t, st, 1, blobCase{needed: 20, total: 160})
+
+	fetch := func(hash string) map[string]json.RawMessage {
+		t.Helper()
+		resp, err := http.Get(ts.URL + "/v1/blobs/" + hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("/v1/blobs/%s: %d", hash, resp.StatusCode)
+		}
+		var out map[string]json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	var pts []struct {
+		Label  string `json:"label"`
+		Reason string `json:"reason"`
+	}
+	got := fetch(suspect)
+	if err := json.Unmarshal(got["suspect_points"], &pts); err != nil || len(pts) != 1 || pts[0].Label != "w2" || pts[0].Reason != "fault" {
+		t.Fatalf("suspect_points: %s", got["suspect_points"])
+	}
+	var blob struct {
+		Reconstructable struct {
+			Status string `json:"status"`
+			Point  string `json:"point"`
+		} `json:"reconstructable"`
+	}
+	if err := json.Unmarshal(got["blob"], &blob); err != nil || blob.Reconstructable.Status != "yes" || blob.Reconstructable.Point != "w1" {
+		t.Fatalf("verdict beside the suspect point: %+v (%v)", blob.Reconstructable, err)
+	}
+
+	got = fetch(empty)
+	for _, k := range []string{"assignments", "probes", "suspect_points"} {
+		if string(got[k]) != "[]" {
+			t.Errorf("%s: %s, want []", k, got[k])
+		}
 	}
 }

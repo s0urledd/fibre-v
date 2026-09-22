@@ -1769,7 +1769,7 @@ func (s *Server) previousWindow(ctx context.Context, win Window, ex excludeSet) 
 		return nil, err
 	}
 	db := s.st.DB()
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at")+ex.clause("validator_address"),
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND `+rollup.EffectiveClass("")+` = 'FAULT'`+ss.clause("scheduled_at")+ex.clause("validator_address"),
 		ex.args(append([]any{prev.startArg(), prev.endArg()}, ss.args...)...)...).Scan(&p.Faults); err != nil {
 		return nil, err
 	}
@@ -2403,8 +2403,12 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// The effective class throughout, as the network figures use: a held
+	// row publishes no serve verdict for one validator either, and the
+	// per-validator figures must add up to the network's.
+	cls := rollup.EffectiveClass("")
 	frows, err := db.QueryContext(ctx, `SELECT validator_address, COUNT(*) FROM probes
-		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+sus+vfilter("validator_address")+`
+		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND `+cls+` = 'FAULT'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address`, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
@@ -2423,9 +2427,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		return nil, err
 	}
 	// classes per validator in window
-	rows, err = db.QueryContext(ctx, `SELECT validator_address, classification, COUNT(*) FROM probes
+	rows, err = db.QueryContext(ctx, `SELECT validator_address, `+cls+`, COUNT(*) FROM probes
 		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
-		GROUP BY validator_address, classification`, vargs(winArgs...)...)
+		GROUP BY validator_address, `+cls, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -2446,8 +2450,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	// The retention profile per validator: the same population as the classes
 	// above, sliced by schedule point.
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, schedule_label,
-			COALESCE(SUM(CASE WHEN classification = 'HEALTHY' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN `+cls+` = 'HEALTHY' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+cls+` = 'FAULT' THEN 1 ELSE 0 END), 0)
 		FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address, schedule_label
 		ORDER BY validator_address, schedule_label`, vargs(winArgs...)...)
@@ -3262,12 +3266,22 @@ func (s *Server) reconstructable(ctx context.Context, hash string, pin asOfPin) 
 	attestationKnown := knownAtt > 0
 
 	// in-window points with real results, newest first, with how many
-	// distinct assigned validators answered at each.
+	// distinct assigned validators answered at each. A point the
+	// correlated-failure guard calls suspect is not one to judge the blob
+	// at: most of its validators failing at once is the observer's own
+	// trouble as likely as theirs, and every rate already leaves it out.
+	// Judging there published "not rebuildable" on the observer's
+	// blindness. Tallied over this blob's rows, as reconstructBatch does.
 	pb, pargs := pin.bound("probes", []any{hash})
+	spts, err := rollup.SuspectPoints(ctx, db, `promise_hash = ?`+pb, pargs...)
+	if err != nil {
+		return nil, err
+	}
+	sx, sxArgs := rollup.Exclusion("scheduled_at", spts)
 	rows, err := db.QueryContext(ctx, `SELECT scheduled_at, schedule_label, must_serve_until, COUNT(DISTINCT validator_address) FROM probes
 		WHERE promise_hash = ? AND phase = 'in_window' AND assigned = 1
-		  AND classification NOT IN ('NOT_PROBED','PROBE_ERROR')`+pb+`
-		GROUP BY scheduled_at ORDER BY scheduled_at DESC`, pargs...)
+		  AND classification NOT IN ('NOT_PROBED','PROBE_ERROR')`+pb+sx+`
+		GROUP BY scheduled_at ORDER BY scheduled_at DESC`, append(pargs, sxArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -3533,7 +3547,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
-	var assigns []assignmentRow
+	assigns := []assignmentRow{} // a list, never null, when nothing was assigned
 	for rows.Next() {
 		var a assignmentRow
 		var att sql.NullInt64
@@ -3560,8 +3574,23 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		PaymentPromiseTimeoutS int64 `json:"payment_promise_timeout_s"`
 	}
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT shard_retention_s, payment_promise_timeout_s FROM publications WHERE promise_hash = ?`, hash).Scan(&params.ShardRetentionS, &params.PaymentPromiseTimeoutS)
+	// The points of this blob the correlated-failure guard calls suspect,
+	// tallied as reconstructable tallies them, so the page can show the rows
+	// no verdict counts beside the verdict that left them out.
+	suspect := []suspectPoint{}
+	spts, err := rollup.SuspectPoints(ctx, s.st.DB(), `promise_hash = ?`, hash)
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	for _, p := range spts {
+		if reason := p.Reason(); reason != "" {
+			suspect = append(suspect, suspectPoint{At: p.At, Label: p.Label, Validators: p.Validators,
+				Unreachable: rate(p.Unreachable, p.Validators), Fault: rate(p.Faulted, p.Validators), Reason: reason})
+		}
+	}
 	writeJSON(w, 200, map[string]any{"blob": blobs[0], "params": params, "assignments": assigns,
-		"probes": probes, "probes_truncated": moreProbes, "vantage": s.vantage})
+		"probes": probes, "probes_truncated": moreProbes, "suspect_points": suspect, "vantage": s.vantage})
 }
 
 // ---- sampling ----
@@ -3823,7 +3852,9 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 		conds, args = append(conds, `started_at >= ?`), append(args, store.TS(t))
 	}
 	if c := q.Get("class"); c != "" {
-		conds, args = append(conds, `classification = ?`), append(args, strings.ToUpper(c))
+		// Filtered on the class the rows are published with, so ?class=FAULT
+		// never returns a row that reads RETENTION_UNVERIFIED.
+		conds, args = append(conds, rollup.EffectiveClass("")+` = ?`), append(args, strings.ToUpper(c))
 	}
 	// at: one schedule point, exactly as vantage_health.suspect lists it, so
 	// the rows behind an incident are one link away.

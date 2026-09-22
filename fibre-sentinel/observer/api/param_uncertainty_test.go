@@ -1054,3 +1054,81 @@ func TestTwoRangesInOnePassEachInvalidateTheCachedAnswer(t *testing.T) {
 	}
 	assertReconciles(t, after)
 }
+
+// The per-validator figures come from the same held-aware class as the
+// network's. They used the stored class, so with a hold on record the
+// network withheld a FAULT that the validator's own row still counted: a
+// validator accused on its row for what the observer had just said it could
+// not judge. Summed over validators they now equal the network's figures,
+// and /v1/probes filters on the class it publishes.
+func TestPerValidatorFiguresHonourTheHoldAndAddUpToTheNetwork(t *testing.T) {
+	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
+	gone := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomeNotFound}
+	st, _, _ := heldFixture(t, map[string][]probe.Outcome{
+		"v1": gone, "v2": gone, "v3": ok, "v4": ok, "v5": ok, "v6": ok, "v7": ok, "v8": ok,
+	})
+	openRange(t, st)
+	ts := httptest.NewServer(api.New(st, "test"))
+	defer ts.Close()
+
+	var network heldJSON
+	get(t, ts, "/v1/network?window=24h", &network)
+	var vals struct {
+		Validators []struct {
+			Address   string           `json:"address"`
+			Faults    int64            `json:"faults"`
+			Classes   map[string]int64 `json:"classes"`
+			ServeRate struct {
+				Den int64 `json:"den"`
+			} `json:"serve_rate"`
+			ByPoint []struct {
+				Key  string `json:"key"`
+				Rate struct {
+					Num int64 `json:"num"`
+					Den int64 `json:"den"`
+				} `json:"serve_rate"`
+			} `json:"serve_rate_by_point"`
+		} `json:"validators"`
+	}
+	if code := get(t, ts, "/v1/validators?window=24h", &vals); code != 200 || len(vals.Validators) != 8 {
+		t.Fatalf("validators: %d, %d rows", code, len(vals.Validators))
+	}
+	var faults, held, faultClass int64
+	for _, v := range vals.Validators {
+		faults += v.Faults
+		held += v.Classes["RETENTION_UNVERIFIED"]
+		faultClass += v.Classes["FAULT"]
+		if v.ServeRate.Den != 0 {
+			t.Errorf("%s: a rate over held rows (den %d)", v.Address, v.ServeRate.Den)
+		}
+		for _, p := range v.ByPoint {
+			if p.Rate.Den != 0 {
+				t.Errorf("%s at %s: a per-point rate over held rows (%d/%d)", v.Address, p.Key, p.Rate.Num, p.Rate.Den)
+			}
+		}
+	}
+	if network.Faults != 0 || faults != network.Faults || faultClass != 0 {
+		t.Fatalf("faults: network %d, per-validator sum %d, FAULT class %d; want all 0 under the hold", network.Faults, faults, faultClass)
+	}
+	if held != network.HeldOut["RETENTION_UNVERIFIED"] || held != 32 {
+		t.Fatalf("held rows: per-validator sum %d, network %d, want 32", held, network.HeldOut["RETENTION_UNVERIFIED"])
+	}
+
+	var probes struct {
+		Probes []struct {
+			Classification string `json:"classification"`
+		} `json:"probes"`
+	}
+	if code := get(t, ts, "/v1/probes?class=fault&limit=100", &probes); code != 200 || len(probes.Probes) != 0 {
+		t.Fatalf("?class=fault under the hold: %d, %d rows", code, len(probes.Probes))
+	}
+	probes.Probes = nil
+	if code := get(t, ts, "/v1/probes?class=retention_unverified&limit=100", &probes); code != 200 || len(probes.Probes) != 32 {
+		t.Fatalf("?class=retention_unverified: %d, %d rows", code, len(probes.Probes))
+	}
+	for _, p := range probes.Probes {
+		if p.Classification != "RETENTION_UNVERIFIED" {
+			t.Fatalf("filtered row published as %s", p.Classification)
+		}
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/rollup"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
 
@@ -206,12 +207,20 @@ func (s *Server) reconstructBatch(ctx context.Context, where string, limit int, 
 		return nil, err
 	}
 
-	// 3. every in-window point with a real result, newest first per blob.
+	// 3. every in-window point with a real result, newest first per blob,
+	// less the points the correlated-failure guard calls suspect: the same
+	// tally rollup.SuspectPoints makes, over this blob's rows, which is what
+	// reconstructable excludes. The rows the WHERE drops are guard-silent
+	// classes and count toward none of the three.
 	pb, pargs := pin.bound("p", args)
+	cls := rollup.EffectiveClass("p")
 	points := map[string][]pointAgg{}
 	rows, err = db.QueryContext(ctx, sel+`
 		SELECT p.promise_hash, p.scheduled_at, p.schedule_label, p.must_serve_until,
-		       COUNT(DISTINCT p.validator_address)
+		       COUNT(DISTINCT p.validator_address),
+		       COUNT(DISTINCT CASE WHEN `+cls+` = 'UNREACHABLE' THEN p.validator_address END),
+		       COUNT(DISTINCT CASE WHEN `+cls+` = 'FAULT' THEN p.validator_address END),
+		       COUNT(DISTINCT CASE WHEN `+cls+` NOT IN `+rollup.GuardSilentSQL+` THEN p.validator_address END)
 		FROM probes p JOIN sel ON sel.promise_hash = p.promise_hash
 		WHERE p.phase = 'in_window' AND p.assigned = 1
 		  AND p.classification NOT IN ('NOT_PROBED','PROBE_ERROR')`+pb+`
@@ -223,9 +232,13 @@ func (s *Server) reconstructBatch(ctx context.Context, where string, limit int, 
 	for rows.Next() {
 		var hash string
 		var pa pointAgg
-		if err := rows.Scan(&hash, &pa.at, &pa.label, &pa.msu, &pa.probed); err != nil {
+		var guard rollup.Point
+		if err := rows.Scan(&hash, &pa.at, &pa.label, &pa.msu, &pa.probed, &guard.Unreachable, &guard.Faulted, &guard.Validators); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if guard.Reason() != "" {
+			continue
 		}
 		points[hash] = append(points[hash], pa)
 	}
