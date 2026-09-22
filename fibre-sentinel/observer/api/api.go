@@ -654,8 +654,10 @@ type upgradeSignal struct {
 const paceMinWindow = 30 * time.Minute
 
 // upgradeSignalOf builds the block from the collector's meta keys, or nil
-// once Fibre is live or nothing was polled yet.
-func upgradeSignalOf(meta map[string]string) *upgradeSignal {
+// once Fibre is live or nothing was polled yet. now is only for the ETA,
+// which is left out while the tip is older than chainStaleAfter: a pace
+// measured up to a chain that stopped says nothing about when it resumes.
+func upgradeSignalOf(meta map[string]string, now time.Time) *upgradeSignal {
 	if meta["fibre_active"] == "yes" || meta["signal_version"] == "" {
 		return nil
 	}
@@ -670,6 +672,11 @@ func upgradeSignalOf(meta map[string]string) *upgradeSignal {
 		u.ThresholdShare = float64(u.ThresholdPower) / float64(u.TotalVotingPower)
 	}
 	_ = json.Unmarshal([]byte(meta["signal_missing"]), &u.MissingValidators)
+	if u.MissingValidators == nil {
+		// "null" on record, from a collector that stored a nil list, is
+		// nobody missing, and the field is a list either way.
+		u.MissingValidators = []string{}
+	}
 	tip := n("chain_height")
 	if u.UpgradeHeight > 0 && tip > 0 && u.UpgradeHeight > tip {
 		u.BlocksRemaining = u.UpgradeHeight - tip
@@ -677,7 +684,7 @@ func upgradeSignalOf(meta map[string]string) *upgradeSignal {
 		fromT, errFrom := time.Parse(store.TimeLayout, meta["chain_pace_from_time"])
 		tipT, errTip := time.Parse(store.TimeLayout, meta["chain_tip_time"])
 		if errFrom == nil && errTip == nil && fromH > 0 && tip > fromH {
-			if window := tipT.Sub(fromT); window >= paceMinWindow {
+			if window := tipT.Sub(fromT); window >= paceMinWindow && now.Sub(tipT) <= chainStaleAfter {
 				u.BlockTimeS = window.Seconds() / float64(tip-fromH)
 				u.PaceWindowS = int64(window.Seconds())
 				u.ETASeconds = int64(float64(u.BlocksRemaining)*u.BlockTimeS + 0.5)
@@ -708,7 +715,7 @@ func (s *Server) upgradeSignalSets(ctx context.Context) (missing, shared map[str
 		}
 	}
 	rows.Close()
-	u := upgradeSignalOf(meta)
+	u := upgradeSignalOf(meta, time.Now())
 	if u == nil {
 		return nil, nil, false
 	}
@@ -843,7 +850,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, metaResponse{
 		Components: h.Components, Health: h.Status, Checks: h.Checks, ScanGaps: h.ScanGaps, PinStatus: h.PinStatus,
-		Evidence: evidenceOf, EvidenceKinds: evidenceKinds, UpgradeSignal: upgradeSignalOf(meta),
+		Evidence: evidenceOf, EvidenceKinds: evidenceKinds, UpgradeSignal: upgradeSignalOf(meta, now),
 		ParamUncertainty:         ranges,
 		UnassignablePublications: s.unassignablePublications(ctx),
 		APIVersion:               Version, Vantage: s.vantage, VantageInfo: s.info,
