@@ -8,6 +8,7 @@ import { Metric, Metrics } from "@/components/Metrics";
 import OutcomeBar from "@/components/OutcomeBar";
 import VolumeChart from "@/components/VolumeChart";
 import Validators from "@/components/Validators";
+import { netName } from "@/components/Chrome";
 
 /**
  * The overview: the network's obligations over the selected period, the
@@ -39,7 +40,7 @@ function Overview() {
   return (
     <>
       <div className="title">
-        <div><h1>Fibre network</h1><p className="lede">Validator service, backed by evidence.</p></div>
+        <div><h1>Fibre on {meta ? netName(meta.chain_id) : "…"}</h1><p className="lede">Whether validators keep serving the shards they signed for, checked from outside.</p></div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
       <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt }} measuring={measuring} />
@@ -106,5 +107,5 @@ function Overview() {
 }
 
 export default function Page() {
-  return <Suspense fallback={<div className="title"><div><h1>Fibre network</h1><p className="lede">Validator service, backed by evidence.</p></div></div>}><Overview /></Suspense>;
+  return <Suspense fallback={<div className="title"><div><h1>Fibre on …</h1><p className="lede">Whether validators keep serving the shards they signed for, checked from outside.</p></div></div>}><Overview /></Suspense>;
 }

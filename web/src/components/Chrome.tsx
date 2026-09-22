@@ -70,7 +70,7 @@ function ThemeToggle() {
 }
 
 /** "mocha-5" as the chip prints it; the mainnet chain id is "celestia" */
-function netName(id: string | undefined): string {
+export function netName(id: string | undefined): string {
   if (!id) return "network";
   if (id === "celestia" || /^mainnet$/i.test(id)) return "Mainnet";
   return id.charAt(0).toUpperCase() + id.slice(1);

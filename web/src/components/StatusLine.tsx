@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useState } from "react";
-import { type Meta, type RecordThrough, type Window, type VantageHealth, type ScanGap, int, ago, since, utcWord, hhmm, API_BASE } from "@/lib/api";
+import { type Meta, type RecordThrough, type Window, type VantageHealth, type ScanGap, int, ago, since, span, utcWord, hhmm, API_BASE } from "@/lib/api";
 
 /** what the page's own data stream says about the API right now */
 export type Client = { error: string | null; fetchedAt: string | null };
@@ -62,7 +62,12 @@ export default function StatusLine({ meta, metaError, snap, client, measuring }:
     );
   }
   if (notLive) {
-    items.push(<span key="live"><i className="dot hold" />Fibre <b>not live</b> · app v{meta!.app_version}{meta!.fibre_app_version ? `, needs v${meta!.fibre_app_version}` : ", needs a later version"}</span>);
+    items.push(
+      <span key="live" title={sig?.eta_seconds ? `At the chain's pace over the last ${span(sig.pace_window_s ?? 0)} (${sig.block_time_s!.toFixed(2)} s per block). An estimate, not a promise.` : undefined}>
+        <i className="dot hold" />Fibre <b>not live</b> · app v{meta!.app_version}{meta!.fibre_app_version ? `, needs v${meta!.fibre_app_version}` : ", needs a later version"}
+        {sig?.upgrade_height ? <> · upgrade at <b className="mono">#{int(sig.upgrade_height)}</b>{sig.blocks_remaining ? <> · {int(sig.blocks_remaining)} blocks to go{sig.eta_seconds ? <>, about <b>{span(sig.eta_seconds)}</b></> : ""}</> : ""}</> : ""}
+      </span>,
+    );
   } else if (measuring) {
     items.push(<span key="live"><i className="dot ok" />Fibre <b>live</b> · measuring</span>);
   }
@@ -88,7 +93,7 @@ export default function StatusLine({ meta, metaError, snap, client, measuring }:
       <p className="disc" id="status-disc" hidden={!open}>
         {meta ? <>Checks <b>{ok} / {checks.length} passing</b>{failing.length > 0 && <> (failing: {failing.map((c) => `${c.name} — ${c.detail}`).join("; ")})</>}</> : <>Observer state <b>unknown</b>: the API has not answered yet</>}
         {meta?.app_version && <> · Fibre <b>{meta.fibre_active ? "live" : "not live"}</b> on app v{meta.app_version}</>}
-        {sig && <> · {(sig.share * 100).toFixed(1)}% of voting power has signalled for v{sig.version} (threshold {(sig.threshold_share * 100).toFixed(1)}%){sig.missing_validators.length > 0 && <>, {int(sig.missing_validators.length)} bonded not yet</>}{sig.upgrade_height ? <>, upgrade at #{int(sig.upgrade_height)}</> : ""}, read {ago(sig.polled_at)}</>}
+        {sig && <> · {(sig.share * 100).toFixed(1)}% of voting power has signalled for v{sig.version} (threshold {(sig.threshold_share * 100).toFixed(1)}%){sig.missing_validators.length > 0 && <>, {int(sig.missing_validators.length)} bonded not yet</>}{sig.upgrade_height ? <>, upgrade at #{int(sig.upgrade_height)}{sig.blocks_remaining ? <> ({int(sig.blocks_remaining)} blocks to go{sig.eta_seconds ? <>, about {span(sig.eta_seconds)} at {sig.block_time_s!.toFixed(2)} s per block measured over the last {span(sig.pace_window_s ?? 0)}</> : ""})</> : ""}</> : ""}, read {ago(sig.polled_at)}</>}
         {rt?.height && <> · Record lag <b>{int(lag)} block{lag === 1 ? "" : "s"}</b>{rt.chain_height ? <> behind the tip #{int(rt.chain_height)}</> : ""}</>}
         {snap?.window && <> · Window <b>{snap.window.name === "all" || snap.window.start.startsWith("0001-") ? "since the first record" : `${utcWord(snap.window.start).slice(0, 16)} → ${utcWord(snap.window.end).slice(0, 16)} UTC`}</b></>}
         {meta?.vantage_info && <> · Observed from <b>{meta.vantage_info.name}</b>{meta.vantage_info.provider ? ` (${meta.vantage_info.provider}${meta.vantage_info.asn ? ` ${meta.vantage_info.asn}` : ""})` : ""}; “unreachable” from here never counts as broken.</>}

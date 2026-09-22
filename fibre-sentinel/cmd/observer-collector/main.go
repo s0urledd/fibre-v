@@ -529,6 +529,12 @@ func main() {
 				// still looks identical to a network at rest.
 				if !tipTime.IsZero() {
 					_ = st.SetMeta("chain_tip_time", store.TS(tipTime), now)
+					// And the anchors behind the chain's recent block time,
+					// which the site needs to say when a scheduled upgrade
+					// height is due (see store.NotePace).
+					if err := st.NotePace(height, tipTime, now); err != nil {
+						log.Printf("chain pace: %v", err)
+					}
 				}
 
 				if provs, err := chain.BondedFibreProviders(ctx); err != nil {

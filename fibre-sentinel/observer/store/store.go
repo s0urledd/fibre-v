@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1025,6 +1026,79 @@ func (s *Store) Meta(key string) (string, error) {
 		return "", nil
 	}
 	return v, err
+}
+
+// ---- chain pace ----
+
+// paceStep is how long the newer pace anchor is kept before the pair
+// advances, so the older anchor always spans between paceStep and twice it.
+const paceStep = 12 * time.Hour
+
+// NotePace keeps two anchors of the chain's own clock against its height
+// (meta chain_pace_from_* and chain_pace_mid_*), so the API can state the
+// chain's recent average block time as a measurement over the last twelve
+// to twenty-four hours rather than a nominal figure. Called on every status
+// poll; the pair advances once the newer anchor is paceStep old. A tip
+// below the older anchor is a different chain: both anchors start over.
+func (s *Store) NotePace(height int64, tipTime, now time.Time) error {
+	if height <= 0 || tipTime.IsZero() {
+		return nil
+	}
+	fromH, fromT, err := s.paceAnchor("from")
+	if err != nil {
+		return err
+	}
+	if fromH == 0 || height < fromH {
+		if err := s.setPaceAnchor("mid", 0, time.Time{}, now); err != nil {
+			return err
+		}
+		return s.setPaceAnchor("from", height, tipTime, now)
+	}
+	midH, midT, err := s.paceAnchor("mid")
+	if err != nil {
+		return err
+	}
+	if midH == 0 {
+		if tipTime.Sub(fromT) >= paceStep {
+			return s.setPaceAnchor("mid", height, tipTime, now)
+		}
+		return nil
+	}
+	if tipTime.Sub(midT) >= paceStep {
+		if err := s.setPaceAnchor("from", midH, midT, now); err != nil {
+			return err
+		}
+		return s.setPaceAnchor("mid", height, tipTime, now)
+	}
+	return nil
+}
+
+func (s *Store) paceAnchor(name string) (int64, time.Time, error) {
+	h, err := s.Meta("chain_pace_" + name + "_height")
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	t, err := s.Meta("chain_pace_" + name + "_time")
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	height, _ := strconv.ParseInt(h, 10, 64)
+	at, perr := time.Parse(TimeLayout, t)
+	if height <= 0 || perr != nil {
+		return 0, time.Time{}, nil
+	}
+	return height, at, nil
+}
+
+func (s *Store) setPaceAnchor(name string, height int64, at, now time.Time) error {
+	h, t := "", ""
+	if height > 0 {
+		h, t = strconv.FormatInt(height, 10), ts(at)
+	}
+	if err := s.SetMeta("chain_pace_"+name+"_height", h, now); err != nil {
+		return err
+	}
+	return s.SetMeta("chain_pace_"+name+"_time", t, now)
 }
 
 // ---- params history ----
