@@ -476,11 +476,15 @@ func main() {
 				log.Printf("app version: %v", err)
 			} else {
 				_ = st.SetMeta("app_version", itoa(int64(av)), now)
-				active := "no"
-				if av >= scan.FibreAppVersion {
-					active = "yes"
+				active, known := fibreActive(av, func() error {
+					_, err := chain.FibreParamsAt(ctx, 0)
+					return err
+				})
+				if known {
+					_ = st.SetMeta("fibre_active", active, now)
+				} else {
+					log.Printf("fibre_active: app v%d but x/fibre did not answer; left as it was", av)
 				}
-				_ = st.SetMeta("fibre_active", active, now)
 				_ = st.SetMeta("fibre_app_version", itoa(scan.FibreAppVersion), now)
 				// Until Fibre is live, the one Fibre-relevant fact the chain
 				// carries is who has signalled for the version that brings
@@ -492,6 +496,9 @@ func main() {
 					if sig, err := chain.UpgradeSignal(ctx, scan.FibreAppVersion); err != nil {
 						log.Printf("upgrade signal: %v", err)
 					} else {
+						if sig.Missing == nil {
+							sig.Missing = []string{} // nobody missing is a list, not null
+						}
 						missing, _ := json.Marshal(sig.Missing)
 						for k, v := range map[string]string{
 							"signal_version":            fmt.Sprint(sig.Version),
@@ -672,6 +679,27 @@ func main() {
 			}
 		}
 	}
+}
+
+// fibreActive is the fibre_active verdict: "yes" only once the chain is on
+// FibreAppVersion AND x/fibre answers at the tip. The version alone said yes
+// too early: the last pre-upgrade block sets app version 10, so a node on
+// the old binary, halted at the upgrade height, reports v10 with no module
+// behind it, and so does the new binary before its first block. known is
+// false when the query failed for another reason (the node is down, busy),
+// which says nothing either way.
+func fibreActive(appVersion uint64, queryFibre func() error) (verdict string, known bool) {
+	if appVersion < scan.FibreAppVersion {
+		return "no", true
+	}
+	err := queryFibre()
+	switch {
+	case err == nil:
+		return "yes", true
+	case scan.IsModuleInactive(err):
+		return "no", true
+	}
+	return "", false
 }
 
 func itoa(i int64) string {

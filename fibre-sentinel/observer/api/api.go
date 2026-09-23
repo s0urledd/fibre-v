@@ -113,6 +113,8 @@ type Server struct {
 	blobs *blobCache
 	// asOf rations pinned-window requests (see asOfLimiter).
 	asOf asOfLimiter
+	// details caches the validator page (see validator_detail.go).
+	details detailCache
 	// bg counts the server's own background work (the blob-page warm-up),
 	// for Close.
 	bg sync.WaitGroup
@@ -654,8 +656,10 @@ type upgradeSignal struct {
 const paceMinWindow = 30 * time.Minute
 
 // upgradeSignalOf builds the block from the collector's meta keys, or nil
-// once Fibre is live or nothing was polled yet.
-func upgradeSignalOf(meta map[string]string) *upgradeSignal {
+// once Fibre is live or nothing was polled yet. now is only for the ETA,
+// which is left out while the tip is older than chainStaleAfter: a pace
+// measured up to a chain that stopped says nothing about when it resumes.
+func upgradeSignalOf(meta map[string]string, now time.Time) *upgradeSignal {
 	if meta["fibre_active"] == "yes" || meta["signal_version"] == "" {
 		return nil
 	}
@@ -670,6 +674,11 @@ func upgradeSignalOf(meta map[string]string) *upgradeSignal {
 		u.ThresholdShare = float64(u.ThresholdPower) / float64(u.TotalVotingPower)
 	}
 	_ = json.Unmarshal([]byte(meta["signal_missing"]), &u.MissingValidators)
+	if u.MissingValidators == nil {
+		// "null" on record, from a collector that stored a nil list, is
+		// nobody missing, and the field is a list either way.
+		u.MissingValidators = []string{}
+	}
 	tip := n("chain_height")
 	if u.UpgradeHeight > 0 && tip > 0 && u.UpgradeHeight > tip {
 		u.BlocksRemaining = u.UpgradeHeight - tip
@@ -677,7 +686,7 @@ func upgradeSignalOf(meta map[string]string) *upgradeSignal {
 		fromT, errFrom := time.Parse(store.TimeLayout, meta["chain_pace_from_time"])
 		tipT, errTip := time.Parse(store.TimeLayout, meta["chain_tip_time"])
 		if errFrom == nil && errTip == nil && fromH > 0 && tip > fromH {
-			if window := tipT.Sub(fromT); window >= paceMinWindow {
+			if window := tipT.Sub(fromT); window >= paceMinWindow && now.Sub(tipT) <= chainStaleAfter {
 				u.BlockTimeS = window.Seconds() / float64(tip-fromH)
 				u.PaceWindowS = int64(window.Seconds())
 				u.ETASeconds = int64(float64(u.BlocksRemaining)*u.BlockTimeS + 0.5)
@@ -708,7 +717,7 @@ func (s *Server) upgradeSignalSets(ctx context.Context) (missing, shared map[str
 		}
 	}
 	rows.Close()
-	u := upgradeSignalOf(meta)
+	u := upgradeSignalOf(meta, time.Now())
 	if u == nil {
 		return nil, nil, false
 	}
@@ -843,7 +852,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, metaResponse{
 		Components: h.Components, Health: h.Status, Checks: h.Checks, ScanGaps: h.ScanGaps, PinStatus: h.PinStatus,
-		Evidence: evidenceOf, EvidenceKinds: evidenceKinds, UpgradeSignal: upgradeSignalOf(meta),
+		Evidence: evidenceOf, EvidenceKinds: evidenceKinds, UpgradeSignal: upgradeSignalOf(meta, now),
 		ParamUncertainty:         ranges,
 		UnassignablePublications: s.unassignablePublications(ctx),
 		APIVersion:               Version, Vantage: s.vantage, VantageInfo: s.info,
@@ -1762,7 +1771,7 @@ func (s *Server) previousWindow(ctx context.Context, win Window, ex excludeSet) 
 		return nil, err
 	}
 	db := s.st.DB()
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+ss.clause("scheduled_at")+ex.clause("validator_address"),
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND `+rollup.EffectiveClass("")+` = 'FAULT'`+ss.clause("scheduled_at")+ex.clause("validator_address"),
 		ex.args(append([]any{prev.startArg(), prev.endArg()}, ss.args...)...)...).Scan(&p.Faults); err != nil {
 		return nil, err
 	}
@@ -2396,8 +2405,12 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// The effective class throughout, as the network figures use: a held
+	// row publishes no serve verdict for one validator either, and the
+	// per-validator figures must add up to the network's.
+	cls := rollup.EffectiveClass("")
 	frows, err := db.QueryContext(ctx, `SELECT validator_address, COUNT(*) FROM probes
-		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND classification = 'FAULT'`+sus+vfilter("validator_address")+`
+		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND `+cls+` = 'FAULT'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address`, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
@@ -2416,9 +2429,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		return nil, err
 	}
 	// classes per validator in window
-	rows, err = db.QueryContext(ctx, `SELECT validator_address, classification, COUNT(*) FROM probes
+	rows, err = db.QueryContext(ctx, `SELECT validator_address, `+cls+`, COUNT(*) FROM probes
 		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
-		GROUP BY validator_address, classification`, vargs(winArgs...)...)
+		GROUP BY validator_address, `+cls, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -2439,8 +2452,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	// The retention profile per validator: the same population as the classes
 	// above, sliced by schedule point.
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, schedule_label,
-			COALESCE(SUM(CASE WHEN classification = 'HEALTHY' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN classification = 'FAULT' THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN `+cls+` = 'HEALTHY' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+cls+` = 'FAULT' THEN 1 ELSE 0 END), 0)
 		FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address, schedule_label
 		ORDER BY validator_address, schedule_label`, vargs(winArgs...)...)
@@ -2947,9 +2960,9 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	}
 	if win.AsOf {
 		// This route builds the aggregates the network and validator lists
-		// do, four spans of them, and none of it is cached — so it was the
-		// one uncapped way to buy a full pinned computation. Rationed like
-		// the others.
+		// do, four spans of them, and a pinned answer is never cached — so it
+		// was the one uncapped way to buy a full pinned computation. Rationed
+		// like the others.
 		if !s.asOf.allow(time.Now()) {
 			w.Header().Set("Retry-After", "2")
 			writeErr(w, 429, "as_of requests are limited to one every two seconds")
@@ -2962,7 +2975,23 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		}
 		defer s.asOf.leave()
 		w.Header().Set("Cache-Control", "no-store")
+		status, out, err := s.validatorDetail(ctx, addr, win, now)
+		if err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		writeJSON(w, status, out)
+		return
 	}
+	s.serveValidatorDetail(w, r, addr, win, now)
+}
+
+const validatorNotSeen = "validator not seen in the registry or in any probe"
+
+// validatorDetail builds the /v1/validators/{addr} answer: the row over win,
+// the four standard spans beside it, and the newest probes. status is 200, or
+// 404 with an error body when nothing about addr is on record.
+func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, now time.Time) (int, any, error) {
 	// The spans beside the row are anchored on the same moment the row is:
 	// the pin when there is one, the clock otherwise. Anchoring them on the
 	// clock while the row was pinned put a rewound validator beside four
@@ -2996,8 +3025,7 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		}
 		_, ss, err := s.suspectPoints(ctx, sw)
 		if err != nil {
-			s.writeInternal(w, r.URL.Path, err)
-			return
+			return 0, nil, err
 		}
 		if sw.Name == "all" {
 			suspectAll = ss.points
@@ -3005,18 +3033,15 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 		classes, total, err := s.classCountsWhere(ctx, `validator_address = ? AND started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+ss.clause("scheduled_at"),
 			append([]any{addr, sw.startArg(), sw.endArg()}, ss.args...)...)
 		if err != nil {
-			s.writeInternal(w, r.URL.Path, err)
-			return
+			return 0, nil, err
 		}
 		obl, err := s.obligationsWhere(ctx, sw, ss, ` AND pr.validator_address = ?`, addr)
 		if err != nil {
-			s.writeInternal(w, r.URL.Path, err)
-			return
+			return 0, nil, err
 		}
 		rolled, label, err := s.rolledFor(ctx, sw, addr)
 		if err != nil {
-			s.writeInternal(w, r.URL.Path, err)
-			return
+			return 0, nil, err
 		}
 		if rolled != nil {
 			if rp, ok := rolled.ProbesByVal[addr]; ok {
@@ -3035,12 +3060,10 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.validatorRows(ctx, win, addr)
 	if err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return 0, nil, err
 	}
 	if len(rows) == 0 {
-		writeErr(w, 404, "validator not seen in the registry or in any probe")
-		return
+		return 404, map[string]any{"error": validatorNotSeen}, nil
 	}
 	probeWhere, probeArgs := `validator_address = ?`, []any{addr}
 	if win.AsOf {
@@ -3049,13 +3072,12 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	}
 	probes, err := s.probeRows(ctx, probeWhere, 50, probeArgs...)
 	if err != nil {
-		s.writeInternal(w, r.URL.Path, err)
-		return
+		return 0, nil, err
 	}
 	probes, moreProbes := trim(probes, 50)
 	out := map[string]any{
 		"window":                      win,
-		"record_through":              s.recordThrough(r.Context()),
+		"record_through":              s.recordThrough(ctx),
 		"validator":                   rows[0],
 		"windows":                     spans,
 		"recent_probes":               probes,
@@ -3070,7 +3092,7 @@ func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
 	if _, label, err := s.rolledFor(ctx, win, addr); err == nil && label != nil {
 		out["rolled_up"] = label
 	}
-	writeJSON(w, 200, out)
+	return 200, out, nil
 }
 
 // ---- blobs ----
@@ -3255,12 +3277,22 @@ func (s *Server) reconstructable(ctx context.Context, hash string, pin asOfPin) 
 	attestationKnown := knownAtt > 0
 
 	// in-window points with real results, newest first, with how many
-	// distinct assigned validators answered at each.
+	// distinct assigned validators answered at each. A point the
+	// correlated-failure guard calls suspect is not one to judge the blob
+	// at: most of its validators failing at once is the observer's own
+	// trouble as likely as theirs, and every rate already leaves it out.
+	// Judging there published "not rebuildable" on the observer's
+	// blindness. Tallied over this blob's rows, as reconstructBatch does.
 	pb, pargs := pin.bound("probes", []any{hash})
+	spts, err := rollup.SuspectPoints(ctx, db, `promise_hash = ?`+pb, pargs...)
+	if err != nil {
+		return nil, err
+	}
+	sx, sxArgs := rollup.Exclusion("scheduled_at", spts)
 	rows, err := db.QueryContext(ctx, `SELECT scheduled_at, schedule_label, must_serve_until, COUNT(DISTINCT validator_address) FROM probes
 		WHERE promise_hash = ? AND phase = 'in_window' AND assigned = 1
-		  AND classification NOT IN ('NOT_PROBED','PROBE_ERROR')`+pb+`
-		GROUP BY scheduled_at ORDER BY scheduled_at DESC`, pargs...)
+		  AND classification NOT IN ('NOT_PROBED','PROBE_ERROR')`+pb+sx+`
+		GROUP BY scheduled_at ORDER BY scheduled_at DESC`, append(pargs, sxArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -3526,7 +3558,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, r.URL.Path, err)
 		return
 	}
-	var assigns []assignmentRow
+	assigns := []assignmentRow{} // a list, never null, when nothing was assigned
 	for rows.Next() {
 		var a assignmentRow
 		var att sql.NullInt64
@@ -3553,8 +3585,23 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		PaymentPromiseTimeoutS int64 `json:"payment_promise_timeout_s"`
 	}
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT shard_retention_s, payment_promise_timeout_s FROM publications WHERE promise_hash = ?`, hash).Scan(&params.ShardRetentionS, &params.PaymentPromiseTimeoutS)
+	// The points of this blob the correlated-failure guard calls suspect,
+	// tallied as reconstructable tallies them, so the page can show the rows
+	// no verdict counts beside the verdict that left them out.
+	suspect := []suspectPoint{}
+	spts, err := rollup.SuspectPoints(ctx, s.st.DB(), `promise_hash = ?`, hash)
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	for _, p := range spts {
+		if reason := p.Reason(); reason != "" {
+			suspect = append(suspect, suspectPoint{At: p.At, Label: p.Label, Validators: p.Validators,
+				Unreachable: rate(p.Unreachable, p.Validators), Fault: rate(p.Faulted, p.Validators), Reason: reason})
+		}
+	}
 	writeJSON(w, 200, map[string]any{"blob": blobs[0], "params": params, "assignments": assigns,
-		"probes": probes, "probes_truncated": moreProbes, "vantage": s.vantage})
+		"probes": probes, "probes_truncated": moreProbes, "suspect_points": suspect, "vantage": s.vantage})
 }
 
 // ---- sampling ----
@@ -3816,7 +3863,9 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 		conds, args = append(conds, `started_at >= ?`), append(args, store.TS(t))
 	}
 	if c := q.Get("class"); c != "" {
-		conds, args = append(conds, `classification = ?`), append(args, strings.ToUpper(c))
+		// Filtered on the class the rows are published with, so ?class=FAULT
+		// never returns a row that reads RETENTION_UNVERIFIED.
+		conds, args = append(conds, rollup.EffectiveClass("")+` = ?`), append(args, strings.ToUpper(c))
 	}
 	// at: one schedule point, exactly as vantage_health.suspect lists it, so
 	// the rows behind an incident are one link away.

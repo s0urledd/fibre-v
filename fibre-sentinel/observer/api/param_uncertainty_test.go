@@ -3,10 +3,14 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1053,4 +1057,155 @@ func TestTwoRangesInOnePassEachInvalidateTheCachedAnswer(t *testing.T) {
 		t.Fatalf("held_param_unverified = %d, want 4", after.Obligations.HeldParamUnverified)
 	}
 	assertReconciles(t, after)
+}
+
+// The per-validator figures come from the same held-aware class as the
+// network's. They used the stored class, so with a hold on record the
+// network withheld a FAULT that the validator's own row still counted: a
+// validator accused on its row for what the observer had just said it could
+// not judge. Summed over validators they now equal the network's figures,
+// and /v1/probes filters on the class it publishes.
+func TestPerValidatorFiguresHonourTheHoldAndAddUpToTheNetwork(t *testing.T) {
+	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
+	gone := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomeNotFound}
+	st, _, _ := heldFixture(t, map[string][]probe.Outcome{
+		"v1": gone, "v2": gone, "v3": ok, "v4": ok, "v5": ok, "v6": ok, "v7": ok, "v8": ok,
+	})
+	openRange(t, st)
+	ts := httptest.NewServer(api.New(st, "test"))
+	defer ts.Close()
+
+	var network heldJSON
+	get(t, ts, "/v1/network?window=24h", &network)
+	var vals struct {
+		Validators []struct {
+			Address   string           `json:"address"`
+			Faults    int64            `json:"faults"`
+			Classes   map[string]int64 `json:"classes"`
+			ServeRate struct {
+				Den int64 `json:"den"`
+			} `json:"serve_rate"`
+			ByPoint []struct {
+				Key  string `json:"key"`
+				Rate struct {
+					Num int64 `json:"num"`
+					Den int64 `json:"den"`
+				} `json:"serve_rate"`
+			} `json:"serve_rate_by_point"`
+		} `json:"validators"`
+	}
+	if code := get(t, ts, "/v1/validators?window=24h", &vals); code != 200 || len(vals.Validators) != 8 {
+		t.Fatalf("validators: %d, %d rows", code, len(vals.Validators))
+	}
+	var faults, held, faultClass int64
+	for _, v := range vals.Validators {
+		faults += v.Faults
+		held += v.Classes["RETENTION_UNVERIFIED"]
+		faultClass += v.Classes["FAULT"]
+		if v.ServeRate.Den != 0 {
+			t.Errorf("%s: a rate over held rows (den %d)", v.Address, v.ServeRate.Den)
+		}
+		for _, p := range v.ByPoint {
+			if p.Rate.Den != 0 {
+				t.Errorf("%s at %s: a per-point rate over held rows (%d/%d)", v.Address, p.Key, p.Rate.Num, p.Rate.Den)
+			}
+		}
+	}
+	if network.Faults != 0 || faults != network.Faults || faultClass != 0 {
+		t.Fatalf("faults: network %d, per-validator sum %d, FAULT class %d; want all 0 under the hold", network.Faults, faults, faultClass)
+	}
+	if held != network.HeldOut["RETENTION_UNVERIFIED"] || held != 32 {
+		t.Fatalf("held rows: per-validator sum %d, network %d, want 32", held, network.HeldOut["RETENTION_UNVERIFIED"])
+	}
+
+	var probes struct {
+		Probes []struct {
+			Classification string `json:"classification"`
+		} `json:"probes"`
+	}
+	if code := get(t, ts, "/v1/probes?class=fault&limit=100", &probes); code != 200 || len(probes.Probes) != 0 {
+		t.Fatalf("?class=fault under the hold: %d, %d rows", code, len(probes.Probes))
+	}
+	probes.Probes = nil
+	if code := get(t, ts, "/v1/probes?class=retention_unverified&limit=100", &probes); code != 200 || len(probes.Probes) != 32 {
+		t.Fatalf("?class=retention_unverified: %d, %d rows", code, len(probes.Probes))
+	}
+	for _, p := range probes.Probes {
+		if p.Classification != "RETENTION_UNVERIFIED" {
+			t.Fatalf("filtered row published as %s", p.Classification)
+		}
+	}
+}
+
+// The validator page is served from a short cache that a hold still clears
+// at once, and an address nothing is on record for is refused before any
+// aggregate is built.
+func TestTheValidatorPageIsCachedUntilAHoldLandsAndRefusesUnknownAddresses(t *testing.T) {
+	a := strings.Repeat("a1", 20)
+	ok := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeServedOK}
+	gone := []probe.Outcome{probe.OutcomeServedOK, probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomeNotFound}
+	outcomes := map[string][]probe.Outcome{a: gone}
+	for i := 2; i <= 8; i++ {
+		outcomes[strings.Repeat(fmt.Sprintf("b%d", i), 20)] = ok
+	}
+	st, _, _ := heldFixture(t, outcomes)
+	srv := api.New(st, "test")
+	ts := httptest.NewServer(srv)
+	defer func() { ts.Close(); srv.Close() }()
+
+	if code := get(t, ts, "/v1/validators/"+strings.Repeat("cd", 20), nil); code != 404 {
+		t.Fatalf("an address with nothing on record: %d, want 404", code)
+	}
+
+	type detail struct {
+		Validator struct {
+			Faults int64 `json:"faults"`
+		} `json:"validator"`
+		Recent []any `json:"recent_probes"`
+	}
+	var d detail
+	if code := get(t, ts, "/v1/validators/"+a+"?window=24h", &d); code != 200 || d.Validator.Faults != 2 || len(d.Recent) != 4 {
+		t.Fatalf("before: %d %+v", code, d)
+	}
+	// Within the TTL the answer is the cached one: the rows behind it are
+	// gone and it still reads as it did.
+	if _, err := st.DB().Exec(`DELETE FROM probes WHERE validator_address = ?`, a); err != nil {
+		t.Fatal(err)
+	}
+	d = detail{}
+	if code := get(t, ts, "/v1/validators/"+a+"?window=24h", &d); code != 200 || len(d.Recent) != 4 {
+		t.Fatalf("cached: %d %+v", code, d)
+	}
+	// A hold clears it at once.
+	openRange(t, st)
+	d = detail{}
+	if code := get(t, ts, "/v1/validators/"+a+"?window=24h", &d); code != 200 || d.Validator.Faults != 0 || len(d.Recent) != 0 {
+		t.Fatalf("after the hold: %d %+v", code, d)
+	}
+
+	// Many readers of one page at once get one answer.
+	b := strings.Repeat("b2", 20)
+	bodies := make([]string, 8)
+	var wg sync.WaitGroup
+	for i := range bodies {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resp, err := http.Get(ts.URL + "/v1/validators/" + b + "?window=7d")
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode == 200 {
+				bodies[i] = string(raw)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := range bodies {
+		if bodies[i] == "" || bodies[i] != bodies[0] {
+			t.Fatalf("reader %d of 8 got a different or failed answer", i)
+		}
+	}
 }

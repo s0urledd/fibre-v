@@ -262,17 +262,13 @@ func (c *snapshotCache[T]) get(ctx context.Context, log logf, win Window) (T, ti
 
 	// Nothing to serve: this reader pays. Claiming the window first means a
 	// burst of first-time readers produces one computation, not one each.
-	c.mu.Lock()
-	if c.refreshing[win.Name] {
-		c.mu.Unlock()
-		if got := c.await(ctx, win); got != nil {
-			return got.v, got.at, got.ms, nil
-		}
+	got, claimed := c.await(ctx, win, rev)
+	if got != nil {
+		return got.v, got.at, got.ms, nil
+	}
+	if !claimed {
 		return zero, time.Time{}, 0, ctx.Err()
 	}
-	c.refreshing[win.Name] = true
-	c.mu.Unlock()
-
 	got, err := c.fill(ctx, win)
 	if err != nil {
 		return zero, time.Time{}, 0, err
@@ -280,21 +276,33 @@ func (c *snapshotCache[T]) get(ctx context.Context, log logf, win Window) (T, ti
 	return got.v, got.at, got.ms, nil
 }
 
-// await blocks until a snapshot for win exists or the caller gives up.
-func (c *snapshotCache[T]) await(ctx context.Context, win Window) *snap[T] {
+// await blocks until win has a snapshot computed under rev, or claims the
+// window for the caller to compute once nothing is computing it, or gives up
+// with the caller.
+//
+// Only a snapshot under rev will do. The computation a reader finds running
+// may have started before a hold that this reader has already seen, and the
+// figure it lands carries the verdicts that hold withdrew; taking whatever
+// landed next served it once for every reader waiting on it.
+func (c *snapshotCache[T]) await(ctx context.Context, win Window, rev string) (*snap[T], bool) {
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
+		c.mu.Lock()
+		if s := c.entries[win.Name]; s != nil && s.rev == rev {
+			c.mu.Unlock()
+			return s, false
+		}
+		if !c.refreshing[win.Name] {
+			c.refreshing[win.Name] = true
+			c.mu.Unlock()
+			return nil, true
+		}
+		c.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return nil
+			return nil, false
 		case <-tick.C:
-			c.mu.Lock()
-			s := c.entries[win.Name]
-			c.mu.Unlock()
-			if s != nil {
-				return s
-			}
 		}
 	}
 }
@@ -327,6 +335,11 @@ func (c *snapshotCache[T]) background(log logf, win Window) {
 
 func (c *snapshotCache[T]) fill(ctx context.Context, win Window) (*snap[T], error) {
 	start := time.Now()
+	// The revision the figures were computed under is the one read before
+	// the queries ran. Read after, a hold landing mid-compute stamped a
+	// pre-hold figure with the post-hold revision, and get served it as
+	// current until the TTL ran out: the withheld fault republished.
+	rev := c.rev()
 	v, err := c.compute(ctx, win)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -334,7 +347,7 @@ func (c *snapshotCache[T]) fill(ctx context.Context, win Window) (*snap[T], erro
 	if err != nil {
 		return nil, err
 	}
-	s := &snap[T]{v: v, rev: c.rev(), at: start, ms: time.Since(start).Milliseconds()}
+	s := &snap[T]{v: v, rev: rev, at: start, ms: time.Since(start).Milliseconds()}
 	c.entries[win.Name] = s
 	c.persist(win.Name, s)
 	return s, nil

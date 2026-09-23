@@ -35,7 +35,7 @@ func (m Measurement) RecomputeWith(pruneTolerance time.Duration, mustServeUntil 
 	}
 	out.Phase = PhaseAtWindow(at, mustServeUntil, pruneTolerance)
 	if m.Outcome == OutcomeNotFound {
-		if p, regraded := notFoundPhase(m.FinishedAt, out.Phase, mustServeUntil, pruneTolerance); regraded {
+		if p, regraded := notFoundPhase(m.FinishedAt, out.Phase, mustServeUntil, pruneTolerance, m.ClockOffsetMS); regraded {
 			out.Phase = p
 		}
 	}

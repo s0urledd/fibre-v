@@ -16,15 +16,16 @@ function recon(b: Blob): { word: string; tier: Tier; title: string } {
       : { word: "unknown", tier: "gap", title: "Row lists were not recorded for this publication, or no in-window point has been probed." };
   }
   if (r.status === "pending") {
-    return { word: "pending", tier: "gap", title: `No in-window point is complete yet: ${r.probed_validators} of ${r.assigned_validators} assigned validators have a result at point ${r.point}. A validator without a row is a gap in observation, not a failure to serve.` };
+    return { word: "not judged yet", tier: "gap", title: `No in-window point is complete yet: ${r.probed_validators} of ${r.assigned_validators} assigned validators have a result at point ${r.point}. A validator without a row is a gap in observation, not a failure to serve.` };
   }
   if (r.status === "yes") {
-    return { word: "yes", tier: "kept", title: `${r.served_distinct_rows.toLocaleString("en-US")} distinct rows served; every validator the promise proves owed this blob answered at point ${r.point}.` };
+    return { word: "fully served", tier: "kept", title: `${r.served_distinct_rows.toLocaleString("en-US")} distinct rows served; every validator the promise proves owed this blob answered at point ${r.point}.` };
   }
   if (r.status === "degraded") {
-    return { word: "degraded", tier: "hold", title: `Enough rows came back to rebuild the blob, but not every validator the promise proves owed it answered at point ${r.point}.` };
+    return { word: "rebuildable", tier: "hold", title: `Enough rows came back to rebuild the blob, but not every validator the promise proves owed it answered at point ${r.point}.` };
   }
-  return { word: "no", tier: "fault", title: `Fewer than the ${r.needed_rows.toLocaleString("en-US")} rows needed came back at point ${r.point}.` };
+  // Not a fault: which validators did not answer, and whether that was this observer's own path, is on the blob's page.
+  return { word: "not rebuildable", tier: "hold", title: `Fewer than the ${r.needed_rows.toLocaleString("en-US")} rows needed came back at point ${r.point}. Unreachable from here is never counted as broken.` };
 }
 
 function Page() {
@@ -41,14 +42,15 @@ function Page() {
         <span className="spacer" />
         <input type="search" placeholder="Filter by namespace (56 hex)" value={ns} onChange={(e) => setNs(e.target.value)} aria-label="namespace filter" />
       </div>
-      {error && <p className="notice err">{error}</p>}
+      {error && !data && <p className="notice">The observer API is not answering ({error}); the page retries every 30 seconds. This is an observer outage, not a Fibre network outage.</p>}
+      {error && data && <p className="sample">Showing the last list received; the API is not answering right now ({error}).</p>}
       {loading && !data && <p className="muted">Loading…</p>}
       {data && (
         <Panel title="Publications" right={<>{data.blobs.length} newest{ns.trim() && ` in namespace ${ns.trim()}`}
               {data.blobs.length >= limit && limit < 500 && <> · <button className="btn" onClick={() => setLimit(Math.min(500, limit * 4))}>show more</button></>}</>}>
         <div className="tablewrap">
           <table>
-            <thead><tr><th>promise</th><th>settled (UTC)</th><th className="right">height</th><th>namespace</th><th className="right">size</th><th className="right">validators</th><th className="right">probes</th><th>serve until</th><th>reconstructable</th></tr></thead>
+            <thead><tr><th>promise</th><th>settled (UTC)</th><th className="right">height</th><th>namespace</th><th className="right">size</th><th className="right">validators</th><th className="right">probes</th><th>serve until</th><th>availability</th></tr></thead>
             <tbody>
               {data.blobs.length === 0 && <tr><td colSpan={9} className="muted">No publications recorded{ns.trim() ? " in this namespace" : ""}.</td></tr>}
               {data.blobs.map((b) => (

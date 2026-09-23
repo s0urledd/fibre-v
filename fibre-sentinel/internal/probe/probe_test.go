@@ -804,13 +804,26 @@ func TestClassifyDownloadError_ResourceExhausted(t *testing.T) {
 func TestNotFoundPhaseGuard(t *testing.T) {
 	msu := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	tol := 150 * time.Second
-	if p, re := notFoundPhase(msu.Add(-NotFoundGuard-time.Second), PhaseInWindow, msu, tol); re || p != PhaseInWindow {
+	if p, re := notFoundPhase(msu.Add(-NotFoundGuard-time.Second), PhaseInWindow, msu, tol, 0); re || p != PhaseInWindow {
 		t.Errorf("outside the guard: regraded=%v phase=%s", re, p)
 	}
-	if p, re := notFoundPhase(msu.Add(-NotFoundGuard+time.Second), PhaseInWindow, msu, tol); !re || p != PhaseGrace {
+	if p, re := notFoundPhase(msu.Add(-NotFoundGuard+time.Second), PhaseInWindow, msu, tol, 0); !re || p != PhaseGrace {
 		t.Errorf("inside the guard: regraded=%v phase=%s, want grace", re, p)
 	}
-	if p, re := notFoundPhase(msu.Add(time.Hour), PhaseGrace, msu, tol); re || p != PhaseGrace {
+	if p, re := notFoundPhase(msu.Add(time.Hour), PhaseGrace, msu, tol, 0); re || p != PhaseGrace {
 		t.Errorf("started in grace: regraded=%v phase=%s", re, p)
+	}
+	// An observer clock 45 s behind the chain's: a NOT_FOUND it reads as a
+	// minute before the deadline may be a server pruning on time, so the
+	// band reaches back by the skew.
+	if p, re := notFoundPhase(msu.Add(-time.Minute), PhaseInWindow, msu, tol, -45_000); !re || p != PhaseGrace {
+		t.Errorf("clock 45 s behind, a minute out: regraded=%v phase=%s, want grace", re, p)
+	}
+	if p, re := notFoundPhase(msu.Add(-80*time.Second), PhaseInWindow, msu, tol, -45_000); re || p != PhaseInWindow {
+		t.Errorf("clock 45 s behind, 80 s out: regraded=%v phase=%s, want in_window", re, p)
+	}
+	// A clock ahead of the chain's does not widen it.
+	if p, re := notFoundPhase(msu.Add(-time.Minute), PhaseInWindow, msu, tol, 45_000); re || p != PhaseInWindow {
+		t.Errorf("clock ahead: regraded=%v phase=%s, want in_window", re, p)
 	}
 }

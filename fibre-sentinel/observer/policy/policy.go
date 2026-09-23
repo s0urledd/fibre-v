@@ -36,10 +36,11 @@ type Config struct {
 	// PointsPerPublication is how many probes one publication costs a
 	// validator: set by the prober from its schedule, not from the file.
 	PointsPerPublication float64 `yaml:"-"`
-	// DownloadsPerPublication is how many of those points transfer bytes:
-	// the in-window points and the grace point, not the post point, which
-	// expects NOT_FOUND. Set from the same flag as PointsPerPublication so
-	// the byte side and the request side of the projection cannot drift.
+	// DownloadsPerPublication is how many of those points can transfer
+	// bytes: all of them. The post point expects NOT_FOUND, but a validator
+	// that keeps the blob serves it there in full, and the projection is a
+	// ceiling. Set from the same flag as PointsPerPublication so the byte
+	// side and the request side of the projection cannot drift.
 	DownloadsPerPublication float64 `yaml:"-"`
 	Capacity                struct {
 		FloorRows         int   `yaml:"floor_rows"`          // rows of the smallest validator the capacity model is stated for (148)
@@ -160,15 +161,16 @@ func ShardBytes(blobSize uint32, originalRows, rows int) int64 {
 	return probe.ShardBytes(blobSize, originalRows, rows)
 }
 
-// defaultDownloadsPerBlob is how many schedule points transfer bytes under
-// the default schedule (four in-window points plus the grace point; the post
-// point expects NOT_FOUND). It is only the fallback: the real count comes
+// defaultDownloadsPerBlob is how many schedule points can transfer bytes
+// under the default schedule: four in-window points, the grace point and the
+// post point, which expects NOT_FOUND but gets the whole shard from a
+// validator that kept it. It is only the fallback: the real count comes
 // from the schedule through Config.DownloadsPerPublication, because the
 // request side of the projection already follows the schedule and a constant
 // on the byte side would drift from it the first time -in-window-probes is
 // changed — projecting too few bytes, holding p at 1, and letting the hard
 // caps bite part-way through schedules instead.
-const defaultDownloadsPerBlob = 5.0
+const defaultDownloadsPerBlob = 6.0
 
 // event is one accounted probe.
 type event struct {

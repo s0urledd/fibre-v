@@ -2,7 +2,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Blob, type Probe, type Meta, int, bytes, tia, utcWord, hhmm, hhmmss, dur, shortMid, nsDisplay, API_BASE } from "@/lib/api";
+import { useApi, type Blob, type Probe, type Meta, int, bytes, tia, utcWord, hhmm, hhmmss, dur, shortMid, nsDisplay, notFound, API_BASE } from "@/lib/api";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
 import Copy from "@/components/Copy";
@@ -11,13 +11,15 @@ type Assignment = { validator_address: string; moniker?: string; voting_power: n
 type Detail = {
   blob: Blob;
   params: { shard_retention_s: number; payment_promise_timeout_s: number };
-  assignments: Assignment[];
-  probes: Probe[];
+  assignments: Assignment[] | null;
+  probes: Probe[] | null;
+  /** schedule points, by scheduled_at, the observer does not trust itself at: nothing there counts */
+  suspect_points?: { at: string; label: string; reason: string }[] | null;
 };
 
 /** one mark per classification; the word is in the title and the legend */
 const MARK: Record<string, [string, string]> = {
-  HEALTHY: ["ok", "served"], FAULT: ["fault", "broken"], UNATTESTED: ["unsigned", "served, unsigned"], EXPECTED_GONE: ["gone", "expected gone after the window"],
+  HEALTHY: ["ok", "served"], FAULT: ["fault", "broken"], UNATTESTED: ["unsigned", "unsigned"], EXPECTED_GONE: ["gone", "expected gone after the window"],
   NOT_REGISTERED: ["none", "no endpoint"], NOT_PROBED: ["gone", "not probed"], SERVER_ERROR: ["other", "server error"], UNREACHABLE: ["other", "unreachable"],
   THROTTLED: ["other", "rate limited"], IDENTITY_EXPIRED: ["other", "certificate expired"], IDENTITY_MISMATCH: ["other", "wrong certificate"],
   TOLERATED: ["gone", "tolerated after the deadline"], UNREACHABLE_POST_WINDOW: ["gone", "unreachable after the window"], SERVED_PAST_WINDOW: ["gone", "served after the window"],
@@ -25,6 +27,11 @@ const MARK: Record<string, [string, string]> = {
   PROBE_ERROR: ["gone", "probe error"], EXPECTED_UNASSIGNED: ["gone", "unassigned"], SERVING_UNASSIGNED: ["other", "serving unassigned"],
 };
 const markOf = (cls: string): [string, string] => MARK[cls] ?? ["other", cls.toLowerCase().replace(/_/g, " ")];
+/** the mark for one probe: an unsigned probe says what came back and is not rated either way */
+const probeMark = (p: Probe): [string, string] => {
+  if (p.classification === "UNATTESTED") return ["unsigned", (p.outcome === "SERVED_OK" || p.outcome === "PARTIAL") ? "served, unsigned" : `unsigned · ${p.outcome.toLowerCase().replace(/_/g, " ")}`];
+  return markOf(p.classification);
+};
 
 function Page() {
   const hash = useSearchParams().get("hash") ?? "";
@@ -35,12 +42,16 @@ function Page() {
   if (!data) {
     return (
       <>
-        <div className="head"><div><p className="crumb"><Link href="/blobs/">Blobs</Link> › {hash.slice(0, 10)}…</p><h1>{d.error ? "Blob" : "Loading…"}</h1></div></div>
-        <StatusLine meta={meta} metaError={metaErr} snap={null} client={{ error: d.error, fetchedAt: d.fetchedAt }} />
+        <div className="head"><div><p className="crumb"><Link href="/blobs/">Blobs</Link> › {hash.slice(0, 10)}…</p><h1>{notFound(d) ? "Blob not recorded yet" : d.error ? "Blob" : "Loading…"}</h1></div></div>
+        <StatusLine meta={meta} metaError={metaErr} snap={null} client={{ error: d.error, fetchedAt: d.fetchedAt, status: d.status }} />
+        {notFound(d) && <p className="notice">No publication with the promise hash <span className="mono">{shortMid(hash, 10, 6)}</span> is on record. A blob appears here once the scanner has read the block that settled it; this page checks again every 30 seconds.</p>}
       </>
     );
   }
   const b = data.blob;
+  const probes = data.probes ?? [];
+  const assignments = data.assignments ?? [];
+  const suspectAt = new Map((data.suspect_points ?? []).map((sp) => [sp.at, sp.reason.replace(",", " and ")]));
   const rc = b.reconstructable;
   const judged = !!rc && (rc.status === "yes" || rc.status === "degraded" || rc.status === "no");
   const over = new Date(b.must_serve_until).getTime() <= Date.now();
@@ -54,14 +65,14 @@ function Page() {
 
   // the probe points, in the order they ran; a point's time is the earliest probe scheduled for it
   const byLabel = new Map<string, { at: string; phase: string; cls: Record<string, number> }>();
-  for (const p of data.probes) {
+  for (const p of probes) {
     const cur = byLabel.get(p.schedule_label);
     if (!cur) byLabel.set(p.schedule_label, { at: p.scheduled_at, phase: p.phase, cls: {} });
     else if (p.scheduled_at < cur.at) cur.at = p.scheduled_at;
   }
   // the newest probe per (validator, point) is the cell; its classification counts once per point
   const cell = new Map<string, Probe>();
-  for (const p of data.probes) {
+  for (const p of probes) {
     const k = p.validator_address + "|" + p.schedule_label;
     const cur = cell.get(k);
     if (!cur || p.started_at > cur.started_at) cell.set(k, p);
@@ -77,6 +88,16 @@ function Page() {
   const lastIn = [...order].reverse().find((k) => new Date(byLabel.get(k)!.at).getTime() <= tEnd);
   const countLine = (k: string) => {
     const c = byLabel.get(k)!.cls;
+    const sus = suspectAt.get(byLabel.get(k)!.at);
+    if (sus) {
+      const n = Object.values(c).reduce((a, x) => a + x, 0);
+      return (
+        <div key={k} title={`At this point ${sus} of the validators probed failed at once. From one location that cannot be told from this observer's own network, so nothing at this point counts in any figure.`}>
+          <b>{k} <span className="soft">· {hhmm(byLabel.get(k)!.at).replace(" UTC", "")}</span></b>
+          {int(n)} rows · not counted, observer-side
+        </div>
+      );
+    }
     const served = c.HEALTHY ?? 0, gone = (c.EXPECTED_GONE ?? 0) + (c.TOLERATED ?? 0), unsigned = c.UNATTESTED ?? 0, broken = c.FAULT ?? 0;
     const other = Object.entries(c).filter(([n]) => !["HEALTHY", "EXPECTED_GONE", "TOLERATED", "UNATTESTED", "FAULT"].includes(n)).reduce((s, [, n]) => s + n, 0);
     const post = byLabel.get(k)!.phase === "post";
@@ -90,7 +111,7 @@ function Page() {
       </div>
     );
   };
-  const rows = [...data.assignments].sort((a, c) => c.voting_power - a.voting_power || a.validator_address.localeCompare(c.validator_address));
+  const rows = [...assignments].sort((a, c) => c.voting_power - a.voting_power || a.validator_address.localeCompare(c.validator_address));
   const winLen = dur(b.settlement_time, b.must_serve_until);
   const fill = rc && rc.total_rows > 0 ? Math.min(100, rc.served_distinct_rows / rc.total_rows * 100) : 0;
   const tick = rc && rc.total_rows > 0 ? Math.min(100, rc.needed_rows / rc.total_rows * 100) : 0;
@@ -191,7 +212,7 @@ function Page() {
           <table className="marks">
             <thead><tr>
               <th className="col-pin">Validator</th><th className="num">Voting power</th><th className="num">Rows</th><th>Signed</th><th>Host at settlement</th>
-              {order.map((k) => <th key={k} className="m" title={`${k} · ${utcWord(byLabel.get(k)!.at)}`}>{k}</th>)}
+              {order.map((k) => <th key={k} className={"m" + (suspectAt.has(byLabel.get(k)!.at) ? " soft" : "")} title={`${k} · ${utcWord(byLabel.get(k)!.at)}${suspectAt.has(byLabel.get(k)!.at) ? " · not counted: the observer does not trust itself at this point" : ""}`}>{k}</th>)}
               <th className="go" />
             </tr></thead>
             <tbody>
@@ -205,7 +226,8 @@ function Page() {
                   <td className="mono soft">{a.host_at_settlement ? a.host_at_settlement : a.host_at_settlement === "" ? <span title="no endpoint registered when the promise settled">—</span> : <span className="sans" title="the registry could not be read at that height">not read</span>}</td>
                   {order.map((k) => {
                     const p = cell.get(a.validator_address + "|" + k);
-                    const m = p ? markOf(p.classification) : ["none", "no row"];
+                    const sus = suspectAt.has(byLabel.get(k)!.at);
+                    const m = !p ? ["none", "no row"] : sus ? ["gone", `not counted, observer-side · filed as ${p.classification.toLowerCase().replace(/_/g, " ")}`] : probeMark(p);
                     return <td key={k} className="m"><span className={"mk " + m[0]} title={`${k} · ${m[1]}${p ? ` · ${utcWord(p.started_at)} · ${int(p.rows_returned)} / ${int(p.rows_expected)} rows · ${int(p.total_duration_ms)} ms${p.raw_error ? ` · ${p.raw_error}` : ""}` : ""}`} /></td>;
                   })}
                   <td className="go"><Link href={`/validator/?addr=${a.validator_address}`} aria-label={`open ${a.moniker || a.validator_address}`}>→</Link></td>
@@ -215,8 +237,8 @@ function Page() {
           </table>
         </div>
         <p className="mklegend">
-          <span><span className="mk ok" /> served</span><span><span className="mk fault" /> broken</span><span><span className="mk unsigned" /> served, unsigned — not a fault (two-thirds quorum)</span>
-          <span><span className="mk other" /> other (server error, unreachable, rate limited, certificate)</span><span><span className="mk gone" /> expected gone after the window, or not probed — not a fault</span><span><span className="mk none" /> no endpoint</span>
+          <span><span className="mk ok" /> served</span><span><span className="mk fault" /> broken</span><span><span className="mk unsigned" /> unsigned: no verified signature, so not rated either way (two-thirds quorum)</span>
+          <span><span className="mk other" /> other (server error, unreachable, rate limited, certificate)</span><span><span className="mk gone" /> expected gone after the window, not probed, or not counted at an observer-side point: never a fault</span><span><span className="mk none" /> no endpoint</span>
         </p>
       </section>
     </>

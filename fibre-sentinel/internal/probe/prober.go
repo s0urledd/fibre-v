@@ -108,9 +108,12 @@ type Config struct {
 	// connection cap is filled by a 16-signer upload, so a probe arriving
 	// during an upload waits for a slot and can time out without saying
 	// anything about retention. The retry costs one extra request and no
-	// bytes, waits RetryDelay, and is skipped when the retry would land in a
-	// different schedule phase than the first attempt. Both attempts are
-	// recorded in the final measurement's Retry field.
+	// bytes, runs RetryDelay or more after the first attempt (queued, not
+	// slept on in a worker), and is skipped when it would land in a
+	// different schedule phase than the first attempt, or when the policy,
+	// asked again at the moment it would run, denies it or has the validator
+	// backed off. Both attempts are recorded in the final measurement's
+	// Retry field.
 	RetryTransportTimeout bool
 	RetryDelay            time.Duration // default 20s
 }
@@ -831,7 +834,18 @@ type work struct {
 	target     Target
 	coder      *Coder
 	commitment [32]byte
-	key        string // point key, for completion tracking
+	key        string    // point key, for completion tracking
+	deadline   time.Time // the last moment it may start (see latenessAt)
+}
+
+// retryReq is a first attempt that earned the transport-timeout retry: it
+// waits in the sweep's retry queue, holding no worker and no lock, until at.
+type retryReq struct {
+	it     work
+	in     Input
+	first  Measurement
+	skipDL bool
+	at     time.Time
 }
 
 // runDue probes every due slot. Slots are grouped by publication so the
@@ -886,7 +900,8 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 				if p.store.Has(p.cfg.Vantage, ph, t.AddressHex, j.point.At) {
 					continue
 				}
-				items = append(items, work{job: j, target: t, coder: coder, commitment: commitment, key: key})
+				items = append(items, work{job: j, target: t, coder: coder, commitment: commitment, key: key,
+					deadline: j.point.At.Add(p.latenessAt(pub, j.point))})
 				pointItems[key]++
 			}
 			if pointItems[key] == 0 {
@@ -903,7 +918,7 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 	// tail of the set by voting power — so their published rates rested on
 	// systematically less evidence than everyone else's, and nothing said so.
 	// A per-cycle rotation spreads the loss instead of concentrating it.
-	rotateItems(items, p.sweep)
+	orderItems(items, p.sweep)
 	p.sweep++
 
 	var (
@@ -913,37 +928,78 @@ func (p *Prober) runDue(ctx context.Context, due []job) int {
 		sem      = make(chan struct{}, p.cfg.Concurrency)
 		bytesSem = newByteSem(p.cfg.InFlightBytes)
 		wg       sync.WaitGroup
+		rwg      sync.WaitGroup
 		canceled bool
+		retries  = make(chan retryReq, len(items))
+		retried  = make(chan struct{})
 	)
+	// Charged what the probe may actually receive, not what the shard
+	// should weigh: the two were different, and the budget was keeping the
+	// wrong one.
+	weight := func(it work) int64 {
+		return int64(recvLimitFor(Input{
+			ExpectedShardBytes: ShardBytes(it.job.pub.Promise.BlobSize, it.job.pub.Assignment.ProtocolParams.OriginalRows, it.target.RowCount),
+			MaxMessageSize:     maxMessageSizeFor(it.job.pub.Assignment.ProtocolParams),
+		}))
+	}
+	// The retry queue. A retry used to sleep RetryDelay inside the worker
+	// that ran the first attempt, holding the worker, its byte budget and
+	// the validator's lock: under a correlated outage, when every probe
+	// times out, the whole pool sat asleep and the deadline-bound points
+	// behind it went unprobed. Queued here it holds nothing while it waits,
+	// and takes a worker like any other probe when its time comes.
+	go func() {
+		defer close(retried)
+		for r := range retries {
+			if ctx.Err() == nil {
+				sleepCtx(ctx, time.Until(r.at))
+			}
+			sem <- struct{}{}
+			want := weight(r.it)
+			bytesSem.acquire(want)
+			rwg.Add(1)
+			go func(r retryReq, want int64) {
+				defer rwg.Done()
+				defer func() { <-sem }()
+				defer bytesSem.release(want)
+				p.runRetry(ctx, r)
+				mu.Lock()
+				done[r.it.key]++
+				mu.Unlock()
+			}(r, want)
+		}
+	}()
 	for _, it := range items {
 		if ctx.Err() != nil {
 			canceled = true
 			break
 		}
 		sem <- struct{}{}
-		// Charged what the probe may actually receive, not what the shard
-		// should weigh: the two were different, and the budget was keeping
-		// the wrong one.
-		want := int64(recvLimitFor(Input{
-			ExpectedShardBytes: ShardBytes(it.job.pub.Promise.BlobSize, it.job.pub.Assignment.ProtocolParams.OriginalRows, it.target.RowCount),
-			MaxMessageSize:     maxMessageSizeFor(it.job.pub.Assignment.ProtocolParams),
-		}))
+		want := weight(it)
 		bytesSem.acquire(want)
 		wg.Add(1)
 		go func(it work, want int64) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			defer bytesSem.release(want)
-			probedOne := p.runOne(ctx, it)
+			probedOne, retry := p.runOne(ctx, it)
+			if retry != nil {
+				retries <- *retry
+			}
 			mu.Lock()
 			if probedOne {
 				n++
 			}
-			done[it.key]++
+			if retry == nil {
+				done[it.key]++
+			}
 			mu.Unlock()
 		}(it, want)
 	}
 	wg.Wait()
+	close(retries) // every first attempt is in; the queue drains, then stops
+	<-retried
+	rwg.Wait()
 	if !canceled && ctx.Err() == nil {
 		for key, want := range pointItems {
 			if done[key] == want {
@@ -1011,9 +1067,11 @@ func (p *Prober) fail(msg string) {
 }
 
 // runOne runs a single probe end to end: lateness re-check, policy gate,
-// per-validator serialisation, the probe itself, the optional retry, and the
-// record. It reports whether a network probe was carried out.
-func (p *Prober) runOne(ctx context.Context, it work) bool {
+// per-validator serialisation, the probe itself, and the record. It reports
+// whether a network probe was carried out and, when the first attempt earned
+// the transport-timeout retry, the retry to queue: the record is then left
+// to runRetry.
+func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 	j, t, pub := it.job, it.target, it.job.pub
 	ph := pub.PromiseHash
 
@@ -1027,14 +1085,14 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 			reason = fmt.Sprintf("elapsed while the cycle ran (%s late); the obligation ended before this reading could be taken, so it is unobserved rather than judged in a later phase", late.Round(time.Second))
 		}
 		p.recordNotProbedTarget(pub, j.point, t, reason)
-		return false
+		return false, nil
 	}
 	skipDL := false
 	if p.cfg.Policy != nil {
 		allow, skip, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now())
 		if !allow {
 			p.recordNotProbedTarget(pub, j.point, t, reason)
-			return false
+			return false, nil
 		}
 		skipDL = skip
 	}
@@ -1062,15 +1120,82 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 
 	lock := p.validatorLock(t.AddressHex)
 	lock.Lock()
+	// Checked again under the lock: waiting for this validator's previous
+	// probe can carry the slot past its allowance, and a probe started then
+	// is judged in whatever phase it lands in — for the last in-window point,
+	// past the deadline, where NOT_FOUND is tolerated by construction.
+	if allowed := p.latenessAt(pub, j.point); time.Since(j.point.At) > allowed {
+		lock.Unlock()
+		p.recordNotProbedTarget(pub, j.point, t, fmt.Sprintf("elapsed waiting for this validator's previous probe (%s late)", time.Since(j.point.At).Round(time.Second)))
+		return false, nil
+	}
 	m := Run(ctx, in, it.coder, p.cfg.Timeouts)
-	if p.cfg.RetryTransportTimeout && shouldRetryTransport(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
+	// Not while the policy has the validator backed off: the backoff's
+	// promise is that it never adds a request to an endpoint already failing.
+	if p.cfg.RetryTransportTimeout && !skipDL && shouldRetryTransport(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
+		lock.Unlock()
+		// The first attempt is a request the endpoint received and a
+		// failure the backoff must count now, not when the retry is done:
+		// every other probe of this validator in the meantime, and the
+		// retry's own policy check, decide on the policy's state.
+		if p.cfg.Policy != nil {
+			p.cfg.Policy.AfterProbe(pub, m)
+		}
 		p.log.Printf("probe %s %s: %s (%s); retrying once in %s", short(ph), t.Host, m.Outcome, m.RawError, p.cfg.RetryDelay)
-		if sleepCtx(ctx, p.cfg.RetryDelay) {
-			m = retryOnce(ctx, in, it.coder, p.cfg.Timeouts, m, p.cfg.RetryDelay)
+		return true, &retryReq{it: it, in: in, first: m, skipDL: skipDL, at: time.Now().Add(p.cfg.RetryDelay)}
+	}
+	p.finish(ctx, it, in, m, skipDL, lock, false)
+	return true, nil
+}
+
+// runRetry runs a queued retry, or records the first attempt alone when the
+// retry would now land in another phase, the sweep is being stopped, or the
+// policy, asked again now, says no.
+//
+// The policy decided the first attempt, and the retry waited at least
+// RetryDelay since: meanwhile other probes of the validator can have pushed
+// it into backoff or used up a budget, and a retry run on the old decision
+// was a request the policy would have refused.
+func (p *Prober) runRetry(ctx context.Context, r retryReq) {
+	pub, t := r.it.job.pub, r.it.target
+	skip := ""
+	if p.cfg.Policy != nil && ctx.Err() == nil {
+		allow, skipDL, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now())
+		switch {
+		case !allow:
+			skip = reason
+		case skipDL:
+			skip = reason // backed off: a retry is a request it promised not to add
 		}
 	}
+	lock := p.validatorLock(t.AddressHex)
+	lock.Lock()
+	m := r.first
+	switch {
+	case skip != "":
+		m.ClassificationReason += "; retry not run: " + skip
+	case ctx.Err() == nil && PhaseAt(time.Now(), pub, p.cfg.Schedule) == r.first.Phase:
+		m = retryOnce(ctx, r.in, r.it.coder, p.cfg.Timeouts, r.first, time.Since(r.first.FinishedAt).Round(time.Second))
+		p.finish(ctx, r.it, r.in, m, r.skipDL, lock, false)
+		return
+	}
+	// The retry is not run, and neither is the evidence probe of the
+	// settlement host: it is a request too, and whatever stopped the retry
+	// (the policy's answer, the phase that moved on, the sweep stopping)
+	// stops it as well. The first attempt is recorded as it stands; it was
+	// accounted when it was queued.
+	p.finish(ctx, r.it, r.in, m, true, lock, true)
+}
+
+// finish completes a probe whose validator lock is held: the settlement-host
+// evidence probe when the validator re-registered and noHostProbe is false,
+// then the lock goes and the row is written. accounted is true when the
+// policy has already been told about m (a first attempt, accounted when its
+// retry was queued).
+func (p *Prober) finish(ctx context.Context, it work, in Input, m Measurement, noHostProbe bool, lock *sync.Mutex, accounted bool) {
+	t, pub := it.target, it.job.pub
 	m.HostAtSettlement = t.HostAtSettlement
-	if hostChanged(t) && !skipDL && m.Outcome != OutcomeServedOK && m.Classification != ClassProbeError {
+	if hostChanged(t) && !noHostProbe && m.Outcome != OutcomeServedOK && m.Classification != ClassProbeError {
 		// The validator re-registered since the promise settled and its
 		// current host did not serve: ask the host the upload went to, as
 		// evidence, on the same lock so the validator still sees one
@@ -1084,11 +1209,10 @@ func (p *Prober) runOne(ctx context.Context, it work) bool {
 	if err := p.store.Append(m); err != nil {
 		p.log.Fatalf("append measurement: %v", err)
 	}
-	if p.cfg.Policy != nil {
+	if p.cfg.Policy != nil && !accounted {
 		p.cfg.Policy.AfterProbe(pub, m)
 	}
 	p.logMeasurement(m)
-	return true
 }
 
 // hostChanged reports whether the validator's current host differs from the
@@ -1235,6 +1359,19 @@ func (p *Prober) forgetPoints(promiseHash string) {
 			delete(p.complete, k)
 		}
 	}
+}
+
+// orderItems is the order a sweep starts its probes in: earliest deadline
+// first, with the per-sweep rotation surviving as the order within a
+// deadline. The rotation alone ran a sweep in whatever order it landed on,
+// so the last in-window point of one blob, allowed 2m30s before its deadline
+// cuts it off, could wait behind a dozen early points of others allowed
+// twelve minutes, and come out NOT_PROBED: the one reading that catches an
+// early prune, lost to scheduling. The sort is stable, so the rotation still
+// spreads any loss among the validators of one point.
+func orderItems(items []work, sweep uint64) {
+	rotateItems(items, sweep)
+	sort.SliceStable(items, func(i, j int) bool { return items[i].deadline.Before(items[j].deadline) })
 }
 
 // rotateItems rotates the work list by a per-sweep offset, keeping each

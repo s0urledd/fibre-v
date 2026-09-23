@@ -2,10 +2,13 @@ package probe
 
 import (
 	"context"
+	"crypto/ed25519"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -176,7 +179,7 @@ func TestRunOne_LateSlotBecomesNotProbed(t *testing.T) {
 	pubA := pub(now.Add(-10*time.Minute), now.Add(10*time.Minute))
 	pt := SchedulePoint{At: now.Add(-3 * time.Minute), Label: "w2", Phase: PhaseInWindow}
 	tg := Target{AddressHex: "aa", Host: "192.0.2.1:7980", Assigned: true, RowCount: 148}
-	probed := p.runOne(context.Background(), work{job: job{pubA, pt}, target: tg, key: pointKey("v1", pubA.PromiseHash, pt.At)})
+	probed, _ := p.runOne(context.Background(), work{job: job{pubA, pt}, target: tg, key: pointKey("v1", pubA.PromiseHash, pt.At)})
 	if probed {
 		t.Fatal("late slot was probed")
 	}
@@ -354,5 +357,355 @@ func TestByteSemBoundsInFlightBytes(t *testing.T) {
 	case <-after:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the waiter was not woken")
+	}
+}
+
+// A sweep starts the probe that must start soonest first: the last
+// in-window point, whose allowance ends at the deadline, ahead of early
+// points with minutes to spare, whatever the rotation. Within one deadline
+// the rotation still decides, so the loss a short sweep takes is spread.
+func TestOrderItems_EarliestDeadlineFirst(t *testing.T) {
+	now := time.Now().UTC()
+	mk := func(addr string, dl time.Duration) work {
+		return work{target: Target{AddressHex: addr}, deadline: now.Add(dl)}
+	}
+	for sweep := uint64(0); sweep < 6; sweep++ {
+		items := []work{mk("early1", 12*time.Minute), mk("early2", 12*time.Minute), mk("w4-a", 2*time.Minute),
+			mk("w4-b", 2*time.Minute), mk("early3", 12*time.Minute), mk("grace", 5*time.Minute)}
+		orderItems(items, sweep)
+		got := []string{}
+		for _, it := range items {
+			got = append(got, it.target.AddressHex)
+		}
+		if !strings.HasPrefix(got[0], "w4-") || !strings.HasPrefix(got[1], "w4-") || got[2] != "grace" {
+			t.Fatalf("sweep %d: %v, want the two w4 probes, then grace, then the rest", sweep, got)
+		}
+	}
+	// the rotation still moves which validator of a point goes first
+	a := []work{mk("x", time.Minute), mk("y", time.Minute)}
+	b := []work{mk("x", time.Minute), mk("y", time.Minute)}
+	orderItems(a, 0)
+	orderItems(b, 1)
+	if a[0].target.AddressHex == b[0].target.AddressHex {
+		t.Fatalf("the rotation no longer varies the order within a deadline")
+	}
+}
+
+// A probe that waited for this validator's previous one past its allowance
+// is not started: it would be judged in whatever phase it landed in.
+func TestRunOne_LatenessIsCheckedAgainUnderTheValidatorLock(t *testing.T) {
+	p := testProber(t)
+	now := time.Now().UTC()
+	pubA := pub(now.Add(-10*time.Minute), now.Add(10*time.Minute))
+	// inside the allowance by 300 ms when runOne is called
+	pt := SchedulePoint{At: now.Add(-p.cfg.MaxLateness + 300*time.Millisecond), Label: "w2", Phase: PhaseInWindow}
+	tg := Target{AddressHex: "aa", Host: "192.0.2.1:7980", Assigned: true, RowCount: 148}
+	p.feed = newPubFeed(filepath.Join(t.TempDir(), "publications.jsonl"))
+	lock := p.validatorLock("aa")
+	lock.Lock() // the validator's previous probe
+	res := make(chan bool, 1)
+	go func() {
+		probed, retry := p.runOne(context.Background(), work{job: job{pubA, pt}, target: tg, key: pointKey("v1", pubA.PromiseHash, pt.At)})
+		res <- probed || retry != nil
+	}()
+	time.Sleep(600 * time.Millisecond)
+	lock.Unlock()
+	if <-res {
+		t.Fatal("a slot that went past its allowance waiting for the lock was probed")
+	}
+	if err := p.store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := LoadMeasurements(p.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 || ms[0].Classification != ClassNotProbed || !strings.Contains(ms[0].ClassificationReason, "previous probe") {
+		t.Fatalf("got %+v", ms)
+	}
+}
+
+// A queued retry whose time came after the phase moved on records the first
+// attempt as it stood: a second attempt in another phase would change the
+// verdict, not add evidence.
+func TestRunRetry_AcrossAPhaseBoundaryRecordsTheFirstAttempt(t *testing.T) {
+	p := testProber(t)
+	now := time.Now().UTC()
+	pubA := pub(now.Add(-4*time.Hour), now.Add(-time.Second)) // the window just ended
+	pt := SchedulePoint{At: now.Add(-time.Minute), Label: "w4", Phase: PhaseInWindow}
+	tg := Target{AddressHex: "aa", Host: "192.0.2.1:7980", Assigned: true, RowCount: 148}
+	first := rowFor(pubA, "v1", "aa", pt)
+	first.Outcome, first.Classification, first.FinishedAt = OutcomeTCPTimeout, ClassUnreachable, now.Add(-20*time.Second)
+	it := work{job: job{pubA, pt}, target: tg, key: pointKey("v1", pubA.PromiseHash, pt.At)}
+	p.runRetry(context.Background(), retryReq{it: it, first: first, at: now})
+	if err := p.store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := LoadMeasurements(p.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 || ms[0].Retry != nil || ms[0].Outcome != OutcomeTCPTimeout || ms[0].Phase != PhaseInWindow {
+		t.Fatalf("got %+v", ms)
+	}
+}
+
+// recPolicy is a Policy whose BeforeProbe answer the test sets, and which
+// records every AfterProbe it is told about.
+type recPolicy struct {
+	mu            sync.Mutex
+	allow, skipDL bool
+	reason        string
+	after         []Measurement
+}
+
+func (r *recPolicy) Admit(scan.Publication, bool) (bool, string) { return true, "" }
+func (r *recPolicy) BeforeProbe(scan.Publication, Target, time.Time) (bool, bool, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.allow, r.skipDL, r.reason
+}
+func (r *recPolicy) AfterProbe(_ scan.Publication, m Measurement) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.after = append(r.after, m)
+}
+func (r *recPolicy) SamplingFor(scan.Publication) (float64, string, string) { return 1, "", "" }
+func (r *recPolicy) Forget(string)                                          {}
+
+// A queued retry asks the policy again when its time comes. Between the
+// first attempt and the retry, other probes of the validator can push it
+// into backoff or use up a budget; the retry then does not run, the first
+// attempt is recorded with the reason, and the policy is not told about the
+// first attempt a second time (it was told when the retry was queued).
+func TestRunRetry_AsksThePolicyAgainAndRecordsTheFirstAttemptWhenItSaysNo(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		allow, skipDL bool
+		reason        string
+	}{
+		{"backed off meanwhile", true, true, "backoff:transport:k=3"},
+		{"budget used up meanwhile", false, false, "budget:validator_requests_per_minute=6"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := testProber(t)
+			pol := &recPolicy{allow: c.allow, skipDL: c.skipDL, reason: c.reason}
+			p.cfg.Policy = pol
+			now := time.Now().UTC()
+			pubA := pub(now.Add(-2*time.Hour), now.Add(time.Hour)) // still in window
+			pt := SchedulePoint{At: now.Add(-time.Minute), Label: "w2", Phase: PhaseInWindow}
+			tg := Target{AddressHex: "aa", Host: "192.0.2.1:7980", Assigned: true, RowCount: 148}
+			first := rowFor(pubA, "v1", "aa", pt)
+			first.Outcome, first.Classification, first.FinishedAt = OutcomeTCPTimeout, ClassUnreachable, now.Add(-20*time.Second)
+			first.ClassificationReason = "tcp connect timed out"
+			it := work{job: job{pubA, pt}, target: tg, key: pointKey("v1", pubA.PromiseHash, pt.At)}
+
+			p.runRetry(context.Background(), retryReq{it: it, first: first, at: now})
+
+			if err := p.store.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			ms, err := LoadMeasurements(p.store.Path())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ms) != 1 || ms[0].Retry != nil || ms[0].Outcome != OutcomeTCPTimeout ||
+				!strings.Contains(ms[0].ClassificationReason, "retry not run: "+c.reason) {
+				t.Fatalf("got %+v", ms)
+			}
+			if n := len(pol.after); n != 0 {
+				t.Fatalf("the policy was told about the first attempt again (%d calls)", n)
+			}
+		})
+	}
+}
+
+// The first attempt of a retried probe reaches the policy the moment the
+// retry is queued: it is a request the endpoint received and a failure the
+// backoff counts, and while the retry waits, every other probe of the
+// validator and the retry's own check decide on that state. The retry, when
+// it runs, is told about separately: two requests, two AfterProbe calls.
+func TestRunOne_QueuingARetryTellsThePolicyAboutTheFirstAttemptAtOnce(t *testing.T) {
+	// accepts the connection and never answers the TLS handshake
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var held []net.Conn
+	var hmu sync.Mutex
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			hmu.Lock()
+			held = append(held, c)
+			hmu.Unlock()
+		}
+	}()
+	defer func() {
+		hmu.Lock()
+		for _, c := range held {
+			c.Close()
+		}
+		hmu.Unlock()
+	}()
+
+	p := testProber(t)
+	p.feed = newPubFeed(filepath.Join(t.TempDir(), "publications.jsonl"))
+	pol := &recPolicy{allow: true}
+	p.cfg.Policy = pol
+	p.cfg.RetryTransportTimeout = true
+	p.cfg.RetryDelay = 10 * time.Millisecond
+	p.cfg.AllowUnroutableHosts = true
+	p.cfg.Timeouts = StepTimeouts{DNS: time.Second, TCP: time.Second, TLS: 200 * time.Millisecond, Identity: time.Second, Download: 3 * time.Second}
+	coder, err := NewCoder(4, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	pubA := pub(now.Add(-2*time.Hour), now.Add(time.Hour))
+	pubA.Assignment.ProtocolParams = scan.ProtocolParamsSnapshot{OriginalRows: 4, TotalRows: 8}
+	pt := SchedulePoint{At: now, Label: "w2", Phase: PhaseInWindow}
+	key, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tg := Target{AddressHex: "aa", Host: ln.Addr().String(), Assigned: true, RowCount: 1, PubKey: key}
+	it := work{job: job{pubA, pt}, target: tg, coder: coder, key: pointKey("v1", pubA.PromiseHash, pt.At)}
+
+	probed, retry := p.runOne(context.Background(), it)
+	if !probed || retry == nil {
+		_ = p.store.Sync()
+		ms, _ := LoadMeasurements(p.store.Path())
+		t.Fatalf("a handshake timeout should queue the retry: probed=%v retry=%v rows=%+v", probed, retry, ms)
+	}
+	if len(pol.after) != 1 || pol.after[0].Outcome != retry.first.Outcome {
+		t.Fatalf("the policy was told %d times at queue time, want once with the first attempt: %+v", len(pol.after), pol.after)
+	}
+
+	p.runRetry(context.Background(), *retry)
+	if len(pol.after) != 2 {
+		t.Fatalf("after the retry the policy has %d attempts, want 2", len(pol.after))
+	}
+	if err := p.store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := LoadMeasurements(p.store.Path())
+	if err != nil || len(ms) != 1 || ms[0].Retry == nil {
+		t.Fatalf("recorded: %+v %v", ms, err)
+	}
+}
+
+// When a queued retry does not run, no request of any kind goes out for it:
+// not the retry, and not the evidence probe of the host the validator was
+// registered at when the promise settled. That probe is a request too, and
+// the answer that stopped the retry (the policy's, or the phase that moved
+// on) stops it as well. The control case, a retry that does run, shows the
+// settlement host is reachable and probed, so a zero count is not vacuous.
+func TestRunRetry_NotRunMeansNoProbeOfTheSettlementHost(t *testing.T) {
+	// accepts the connection and never answers the TLS handshake, counting
+	listen := func(t *testing.T) (net.Listener, *atomic.Int32) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var n atomic.Int32
+		var mu sync.Mutex
+		var held []net.Conn
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				n.Add(1)
+				mu.Lock()
+				held = append(held, c)
+				mu.Unlock()
+			}
+		}()
+		t.Cleanup(func() {
+			ln.Close()
+			mu.Lock()
+			for _, c := range held {
+				c.Close()
+			}
+			mu.Unlock()
+		})
+		return ln, &n
+	}
+	for _, c := range []struct {
+		name          string
+		allow, skipDL bool
+		phaseMoved    bool
+		probed        bool
+	}{
+		{name: "budget used up meanwhile", allow: false},
+		{name: "backed off meanwhile", allow: true, skipDL: true},
+		{name: "phase moved on", allow: true, phaseMoved: true},
+		{name: "retry runs", allow: true, probed: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			current, _ := listen(t)
+			old, oldConns := listen(t)
+			p := testProber(t)
+			p.feed = newPubFeed(filepath.Join(t.TempDir(), "publications.jsonl"))
+			pol := &recPolicy{allow: true}
+			p.cfg.Policy = pol
+			p.cfg.RetryTransportTimeout = true
+			p.cfg.RetryDelay = 10 * time.Millisecond
+			p.cfg.AllowUnroutableHosts = true
+			p.cfg.Timeouts = StepTimeouts{DNS: time.Second, TCP: time.Second, TLS: 200 * time.Millisecond, Identity: time.Second, Download: 3 * time.Second}
+			coder, err := NewCoder(4, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			pubA := pub(now.Add(-2*time.Hour), now.Add(time.Hour))
+			pubA.Assignment.ProtocolParams = scan.ProtocolParamsSnapshot{OriginalRows: 4, TotalRows: 8}
+			pt := SchedulePoint{At: now, Label: "w2", Phase: PhaseInWindow}
+			key, _, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tg := Target{AddressHex: "aa", Host: current.Addr().String(), HostAtSettlement: old.Addr().String(),
+				Assigned: true, RowCount: 1, PubKey: key}
+			it := work{job: job{pubA, pt}, target: tg, coder: coder, key: pointKey("v1", pubA.PromiseHash, pt.At)}
+
+			_, retry := p.runOne(context.Background(), it)
+			if retry == nil {
+				t.Fatal("a handshake timeout should queue the retry")
+			}
+			if n := oldConns.Load(); n != 0 {
+				t.Fatalf("the settlement host was probed before the retry: %d connection(s)", n)
+			}
+			pol.mu.Lock()
+			pol.allow, pol.skipDL, pol.reason = c.allow, c.skipDL, "budget or backoff"
+			pol.mu.Unlock()
+			if c.phaseMoved {
+				retry.first.Phase = PhasePost
+			}
+			p.runRetry(context.Background(), *retry)
+
+			if err := p.store.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			ms, err := LoadMeasurements(p.store.Path())
+			if err != nil || len(ms) != 1 {
+				t.Fatalf("recorded: %+v %v", ms, err)
+			}
+			n := oldConns.Load()
+			switch {
+			case c.probed && (n == 0 || ms[0].SettlementHost == nil):
+				t.Fatalf("the retry ran and failed, so the settlement host should be probed: %d connection(s), %+v", n, ms[0].SettlementHost)
+			case !c.probed && (n != 0 || ms[0].SettlementHost != nil):
+				t.Fatalf("the retry did not run, yet the settlement host got %d connection(s): %+v", n, ms[0].SettlementHost)
+			case ms[0].HostAtSettlement != old.Addr().String():
+				t.Fatalf("the row lost the host registered at settlement: %q", ms[0].HostAtSettlement)
+			}
+		})
 	}
 }

@@ -454,7 +454,7 @@ func Run(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (m Measur
 		m.RawError = dl.rawErr
 	}
 	if dl.outcome == OutcomeNotFound {
-		if p, regraded := notFoundPhase(time.Now().UTC(), m.Phase, in.MustServeUntil, in.PruneTolerance); regraded {
+		if p, regraded := notFoundPhase(time.Now().UTC(), m.Phase, in.MustServeUntil, in.PruneTolerance, in.ClockOffsetMS); regraded {
 			m.Phase = p
 			m.PhaseNote = "not_found_at_deadline"
 		}
@@ -475,12 +475,29 @@ const NotFoundGuard = 30 * time.Second
 // notFoundPhase returns the phase a NOT_FOUND answered at now should be graded
 // in, and whether that differs from the phase the probe started in. Only an
 // in-window start is ever regraded, and only forward.
-func notFoundPhase(now time.Time, started Phase, mustServeUntil time.Time, tol time.Duration) (Phase, bool) {
+//
+// clockOffsetMS is the observer's clock minus the chain's newest block time,
+// as stamped on the row. Negative, the observer's clock is behind: at what it
+// reads as thirty seconds before the deadline, a server on the right time may
+// already be past it and pruning on schedule. The band is widened by that
+// much, so a NOT_FOUND the observer's own slow clock made early is never a
+// FAULT. A clock that is ahead only makes the observer see the deadline
+// sooner, which can tolerate a real early prune but never invent one.
+func notFoundPhase(now time.Time, started Phase, mustServeUntil time.Time, tol time.Duration, clockOffsetMS int64) (Phase, bool) {
 	if started != PhaseInWindow {
 		return started, false
 	}
-	p := PhaseAtWindow(now.Add(NotFoundGuard), mustServeUntil, tol)
+	p := PhaseAtWindow(now.Add(notFoundGuard(clockOffsetMS)), mustServeUntil, tol)
 	return p, p != PhaseInWindow
+}
+
+// notFoundGuard is NotFoundGuard widened by how far the observer's clock is
+// behind the chain's.
+func notFoundGuard(clockOffsetMS int64) time.Duration {
+	if clockOffsetMS < 0 {
+		return NotFoundGuard + time.Duration(-clockOffsetMS)*time.Millisecond
+	}
+	return NotFoundGuard
 }
 
 // dlResult carries the raw outcome + error out of downloadAndVerify without

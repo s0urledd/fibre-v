@@ -104,9 +104,11 @@ func main() {
 		// in-window points, the grace point and the post point: one request
 		// each per validator per publication
 		cfg.PointsPerPublication = float64(len(fracs) + 2)
-		// The byte side of the projection: every point but the post one,
-		// where NOT_FOUND is the expected answer and nothing is transferred.
-		cfg.DownloadsPerPublication = float64(len(fracs) + 1)
+		// The byte side of the projection: every point, the post one too.
+		// NOT_FOUND is what the post point expects, but a validator that
+		// keeps the blob past the tolerance serves it there in full, and
+		// the projection is a ceiling, so it must count that transfer.
+		cfg.DownloadsPerPublication = float64(len(fracs) + 2)
 		// The master secret lives in the data directory unless the policy
 		// names somewhere else. It is the only path the unit can write
 		// (fibre-probe@.service: ProtectSystem=strict with

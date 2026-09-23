@@ -119,6 +119,10 @@ type Block struct {
 	Height int64
 	Time   time.Time
 	Txs    []cmttypes.Tx
+	// AppVersion is the header's app version: the version block Height was
+	// executed under. The first block at FibreAppVersion is the first whose
+	// state has x/fibre and x/valaddr in it.
+	AppVersion uint64
 }
 
 // Block fetches block header + raw txs at height.
@@ -130,10 +134,49 @@ func (c *Chain) Block(parent context.Context, height int64) (*Block, error) {
 		return nil, fmt.Errorf("block %d: %w", height, err)
 	}
 	return &Block{
-		Height: res.Block.Height,
-		Time:   res.Block.Time,
-		Txs:    res.Block.Data.Txs,
+		Height:     res.Block.Height,
+		Time:       res.Block.Time,
+		Txs:        res.Block.Data.Txs,
+		AppVersion: res.Block.Header.Version.App,
 	}, nil
+}
+
+// headerAppVersion is the app version block height was executed under.
+func (c *Chain) headerAppVersion(parent context.Context, height int64) (uint64, error) {
+	ctx, cancel := c.ctx(parent)
+	defer cancel()
+	res, err := c.rpc.Header(ctx, &height)
+	if err != nil {
+		return 0, fmt.Errorf("header %d: %w", height, err)
+	}
+	if res.Header == nil {
+		return 0, fmt.Errorf("header %d: empty response", height)
+	}
+	return res.Header.Version.App, nil
+}
+
+// abciPanicCode is cosmos-sdk's ErrPanic: the node recovered a panic while
+// answering. A node on app version 10 or later answers every x/fibre and
+// x/valaddr query at a height from before the upgrade with it, because the
+// module's store did not exist at that version and the query reads through
+// a nil store. The same node below the upgrade (and any node on an older
+// binary) says "unknown query path" instead.
+const abciPanicCode = 111222
+
+// queryError turns a non-zero ABCI answer to a Fibre-module query at height
+// into an ABCIError, and names the one case it can prove: a panic at a
+// height whose block ran below FibreAppVersion is the module not existing
+// yet at that height, which no retry changes. Anything else, a panic at a
+// height where the module exists included, is left for the caller to judge.
+func (c *Chain) queryError(parent context.Context, path string, height int64, r abci.ResponseQuery) *ABCIError {
+	e := &ABCIError{Path: path, Height: height, Code: r.Code, Codespace: r.Codespace, Log: r.Log}
+	if r.Code == abciPanicCode && height > 0 {
+		if v, err := c.headerAppVersion(parent, height); err == nil && v < FibreAppVersion {
+			e.BeforeModule = true
+			e.AppVersion = v
+		}
+	}
+	return e
 }
 
 // BlockResults holds the per-tx result codes and the events the scanner scans
@@ -218,8 +261,7 @@ func (c *Chain) FibreParamsAt(parent context.Context, height int64) (fibretypes.
 		return fibretypes.Params{}, fmt.Errorf("abci query params h=%d: %w", height, err)
 	}
 	if res.Response.Code != 0 {
-		return fibretypes.Params{}, &ABCIError{Path: "/celestia.fibre.v1.Query/Params", Height: height,
-			Code: res.Response.Code, Codespace: res.Response.Codespace, Log: res.Response.Log}
+		return fibretypes.Params{}, c.queryError(parent, "/celestia.fibre.v1.Query/Params", height, res.Response)
 	}
 	var resp fibretypes.QueryParamsResponse
 	if err := resp.Unmarshal(res.Response.Value); err != nil {
@@ -322,8 +364,7 @@ func (c *Chain) EscrowAccount(parent context.Context, signer string, height int6
 		return Escrow{}, fmt.Errorf("abci query escrow %s h=%d: %w", signer, height, err)
 	}
 	if res.Response.Code != 0 {
-		return Escrow{}, &ABCIError{Path: path, Height: height,
-			Code: res.Response.Code, Codespace: res.Response.Codespace, Log: res.Response.Log}
+		return Escrow{}, c.queryError(parent, path, height, res.Response)
 	}
 	var resp fibretypes.QueryEscrowAccountResponse
 	if err := resp.Unmarshal(res.Response.Value); err != nil {
@@ -366,12 +407,13 @@ func (c *Chain) BondedFibreProvidersAt(parent context.Context, height int64) ([]
 	if err != nil {
 		return nil, fmt.Errorf("marshal providers request: %w", err)
 	}
-	res, err := c.rpc.ABCIQueryWithOptions(ctx, "/celestia.valaddr.v1.Query/AllBondedFibreProviders", cmtbytes.HexBytes(data), rpcclient.ABCIQueryOptions{Height: height})
+	const path = "/celestia.valaddr.v1.Query/AllBondedFibreProviders"
+	res, err := c.rpc.ABCIQueryWithOptions(ctx, path, cmtbytes.HexBytes(data), rpcclient.ABCIQueryOptions{Height: height})
 	if err != nil {
 		return nil, fmt.Errorf("abci query bonded fibre providers: %w", err)
 	}
 	if res.Response.Code != 0 {
-		return nil, fmt.Errorf("abci query bonded fibre providers: code=%d log=%s", res.Response.Code, res.Response.Log)
+		return nil, c.queryError(parent, path, height, res.Response)
 	}
 	var resp valaddrtypes.QueryAllBondedFibreProvidersResponse
 	if err := resp.Unmarshal(res.Response.Value); err != nil {
@@ -397,12 +439,13 @@ func (c *Chain) FibreProviderInfoAt(parent context.Context, consAddrBech32 strin
 	if err != nil {
 		return "", false, fmt.Errorf("marshal provider info request: %w", err)
 	}
-	res, err := c.rpc.ABCIQueryWithOptions(ctx, "/celestia.valaddr.v1.Query/FibreProviderInfo", cmtbytes.HexBytes(data), rpcclient.ABCIQueryOptions{Height: height})
+	const path = "/celestia.valaddr.v1.Query/FibreProviderInfo"
+	res, err := c.rpc.ABCIQueryWithOptions(ctx, path, cmtbytes.HexBytes(data), rpcclient.ABCIQueryOptions{Height: height})
 	if err != nil {
 		return "", false, fmt.Errorf("abci query fibre provider info: %w", err)
 	}
 	if res.Response.Code != 0 {
-		return "", false, fmt.Errorf("abci query fibre provider info: code=%d log=%s", res.Response.Code, res.Response.Log)
+		return "", false, c.queryError(parent, path, height, res.Response)
 	}
 	var resp valaddrtypes.QueryFibreProviderInfoResponse
 	if err := resp.Unmarshal(res.Response.Value); err != nil {
@@ -568,20 +611,31 @@ type ABCIError struct {
 	Code      uint32
 	Codespace string
 	Log       string
+	// BeforeModule is set when the answer is proven to mean the queried
+	// module did not exist yet at Height: block Height ran under
+	// AppVersion, below FibreAppVersion (see queryError).
+	BeforeModule bool
+	AppVersion   uint64
 }
 
 func (e *ABCIError) Error() string {
+	if e.BeforeModule {
+		return fmt.Sprintf("abci query %s h=%d: code=%d: block %d ran under app v%d, before the module existed", e.Path, e.Height, e.Code, e.Height, e.AppVersion)
+	}
 	return fmt.Sprintf("abci query %s h=%d: code=%d codespace=%s log=%s", e.Path, e.Height, e.Code, e.Codespace, e.Log)
 }
 
 // IsResultsNotPersisted reports the block_results error of a node that runs
 // with storage.discard_abci_responses = true. Retrying never helps.
+// CometBFT's own wording is "node is not persisting finalize block
+// responses"; "not persisted" alone never matched it, so such a node held
+// the scanner in the unbounded transient retry instead of the gap path.
 func IsResultsNotPersisted(err error) bool {
 	if err == nil {
 		return false
 	}
 	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "not persisted") || strings.Contains(s, "discard_abci_responses")
+	return strings.Contains(s, "not persisting") || strings.Contains(s, "not persisted") || strings.Contains(s, "discard_abci_responses")
 }
 
 // IsHeightUnavailable reports an error that means the node does not have
@@ -605,5 +659,7 @@ func IsHeightUnavailable(err error) bool {
 		// recorded. A promise may be up to PaymentPromiseHeightWindow
 		// blocks older than the block that settles it, so any node whose
 		// state base sits between the two reaches this.
-		strings.Contains(s, "could not find validator set for height")
+		strings.Contains(s, "could not find validator set for height") ||
+		// cosmos-sdk's answer to a query at a height whose state was pruned.
+		strings.Contains(s, "failed to load state at height")
 }

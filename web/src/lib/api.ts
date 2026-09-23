@@ -88,7 +88,7 @@ export type Meta = {
     /** blocks_remaining at that pace: an estimate, not a promise */
     eta_seconds?: number;
     /** monikers, as x/signal reports them */
-    missing_validators: string[];
+    missing_validators: string[] | null;
     polled_at: string;
   };
 };
@@ -578,7 +578,37 @@ export type Payment = {
  * that fails keeps the payload and the old fetchedAt beside the new error, so
  * a page can say "showing data as of 08:13" instead of pretending it is now.
  */
-export type Fetch<T> = { data: T | null; error: string | null; loading: boolean; fetchedAt: string | null };
+/**
+ * status is the HTTP status of the last failed request: 0 when the API did
+ * not answer at all (network error, proxy down, timeout), otherwise the code
+ * it answered with. Only 404/410 say the thing asked for is not on record and
+ * only 400 says the request itself was wrong; every other failure, a 429 or a
+ * 5xx included, says nothing about the record and reads as the API not
+ * answering.
+ */
+export type Fetch<T> = { data: T | null; error: string | null; loading: boolean; fetchedAt: string | null; status?: number };
+
+/** the API answered that the thing asked for is not on record (404, 410) */
+export function notFound(f: { error: string | null; status?: number }): boolean {
+  return !!f.error && (f.status === 404 || f.status === 410);
+}
+/** the API refused the request as malformed (400): a wrong address, not a missing one */
+export function badRequest(f: { error: string | null; status?: number }): boolean {
+  return !!f.error && f.status === 400;
+}
+/**
+ * the API did not answer usefully: no answer, a 5xx, or a refusal that says
+ * nothing about the record (429 rate-limited, 401/403, 408). It used to be
+ * "anything but a 4xx", so a 429 printed "no validator with this address is
+ * on record" about a validator that was.
+ */
+export function apiFailing(f: { error: string | null; status?: number }): boolean {
+  return !!f.error && !notFound(f) && !badRequest(f);
+}
+/** the API is up but asked us to slow down */
+export function throttled(f: { error: string | null; status?: number }): boolean {
+  return !!f.error && f.status === 429;
+}
 
 // One in-flight request and one timer per (path, interval), however many
 // components ask for it: the header, the banner, the footer and the page all
@@ -588,15 +618,24 @@ const streams = new Map<string, Sub>();
 
 async function fetchOnce(path: string): Promise<Fetch<unknown>> {
   try {
-    const r = await fetch(API_BASE + path, { cache: "no-store" });
-    if (!r.ok) {
-      let msg = `${r.status}`;
-      try { msg = (await r.json()).error ?? msg; } catch { /* keep status */ }
-      return { data: null, error: msg, loading: false, fetchedAt: null };
+    // A hung API must read as unreachable rather than as a page that never
+    // updates: every request is abandoned after 20 s.
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 20000);
+    try {
+      const r = await fetch(API_BASE + path, { cache: "no-store", signal: ctl.signal });
+      if (!r.ok) {
+        let msg = `${r.status}`;
+        try { msg = (await r.json()).error ?? msg; } catch { /* keep status */ }
+        return { data: null, error: msg, loading: false, fetchedAt: null, status: r.status };
+      }
+      return { data: await r.json(), error: null, loading: false, fetchedAt: new Date().toISOString() };
+    } finally {
+      clearTimeout(timer);
     }
-    return { data: await r.json(), error: null, loading: false, fetchedAt: new Date().toISOString() };
   } catch (e) {
-    return { data: null, error: e instanceof Error ? e.message : String(e), loading: false, fetchedAt: null };
+    const aborted = e instanceof DOMException && e.name === "AbortError";
+    return { data: null, error: aborted ? "no answer within 20 s" : e instanceof Error ? e.message : String(e), loading: false, fetchedAt: null, status: 0 };
   }
 }
 
@@ -617,7 +656,7 @@ function subscribe(key: string, path: string, refreshMs: number, fn: (f: Fetch<u
       // page to show, and the figures keep their own computed_at so nobody
       // reads stale numbers as fresh ones.
       cur.last = next.error && cur.last.data !== null
-        ? { data: cur.last.data, error: next.error, loading: false, fetchedAt: cur.last.fetchedAt }
+        ? { data: cur.last.data, error: next.error, loading: false, fetchedAt: cur.last.fetchedAt, status: next.status }
         : next;
       const out = cur.last;
       cur.subs.forEach((s) => s(out));
@@ -700,16 +739,27 @@ export function since(s: string | null | undefined): string {
   if (!s) return "";
   const ms = Date.now() - new Date(s).getTime();
   if (isNaN(ms)) return "";
-  const m = Math.max(0, Math.round(ms / 60000));
+  const m = Math.max(0, Math.round(Math.abs(ms) / 60000));
   if (m < 1) return "just now";
   if (m < 60) return `${m} min`;
   const h = Math.floor(m / 60), rm = m % 60;
   if (h < 24) return rm ? `${h} h ${rm} min` : `${h} h`;
   return `${Math.floor(h / 24)} d`;
 }
+/** "12 min ago" for the past, "in 12 min" for the future, "just now" within a minute */
 export function ago(s: string | null | undefined): string {
   const w = since(s);
-  return w === "" || w === "just now" ? w : `${w} ago`;
+  if (w === "" || w === "just now") return w;
+  return new Date(s!).getTime() > Date.now() ? `in ${w}` : `${w} ago`;
+}
+/** "09:09 UTC" today, "Sep 21 09:09 UTC" on any other UTC day: a time that says which day it is */
+export function whenUTC(s: string | null | undefined): string {
+  if (!s) return "—";
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return s;
+  const today = new Date().toISOString().slice(0, 10) === d.toISOString().slice(0, 10);
+  const t = d.toISOString().slice(11, 16) + " UTC";
+  return today ? t : `${d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })} ${t}`;
 }
 /** "2026-09-22 08:59:09 UTC" */
 export function utcWord(s: string | null | undefined): string {

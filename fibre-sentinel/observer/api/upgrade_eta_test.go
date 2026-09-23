@@ -22,7 +22,8 @@ func TestUpgradeSignalCarriesBlocksRemainingAndAnETAAtTheMeasuredPace(t *testing
 		t.Fatal(err)
 	}
 	defer st.Close()
-	now := time.Date(2026, 9, 22, 14, 0, 0, 0, time.UTC)
+	// the API measures the tip's age against its own clock
+	now := time.Now().UTC().Truncate(time.Second)
 	set := func(kv map[string]string) {
 		t.Helper()
 		for k, v := range kv {
@@ -34,7 +35,7 @@ func TestUpgradeSignalCarriesBlocksRemainingAndAnETAAtTheMeasuredPace(t *testing
 	set(map[string]string{
 		"app_version": "9", "fibre_active": "no", "fibre_app_version": "10",
 		"signal_version": "10", "signal_voting_power": "300000000", "signal_threshold_power": "268982696",
-		"signal_total_voting_power": "322779235", "signal_upgrade_height": "1082619", "signal_missing": `[]`,
+		"signal_total_voting_power": "322779235", "signal_upgrade_height": "1082619", "signal_missing": `null`,
 		"signal_polled_at": store.TS(now),
 		"chain_height":     "1016732", "chain_tip_time": store.TS(now),
 		// six hours ago the tip was 7,606 blocks lower: 2.84 s a block
@@ -46,17 +47,22 @@ func TestUpgradeSignalCarriesBlocksRemainingAndAnETAAtTheMeasuredPace(t *testing
 
 	var meta struct {
 		UpgradeSignal *struct {
-			UpgradeHeight   int64   `json:"upgrade_height"`
-			BlocksRemaining int64   `json:"blocks_remaining"`
-			BlockTimeS      float64 `json:"block_time_s"`
-			PaceWindowS     int64   `json:"pace_window_s"`
-			ETASeconds      int64   `json:"eta_seconds"`
+			UpgradeHeight     int64     `json:"upgrade_height"`
+			BlocksRemaining   int64     `json:"blocks_remaining"`
+			BlockTimeS        float64   `json:"block_time_s"`
+			PaceWindowS       int64     `json:"pace_window_s"`
+			ETASeconds        int64     `json:"eta_seconds"`
+			MissingValidators *[]string `json:"missing_validators"`
 		} `json:"upgrade_signal"`
 	}
 	if code := get(t, ts, "/v1/meta", &meta); code != 200 {
 		t.Fatalf("meta: %d", code)
 	}
 	u := meta.UpgradeSignal
+	// "null" on record, from an older collector, is published as a list
+	if u == nil || u.MissingValidators == nil || len(*u.MissingValidators) != 0 {
+		t.Fatalf("missing_validators must be a list: %+v", u)
+	}
 	if u == nil || u.BlocksRemaining != 65887 {
 		t.Fatalf("blocks_remaining: %+v", u)
 	}
@@ -77,5 +83,19 @@ func TestUpgradeSignalCarriesBlocksRemainingAndAnETAAtTheMeasuredPace(t *testing
 	}
 	if u = meta.UpgradeSignal; u == nil || u.BlocksRemaining != 65887 || u.ETASeconds != 0 || u.BlockTimeS != 0 {
 		t.Fatalf("short window should carry no pace: %+v", u)
+	}
+
+	// a chain that stopped: the blocks left still stand, the ETA does not,
+	// because a pace measured up to a halt says nothing about the restart
+	set(map[string]string{
+		"chain_tip_time":         store.TS(now.Add(-20 * time.Minute)),
+		"chain_pace_from_height": "1009126", "chain_pace_from_time": store.TS(now.Add(-6 * time.Hour)),
+	})
+	meta.UpgradeSignal = nil
+	if code := get(t, ts, "/v1/meta", &meta); code != 200 {
+		t.Fatalf("meta: %d", code)
+	}
+	if u = meta.UpgradeSignal; u == nil || u.BlocksRemaining != 65887 || u.ETASeconds != 0 {
+		t.Fatalf("a stopped chain should carry no ETA: %+v", u)
 	}
 }

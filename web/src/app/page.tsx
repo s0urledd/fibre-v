@@ -43,10 +43,10 @@ function Overview() {
         <div><h1>Fibre on {meta ? netName(meta.chain_id) : "…"}</h1><p className="lede">Whether validators keep serving the shards they signed for, checked from outside.</p></div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
-      <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt }} measuring={measuring} />
+      <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt, status: net.status }} measuring={measuring} />
 
       <Metrics>
-        <Metric label="Kept obligations"
+        <Metric label="Service rate"
           value={!N || notLive || !o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}
           tone={!N || notLive || !o || decided === 0 ? "absent" : undefined}
           help={!N ? " " : notLive ? "nothing to measure yet" : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed`} />
@@ -72,7 +72,7 @@ function Overview() {
       <section className="band" id="outcomes">
         <div>
           <h2>Obligation outcomes</h2>
-          <OutcomeBar o={o} />
+          <OutcomeBar o={o} absent={!N || notLive} />
           <p className="blobs">
             <button type="button" className="dis" aria-expanded={disc === "outcomes"} onClick={() => setDisc(disc === "outcomes" ? "" : "outcomes")}>About these outcomes</button>
             <span className="sep">·</span>
@@ -81,7 +81,7 @@ function Overview() {
           </p>
           <p className="disc" hidden={disc !== "outcomes"}>
             {o && o.total > 0
-              ? <>The bar shows all <b>{int(o.total)}</b> obligations settled in the period — one per validator and blob it signed for. The kept rate counts only the <b>{int(decided)}</b> assessed ones (served + broken); undecided (no reading at the end of the window {int(o.end_unobserved)}, never observed serving {int(o.unobserved)}{(o.held_param_unverified ?? 0) > 0 && <>, deadline unverified {int(o.held_param_unverified)}</>}) and pending stay outside it. Unreachable from here is never counted as broken.</>
+              ? <>The bar shows all <b>{int(o.total)}</b> obligations settled in the period — one per validator and blob it signed for. The service rate counts only the <b>{int(decided)}</b> assessed ones (served + broken); undecided (no reading at the end of the window {int(o.end_unobserved)}, never observed serving {int(o.unobserved)}{(o.held_param_unverified ?? 0) > 0 && <>, deadline unverified {int(o.held_param_unverified)}</>}) and pending stay outside it. Unreachable from here is never counted as broken.</>
               : <>No obligation settled in this period. An obligation is one validator and one blob it signed for; it is decided by the last probe before the retention deadline.</>}
             {" "}<Link href="/methodology/#rates">Methodology →</Link>
           </p>
