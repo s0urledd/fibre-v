@@ -110,9 +110,10 @@ type Config struct {
 	// anything about retention. The retry costs one extra request and no
 	// bytes, runs RetryDelay or more after the first attempt (queued, not
 	// slept on in a worker), and is skipped when it would land in a
-	// different schedule phase than the first attempt, and while the policy
-	// has the validator backed off. Both attempts are recorded in the final
-	// measurement's Retry field.
+	// different schedule phase than the first attempt, or when the policy,
+	// asked again at the moment it would run, denies it or has the validator
+	// backed off. Both attempts are recorded in the final measurement's
+	// Retry field.
 	RetryTransportTimeout bool
 	RetryDelay            time.Duration // default 20s
 }
@@ -1133,30 +1134,60 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 	// promise is that it never adds a request to an endpoint already failing.
 	if p.cfg.RetryTransportTimeout && !skipDL && shouldRetryTransport(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
 		lock.Unlock()
+		// The first attempt is a request the endpoint received and a
+		// failure the backoff must count now, not when the retry is done:
+		// every other probe of this validator in the meantime, and the
+		// retry's own policy check, decide on the policy's state.
+		if p.cfg.Policy != nil {
+			p.cfg.Policy.AfterProbe(pub, m)
+		}
 		p.log.Printf("probe %s %s: %s (%s); retrying once in %s", short(ph), t.Host, m.Outcome, m.RawError, p.cfg.RetryDelay)
 		return true, &retryReq{it: it, in: in, first: m, skipDL: skipDL, at: time.Now().Add(p.cfg.RetryDelay)}
 	}
-	p.finish(ctx, it, in, m, skipDL, lock)
+	p.finish(ctx, it, in, m, skipDL, lock, false)
 	return true, nil
 }
 
 // runRetry runs a queued retry, or records the first attempt alone when the
-// retry would now land in another phase or the sweep is being stopped.
+// retry would now land in another phase, the sweep is being stopped, or the
+// policy, asked again now, says no.
+//
+// The policy decided the first attempt, and the retry waited at least
+// RetryDelay since: meanwhile other probes of the validator can have pushed
+// it into backoff or used up a budget, and a retry run on the old decision
+// was a request the policy would have refused.
 func (p *Prober) runRetry(ctx context.Context, r retryReq) {
-	pub := r.it.job.pub
-	lock := p.validatorLock(r.it.target.AddressHex)
+	pub, t := r.it.job.pub, r.it.target
+	skip := ""
+	if p.cfg.Policy != nil && ctx.Err() == nil {
+		allow, skipDL, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now())
+		switch {
+		case !allow:
+			skip = reason
+		case skipDL:
+			skip = reason // backed off: a retry is a request it promised not to add
+		}
+	}
+	lock := p.validatorLock(t.AddressHex)
 	lock.Lock()
 	m := r.first
-	if ctx.Err() == nil && PhaseAt(time.Now(), pub, p.cfg.Schedule) == r.first.Phase {
+	switch {
+	case skip != "":
+		m.ClassificationReason += "; retry not run: " + skip
+	case ctx.Err() == nil && PhaseAt(time.Now(), pub, p.cfg.Schedule) == r.first.Phase:
 		m = retryOnce(ctx, r.in, r.it.coder, p.cfg.Timeouts, r.first, time.Since(r.first.FinishedAt).Round(time.Second))
+		p.finish(ctx, r.it, r.in, m, r.skipDL, lock, false)
+		return
 	}
-	p.finish(ctx, r.it, r.in, m, r.skipDL, lock)
+	// The first attempt was accounted when it was queued.
+	p.finish(ctx, r.it, r.in, m, r.skipDL, lock, true)
 }
 
 // finish completes a probe whose validator lock is held: the settlement-host
 // evidence probe when the validator re-registered, then the lock goes and
-// the row is written.
-func (p *Prober) finish(ctx context.Context, it work, in Input, m Measurement, skipDL bool, lock *sync.Mutex) {
+// the row is written. accounted is true when the policy has already been
+// told about m (a first attempt, accounted when its retry was queued).
+func (p *Prober) finish(ctx context.Context, it work, in Input, m Measurement, skipDL bool, lock *sync.Mutex, accounted bool) {
 	t, pub := it.target, it.job.pub
 	m.HostAtSettlement = t.HostAtSettlement
 	if hostChanged(t) && !skipDL && m.Outcome != OutcomeServedOK && m.Classification != ClassProbeError {
@@ -1173,7 +1204,7 @@ func (p *Prober) finish(ctx context.Context, it work, in Input, m Measurement, s
 	if err := p.store.Append(m); err != nil {
 		p.log.Fatalf("append measurement: %v", err)
 	}
-	if p.cfg.Policy != nil {
+	if p.cfg.Policy != nil && !accounted {
 		p.cfg.Policy.AfterProbe(pub, m)
 	}
 	p.logMeasurement(m)
