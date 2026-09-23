@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -595,5 +596,116 @@ func TestRunOne_QueuingARetryTellsThePolicyAboutTheFirstAttemptAtOnce(t *testing
 	ms, err := LoadMeasurements(p.store.Path())
 	if err != nil || len(ms) != 1 || ms[0].Retry == nil {
 		t.Fatalf("recorded: %+v %v", ms, err)
+	}
+}
+
+// When a queued retry does not run, no request of any kind goes out for it:
+// not the retry, and not the evidence probe of the host the validator was
+// registered at when the promise settled. That probe is a request too, and
+// the answer that stopped the retry (the policy's, or the phase that moved
+// on) stops it as well. The control case, a retry that does run, shows the
+// settlement host is reachable and probed, so a zero count is not vacuous.
+func TestRunRetry_NotRunMeansNoProbeOfTheSettlementHost(t *testing.T) {
+	// accepts the connection and never answers the TLS handshake, counting
+	listen := func(t *testing.T) (net.Listener, *atomic.Int32) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var n atomic.Int32
+		var mu sync.Mutex
+		var held []net.Conn
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				n.Add(1)
+				mu.Lock()
+				held = append(held, c)
+				mu.Unlock()
+			}
+		}()
+		t.Cleanup(func() {
+			ln.Close()
+			mu.Lock()
+			for _, c := range held {
+				c.Close()
+			}
+			mu.Unlock()
+		})
+		return ln, &n
+	}
+	for _, c := range []struct {
+		name          string
+		allow, skipDL bool
+		phaseMoved    bool
+		probed        bool
+	}{
+		{name: "budget used up meanwhile", allow: false},
+		{name: "backed off meanwhile", allow: true, skipDL: true},
+		{name: "phase moved on", allow: true, phaseMoved: true},
+		{name: "retry runs", allow: true, probed: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			current, _ := listen(t)
+			old, oldConns := listen(t)
+			p := testProber(t)
+			p.feed = newPubFeed(filepath.Join(t.TempDir(), "publications.jsonl"))
+			pol := &recPolicy{allow: true}
+			p.cfg.Policy = pol
+			p.cfg.RetryTransportTimeout = true
+			p.cfg.RetryDelay = 10 * time.Millisecond
+			p.cfg.AllowUnroutableHosts = true
+			p.cfg.Timeouts = StepTimeouts{DNS: time.Second, TCP: time.Second, TLS: 200 * time.Millisecond, Identity: time.Second, Download: 3 * time.Second}
+			coder, err := NewCoder(4, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			pubA := pub(now.Add(-2*time.Hour), now.Add(time.Hour))
+			pubA.Assignment.ProtocolParams = scan.ProtocolParamsSnapshot{OriginalRows: 4, TotalRows: 8}
+			pt := SchedulePoint{At: now, Label: "w2", Phase: PhaseInWindow}
+			key, _, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tg := Target{AddressHex: "aa", Host: current.Addr().String(), HostAtSettlement: old.Addr().String(),
+				Assigned: true, RowCount: 1, PubKey: key}
+			it := work{job: job{pubA, pt}, target: tg, coder: coder, key: pointKey("v1", pubA.PromiseHash, pt.At)}
+
+			_, retry := p.runOne(context.Background(), it)
+			if retry == nil {
+				t.Fatal("a handshake timeout should queue the retry")
+			}
+			if n := oldConns.Load(); n != 0 {
+				t.Fatalf("the settlement host was probed before the retry: %d connection(s)", n)
+			}
+			pol.mu.Lock()
+			pol.allow, pol.skipDL, pol.reason = c.allow, c.skipDL, "budget or backoff"
+			pol.mu.Unlock()
+			if c.phaseMoved {
+				retry.first.Phase = PhasePost
+			}
+			p.runRetry(context.Background(), *retry)
+
+			if err := p.store.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			ms, err := LoadMeasurements(p.store.Path())
+			if err != nil || len(ms) != 1 {
+				t.Fatalf("recorded: %+v %v", ms, err)
+			}
+			n := oldConns.Load()
+			switch {
+			case c.probed && (n == 0 || ms[0].SettlementHost == nil):
+				t.Fatalf("the retry ran and failed, so the settlement host should be probed: %d connection(s), %+v", n, ms[0].SettlementHost)
+			case !c.probed && (n != 0 || ms[0].SettlementHost != nil):
+				t.Fatalf("the retry did not run, yet the settlement host got %d connection(s): %+v", n, ms[0].SettlementHost)
+			case ms[0].HostAtSettlement != old.Addr().String():
+				t.Fatalf("the row lost the host registered at settlement: %q", ms[0].HostAtSettlement)
+			}
+		})
 	}
 }

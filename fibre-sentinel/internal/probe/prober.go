@@ -1179,18 +1179,23 @@ func (p *Prober) runRetry(ctx context.Context, r retryReq) {
 		p.finish(ctx, r.it, r.in, m, r.skipDL, lock, false)
 		return
 	}
-	// The first attempt was accounted when it was queued.
-	p.finish(ctx, r.it, r.in, m, r.skipDL, lock, true)
+	// The retry is not run, and neither is the evidence probe of the
+	// settlement host: it is a request too, and whatever stopped the retry
+	// (the policy's answer, the phase that moved on, the sweep stopping)
+	// stops it as well. The first attempt is recorded as it stands; it was
+	// accounted when it was queued.
+	p.finish(ctx, r.it, r.in, m, true, lock, true)
 }
 
 // finish completes a probe whose validator lock is held: the settlement-host
-// evidence probe when the validator re-registered, then the lock goes and
-// the row is written. accounted is true when the policy has already been
-// told about m (a first attempt, accounted when its retry was queued).
-func (p *Prober) finish(ctx context.Context, it work, in Input, m Measurement, skipDL bool, lock *sync.Mutex, accounted bool) {
+// evidence probe when the validator re-registered and noHostProbe is false,
+// then the lock goes and the row is written. accounted is true when the
+// policy has already been told about m (a first attempt, accounted when its
+// retry was queued).
+func (p *Prober) finish(ctx context.Context, it work, in Input, m Measurement, noHostProbe bool, lock *sync.Mutex, accounted bool) {
 	t, pub := it.target, it.job.pub
 	m.HostAtSettlement = t.HostAtSettlement
-	if hostChanged(t) && !skipDL && m.Outcome != OutcomeServedOK && m.Classification != ClassProbeError {
+	if hostChanged(t) && !noHostProbe && m.Outcome != OutcomeServedOK && m.Classification != ClassProbeError {
 		// The validator re-registered since the promise settled and its
 		// current host did not serve: ask the host the upload went to, as
 		// evidence, on the same lock so the validator still sees one
