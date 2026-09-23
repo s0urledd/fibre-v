@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useState } from "react";
-import { type Meta, type RecordThrough, type Window, type VantageHealth, type ScanGap, int, ago, since, span, utcWord, hhmm, apiFailing, API_BASE } from "@/lib/api";
+import { type Meta, type RecordThrough, type Window, type VantageHealth, type ScanGap, int, ago, since, span, utcWord, hhmm, apiFailing, throttled, API_BASE } from "@/lib/api";
 
 /** what the page's own data stream says about the API right now */
 export type Client = { error: string | null; fetchedAt: string | null; status?: number };
@@ -57,7 +57,7 @@ export default function StatusLine({ meta, metaError, snap, client, measuring }:
   const items: React.ReactNode[] = [];
   if (apiDown) {
     const err = client.error ?? metaError ?? "no answer";
-    items.push(<span key="api"><i className="dot none" />API unreachable · <b>{err}</b></span>);
+    items.push(<span key="api"><i className="dot none" />{throttled(client) ? "API busy" : "API unreachable"} · <b>{err}</b></span>);
     if (client.fetchedAt) {
       items.push(<span key="asof" title={`last successful refresh ${utcWord(client.fetchedAt)}`}>Showing data as of <b>{hhmm(client.fetchedAt)}</b> · {ago(client.fetchedAt)}</span>);
     } else {

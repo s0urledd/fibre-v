@@ -580,19 +580,34 @@ export type Payment = {
  */
 /**
  * status is the HTTP status of the last failed request: 0 when the API did
- * not answer at all (network error, proxy down), 4xx when it answered that
- * the thing asked for does not exist or the request was wrong. Only the
- * first is an outage; a page must not call a 404 "the API is unreachable".
+ * not answer at all (network error, proxy down, timeout), otherwise the code
+ * it answered with. Only 404/410 say the thing asked for is not on record and
+ * only 400 says the request itself was wrong; every other failure, a 429 or a
+ * 5xx included, says nothing about the record and reads as the API not
+ * answering.
  */
 export type Fetch<T> = { data: T | null; error: string | null; loading: boolean; fetchedAt: string | null; status?: number };
 
-/** the API answered, but not with the thing asked for (a 4xx): not an outage */
+/** the API answered that the thing asked for is not on record (404, 410) */
 export function notFound(f: { error: string | null; status?: number }): boolean {
-  return !!f.error && !!f.status && f.status >= 400 && f.status < 500;
+  return !!f.error && (f.status === 404 || f.status === 410);
 }
-/** the API did not answer usefully: a network error or a 5xx */
+/** the API refused the request as malformed (400): a wrong address, not a missing one */
+export function badRequest(f: { error: string | null; status?: number }): boolean {
+  return !!f.error && f.status === 400;
+}
+/**
+ * the API did not answer usefully: no answer, a 5xx, or a refusal that says
+ * nothing about the record (429 rate-limited, 401/403, 408). It used to be
+ * "anything but a 4xx", so a 429 printed "no validator with this address is
+ * on record" about a validator that was.
+ */
 export function apiFailing(f: { error: string | null; status?: number }): boolean {
-  return !!f.error && !notFound(f);
+  return !!f.error && !notFound(f) && !badRequest(f);
+}
+/** the API is up but asked us to slow down */
+export function throttled(f: { error: string | null; status?: number }): boolean {
+  return !!f.error && f.status === 429;
 }
 
 // One in-flight request and one timer per (path, interval), however many
