@@ -22,7 +22,8 @@ import (
 //     on record (validatorKnown);
 //   - kept for detailTTL per (address, window) and dropped as soon as a
 //     parameter hold lands, like the network and validator snapshots;
-//   - computed once for concurrent readers of the same key;
+//   - computed once for concurrent readers of the same key under the same
+//     hold revision;
 //   - computed at most detailConcurrency at a time.
 
 const (
@@ -55,6 +56,8 @@ type detailCache struct {
 	flight  map[string]*detailCall
 	once    sync.Once
 	sem     chan struct{}
+	// compute is validatorDetail unless a test puts something in its place.
+	compute func(ctx context.Context, addr string, win Window, now time.Time) (int, any, error)
 }
 
 func (c *detailCache) init() {
@@ -107,10 +110,14 @@ func (s *Server) serveValidatorDetail(w http.ResponseWriter, r *http.Request, ad
 		writeDetail(w, e)
 		return
 	}
-	call, leader := c.flight[key], false
+	// A computation is shared only by readers who asked under one revision.
+	// One started before a hold landed has read the rows the hold withdrew,
+	// and a reader who arrives after the hold must not be handed its fault.
+	fkey := key + "|" + rev
+	call, leader := c.flight[fkey], false
 	if call == nil {
 		call, leader = &detailCall{done: make(chan struct{})}, true
-		c.flight[key] = call
+		c.flight[fkey] = call
 	}
 	c.mu.Unlock()
 
@@ -118,7 +125,7 @@ func (s *Server) serveValidatorDetail(w http.ResponseWriter, r *http.Request, ad
 		s.bg.Add(1) // Close waits for it like any other background work
 		go func() {
 			defer s.bg.Done()
-			s.computeDetail(c, key, call, addr, win, now, rev)
+			s.computeDetail(c, key, fkey, call, addr, win, now, rev)
 		}()
 	}
 	select {
@@ -135,11 +142,15 @@ func (s *Server) serveValidatorDetail(w http.ResponseWriter, r *http.Request, ad
 
 // computeDetail runs one computation for key and hands it to everyone
 // waiting on call.
-func (s *Server) computeDetail(c *detailCache, key string, call *detailCall, addr string, win Window, now time.Time, rev string) {
+func (s *Server) computeDetail(c *detailCache, key, fkey string, call *detailCall, addr string, win Window, now time.Time, rev string) {
 	defer func() {
+		// Kept only if no hold landed while it ran. Its readers asked before
+		// the hold and get it; the next one did not, and a late answer from
+		// before the hold would also replace the one computed after it.
+		keep := call.err == nil && rev != "unreadable" && s.paramHoldsRevision() == rev
 		c.mu.Lock()
-		delete(c.flight, key)
-		if call.err == nil && rev != "unreadable" {
+		delete(c.flight, fkey)
+		if keep {
 			if len(c.entries) >= detailMaxEntries {
 				c.entries = map[string]detailEntry{} // crude, and bounded
 			}
@@ -157,7 +168,11 @@ func (s *Server) computeDetail(c *detailCache, key string, call *detailCall, add
 		call.err = ctx.Err()
 		return
 	}
-	status, out, err := s.validatorDetail(ctx, addr, win, now)
+	compute := c.compute
+	if compute == nil {
+		compute = s.validatorDetail
+	}
+	status, out, err := compute(ctx, addr, win, now)
 	if err != nil {
 		call.err = err
 		return

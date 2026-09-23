@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -228,5 +229,55 @@ func TestASnapshotComputedAcrossARevisionChangeIsNotServedAsCurrent(t *testing.T
 	v, _, _, err = c.get(ctx, nil, win)
 	if err != nil || v != 2 || computed != 2 {
 		t.Fatalf("third read: %d after %d computations; nothing changed since the second", v, computed)
+	}
+}
+
+// A reader who arrives after a hold, while a refresh started before it is
+// still running, must not be handed that refresh's figure when it lands: it
+// was computed from the rows the hold withdrew.
+func TestAReaderAfterAHoldDoesNotTakeTheRefreshStartedBeforeIt(t *testing.T) {
+	var rev atomic.Value
+	rev.Store("r1")
+	var computed atomic.Int32
+	refreshing, release := make(chan struct{}), make(chan struct{})
+	c := newSnapshotCache("test", func(ctx context.Context, win Window) (int, error) {
+		n := int(computed.Add(1))
+		if n == 2 {
+			close(refreshing)
+			<-release
+		}
+		return n, nil
+	})
+	c.revision = func() string { return rev.Load().(string) }
+	ctx := context.Background()
+	win := testWindow("24h")
+
+	if v, _, _, err := c.get(ctx, nil, win); err != nil || v != 1 {
+		t.Fatalf("first read: %d %v", v, err)
+	}
+	c.mu.Lock()
+	c.entries[win.Name].at = time.Now().Add(-24 * time.Hour) // past its TTL
+	c.mu.Unlock()
+	if v, _, _, err := c.get(ctx, nil, win); err != nil || v != 1 {
+		t.Fatalf("stale read: %d %v", v, err)
+	}
+	<-refreshing // the refresh has read its rows
+	rev.Store("r2")
+
+	type result struct {
+		v   int
+		err error
+	}
+	after := make(chan result, 1)
+	go func() {
+		v, _, _, err := c.get(ctx, nil, win)
+		after <- result{v, err}
+	}()
+	time.Sleep(200 * time.Millisecond) // let it find the refresh running
+	close(release)
+	r := <-after
+	c.bg.Wait()
+	if r.err != nil || r.v != 3 {
+		t.Fatalf("the reader after the hold got %d (%v) after %d computations, want the figure computed after the hold", r.v, r.err, computed.Load())
 	}
 }
