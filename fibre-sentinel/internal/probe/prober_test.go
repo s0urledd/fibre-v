@@ -457,18 +457,26 @@ type recPolicy struct {
 	allow, skipDL bool
 	reason        string
 	after         []Measurement
+	asked         []Target
+	released      int
 }
 
 func (r *recPolicy) Admit(scan.Publication, bool) (bool, string) { return true, "" }
-func (r *recPolicy) BeforeProbe(scan.Publication, Target, time.Time) (bool, bool, string) {
+func (r *recPolicy) BeforeProbe(_ scan.Publication, t Target, _ time.Time) (bool, bool, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.asked = append(r.asked, t)
 	return r.allow, r.skipDL, r.reason
 }
 func (r *recPolicy) AfterProbe(_ scan.Publication, m Measurement) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.after = append(r.after, m)
+}
+func (r *recPolicy) Release(scan.Publication, Target) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.released++
 }
 func (r *recPolicy) SamplingFor(scan.Publication) (float64, string, string) { return 1, "", "" }
 func (r *recPolicy) Forget(string)                                          {}
@@ -706,6 +714,109 @@ func TestRunRetry_NotRunMeansNoProbeOfTheSettlementHost(t *testing.T) {
 			case ms[0].HostAtSettlement != old.Addr().String():
 				t.Fatalf("the row lost the host registered at settlement: %q", ms[0].HostAtSettlement)
 			}
+			// Every admission is settled exactly once. A retry admitted and
+			// then not run (backed off, phase moved on) gives its slot back;
+			// one that runs is accounted, and so is the settlement-host
+			// probe, which asked the policy for its own slot first.
+			pol.mu.Lock()
+			defer pol.mu.Unlock()
+			wantAfter, wantReleased, wantAsked := 1, 0, 2
+			switch {
+			case c.probed:
+				wantAfter, wantAsked = 3, 3
+			case c.allow:
+				wantReleased = 1
+			}
+			if len(pol.after) != wantAfter || pol.released != wantReleased || len(pol.asked) != wantAsked {
+				t.Fatalf("policy saw %d asks, %d accounted, %d released; want %d, %d, %d",
+					len(pol.asked), len(pol.after), pol.released, wantAsked, wantAfter, wantReleased)
+			}
+			if c.probed && pol.asked[2].Host != old.Addr().String() {
+				t.Fatalf("the settlement-host probe was not put to the policy: asked about %+v", pol.asked[2])
+			}
 		})
+	}
+}
+
+// overlapPolicy admits everything and counts every time it is asked about a
+// validator while an earlier admission of that validator is still unsettled
+// (neither accounted nor released).
+type overlapPolicy struct {
+	recPolicy
+	inflight map[string]int
+	overlaps int
+}
+
+func (o *overlapPolicy) BeforeProbe(_ scan.Publication, t Target, _ time.Time) (bool, bool, string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.inflight[t.AddressHex] > 0 {
+		o.overlaps++
+	}
+	o.inflight[t.AddressHex]++
+	return true, false, ""
+}
+func (o *overlapPolicy) AfterProbe(_ scan.Publication, m Measurement) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.inflight[m.ValidatorAddress]--
+	o.after = append(o.after, m)
+}
+func (o *overlapPolicy) Release(_ scan.Publication, t Target) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.inflight[t.AddressHex]--
+	o.released++
+}
+
+// Several work items for one validator run by concurrent workers — the first
+// burst after a start, with eight workers — are put to the policy one at a
+// time: each is asked about only once the one before it has been accounted.
+// The policy used to be asked before the validator's lock was taken and told
+// after it was released, so every item of the burst was admitted on a state
+// that included none of the others, and then ran back to back with no
+// spacing, past the per-validator caps.
+func TestRunOne_ConcurrentItemsOfOneValidatorAreAdmittedOneAtATime(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close() // connection refused from here on: a fast, real request
+
+	p := testProber(t)
+	p.feed = newPubFeed(filepath.Join(t.TempDir(), "publications.jsonl"))
+	pol := &overlapPolicy{inflight: map[string]int{}}
+	p.cfg.Policy = pol
+	p.cfg.AllowUnroutableHosts = true
+	coder, err := NewCoder(4, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	pubA := pub(now.Add(-2*time.Hour), now.Add(time.Hour))
+	pubA.Assignment.ProtocolParams = scan.ProtocolParamsSnapshot{OriginalRows: 4, TotalRows: 8}
+	tg := Target{AddressHex: "aa", Host: addr, Assigned: true, RowCount: 1}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		pt := SchedulePoint{At: now, Label: "w" + string(rune('0'+i)), Phase: PhaseInWindow}
+		it := work{job: job{pubA, pt}, target: tg, coder: coder, key: pointKey("v1", pubA.PromiseHash, pt.At)}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.runOne(context.Background(), it)
+		}()
+	}
+	wg.Wait()
+
+	pol.mu.Lock()
+	defer pol.mu.Unlock()
+	if pol.overlaps != 0 {
+		t.Fatalf("%d admissions of the validator were asked for while an earlier one was still unsettled", pol.overlaps)
+	}
+	if len(pol.after)+pol.released != workers || pol.inflight["aa"] != 0 {
+		t.Fatalf("%d accounted + %d released for %d admissions, %d left unsettled", len(pol.after), pol.released, workers, pol.inflight["aa"])
 	}
 }

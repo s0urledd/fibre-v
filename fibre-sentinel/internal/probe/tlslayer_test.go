@@ -300,7 +300,7 @@ func TestRun_SettlementHostIsProbedAsEvidenceWhenTheCurrentHostDoesNotServe(t *t
 		t.Fatal("host change not detected")
 	}
 	m.HostAtSettlement = in.Target.HostAtSettlement
-	m.SettlementHost = settlementProbe(context.Background(), in, mustCoder(t), StepTimeouts{})
+	m.SettlementHost, _ = settlementProbe(context.Background(), in, mustCoder(t), StepTimeouts{})
 	if m.SettlementHost == nil || m.SettlementHost.Host != old || m.SettlementHost.Outcome != OutcomeServerError {
 		t.Fatalf("settlement probe = %+v", m.SettlementHost)
 	}
