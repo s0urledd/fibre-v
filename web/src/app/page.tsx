@@ -8,7 +8,7 @@ import { Metric, Metrics } from "@/components/Metrics";
 import OutcomeBar from "@/components/OutcomeBar";
 import VolumeChart from "@/components/VolumeChart";
 import Validators from "@/components/Validators";
-import { netName } from "@/components/Chrome";
+import PreLive from "@/components/PreLive";
 import { Concentration } from "@/components/Hosting";
 
 /**
@@ -52,38 +52,40 @@ function Overview() {
   return (
     <>
       <div className="title">
-        <div><h1>Celestia Fibre · {meta ? netName(meta.chain_id) : "…"}</h1><p className="lede">Independent checks that validators serve the data they signed for. <button type="button" className="dis" aria-expanded={about} onClick={() => setAbout(!about)}>What is measured?</button></p>
+        {/* The product is the label and the claim is the headline; the network is already in the header's chip. */}
+        <div><p className="eyebrow">Celestia Fibre</p><h1>Independent checks that validators serve the data they signed for.</h1><p className="lede"><button type="button" className="dis" aria-expanded={about} onClick={() => setAbout(!about)}>What is measured?</button></p>
           <p className="disc about" hidden={!about}>
             Fibre is Celestia's low-latency data path. Each validator signs for its share of a blob and must keep serving that share until the retention window ends; the chain records the signature, never the serving. Tensile downloads the shares from outside, as any client would, checks every row against the on-chain commitment, and publishes each result with the evidence behind it. An endpoint it cannot reach is never counted as a failure. <Link href="/methodology/">Methodology →</Link>
           </p></div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
+      <PreLive meta={meta} />
       <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt, status: net.status }} measuring={measuring} />
 
       <Metrics>
         <Metric label="Service rate"
           value={!N || notLive || !o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}
           tone={!N || notLive || !o || decided === 0 ? "absent" : undefined}
-          help={!N ? " " : notLive ? "nothing to measure yet" : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed`} />
+          help={!N || notLive ? " " : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed`} />
         <Metric label="Broken obligations"
           value={!N || notLive ? "—" : int(o?.broken ?? 0)}
           tone={!N || notLive ? "absent" : (o?.broken ?? 0) > 0 ? "fault" : undefined}
-          help={!N ? " " : notLive ? "nothing to measure yet" : (o?.broken ?? 0) > 0 ? `on ${int(brokenOn)} validator${brokenOn === 1 ? "" : "s"}` : "none in this period"} />
+          help={!N || notLive ? " " : (o?.broken ?? 0) > 0 ? `on ${int(brokenOn)} validator${brokenOn === 1 ? "" : "s"}` : "none in this period"} />
         <Metric label="Undecided"
           value={!N || notLive ? "—" : int(und)}
           tone={!N || notLive ? "absent" : undefined}
-          help={!N ? " " : notLive ? "nothing to measure yet" : `${int(o?.pending ?? 0)} pending`} />
+          help={!N || notLive ? " " : `${int(o?.pending ?? 0)} pending`} />
         <Metric label="Hosts registered"
           value={!vals.data ? "—" : int(reg.count)}
           den={vals.data && reg.of > 0 ? int(reg.of) : undefined}
           tone={!vals.data || reg.count === 0 ? "absent" : undefined}
           title="Bonded validators with a Fibre host in x/valaddr, and the share of bonded voting power they hold. A validator without one cannot serve Fibre data."
-          help={!vals.data ? " " : reg.count === 0 ? (notLive ? "opens at activation" : "none yet")
+          help={!vals.data ? " " : reg.count === 0 ? (notLive ? " " : "none yet")
             : <>{reg.share} of stake{reach && reach.den > 0 ? <> · {int(reach.num)} reachable now</> : null}</>} />
         <Metric label="Settled data"
-          value={!N ? "—" : bytes(N.publication_bytes)}
-          tone={!N || N.publications === 0 ? "absent" : undefined}
-          help={!N ? " " : `${int(N.publications)} publication${N.publications === 1 ? "" : "s"} · ${period}`} />
+          value={!N || notLive ? "—" : bytes(N.publication_bytes)}
+          tone={!N || notLive || N.publications === 0 ? "absent" : undefined}
+          help={!N || notLive ? " " : `${int(N.publications)} publication${N.publications === 1 ? "" : "s"} · ${period}`} />
       </Metrics>
 
       <section className="band" id="outcomes">
@@ -127,5 +129,5 @@ function Overview() {
 }
 
 export default function Page() {
-  return <Suspense fallback={<div className="title"><div><h1>Celestia Fibre</h1><p className="lede">Independent checks that validators serve the data they signed for.</p></div></div>}><Overview /></Suspense>;
+  return <Suspense fallback={<div className="title"><div><p className="eyebrow">Celestia Fibre</p><h1>Independent checks that validators serve the data they signed for.</h1></div></div>}><Overview /></Suspense>;
 }

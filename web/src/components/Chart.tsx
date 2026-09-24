@@ -79,7 +79,8 @@ export default function Chart({ series, rows, fmt, height = 200, fmtAxis, title,
               if (px < 0 || px > plotW || n === 0) { setHover(null); return; }
               setHover(Math.min(n - 1, Math.max(0, Math.floor(px / slot))));
             }}>
-            {ticks.map((t) => (
+            {/* an all-zero series has no scale to read: no gridlines or tick labels, the sentence below instead */}
+            {hasData && ticks.map((t) => (
               <g key={t}>
                 <line x1={left} x2={left + plotW} y1={y(t)} y2={y(t)} className="grid" />
                 <text x={left - 6} y={y(t) + 3.5} textAnchor="end" className="tick">{axisFmt(t)}</text>

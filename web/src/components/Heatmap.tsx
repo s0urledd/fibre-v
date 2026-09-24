@@ -19,7 +19,10 @@ import { int, pctOf } from "@/lib/api";
  * scrolls inside its own frame rather than the page.
  */
 
-const POINT_LABEL: Record<string, string> = { w1: "w1", w2: "w2", w3: "w3", w4: "w4", day: "day" };
+// The schedule points by where they fall in the retention window, as the
+// "Through the retention window" table on the same page names them (POINT in
+// validator/page.tsx); the key stays in the tooltip.
+const POINT_LABEL: Record<string, string> = { w1: "12%", w2: "45%", w3: "72%", w4: "end", day: "day" };
 const POINT_TITLE: Record<string, string> = {
   w1: "w1 · 12% of the retention window", w2: "w2 · 45% of the window", w3: "w3 · 72% of the window",
   w4: "w4 · within 2 min 30 s of the deadline", day: "every point of the day together",
@@ -37,9 +40,9 @@ function cellTitle(day: string, point: string, c: HeatCell | undefined, beforeRa
   }
   const rated = c.served + c.faults;
   const held = c.held_out > 0 ? ` · ${int(c.held_out)} held out (no verdict: unsigned, unreachable, gaps…)` : "";
-  if (rated === 0) return `${where}: no verdict · ${int(c.held_out)} probe${c.held_out === 1 ? "" : "s"}, none rated`;
+  if (rated === 0) return `${where}: no verdict · n = 0 rated · ${int(c.held_out)} probe${c.held_out === 1 ? "" : "s"} held out`;
   const broken = c.faults > 0 ? ` · ${int(c.faults)} broken` : "";
-  return `${where}: served ${int(c.served)} / ${int(rated)} rated (${pctOf(c.served, rated)})${broken}${held}${c.rolled ? " · from the daily rollup" : ""}`;
+  return `${where}: n = ${int(rated)} rated · served ${int(c.served)} / ${int(rated)} (${pctOf(c.served, rated)})${broken}${held}${c.rolled ? " · from the daily rollup" : ""}`;
 }
 
 function Cell({ day, point, c, beforeRaw }: { day: string; point: string; c: HeatCell | undefined; beforeRaw: boolean }) {
@@ -70,7 +73,7 @@ export default function Heatmap({ data }: { data: HeatmapData | undefined }) {
   return (
     <div className="hm">
       <div className="hm-scroll">
-        <div className={"hm-grid" + (wide ? " wide" : "")} style={{ gridTemplateColumns: `2.6em repeat(${n}, minmax(${wide ? "6px" : "0"}, 1fr))` }}
+        <div className={"hm-grid" + (wide ? " wide" : "")} style={{ gridTemplateColumns: `3em repeat(${n}, minmax(${wide ? "6px" : "0"}, 1fr))` }}
           role="group" aria-label={`served over rated probes per UTC day and schedule point, ${n} day${n === 1 ? "" : "s"}`}>
           {rows.map((p) => (
             <div key={p} style={{ display: "contents" }}>
