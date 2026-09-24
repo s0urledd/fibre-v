@@ -468,10 +468,15 @@ One sentence each, and what a reader should conclude.
   `FibreProviderInfo` query at the settlement height, in force from the
   seed height since every later change is an event on record) or, when
   that state is pruned, at the tip (`seed_current`, in force from the tip
-  only); `host_at_settlement_source` says event, seed, seed_lazy,
-  seed_current, none (the chain's explicit answer that nothing is
-  registered, never inferred from absence), or unknown because a scan gap
-  or a missing seed leaves the question open; `host_history.jsonl` is the record and the export carries
+  only), and read again after a scan gap whose blocks' events were not
+  read (`reseed`: the registry at the height before the scan's position,
+  in force from the gap's end, for each validator with no event of its own
+  since; settlements inside or before the gap stay unknown). A gap where
+  only a publication's validator set was pruned read the block's events
+  and does not make hosts unknown; `host_at_settlement_source` says event,
+  seed, seed_lazy, seed_current, reseed, none (the chain's explicit answer
+  that nothing is registered, never inferred from absence), or unknown
+  because a scan gap or a missing seed leaves the question open; `host_history.jsonl` is the record and the export carries
   it) with
   `settlement_host_probe` (what that host answered when the current one
   did not serve and differs from it), `observer.build` (the observer's VCS revision), and

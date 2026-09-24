@@ -1202,7 +1202,7 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 		// else the host the chain's events or the seed named.
 		var host any
 		switch v.HostSource {
-		case scan.HostFromEvent, scan.HostFromSeed, scan.HostFromSeedLazy, scan.HostFromSeedCurrent:
+		case scan.HostFromEvent, scan.HostFromSeed, scan.HostFromSeedLazy, scan.HostFromSeedCurrent, scan.HostFromReseed:
 			host = v.Host
 		case scan.HostNone:
 			host = ""
