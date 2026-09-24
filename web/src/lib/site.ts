@@ -6,7 +6,7 @@
  * and so that moving this repository, which is a decision still open, is one
  * environment variable rather than a search across the site.
  */
-export const SOURCE_URL = (process.env.NEXT_PUBLIC_SOURCE_URL ?? "https://github.com/s0urledd/fibre-v").replace(/\/$/, "");
+export const SOURCE_URL = (process.env.NEXT_PUBLIC_SOURCE_URL ?? "https://github.com/s0urledd/tensile").replace(/\/$/, "");
 
 /** The dispute route: what to do about a verdict you think is wrong. */
 export const DISPUTE_URL = `${SOURCE_URL}/blob/main/docs/verdicts.md#disputing-a-verdict`;
