@@ -1,6 +1,6 @@
 # fibre
 
-The source of **Tensile** (https://fibre.huginn.tech), the independent
+The source of **Tensile** (https://tensile.huginn.tech), the independent
 observer for Celestia Fibre, and the modules it is built on.
 
 Independent, outside-the-validator tooling for **Celestia Fibre** — the

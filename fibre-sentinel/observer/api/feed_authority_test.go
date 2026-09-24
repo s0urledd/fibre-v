@@ -14,8 +14,8 @@ func TestFeedAuthorityPrefersTheConfiguredHost(t *testing.T) {
 	if got := feedAuthority(r); got != "attacker.example" {
 		t.Fatalf("unconfigured: %q, want the forwarded host (the old behaviour)", got)
 	}
-	t.Setenv(feedAuthorityEnv, "Fibre.Huginn.Tech ")
-	if got := feedAuthority(r); got != "fibre.huginn.tech" {
-		t.Fatalf("configured: %q, want fibre.huginn.tech", got)
+	t.Setenv(feedAuthorityEnv, "Tensile.Huginn.Tech ")
+	if got := feedAuthority(r); got != "tensile.huginn.tech" {
+		t.Fatalf("configured: %q, want tensile.huginn.tech", got)
 	}
 }
