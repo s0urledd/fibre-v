@@ -115,6 +115,11 @@ type Entry struct {
 	Bytes  int64  `json:"bytes"`
 	SHA256 string `json:"sha256"`
 	Manifest
+	// Signature is the ed25519 signature over the manifest digest, the same
+	// object <name>.sig holds (see sign.go). Omitted, not empty, on an
+	// export built with no signing key, so an unsigned index is exactly
+	// what it was before signing existed.
+	Signature *Signature `json:"signature,omitempty"`
 }
 
 const rule = "records dated (by time_field, UTC) on this day, plus late records dated earlier, read from each source file between source_from and source_to; every line of every source file is in exactly one export"
@@ -136,13 +141,17 @@ type Builder struct {
 	// grace for late rows). 3 means 03:00 the next day.
 	Hour int
 	Logf func(string, ...any)
+	// Signer, when set, signs every export this builder writes (sign.go).
+	// Nil builds unsigned exports, exactly as before signing existed.
+	Signer *Signer
 }
 
 // NamePattern is what an export file name looks like. Exports built before
 // the observer was named Tensile carry the old "fibrescope-" prefix; they are
 // part of the record and stay downloadable under the name they were published
-// with.
-var NamePattern = regexp.MustCompile(`^(?:tensile|fibrescope)-[A-Za-z0-9._-]+-\d{4}-\d{2}-\d{2}\.tar\.gz(\.sha256)?$`)
+// with. The optional suffix is the digest sidecar (.sha256) or the signature
+// (.sig).
+var NamePattern = regexp.MustCompile(`^(?:tensile|fibrescope)-[A-Za-z0-9._-]+-\d{4}-\d{2}-\d{2}\.tar\.gz(\.sha256|\.sig)?$`)
 
 func (b *Builder) name(day string) string {
 	v := strings.Map(func(r rune) rune {
@@ -282,7 +291,30 @@ func (b *Builder) build(day string, st *state, now time.Time) error {
 	if err := atomicWrite(path+".sha256", []byte(digest+"  "+name+"\n")); err != nil {
 		return err
 	}
-	if err := b.updateIndex(Entry{Name: name, Bytes: int64(tarBuf.Len()), SHA256: digest, Manifest: man}); err != nil {
+	entry := Entry{Name: name, Bytes: int64(tarBuf.Len()), SHA256: digest, Manifest: man}
+	if b.Signer != nil {
+		// The digest of manifest.json exactly as the tarball holds it, so a
+		// verifier who extracts that one member reproduces it. The key is
+		// recorded before the signature is written, and both before the
+		// index names the export signed: nothing published ever points at a
+		// key or a .sig the directory does not hold. A crash in between
+		// leaves a .sig that the next run, rebuilding the day from the same
+		// offsets, overwrites along with the tarball.
+		ms := sha256.Sum256(manJSON)
+		sig := b.Signer.Sign(hex.EncodeToString(ms[:]))
+		if err := recordSigningKey(b.Dir, b.Signer.PublicKey(), day); err != nil {
+			return fmt.Errorf("signing keys: %w", err)
+		}
+		sigJSON, err := json.MarshalIndent(sig, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := atomicWrite(path+".sig", append(sigJSON, '\n')); err != nil {
+			return err
+		}
+		entry.Signature = sig
+	}
+	if err := b.updateIndex(entry); err != nil {
 		return err
 	}
 	st.LastDay = day
@@ -298,7 +330,11 @@ func (b *Builder) build(day string, st *state, now time.Time) error {
 			lines += m.Lines
 			late += m.LateLines
 		}
-		b.Logf("export: %s written (%d lines, %d late, %d bytes, sha256 %s)", name, lines, late, tarBuf.Len(), digest[:12])
+		signed := "unsigned"
+		if entry.Signature != nil {
+			signed = "signed by " + entry.Signature.KeyFingerprint
+		}
+		b.Logf("export: %s written (%d lines, %d late, %d bytes, sha256 %s, %s)", name, lines, late, tarBuf.Len(), digest[:12], signed)
 	}
 	return nil
 }

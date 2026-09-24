@@ -59,6 +59,7 @@ func main() {
 		pruneTol  = flag.Duration("prune-tolerance", 5*time.Minute, "how long past must_serve_until a promise's shard is still taken to be on disk when judging a deferred shadow verdict")
 		expDir    = flag.String("exports-dir", "", "where the daily export tarballs are built (default <data-dir>/exports)")
 		expHour   = flag.Int("export-hour", 3, "UTC hour after which a day's export is built, the grace for late rows (-1 = never build exports)")
+		expKey    = flag.String("export-signing-key", os.Getenv(export.SigningKeyEnv), "ed25519 private key (PKCS#8 PEM, e.g. from openssl genpkey -algorithm ed25519) that signs every daily export's manifest digest; default $"+export.SigningKeyEnv+"; empty = exports are unsigned, exactly as before (docs/exports-signing.md)")
 		retainRaw = flag.Duration("retain-raw", rollup.Default().RetainRaw, "keep probe and heartbeat rows this long; older rolled days are pruned, whole days at a time (0 = keep forever)")
 		retainRJ  = flag.Duration("retain-raw-json", rollup.Default().RetainRawJSON, "keep a row's raw_json (the bulk of it) this long; every typed column stays (0 = keep forever)")
 		rollAfter = flag.Duration("rollup-after", rollup.Default().RollupAfter, "compute a day's obligation and probe rollups this long after the day ends; must clear every retention window (0 = never roll up, so never prune)")
@@ -173,6 +174,17 @@ func main() {
 	var exporter *export.Builder
 	if *expHour >= 0 {
 		exporter = &export.Builder{DataDir: *dataDir, Dir: *expDir, Vantage: *vantage, Build: status.BuildRevision(), Hour: *expHour, Logf: log.Printf}
+		// A configured key that cannot be loaded stops the collector rather
+		// than falling back to unsigned: an operator who asked for signed
+		// exports would otherwise publish unsigned ones without noticing.
+		if *expKey != "" {
+			signer, err := export.LoadSigner(*expKey)
+			if err != nil {
+				log.Fatalf("export signing key: %v", err)
+			}
+			exporter.Signer = signer
+			log.Printf("exports are signed by %s", export.Fingerprint(signer.PublicKey()))
+		}
 	}
 	// Late shadow verdicts are this collector's own judgement and, like the
 	// endpoint history, have no source but this process: every one is

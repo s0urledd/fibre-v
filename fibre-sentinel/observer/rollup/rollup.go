@@ -50,6 +50,11 @@ import (
 // a probe of a promise settled at or after the window start cannot have
 // started materially before it. Callers pass the settlement start less an
 // hour, which covers prober and chain clock skew many times over.
+//
+// first_fault is the start of the obligation's earliest FAULT row. No count
+// reads it; the API uses it to mark a broken obligation provisional while
+// even its oldest fault is younger than verdict.FaultSettling (see
+// observer/api/provisional.go). Sums ignore it, so the rollup is unchanged.
 const ObligationBuckets = `SELECT validator_address, promise_hash,
 			SUM(cls = 'FAULT')                AS faults,
 			SUM(cls = 'HEALTHY')              AS healthy,
@@ -59,12 +64,13 @@ const ObligationBuckets = `SELECT validator_address, promise_hash,
 			SUM(cls NOT IN ('NOT_PROBED','PROBE_ERROR'))                AS attempted,
 			SUM(cls NOT IN ('NOT_PROBED','PROBE_ERROR') AND tls_ok = 1) AS reached,
 			COALESCE(MAX(CASE WHEN rn = 1 THEN cls END), '')            AS last_cls,
-			MAX(must_serve_until > ?)                                   AS pending
+			MAX(must_serve_until > ?)                                   AS pending,
+			MIN(CASE WHEN cls = 'FAULT' THEN started_at END)            AS first_fault
 		FROM (
 			SELECT pr.validator_address, pr.promise_hash,
 			       CASE WHEN pr.retention_unverified = 1 AND pr.classification IN ('HEALTHY','FAULT') AND pr.outcome <> 'INVALID_ROWS'
 			            THEN 'RETENTION_UNVERIFIED' ELSE pr.classification END AS cls,
-			       pr.tls_ok, pr.must_serve_until,
+			       pr.tls_ok, pr.must_serve_until, pr.started_at,
 			       pr.scheduled_at, pb.settlement_time,
 			       ROW_NUMBER() OVER (PARTITION BY pr.validator_address, pr.promise_hash
 			                          ORDER BY (pr.classification IN ('NOT_PROBED','PROBE_ERROR')), pr.scheduled_at DESC, pr.started_at DESC) AS rn

@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATED } from "@/lib/api";
+import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATED, provisionalNow } from "@/lib/api";
 import Avatar from "./Avatar";
 import { SELF_VALIDATOR } from "@/lib/site";
 
@@ -115,7 +115,12 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     const o = v.obligations;
     if (!o || o.total === 0) return <span className="muted">—</span>;
     if (n === 0) return <span className="muted">0</span>;
-    if (kind === "broken") return <Link className="fault" href={href(v, "#evidence")} title={`${int(n)} obligation${n === 1 ? "" : "s"} broken: the validator answered and did not hand over a shard it had signed for. Opens the evidence.`}>{int(n)}</Link>;
+    if (kind === "broken") {
+      // Counted either way; the badge says how many are still settling.
+      const prov = provisionalNow(v.provisional_faults);
+      return <><Link className="fault" href={href(v, "#evidence")} title={`${int(n)} obligation${n === 1 ? "" : "s"} broken: the validator answered and did not hand over a shard it had signed for. Opens the evidence.`}>{int(n)}</Link>
+        {prov > 0 && <span className="ours" title={`${int(prov)} of these rest only on failed probes younger than the settling period. Counted now; final unless evidence still arriving withdraws them.`}>{prov === n ? "provisional" : `${int(prov)} provisional`}</span>}</>;
+    }
     return <Link className="plain" href={href(v, "#outcomes")} title={`${int(n)} obligation${n === 1 ? "" : "s"} the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault.`}>{int(n)}</Link>;
   };
 

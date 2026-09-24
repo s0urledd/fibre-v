@@ -54,8 +54,12 @@ import (
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/uploadprobe"
 )
 
 // abandonedPromise is what -abandon writes and -timeout reads: the promise
@@ -101,6 +105,13 @@ func main() {
 		timeoutF   = flag.String("timeout", "", "broadcast MsgPaymentPromiseTimeout for the promise file(s) written by -abandon (comma-separated)")
 		withdraw   = flag.Int64("withdraw", 0, "broadcast MsgRequestWithdrawal for this many utia and exit")
 		showF      = flag.String("show", "", "print the promise hash of the promise file(s) written by -abandon (comma-separated) and exit")
+		// Upload-side measurement groundwork (docs/research/R13-upload-probing.md),
+		// off by default: when set, every validator's handling of every shard
+		// this run uploads is recorded from the fibre client's own trace spans
+		// (internal/uploadprobe) and written here as JSONL once the client has
+		// finished its background deliveries.
+		upResults = flag.String("upload-results", "", "write per-validator upload results (accepted, budget_exceeded, deadline, ...) as JSONL to this file; empty = off")
+		upGrace   = flag.Duration("upload-results-grace", 30*time.Second, "with -upload-results: how long to let deliveries past quorum finish before stopping the client")
 	)
 	flag.Parse()
 
@@ -173,6 +184,17 @@ func main() {
 	fcfg := celfibre.DefaultClientConfig()
 	fcfg.DefaultKeyName = "pub"
 	fcfg.StateAddress = *grpcAddr
+	// With -upload-results the client traces into a recorder instead of the
+	// global (no-op) tracer; nothing else about the upload changes.
+	var upRec *uploadprobe.Recorder
+	var upTracer trace.Tracer
+	if *upResults != "" {
+		upRec = uploadprobe.NewRecorder("sentinel-pub")
+		tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(upRec))
+		defer tp.Shutdown(context.Background())
+		upTracer = tp.Tracer("fibre-client")
+		fcfg.Tracer = upTracer
+	}
 	fc, err := celfibre.NewClient(kr, fcfg)
 	must(err, "fibre client")
 	must(fc.Start(ctx), "fibre client start")
@@ -204,7 +226,25 @@ func main() {
 		if *awaitAll {
 			opts = append(opts, celfibre.WithAwaitAllSignatures())
 		}
-		sp, err := fc.Upload(ctx, ns, blob, opts...)
+		upCtx := ctx
+		var upSpan trace.Span
+		if upTracer != nil {
+			upCtx, upSpan = upTracer.Start(ctx, "sentinel-pub.upload")
+		}
+		sp, err := fc.Upload(upCtx, ns, blob, opts...)
+		if upSpan != nil {
+			// Every upload_to span of this upload shares the trace, including
+			// the deliveries that end after Upload returns.
+			labels := map[string]string{"blob_index": fmt.Sprint(i), "blob_size": fmt.Sprint(*blobBytes)}
+			if err == nil {
+				labels["commitment"] = hex.EncodeToString(sp.Commitment[:])
+				if h, herr := sp.Hash(); herr == nil {
+					labels["promise_hash"] = hex.EncodeToString(h)
+				}
+			}
+			upRec.Label(upSpan.SpanContext().TraceID(), labels)
+			upSpan.End()
+		}
 		must(err, fmt.Sprintf("upload %d", i))
 
 		promiseProto, err := sp.ToProto()
@@ -266,6 +306,20 @@ func main() {
 		}
 	}
 	fmt.Printf("PUB| done: %d blobs %s\n", *count, map[bool]string{true: "abandoned", false: "published"}[*abandon])
+	if upRec != nil {
+		// Let the deliveries past quorum finish, then stop the client (which
+		// waits for them) before writing: a delivery cut short by Stop reads
+		// as "canceled", the client's own decision, never the validator's.
+		time.Sleep(*upGrace)
+		stopCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		_ = fc.Stop(stopCtx)
+		cancel()
+		f, err := os.Create(*upResults)
+		must(err, "create "+*upResults)
+		must(upRec.WriteJSONL(f), "write "+*upResults)
+		must(f.Close(), "close "+*upResults)
+		fmt.Printf("PUB| upload results: %d per-validator deliveries -> %s\n", len(upRec.Results()), *upResults)
+	}
 }
 
 // funded is the account's spendable utia, or 0 when the chain has never
