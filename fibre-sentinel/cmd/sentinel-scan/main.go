@@ -37,12 +37,26 @@ func main() {
 		storeRows   = flag.Bool("rows", true, "include full per-validator row-index lists in each record")
 		checkpoint  = flag.Int("checkpoint-every", 20, "fsync + persist cursor every N heights")
 		logLines    = flag.Int("log-ring", 300, "log lines kept in memory for the crash dump")
+		skipHeights = flag.String("skip-heights", "", "heights not to read, recorded and published as scan gaps: comma-separated heights and ranges a-b (e.g. 1234,2000-2005); the way out of a crash loop on one block, see deploy/README.md")
 	)
 	flag.Parse()
 
 	log := scan.NewLogger(*logLines)
 	if !*storeRows {
 		log.Printf("WARNING: -rows=false omits the per-validator row lists, so the observer cannot compute which distinct rows were served; the dashboard's reconstructability verdict will read \"unknown\" for every blob recorded in this run")
+	}
+
+	// -skip-heights is the operator's way past a block the scanner exits on
+	// (every such exit names it). A value that does not parse is fatal
+	// rather than read as "no skips" or as part of a list: skipping the
+	// wrong height, or silently none, is the one thing it must never do.
+	// An empty value is no skips, which is what the systemd unit passes
+	// when SKIP_HEIGHTS is unset. The raw value lands in runs.jsonl with
+	// the rest of the run config, so every skip has an audit trail beside
+	// the gap it produced.
+	skips, err := scan.ParseHeightRanges(*skipHeights)
+	if err != nil {
+		log.Fatalf("-skip-heights: %v", err)
 	}
 
 	runCfg := map[string]any{}
@@ -61,6 +75,7 @@ func main() {
 		IncludeFailed:   *includeFail,
 		StoreRows:       *storeRows,
 		CheckpointEvery: *checkpoint,
+		SkipHeights:     skips,
 	}, log)
 	if err != nil {
 		log.Fatalf("init: %v", err)

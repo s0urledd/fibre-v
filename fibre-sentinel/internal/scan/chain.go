@@ -141,6 +141,22 @@ func (c *Chain) Block(parent context.Context, height int64) (*Block, error) {
 	}, nil
 }
 
+// headerTime is the block time of height, from its header alone. Used to
+// place an operator-skipped height on the chain's clock without reading the
+// block it was skipped for.
+func (c *Chain) headerTime(parent context.Context, height int64) (time.Time, error) {
+	ctx, cancel := c.ctx(parent)
+	defer cancel()
+	res, err := c.rpc.Header(ctx, &height)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("header %d: %w", height, err)
+	}
+	if res.Header == nil {
+		return time.Time{}, fmt.Errorf("header %d: empty response", height)
+	}
+	return res.Header.Time, nil
+}
+
 // headerAppVersion is the app version block height was executed under.
 func (c *Chain) headerAppVersion(parent context.Context, height int64) (uint64, error) {
 	ctx, cancel := c.ctx(parent)

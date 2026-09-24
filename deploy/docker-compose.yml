@@ -7,7 +7,7 @@
 services:
   scan:
     build: { context: .., dockerfile: deploy/Dockerfile }
-    command: ["sentinel-scan", "-rpc", "${RPC}", "-data-dir", "/data", "-start-height", "${START_HEIGHT:-0}", "-follow"]
+    command: ["sentinel-scan", "-rpc", "${RPC}", "-data-dir", "/data", "-start-height", "${START_HEIGHT:-0}", "-skip-heights=${SKIP_HEIGHTS:-}", "-follow"]
     volumes: ["observer-data:/data"]
     restart: unless-stopped
   probe:

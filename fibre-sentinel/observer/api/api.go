@@ -619,7 +619,8 @@ type metaResponse struct {
 	// pin — so the site announced "degraded" with nothing after the colon,
 	// on the one day (an upgrade halt) when everyone was looking.
 	Checks []healthCheck `json:"checks"`
-	// ScanGaps are height ranges the scanner could not read from its node.
+	// ScanGaps are height ranges the scanner could not read from its node,
+	// or that the operator told it to skip (-skip-heights; Reason says which).
 	// A publication in one of them is unknown to this observer.
 	ScanGaps []scan.ScanGap `json:"scan_gaps,omitempty"`
 	// ParamUncertainty is every range of heights this observer could not
