@@ -237,6 +237,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/runs", s.handleRuns)
 	s.mux.HandleFunc("GET /v1/sampling", s.handleSampling)
 	s.mux.HandleFunc("GET /v1/exports", s.handleExports)
+	s.mux.HandleFunc("GET /v1/exports/pubkey", s.handleExportPubkey) // exports_signing.go; more specific than {name}
 	s.mux.HandleFunc("GET /v1/exports/{name}", s.handleExportFile)
 	s.mux.HandleFunc("GET /v1/avatars/{identity}", s.handleAvatar)
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
@@ -1136,6 +1137,10 @@ type networkResponse struct {
 	LatencyP50    *int64 `json:"serve_latency_p50_ms"`
 	LatencyP95    *int64 `json:"serve_latency_p95_ms"`
 	LatencySample int64  `json:"serve_latency_sample"`
+
+	// ProvisionalFaults is the part of Obligations.Broken still settling
+	// (provisional.go); absent when there is none.
+	ProvisionalFaults *provisionalFaults `json:"provisional_faults,omitempty"`
 }
 
 // latencyWhere returns the median and 95th percentile of a whole probe over the
@@ -1880,6 +1885,11 @@ func (s *Server) computeNetwork(ctx context.Context, win Window, ex excludeSet, 
 		return nil, err
 	}
 	resp.ByObligation = resp.Obligations.Rate
+	prov, err := s.provisionalByValidator(ctx, win, ss, time.Now(), ex.clause("pr.validator_address"), ex.addrs...)
+	if err != nil {
+		return nil, err
+	}
+	resp.ProvisionalFaults = provisionalTotal(prov)
 	_ = total
 	// The same population the class tally above was drawn from, suspect
 	// points and all. Without the exclusion here the two were counts of
@@ -2273,6 +2283,10 @@ type validatorRow struct {
 	// absent when the lookup is off or has not reached this host. See
 	// hosting.go and observer/hosting.
 	Hosting *hosting.Info `json:"hosting,omitempty"`
+
+	// ProvisionalFaults is the part of Obligations.Broken whose faults are
+	// all still settling (provisional.go); absent when there is none.
+	ProvisionalFaults *provisionalFaults `json:"provisional_faults,omitempty"`
 }
 
 func loadBand(rows int) string {
@@ -2812,6 +2826,10 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	if err != nil {
 		return nil, err
 	}
+	provisional, err := s.provisionalByValidator(ctx, win, ss, time.Now(), vfilter("pr.validator_address"), vargs()...)
+	if err != nil {
+		return nil, err
+	}
 
 	timeouts, err := s.timeoutsByAccount(ctx, win)
 	if err != nil {
@@ -2863,6 +2881,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		v.HeldOut = heldOut(v.Classes)
 		v.Obligations = byObligation[addr]
 		v.ByObligation = v.Obligations.Rate
+		v.ProvisionalFaults = provisional[addr]
 		if v.Operator != "" {
 			v.TimeoutsEnforced = timeouts[accountKey(v.Operator)]
 		}
@@ -3074,6 +3093,8 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 		HeldOut      map[string]int64 `json:"serve_rate_held_out"`
 		Classes      classCounts      `json:"classes"`
 		RolledUp     *rolledUp        `json:"rolled_up,omitempty"`
+		// Provisional is the part of obligations.broken still settling.
+		Provisional *provisionalFaults `json:"provisional_faults,omitempty"`
 	}
 	var spans []span
 	// The suspect points over all time, so the recent-probes list can mark
@@ -3100,6 +3121,10 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 		if err != nil {
 			return 0, nil, err
 		}
+		prov, err := s.provisionalByValidator(ctx, sw, ss, time.Now(), ` AND pr.validator_address = ?`, addr)
+		if err != nil {
+			return 0, nil, err
+		}
 		rolled, label, err := s.rolledFor(ctx, sw, addr)
 		if err != nil {
 			return 0, nil, err
@@ -3116,7 +3141,7 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 		spans = append(spans, span{
 			Window: sw, Rate: serveRate(classes), Count: total,
 			Coverage: coverage(classes), Obligations: obl, ByObligation: obl.Rate, HeldOut: heldOut(classes), Classes: classes,
-			RolledUp: label,
+			RolledUp: label, Provisional: prov[addr],
 		})
 	}
 	rows, err := s.validatorRows(ctx, win, addr)
@@ -3155,6 +3180,11 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 		return 0, nil, err
 	}
 	out["heatmap"] = hm
+	// The network's rate over the same window from the same vantage, for the
+	// page's service-rate context (provisional.go).
+	if ref := s.networkReference(ctx, win); ref != nil {
+		out["network_reference"] = ref
+	}
 	if c, err := s.lastEndpointCheck(ctx, addr, win); err == nil && c != nil {
 		out["last_endpoint_check"] = c
 	}
@@ -3838,6 +3868,9 @@ type probeRow struct {
 	HostChanged           bool   `json:"host_changed,omitempty"`
 	SettlementHostOutcome string `json:"settlement_host_outcome,omitempty"`
 	SettlementHostServed  *bool  `json:"settlement_host_served,omitempty"`
+	// Provisional marks a FAULT younger than verdict.FaultSettling: it
+	// counts, and it can still be withdrawn (provisional.go).
+	Provisional bool `json:"provisional,omitempty"`
 }
 
 func (s *Server) probeRows(ctx context.Context, where string, limit int, args ...any) ([]probeRow, error) {
@@ -3870,6 +3903,7 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 	}
 	defer rows.Close()
 	out := []probeRow{}
+	now := time.Now()
 	for rows.Next() {
 		var p probeRow
 		var assigned, tls, id, held int
@@ -3885,6 +3919,7 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 			return nil, err
 		}
 		p.RetentionUnverified = held == 1
+		p.Provisional = isProvisional(p.Classification, p.StartedAt, now)
 		p.HostChanged = p.HostAtSettlement != "" && p.ValidatorHost != "" && p.ValidatorHost != p.HostAtSettlement
 		if served.Valid {
 			b := served.Int64 == 1
@@ -4029,7 +4064,7 @@ func (s *Server) handleExports(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, 200, map[string]any{
+	out := map[string]any{
 		"vantage": s.vantage,
 		"exports": entries,
 		"how_to_verify": "download /v1/exports/<name>, check its sha256 against the entry (and the .sha256 sidecar), " +
@@ -4037,7 +4072,14 @@ func (s *Server) handleExports(w http.ResponseWriter, r *http.Request) {
 			"every row's phase and classification from the row's own fields and the run's recorded configuration, and every " +
 			"obligation figure from the rows, and prints what differs from this API's /v1/validators?as_of=<day end>.",
 		"rule": "records are assigned to a day by their own timestamp; a record that reached the file after its day's export was built is in the next export, counted as late",
-	})
+	}
+	// Whether exports are signed, by which key, and how to check (see
+	// exports_signing.go). An unreadable key record hides the block rather
+	// than failing the list: the exports are still the exports.
+	if sig, err := s.exportSigning(); err == nil {
+		out["signing"] = sig
+	}
+	writeJSON(w, 200, out)
 }
 
 // handleExportFile serves one export or its digest sidecar. Names are
@@ -4099,6 +4141,9 @@ func (s *Server) handleExportFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasSuffix(name, ".sha256") {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	} else if strings.HasSuffix(name, ".sig") {
+		// The signature over the manifest digest (export/sign.go).
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	} else {
 		w.Header().Set("Content-Type", "application/gzip")
 		w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")

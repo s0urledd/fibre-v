@@ -343,6 +343,9 @@ cmd/sentinel-scan          the scanner CLI
 cmd/sentinel-probe         the probe scheduler / measurement service
 cmd/sentinel-pub           devnet publish helper (fibre.Client.Upload + MsgPayForFibre; -abandon / -timeout / -withdraw for the escrow side)
 cmd/sentinel-verify        checks publications.jsonl against expected commitments
+cmd/sentinel-verify-export checks a downloaded daily export offline: sidecar, members vs manifest, ed25519 signature (docs/exports-signing.md)
+cmd/sentinel-anchor        builds and prints (never broadcasts) the PayForBlobs that would anchor an export's manifest digest on Celestia
+internal/uploadprobe       upload-side measurement groundwork: per-validator results from the fibre client's spans (docs/research/R13-upload-probing.md)
 cmd/sentinel-measure-check checks measurements.jsonl against the taxonomy
 internal/scan              scanner, param history, record schema, store, CometBFT RPC client
 internal/probe             schedule, layered probe, measurement store, classifier, prober loop
