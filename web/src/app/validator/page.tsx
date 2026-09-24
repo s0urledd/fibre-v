@@ -12,6 +12,7 @@ import { endpoint } from "@/components/Validators";
 import { HostingChip } from "@/components/Hosting";
 import { DISPUTE_URL, SELF_VALIDATOR } from "@/lib/site";
 import Heatmap from "@/components/Heatmap";
+import PreLive from "@/components/PreLive";
 import Diagnosis from "@/components/Diagnosis";
 import Info from "@/components/Info";
 import type { Heatmap as HeatmapData } from "@/lib/signing";
@@ -188,6 +189,7 @@ function Page() {
         </div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
+      <PreLive meta={meta} />
       <StatusLine meta={meta} metaError={metaErr} snap={{ record_through: data.record_through, window: data.window }} client={{ error: d.error, fetchedAt: d.fetchedAt, status: d.status }} measuring={measuring} />
       {/* the conclusion before the evidence; before activation there is nothing to conclude, and StatusLine says so */}
       {!notLive && <Diagnosis v={v} check={data.last_endpoint_check} meta={meta} decided={decided} provisional={prov}
@@ -197,13 +199,13 @@ function Page() {
         <Metric label="Service rate"
           value={notLive || !o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}
           tone={notLive || !o || decided === 0 ? "absent" : undefined}
-          help={notLive ? "nothing to measure yet" : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed${refText ? ` · ${refText}` : ""}`}
+          help={notLive ? " " : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed${refText ? ` · ${refText}` : ""}`}
           title={notLive ? undefined : refTitle} />
         <Metric label="Broken obligations"
           value={notLive ? "—" : int(o?.broken ?? 0)} tone={notLive ? "absent" : (o?.broken ?? 0) > 0 ? "fault" : !o || o.total === 0 ? "absent" : undefined}
-          help={notLive ? "nothing to measure yet" : (o?.broken ?? 0) > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}${prov > 0 ? ` · ${int(prov)} provisional` : ""}` : faults > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"} · none broken in this period` : "none in this period"}
+          help={notLive ? " " : (o?.broken ?? 0) > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}${prov > 0 ? ` · ${int(prov)} provisional` : ""}` : faults > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"} · none broken in this period` : "none in this period"}
           title={prov > 0 ? `${int(prov)} of these rest only on failed probes younger than ${Math.round((v.provisional_faults?.settling_seconds ?? 1800) / 60)} minutes. They count in the rate now, and become final at ${whenUTC(v.provisional_faults!.until)} unless evidence still arriving withdraws them: the rest of the schedule point's probes, or an x/fibre params change not yet reconciled.` : (o?.broken ?? 0) > 0 ? "One obligation counts once, however many probes of it failed. The probe rows are in the evidence below." : faults > 0 ? "A failed probe of an obligation still inside its retention window is not a verdict yet; the obligation is decided at the end of the window." : undefined} />
-        <Metric label="Undecided" value={notLive ? "—" : int(und)} tone={notLive || !o || o.total === 0 ? "absent" : undefined} help={notLive ? "nothing to measure yet" : `${int(o?.pending ?? 0)} pending`} />
+        <Metric label="Undecided" value={notLive ? "—" : int(und)} tone={notLive || !o || o.total === 0 ? "absent" : undefined} help={notLive ? " " : `${int(o?.pending ?? 0)} pending`} />
         <Metric label="Reachability"
           value={!bonded ? "—" : rw && rw.den > 0 ? int(rw.num) : "—"} den={bonded && rw && rw.den > 0 ? int(rw.den) : undefined}
           tone={!bonded || !rw || rw.den === 0 ? "absent" : undefined}

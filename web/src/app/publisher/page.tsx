@@ -1,13 +1,12 @@
 "use client";
-import { Suspense, useState } from "react";
+import { Suspense } from "react";
+import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useApi, notFound, badRequest, throttled, hhmm, type Payment, type Blob, type Window, type PriceFormula, utc, ago, bytes, tia, shortHex, shortBech, nsDisplay, fmtShare } from "@/lib/api";
 import { Panel, Cell } from "@/components/Panel";
 import { WithdrawalQueue, pendingLine } from "@/components/Withdrawals";
 import type { PublisherWithQueue, PublisherWithdrawals } from "@/lib/withdrawals";
-
-const WINDOWS = ["24h", "7d", "30d", "all"];
 
 type Detail = {
   window: Window;
@@ -31,7 +30,8 @@ const KIND: Record<Payment["kind"], string> = {
 
 function Page() {
   const addr = useSearchParams().get("addr") ?? "";
-  const [win, setWin] = useState("7d");
+  // 7d like the publishers list this page is opened from, so the figures match the row that was clicked.
+  const [win, setWin] = useWindow("7d");
   const pub = useApi<Detail>(addr ? `/v1/publishers/${addr}?window=${win}` : null);
   const { data, error, loading } = pub;
   if (!addr) return <p className="notice err">No publisher address given.</p>;
@@ -51,9 +51,7 @@ function Page() {
         <h1 className="mono" style={{ fontSize: "var(--t-h1)" }}>{p.label ?? shortBech(p.publisher)}</h1>
         {p.label && <span className="chip" title={p.label_source ? `label source: ${p.label_source}` : undefined}>{p.label_source ?? "labelled"}</span>}
         <span className="spacer" />
-        <div className="pills" role="group" aria-label="window">
-          {WINDOWS.map((w) => <button key={w} aria-pressed={win === w} onClick={() => setWin(w)}>{w}</button>)}
-        </div>
+        <WindowSwitch value={win} onChange={setWin} />
       </div>
 
       <section className="card">
@@ -67,7 +65,7 @@ function Page() {
         </dl>
       </section>
 
-      <Panel title="Activity" right={`${win} window`}>
+      <Panel title="Activity" right={`${windowLabel(win)} window`}>
       <div className="cells four">
         <Cell label="Fees settled" value={tia(p.fees_utia, { unit: false })} unit="TIA"
           tone={p.settlements === 0 ? "absent" : undefined}
@@ -89,7 +87,7 @@ function Page() {
           <tbody>
             {data.windows.map((w) => (
               <tr key={w.window.name}>
-                <td className="mono">{w.window.name}</td>
+                <td className="mono">{windowLabel(w.window.name)}</td>
                 <td className="right mono">{w.settlements.toLocaleString("en-US")}</td>
                 <td className="right mono">{bytes(w.bytes)}</td>
                 <td className="right mono">{tia(w.fees_utia)}</td>

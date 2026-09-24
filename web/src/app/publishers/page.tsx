@@ -1,14 +1,15 @@
 "use client";
-import { useState } from "react";
+import { Suspense } from "react";
 import Link from "next/link";
-import { useApi, fmtPct, fmtCount, fmtShare, bytes, utc, ago, tia, shortBech, publisherName, through } from "@/lib/api";
+import { useApi, type Meta, fmtPct, fmtCount, fmtShare, bytes, utc, ago, tia, shortBech, publisherName, through } from "@/lib/api";
 import { Panel, Cell } from "@/components/Panel";
 import Chart, { calendar, CATEGORICAL, OTHER_COLOR, type Row, type Series } from "@/components/Chart";
 import Info from "@/components/Info";
 import { WithdrawalQueueCells, pendingLine } from "@/components/Withdrawals";
 import type { MarketWithQueue, PublisherWithQueue } from "@/lib/withdrawals";
-
-const WINDOWS = ["24h", "7d", "30d", "all"];
+import { useWindow, WindowSwitch } from "@/lib/window";
+import PreLive, { notLiveOf } from "@/components/PreLive";
+import { unit } from "@/components/Unit";
 
 /**
  * The publisher side of Fibre: who pays for storage, what it costs, and
@@ -16,8 +17,13 @@ const WINDOWS = ["24h", "7d", "30d", "all"];
  * observer. Every figure is a count of something the chain recorded, and the
  * notes at the bottom say which ones are floors.
  */
-export default function PublishersPage() {
-  const [win, setWin] = useState("7d");
+function Page() {
+  // 7d, not the site's 24h: the page's two charts are per UTC day, and a
+  // 24h window draws one or two bars, which is not a chart.
+  const [win, setWin] = useWindow("7d");
+  const { data: meta } = useApi<Meta>("/v1/meta");
+  // Before activation every market figure is a zero of a module that does not exist yet: one line says so, the tiles show a dash.
+  const pre = notLiveOf(meta);
   const { data: m, error, loading } = useApi<MarketWithQueue>(`/v1/market?window=${win}`);
   const { data: list } = useApi<{ publishers: PublisherWithQueue[] }>(`/v1/publishers?window=${win}`);
   const busy = loading && !m;
@@ -35,16 +41,22 @@ export default function PublishersPage() {
           </Info>
         )}
         <span className="spacer" />
-        <div className="pills" role="group" aria-label="window">
-          {WINDOWS.map((w) => <button key={w} aria-pressed={win === w} onClick={() => setWin(w)}>{w}</button>)}
-        </div>
+        <WindowSwitch value={win} onChange={setWin} />
       </div>
+      <PreLive meta={meta} />
 
       {error && <div className="note hold"><span className="label">Observer</span><p>Cannot reach the observer API: {error}. Nothing below is current.</p></div>}
 
+      {pre ? (
       <Panel title="Market" right={<>from the chain&rsquo;s own records · <Link href="/methodology/#publishers">methodology →</Link></>}>
       <div className="cells three">
-        <Cell label="Fees settled" loading={busy} evidence="chain"
+        {["Fees settled", "Publishers", "Paid per MiB", "Timed out", "Settlement rate", "Escrow held"].map((l) => <Cell key={l} label={l} value="—" tone="absent" />)}
+      </div>
+      </Panel>
+      ) : <>
+      <Panel title="Market" right={<>from the chain&rsquo;s own records · <Link href="/methodology/#publishers">methodology →</Link></>}>
+      <div className="cells three">
+        <Cell label="Fees settled" loading={busy}
           value={m ? tia(m.fees_settled_utia, { unit: false }) : "—"} unit={m ? "TIA" : undefined}
           tone={m && m.settlements === 0 ? "absent" : undefined}
           sub={m ? `${m.settlements.toLocaleString("en-US")} settlement${m.settlements === 1 ? "" : "s"} · ${bytes(m.bytes)}` : undefined}
@@ -53,11 +65,11 @@ export default function PublishersPage() {
             <p>The chain records no amount on a settlement. Each fee is recomputed from the blob&rsquo;s padded size with the module&rsquo;s own formula, which is exactly what it charges.</p>
             <p><Link href="/methodology/#publishers">Where these numbers come from</Link></p>
           </>} />
-        <Cell label="Publishers" loading={busy} evidence="chain"
+        <Cell label="Publishers" loading={busy}
           value={m ? m.publishers_active.toLocaleString("en-US") : "—"}
           sub={m ? `${m.escrow_accounts} escrow account${m.escrow_accounts === 1 ? "" : "s"}` : undefined}
           info={<p>Accounts that settled at least one blob in the window. The account charged is the one whose key signed the promise, whoever broadcast the transaction.</p>} />
-        <Cell label="Paid per MiB" loading={busy} evidence="chain"
+        <Cell label="Paid per MiB" loading={busy}
           value={m?.paid_per_mib_utia != null ? tia(m.paid_per_mib_utia, { unit: false }) : "—"} unit={m?.paid_per_mib_utia != null ? "TIA" : undefined}
           tone={m?.paid_per_mib_utia == null ? "absent" : undefined}
           sub={m ? (m.paid_per_mib_utia != null ? "fees over bytes settled" : "nothing settled") : undefined}
@@ -65,8 +77,8 @@ export default function PublishersPage() {
             <p>Fees settled divided by bytes settled. It falls as blobs get larger: the fee has a fixed part, so a 64 KiB blob pays far more per byte than a 128 MiB one.</p>
             <p>Sizes are the padded upload size the module charges for, not the payload.</p>
           </>} />
-        <Cell label="Timed out" loading={busy} evidence="chain"
-          value={m ? (m.timeouts > 0 ? m.timeouts.toLocaleString("en-US") : "none") : "—"}
+        <Cell label="Timed out" loading={busy}
+          value={m ? m.timeouts.toLocaleString("en-US") : "—"}
           tone={m && m.timeouts > 0 ? "fault" : "absent"}
           sub={m ? (m.timeouts > 0 ? `${tia(m.timed_out_utia)} charged` : "none reported") : undefined}
           detail={m && m.timeouts > 0 ? `${tia(m.timed_out_utia)} charged on abandoned promises, reported by ${m.timeout_processors} account${m.timeout_processors === 1 ? "" : "s"}.` : undefined}
@@ -74,12 +86,12 @@ export default function PublishersPage() {
             <p>Promises a publisher obtained signatures for and never settled, charged anyway once anyone submits the timeout; the chain pays nothing for doing so.</p>
             <p>This is a floor. A promise nobody reports leaves no trace on chain at all.</p>
           </>} />
-        <Cell label="Settlement rate" loading={busy} evidence="chain"
+        <Cell label="Settlement rate" loading={busy}
           value={m?.settlement_rate.den ? fmtPct(m.settlement_rate) : "—"}
           tone={m?.settlement_rate.den ? undefined : "absent"}
           sub={m?.settlement_rate.den ? `${fmtCount(m.settlement_rate)} promises` : "nothing to rate"}
           info={<p>Settlements over settlements plus reported timeouts. Because unreported timeouts are invisible, this can only overstate how often publishers pay.</p>} />
-        <Cell label="Escrow held" loading={busy} evidence="chain"
+        <Cell label="Escrow held" loading={busy}
           value={m ? tia(m.escrow_total_utia ?? m.escrow_held_utia, { unit: false }) : "—"} unit={m ? "TIA" : undefined}
           tone={m && (m.escrow_total_utia ?? m.escrow_held_utia) === 0 ? "absent" : undefined}
           sub={m ? `${tia(m.deposits.utia)} deposited · ${tia(m.withdrawals_requested.utia)} requested out · ${tia(m.withdrawals_executed.utia)} paid out` : undefined}
@@ -97,6 +109,7 @@ export default function PublishersPage() {
           events (see WithdrawalQueueCells). Absent until the collector has
           read it, and on a pinned window. */}
       {m?.withdrawal_queue && <WithdrawalQueueCells q={m.withdrawal_queue} win={win} />}
+      </>}
 
       {m && (() => {
         const days = calendar(m.window.start.startsWith("0001-") || m.window.name === "all"
@@ -159,16 +172,16 @@ export default function PublishersPage() {
                   {p.label && <span className="faint"> {shortBech(p.publisher)}</span>}
                 </td>
                 <td className="right mono">{p.settlements.toLocaleString("en-US")}</td>
-                <td className="right mono">{bytes(p.bytes)}</td>
+                <td className="right mono">{unit(bytes(p.bytes))}</td>
                 <td className="right mono faint">{fmtShare(p.bytes_share)}</td>
-                <td className="right mono">{tia(p.fees_utia)}</td>
+                <td className="right mono">{unit(tia(p.fees_utia))}</td>
                 <td className="right mono faint">{fmtShare(p.fees_share)}</td>
-                <td className="right mono">{p.paid_per_mib_utia != null ? tia(p.paid_per_mib_utia) : "—"}</td>
+                <td className="right mono">{p.paid_per_mib_utia != null ? unit(tia(p.paid_per_mib_utia)) : "—"}</td>
                 <td className={"right mono" + (p.timeouts > 0 ? " err" : " faint")} title={p.timeouts > 0 ? `${tia(p.timed_out_utia)} charged on abandoned promises` : "no timeout reported"}>{p.timeouts > 0 ? p.timeouts : "—"}</td>
                 <td className="right mono" title={p.escrow ? (p.escrow.found ? `available ${tia(p.escrow.available_utia)} · read at height ${p.escrow.height.toLocaleString("en-US")}, ${ago(p.escrow.updated_at)}` : "no escrow account on chain") : "not polled yet"}>
-                  {p.escrow ? (p.escrow.found ? tia(p.escrow.balance_utia) : <span className="faint">none</span>) : <span className="faint">—</span>}
+                  {p.escrow ? (p.escrow.found ? unit(tia(p.escrow.balance_utia)) : <span className="faint">none</span>) : <span className="faint">—</span>}
                 </td>
-                <td className={"right mono" + (p.pending_withdrawals?.count ? "" : " faint")} title={pendingLine(p.pending_withdrawals)}>{p.pending_withdrawals ? (p.pending_withdrawals.count ? tia(p.pending_withdrawals.utia) : "none") : "—"}</td>
+                <td className={"right mono" + (p.pending_withdrawals?.count ? "" : " faint")} title={pendingLine(p.pending_withdrawals)}>{p.pending_withdrawals ? (p.pending_withdrawals.count ? unit(tia(p.pending_withdrawals.utia)) : "none") : "—"}</td>
                 <td className="mono faint" title={utc(p.first_seen_at)}>{ago(p.first_seen_at)}</td>
                 <td className="mono faint" title={utc(p.last_seen_at)}>{ago(p.last_seen_at)}</td>
               </tr>
@@ -180,4 +193,8 @@ export default function PublishersPage() {
 
     </>
   );
+}
+
+export default function PublishersPage() {
+  return <Suspense fallback={<p className="muted">Loading…</p>}><Page /></Suspense>;
 }
