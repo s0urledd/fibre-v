@@ -25,6 +25,17 @@ export type Snapshot = {
  * Fibre; figures withheld (a stale assignment pin, points left out, scan
  * gaps). Each says what it means for the numbers below it.
  */
+/**
+ * A check's detail up to its first clause. Details carry the process's last
+ * error (a raw RPC message, often a harmless retry from minutes ago); the
+ * banner says what is wrong now, and the full text stays in the tooltip and
+ * in /v1/health.
+ */
+function brief(detail: string): string {
+  const cut = detail.search(/; last error|: error in json rpc/);
+  return (cut > 0 ? detail.slice(0, cut) : detail).trim();
+}
+
 export default function StatusLine({ meta, metaError, snap, client }: {
   meta: Meta | null;
   metaError: string | null;
@@ -62,7 +73,7 @@ export default function StatusLine({ meta, metaError, snap, client }: {
   } else if (failing.length > 0) {
     lines.push(
       <p className="notice" key="checks">
-        <b>Observer degraded</b> · {failing.map((c) => <span key={c.name}>{c.name}: {c.detail}. </span>)}
+        <b>Observer degraded</b> · {failing.map((c) => <span key={c.name} title={c.detail}>{c.name}: {brief(c.detail)}. </span>)}
         Figures below may lag; nothing the observer failed to see is counted against a validator.{" "}
         <Link href="/methodology/#gaps">Why →</Link>
       </p>,
