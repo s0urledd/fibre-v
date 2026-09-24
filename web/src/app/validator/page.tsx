@@ -2,7 +2,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, badRequest, MIN_RATED, API_BASE } from "@/lib/api";
+import { useApi, type Validator, type Probe, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, badRequest, MIN_RATED, API_BASE } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
@@ -23,6 +23,8 @@ type Detail = {
   rolled_up?: { raw_from: string; days: number; note: string };
   /** schedule points, over all time, that no rate counts: the observer's own correlated failures */
   suspect_points: { at: string; label: string; reason: string }[];
+  /** the newest heartbeat against this validator's host, stage by stage */
+  last_endpoint_check?: EndpointCheck;
 };
 
 /** the verdict as a word and a mark; the classification is the observer's, never re-derived here */
@@ -171,6 +173,7 @@ function Page() {
               : <>No failed probe among the newest {int(probes.length)} rows</>}
             <br />Last successful probe <b>{lastOk ? whenUTC(lastOk.started_at) : "—"}</b> · last failed handshake <b>{v.last_unreachable_at ? whenUTC(v.last_unreachable_at) : "none on record"}</b>
           </p>
+          {data.last_endpoint_check && <EndpointCheckLine c={data.last_endpoint_check} />}
         </div>
       </section>
 
@@ -222,4 +225,32 @@ function Page() {
 
 export default function ValidatorPage() {
   return <Suspense fallback={<p className="crumb" style={{ paddingTop: 22 }}>Loading…</p>}><Page /></Suspense>;
+}
+
+/**
+ * The newest handshake with this validator's Fibre host, stage by stage:
+ * what an operator setting up a server needs, and cannot see from their own
+ * machine — whether the name resolves, the port opens, TLS completes and the
+ * certificate carries this validator's key, and the error it stopped on.
+ */
+function EndpointCheckLine({ c }: { c: EndpointCheck }) {
+  const stages: [string, boolean, string][] = [
+    ["DNS", c.dns_ok, ""],
+    ["TCP", c.tcp_ok, c.tcp_ok ? `${c.tcp_ms} ms` : ""],
+    ["TLS", c.tls_ok, c.tls_ok ? `${c.tls_ms} ms` : ""],
+    ["identity", c.identity_ok, c.identity_ok ? "" : c.identity_reason ?? ""],
+  ];
+  // stages after the first failure were never reached; say so rather than "failed"
+  const first = stages.findIndex(([, ok]) => !ok);
+  return (
+    <p className="errs endpoint-check">
+      Endpoint check <b>{whenUTC(c.at)}</b> · <span className="mono">{c.host}</span> ·{" "}
+      {stages.map(([name, ok, note], i) => (
+        <span key={name} className={"stage " + (ok ? "ok" : first >= 0 && i > first ? "skip" : "bad")}>
+          {name} {ok ? "✓" : first >= 0 && i > first ? "–" : "✗"}{note && <> {note}</>}{i < stages.length - 1 && " · "}
+        </span>
+      ))}
+      {c.raw_error && <><br /><code>{c.raw_error}</code></>}
+    </p>
+  );
 }

@@ -36,11 +36,21 @@ function Overview() {
   const judged = rc ? rc.yes + rc.degraded + rc.no : 0;
   const measuring = !!N && !notLive && !!o && o.total > 0 && decided < MIN_RATED && o.pending > 0;
   const period = windowLabel(win).toLowerCase() === "all" ? "all time" : `${win}`;
+  // Fibre host registration among the bonded set, by count and by stake:
+  // the first thing to watch after activation, and the ceiling on every
+  // other figure, since a validator with no host cannot be probed at all.
+  const reg = (() => {
+    const bonded = rows.filter((v) => !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED"));
+    const withHost = bonded.filter((v) => !!v.host);
+    const power = bonded.reduce((s, v) => s + (v.voting_power || 0), 0);
+    const hosted = withHost.reduce((s, v) => s + (v.voting_power || 0), 0);
+    return { count: withHost.length, of: bonded.length, share: power > 0 ? pctOf(hosted, power) : "—" };
+  })();
 
   return (
     <>
       <div className="title">
-        <div><h1>Celestia Fibre on {meta ? netName(meta.chain_id) : "…"}</h1><p className="lede">Whether validators keep serving the shards they signed for, checked from outside.</p></div>
+        <div><h1>Are validators serving the Fibre data they signed for?</h1><p className="lede">Tensile follows every blob settled through Celestia Fibre on {meta ? netName(meta.chain_id) : "…"}, fetches the shards each validator signed for at four points across the retention window, and checks every row against the on-chain commitment. Run independently, from outside the validator set.</p></div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
       <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt, status: net.status }} measuring={measuring} />
@@ -58,11 +68,13 @@ function Overview() {
           value={!N || notLive ? "—" : int(und)}
           tone={!N || notLive ? "absent" : undefined}
           help={!N ? " " : notLive ? "nothing to measure yet" : `${int(o?.pending ?? 0)} pending`} />
-        <Metric label="Reachable now"
-          value={!N ? "—" : !reach || reach.den === 0 ? "—" : int(reach.num)}
-          den={N && reach && reach.den > 0 ? int(reach.den) : undefined}
-          tone={!N || !reach || reach.den === 0 ? "absent" : undefined}
-          help={!N ? " " : !reach || reach.den === 0 ? "no endpoint registered yet" : "Newest endpoint checks"} />
+        <Metric label="Hosts registered"
+          value={!vals.data ? "—" : int(reg.count)}
+          den={vals.data && reg.of > 0 ? int(reg.of) : undefined}
+          tone={!vals.data || reg.count === 0 ? "absent" : undefined}
+          title="Bonded validators with a Fibre host in x/valaddr, and the share of bonded voting power they hold. A validator without one cannot serve Fibre data."
+          help={!vals.data ? " " : reg.count === 0 ? (notLive ? "opens at activation" : "none yet")
+            : <>{reg.share} of stake{reach && reach.den > 0 ? <> · {int(reach.num)} reachable now</> : null}</>} />
         <Metric label="Settled data"
           value={!N ? "—" : bytes(N.publication_bytes)}
           tone={!N || N.publications === 0 ? "absent" : undefined}
@@ -107,5 +119,5 @@ function Overview() {
 }
 
 export default function Page() {
-  return <Suspense fallback={<div className="title"><div><h1>Celestia Fibre on …</h1><p className="lede">Whether validators keep serving the shards they signed for, checked from outside.</p></div></div>}><Overview /></Suspense>;
+  return <Suspense fallback={<div className="title"><div><h1>Are validators serving the Fibre data they signed for?</h1></div></div>}><Overview /></Suspense>;
 }

@@ -32,6 +32,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/verdict"
 )
 
 // FileSpec names one JSONL file and the field that dates its records.
@@ -98,7 +100,9 @@ type Manifest struct {
 	Day         string    `json:"day"`
 	GeneratedAt time.Time `json:"generated_at"`
 	Build       string    `json:"build"`
-	Files       []Member  `json:"files"`
+	// Methodology is the verdict.MethodologyVersion the day was recorded under.
+	Methodology string   `json:"methodology_version,omitempty"`
+	Files       []Member `json:"files"`
 	// State is the scanner state snapshot carried beside the day's lines.
 	// Absent only on an export built from a data directory that had none.
 	State *Member `json:"state,omitempty"`
@@ -221,7 +225,7 @@ func (b *Builder) build(day string, st *state, now time.Time) error {
 	if err := os.MkdirAll(b.Dir, 0o755); err != nil {
 		return err
 	}
-	man := Manifest{Vantage: b.Vantage, Day: day, GeneratedAt: now.UTC(), Build: b.Build, Rule: rule}
+	man := Manifest{Vantage: b.Vantage, Day: day, GeneratedAt: now.UTC(), Build: b.Build, Methodology: verdict.MethodologyVersion, Rule: rule}
 	newOffsets := map[string]int64{}
 	// The whole state, as it stands, not the part dated today: it is a
 	// snapshot, and every export carries the one current at the time it was

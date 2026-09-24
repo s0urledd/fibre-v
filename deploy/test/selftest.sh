@@ -24,6 +24,9 @@
 #                   passes; no block_results fails; a second RPC that does
 #                   not answer fails; two nodes disagreeing on a hash fails;
 #                   two agreeing pass
+#   healthwatch     one alert per fault; a second failing check alerts while
+#                   the state stays degraded; recovery alerts; a two-line
+#                   state file from the older build does not alert by itself
 #
 # Usage: deploy/test/selftest.sh     Exit 0 when every case passes.
 set -o errexit -o nounset -o pipefail
@@ -203,6 +206,36 @@ serve fake-rpc.py --hash-salt other; rsalt=$PORT
 check not "$RC" "http://127.0.0.1:$r9" "http://127.0.0.1:$rsalt"
 serve fake-rpc.py --app-version 9 --fibre-code 6; r9b=$PORT
 check "$RC" "http://127.0.0.1:$r9" "http://127.0.0.1:$r9b"
+
+echo "== healthwatch"
+HW="$HERE/../healthwatch.sh"
+serve fake-http.py --code 200 --record "$T/hook.log"; hook=$PORT
+cat > "$T/degraded2.json" <<'J'
+{"status":"degraded","checks":[{"name":"chain_liveness","ok":false,"detail":"newest block 11m3s old"},{"name":"prober","ok":false,"detail":"stopped 3m ago (signal)"}]}
+J
+serve fake-http.py --code 503 --body "$T/degraded2.json"; p503b=$PORT
+hwstate="$T/hw/status/healthwatch.state"
+hw() { # hw <api port>: one healthwatch run; its exit code says ok or not
+  API_LISTEN="127.0.0.1:$1" DATA_DIR="$T/hw" NETWORK=t ALERT_REPEAT_MIN=60 \
+    ALERT_WEBHOOK="http://127.0.0.1:$hook/" bash "$HW" t >> "$T/check.log" 2>&1 || true
+}
+posts() { if [ -f "$T/hook.log" ]; then wc -l < "$T/hook.log" | tr -d ' '; else echo 0; fi; }
+lastpost() { tail -n 1 "$T/hook.log"; }
+contains() { case "$1" in *"$2"*) ;; *) echo "  [$1] lacks [$2]"; return 1 ;; esac; }
+hw "$p503"; check eq "$(posts)" 1
+check eq "$(sed -n 3p "$hwstate")" chain_liveness
+hw "$p503"; check eq "$(posts)" 1              # same fault: quiet until the repeat
+# a second fault while the first persists: same state, new set, one alert
+hw "$p503b"; check eq "$(posts)" 2
+check contains "$(lastpost)" "failing checks changed (was: chain_liveness)"
+check eq "$(sed -n 3p "$hwstate")" chain_liveness,prober
+hw "$p503b"; check eq "$(posts)" 2
+hw "$p200"; check eq "$(posts)" 3
+check contains "$(lastpost)" recovered
+# a two-line state file from the older build: the set is unknown, not
+# empty, so the upgrade alone does not alert
+printf 'degraded\n%s\n' "$(date +%s)" > "$hwstate"
+hw "$p503"; check eq "$(posts)" 3
 
 echo
 echo "selftest: $ok passed, $bad failed"

@@ -43,6 +43,11 @@ type Config struct {
 	StoreRows     bool // include full per-validator row index lists in records
 
 	CheckpointEvery int // Sync+SaveState every N processed heights (default 20)
+
+	// SkipHeights are heights the operator told the scanner not to read
+	// (-skip-heights): each is recorded as a scan gap with SkipReason and
+	// never processed. The way out of a crash loop on one block; see skip.go.
+	SkipHeights []HeightRange
 }
 
 // Scanner is the chain scanner: discovery + recording only, no probing.
@@ -173,6 +178,15 @@ func (s *Scanner) Run(parent context.Context) error {
 		target = s.cfg.MaxHeight
 	}
 	s.log.Printf("scanning from height %d to %d (follow=%v)", next, target, s.cfg.Follow)
+	// Said at every start, so the journal shows the skips in force, and
+	// which of them the scan has already passed (inert, safe to unset).
+	for _, r := range s.cfg.SkipHeights {
+		state := "ahead: will be recorded as a scan gap, not read"
+		if r.To < next {
+			state = "already behind the scan: inert, the flag can be removed"
+		}
+		s.log.Printf("WARNING: -skip-heights %s (%s)", r, state)
+	}
 
 	sinceCheckpoint := 0
 	totalPubs := 0
@@ -342,24 +356,31 @@ func (s *Scanner) recordGap(h int64, err error, blockTime time.Time) bool {
 	if !errors.As(err, &ue) {
 		return false
 	}
-	reason := "height unavailable from the RPC node (pruned, or storage.discard_abci_responses = true)"
+	s.addGap(h, "height unavailable from the RPC node (pruned, or storage.discard_abci_responses = true)", ue.Err.Error(), blockTime)
+	s.log.Printf("WARNING: GAP h=%d not scanned: %v; recorded and moving on (%d gap ranges so far)", h, ue.Err, len(s.gaps))
+	s.status.Error(fmt.Sprintf("gap at h=%d: %v", h, ue.Err))
+	return true
+}
+
+// addGap puts h on the gap list. It extends the newest range when h follows
+// it directly and the reason is the same; a different reason starts a new
+// range, so a height the operator skipped never hides inside a run the node
+// could not serve, or the other way round.
+func (s *Scanner) addGap(h int64, reason, lastErr string, blockTime time.Time) {
 	var bt *time.Time
 	if !blockTime.IsZero() {
 		t := blockTime.UTC()
 		bt = &t
 	}
-	if n := len(s.gaps); n > 0 && s.gaps[n-1].To == h-1 {
+	if n := len(s.gaps); n > 0 && s.gaps[n-1].To == h-1 && s.gaps[n-1].Reason == reason {
 		s.gaps[n-1].To = h
-		s.gaps[n-1].LastError = ue.Err.Error()
+		s.gaps[n-1].LastError = lastErr
 		if bt != nil {
 			s.gaps[n-1].ToTime = bt
 		}
 	} else {
-		s.gaps = append(s.gaps, ScanGap{From: h, To: h, Reason: reason, LastError: ue.Err.Error(), At: time.Now().UTC(), FromTime: bt, ToTime: bt})
+		s.gaps = append(s.gaps, ScanGap{From: h, To: h, Reason: reason, LastError: lastErr, At: time.Now().UTC(), FromTime: bt, ToTime: bt})
 	}
-	s.log.Printf("WARNING: GAP h=%d not scanned: %v; recorded and moving on (%d gap ranges so far)", h, ue.Err, len(s.gaps))
-	s.status.Error(fmt.Sprintf("gap at h=%d: %v", h, ue.Err))
-	return true
 }
 
 // waitForHeight polls Status until the tip reaches want, or FollowTimeout
@@ -388,6 +409,12 @@ func (s *Scanner) waitForHeight(ctx context.Context, want int64) (int64, error) 
 			return tip, nil
 		}
 		s.status.Set("chain_tip", tip)
+		// Caught up, the tip is the block just scanned and its time is known:
+		// the dashboard's block ticker reads both from this file every few
+		// seconds, rather than from state.json, which moves every 20 blocks.
+		if tip == want-1 && !s.lastBlockTime.IsZero() {
+			s.status.Set("tip_block_time", s.lastBlockTime.UTC())
+		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return 0, fmt.Errorf("no new block: tip stuck at %d, waited %s for height %d", tip, s.cfg.FollowTimeout, want)
 		}
@@ -890,6 +917,14 @@ func (s *Scanner) trySeed(ctx context.Context, h int64) bool {
 }
 
 func (s *Scanner) processBlock(ctx context.Context, h int64) int {
+	// An operator skip comes before anything else that touches the block:
+	// the height is listed because reading it kills the process, so none of
+	// it is read — not the params, not the registrations, not the escrow
+	// movements. It is a scan gap, recorded and published like any other.
+	if s.skipListed(h) {
+		s.skipHeight(ctx, h)
+		return 0
+	}
 	if s.fibreInactive && (h%inactiveRetryEvery == 0 || h == s.startHeight) {
 		s.trySeed(ctx, h)
 	}
@@ -942,7 +977,7 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 		s.log.Fatalf("fetch block_results %d: %v", h, err)
 	}
 	if len(res.TxCodes) != len(blk.Txs) {
-		s.log.Fatalf("block %d: %d txs but %d results", h, len(blk.Txs), len(res.TxCodes))
+		s.log.Fatalf("block %d: %d txs but %d results%s", h, len(blk.Txs), len(res.TxCodes), skipHint(h))
 	}
 
 	// 1) param updates first, so must_serve_until for a PayForFibre later in
@@ -963,7 +998,7 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 				continue
 			}
 			if perr != nil {
-				s.log.Fatalf("block %d tx %d: %v", h, i, perr)
+				s.log.Fatalf("block %d tx %d: %v%s", h, i, perr, skipHint(h))
 			}
 			if s.params.AddTxEvent(h, i, p) {
 				s.log.Printf("param update @ h=%d tx=%d: promise_timeout=%s shard_retention=%s withdrawal_delay=%s",
@@ -977,7 +1012,7 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 			continue
 		}
 		if perr != nil {
-			s.log.Fatalf("block %d finalize events: %v", h, perr)
+			s.log.Fatalf("block %d finalize events: %v%s", h, perr, skipHint(h))
 		}
 		if s.params.AddFinalizeEvent(h, p) {
 			s.log.Printf("param update @ h=%d (finalize, effective h=%d): promise_timeout=%s shard_retention=%s",
@@ -999,7 +1034,7 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 				continue
 			}
 			if perr != nil {
-				s.log.Fatalf("block %d tx %d: %v", h, i, perr)
+				s.log.Fatalf("block %d tx %d: %v%s", h, i, perr, skipHint(h))
 			}
 			if e, added := s.hosts.AddTxEvent(h, i, addr, host); added {
 				s.log.Printf("host registration @ h=%d tx=%d: %s -> %s", h, i, addr, host)
@@ -1031,7 +1066,7 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 			continue
 		}
 		if s.fibreInactive && !s.trySeed(ctx, h) {
-			s.log.Fatalf("h=%d tx=%d: MsgPayForFibre seen but x/fibre params cannot be read", h, i)
+			s.log.Fatalf("h=%d tx=%d: MsgPayForFibre seen but x/fibre params cannot be read%s", h, i, skipHint(h))
 		}
 		msg, derr := decodePayForFibre(raw)
 		if derr != nil || msg == nil {
@@ -1055,7 +1090,7 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 			if s.recordGap(h, berr, blk.Time) {
 				continue
 			}
-			s.log.Fatalf("h=%d tx=%d: build publication: %v", h, i, berr)
+			s.log.Fatalf("h=%d tx=%d: build publication: %v%s", h, i, berr, skipHint(h))
 		}
 		if err := s.store.AppendPublication(pub); err != nil {
 			s.log.Fatalf("h=%d tx=%d: append publication: %v", h, i, err)

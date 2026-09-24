@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,6 +125,11 @@ type marketResponse struct {
 	// from state queries; EscrowAccounts how many were polled.
 	EscrowHeldUtia int64 `json:"escrow_held_utia"`
 	EscrowAccounts int64 `json:"escrow_accounts"`
+	// EscrowTotalUtia is the x/fibre module account's balance: every
+	// escrow on the chain, whether or not its owner ever published, read
+	// at EscrowTotalAt. Absent until the collector has read it once.
+	EscrowTotalUtia *int64  `json:"escrow_total_utia,omitempty"`
+	EscrowTotalAt   *string `json:"escrow_total_at,omitempty"`
 
 	Daily        []dayBucket      `json:"daily"`
 	DailyByPub   []dayPublisher   `json:"daily_by_publisher"`
@@ -281,6 +287,14 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(balance_utia),0) FROM escrow_accounts WHERE found = 1`).
 		Scan(&r.EscrowAccounts, &r.EscrowHeldUtia); err != nil {
 		return nil, fmt.Errorf("escrow: %w", err)
+	}
+	if v, err := s.st.Meta("escrow_module_utia"); err == nil && v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			r.EscrowTotalUtia = &n
+			if at, _ := s.st.Meta("escrow_module_polled_at"); at != "" {
+				r.EscrowTotalAt = &at
+			}
+		}
 	}
 
 	// Daily buckets, over settlements and timeouts. The day is the block

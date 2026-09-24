@@ -677,11 +677,19 @@ type Policy interface {
 	// is true when any of its points was already handled, in which case the
 	// decision must stay "yes" so a schedule is never half-recorded.
 	Admit(pub scan.Publication, alreadyStarted bool) (ok bool, reason string)
-	// BeforeProbe is asked right before one probe. It may deny it (recorded
-	// as NOT_PROBED with reason) or ask for L1-L3 only.
+	// BeforeProbe is asked right before one probe, with the validator's
+	// lock held. It may deny it (recorded as NOT_PROBED with reason) or ask
+	// for L1-L3 only. An allow reserves the request against the caps and the
+	// spacing at once, so two concurrent asks can never both be admitted
+	// into the same slot; every allow is settled by exactly one AfterProbe
+	// (the probe ran) or one Release (it did not).
 	BeforeProbe(pub scan.Publication, t Target, now time.Time) (allow, skipDownload bool, reason string)
-	// AfterProbe accounts the bytes and requests a probe consumed.
+	// AfterProbe accounts the bytes and requests a probe consumed, settling
+	// the reservation its BeforeProbe made.
 	AfterProbe(pub scan.Publication, m Measurement)
+	// Release gives back the reservation of a probe BeforeProbe admitted
+	// that is not going to run.
+	Release(pub scan.Publication, t Target)
 	// SamplingFor reports what this publication's admission decision was made
 	// with, so every row can carry it and the sample can be audited after the
 	// day secret is revealed.
@@ -1087,10 +1095,26 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 		p.recordNotProbedTarget(pub, j.point, t, reason)
 		return false, nil
 	}
+	// The validator's lock is taken before the policy is asked, and the
+	// policy is told about the probe before the lock goes, so for one
+	// validator "ask, probe, account" is a single step. The policy used to be
+	// asked first and the lock taken after: with eight workers the first
+	// burst of blobs put one validator in several work items, all of them
+	// were admitted in the same instant on a state that included none of the
+	// others, and then ran back to back behind the lock with no spacing and
+	// up to seven shards over the per-validator caps. The policy now also
+	// reserves the slot when it admits (see policy.BeforeProbe), which makes
+	// the caps hold whoever calls it; the lock is what makes the spacing a
+	// spacing between request starts, because an admission taken while an
+	// earlier probe of the validator was still running would otherwise be
+	// dated from the admission, not from when it got to go out.
+	lock := p.validatorLock(t.AddressHex)
+	lock.Lock()
 	skipDL := false
 	if p.cfg.Policy != nil {
 		allow, skip, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now())
 		if !allow {
+			lock.Unlock()
 			p.recordNotProbedTarget(pub, j.point, t, reason)
 			return false, nil
 		}
@@ -1118,14 +1142,17 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 		Observer:            p.observerInfo(),
 	}
 
-	lock := p.validatorLock(t.AddressHex)
-	lock.Lock()
 	// Checked again under the lock: waiting for this validator's previous
-	// probe can carry the slot past its allowance, and a probe started then
-	// is judged in whatever phase it lands in — for the last in-window point,
-	// past the deadline, where NOT_FOUND is tolerated by construction.
+	// probe, and then the policy's spacing, can carry the slot past its
+	// allowance, and a probe started then is judged in whatever phase it
+	// lands in — for the last in-window point, past the deadline, where
+	// NOT_FOUND is tolerated by construction. The policy admitted it, so its
+	// reservation is given back: the request never goes out.
 	if allowed := p.latenessAt(pub, j.point); time.Since(j.point.At) > allowed {
 		lock.Unlock()
+		if p.cfg.Policy != nil {
+			p.cfg.Policy.Release(pub, t)
+		}
 		p.recordNotProbedTarget(pub, j.point, t, fmt.Sprintf("elapsed waiting for this validator's previous probe (%s late)", time.Since(j.point.At).Round(time.Second)))
 		return false, nil
 	}
@@ -1133,14 +1160,16 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 	// Not while the policy has the validator backed off: the backoff's
 	// promise is that it never adds a request to an endpoint already failing.
 	if p.cfg.RetryTransportTimeout && !skipDL && shouldRetryTransport(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
-		lock.Unlock()
 		// The first attempt is a request the endpoint received and a
 		// failure the backoff must count now, not when the retry is done:
 		// every other probe of this validator in the meantime, and the
-		// retry's own policy check, decide on the policy's state.
+		// retry's own policy check, decide on the policy's state. Told
+		// before the lock goes, so the next probe of the validator is
+		// asked about on a state that includes it.
 		if p.cfg.Policy != nil {
 			p.cfg.Policy.AfterProbe(pub, m)
 		}
+		lock.Unlock()
 		p.log.Printf("probe %s %s: %s (%s); retrying once in %s", short(ph), t.Host, m.Outcome, m.RawError, p.cfg.RetryDelay)
 		return true, &retryReq{it: it, in: in, first: m, skipDL: skipDL, at: time.Now().Add(p.cfg.RetryDelay)}
 	}
@@ -1158,18 +1187,26 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 // was a request the policy would have refused.
 func (p *Prober) runRetry(ctx context.Context, r retryReq) {
 	pub, t := r.it.job.pub, r.it.target
+	// Asked under the validator's lock, as in runOne, so the answer and the
+	// request it admits are one step for this validator.
+	lock := p.validatorLock(t.AddressHex)
+	lock.Lock()
 	skip := ""
+	admitted := false
 	if p.cfg.Policy != nil && ctx.Err() == nil {
 		allow, skipDL, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now())
 		switch {
 		case !allow:
 			skip = reason
 		case skipDL:
-			skip = reason // backed off: a retry is a request it promised not to add
+			// backed off: a retry is a request it promised not to add, so the
+			// slot it was just given is handed straight back.
+			p.cfg.Policy.Release(pub, t)
+			skip = reason
+		default:
+			admitted = true
 		}
 	}
-	lock := p.validatorLock(t.AddressHex)
-	lock.Lock()
 	m := r.first
 	switch {
 	case skip != "":
@@ -1179,6 +1216,11 @@ func (p *Prober) runRetry(ctx context.Context, r retryReq) {
 		p.finish(ctx, r.it, r.in, m, r.skipDL, lock, false)
 		return
 	}
+	// Admitted, but the phase moved on or the sweep is stopping while the
+	// policy was being asked: the reservation goes back with the request.
+	if admitted {
+		p.cfg.Policy.Release(pub, t)
+	}
 	// The retry is not run, and neither is the evidence probe of the
 	// settlement host: it is a request too, and whatever stopped the retry
 	// (the policy's answer, the phase that moved on, the sweep stopping)
@@ -1187,30 +1229,64 @@ func (p *Prober) runRetry(ctx context.Context, r retryReq) {
 	p.finish(ctx, r.it, r.in, m, true, lock, true)
 }
 
-// finish completes a probe whose validator lock is held: the settlement-host
-// evidence probe when the validator re-registered and noHostProbe is false,
-// then the lock goes and the row is written. accounted is true when the
-// policy has already been told about m (a first attempt, accounted when its
-// retry was queued).
+// finish completes a probe whose validator lock is held: the policy is told
+// about m, the settlement-host evidence probe runs when the validator
+// re-registered and noHostProbe is false, then the lock goes and the row is
+// written. accounted is true when the policy has already been told about m
+// (a first attempt, accounted when its retry was queued).
 func (p *Prober) finish(ctx context.Context, it work, in Input, m Measurement, noHostProbe bool, lock *sync.Mutex, accounted bool) {
 	t, pub := it.target, it.job.pub
 	m.HostAtSettlement = t.HostAtSettlement
+	// Accounted while the lock is still held, so the next probe of this
+	// validator (and the evidence probe below) is asked about on a state
+	// that already includes this one. It used to be told after the lock
+	// went, which left a window in which the next probe was admitted
+	// without it.
+	if p.cfg.Policy != nil && !accounted {
+		p.cfg.Policy.AfterProbe(pub, m)
+	}
 	if hostChanged(t) && !noHostProbe && m.Outcome != OutcomeServedOK && m.Classification != ClassProbeError {
 		// The validator re-registered since the promise settled and its
 		// current host did not serve: ask the host the upload went to, as
 		// evidence, on the same lock so the validator still sees one
 		// connection at a time. The verdict stays the current host's.
-		m.SettlementHost = settlementProbe(ctx, in, it.coder, p.cfg.Timeouts)
-		m.ClassificationReason += "; " + hostChangeNote(t, m.SettlementHost)
+		//
+		// It is a request like any other, to the same validator, so it asks
+		// the policy like any other and is accounted like any other. It used
+		// to do neither: the one extra request the observer makes of a
+		// validator whose current host is already failing went out with no
+		// spacing after the probe that just failed, past the caps and past
+		// the backoff, whose promise is that it never adds a request to an
+		// endpoint already failing.
+		ht := t
+		ht.Host, ht.HostSource = t.HostAtSettlement, "settlement"
+		skip := ""
+		if p.cfg.Policy != nil {
+			allow, skipDL, reason := p.cfg.Policy.BeforeProbe(pub, ht, time.Now())
+			switch {
+			case !allow:
+				skip = reason
+			case skipDL:
+				p.cfg.Policy.Release(pub, ht)
+				skip = reason
+			}
+		}
+		if skip != "" {
+			m.ClassificationReason += "; " + hostChangeNote(t, nil) + "; the host registered at settlement was not probed: " + skip
+		} else {
+			hp, e := settlementProbe(ctx, in, it.coder, p.cfg.Timeouts)
+			if p.cfg.Policy != nil {
+				p.cfg.Policy.AfterProbe(pub, e)
+			}
+			m.SettlementHost = hp
+			m.ClassificationReason += "; " + hostChangeNote(t, m.SettlementHost)
+		}
 	}
 	lock.Unlock()
 
 	p.stampSampling(&m, pub)
 	if err := p.store.Append(m); err != nil {
 		p.log.Fatalf("append measurement: %v", err)
-	}
-	if p.cfg.Policy != nil && !accounted {
-		p.cfg.Policy.AfterProbe(pub, m)
 	}
 	p.logMeasurement(m)
 }
@@ -1221,13 +1297,15 @@ func hostChanged(t Target) bool {
 	return t.HostAtSettlement != "" && t.Host != "" && t.Host != t.HostAtSettlement && t.HostSource != "settlement"
 }
 
-// settlementProbe runs the evidence probe of the settlement host.
-func settlementProbe(ctx context.Context, in Input, coder *Coder, to StepTimeouts) *HostProbe {
+// settlementProbe runs the evidence probe of the settlement host. It returns
+// the evidence for the row and the probe's own measurement, which is what the
+// policy accounts the request from.
+func settlementProbe(ctx context.Context, in Input, coder *Coder, to StepTimeouts) (*HostProbe, Measurement) {
 	in.Target.Host, in.Target.HostSource = in.Target.HostAtSettlement, "settlement"
 	e := Run(ctx, in, coder, to)
 	return &HostProbe{Host: in.Target.Host, Outcome: e.Outcome, RowsReturned: e.Download.RowsReturned,
 		CommitmentVerified: e.Download.CommitmentVerified, AssignmentVerified: e.Download.AssignmentVerified,
-		DurationMS: e.TotalDurationMS, RawError: e.RawError}
+		DurationMS: e.TotalDurationMS, RawError: e.RawError}, e
 }
 
 // hostChangeNote is appended to the reason of a row whose validator moved.

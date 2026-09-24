@@ -118,6 +118,8 @@ type Server struct {
 	// bg counts the server's own background work (the blob-page warm-up,
 	// the snapshot keeper), for Close.
 	bg sync.WaitGroup
+	// tip holds the block ticker's answer for a second.
+	tip tipCache
 	// stop ends the snapshot keeper; Close closes it once.
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -235,6 +237,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/exports/{name}", s.handleExportFile)
 	s.mux.HandleFunc("GET /v1/avatars/{identity}", s.handleAvatar)
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
+	s.mux.HandleFunc("GET /v1/tip", s.handleTip)
 	s.mux.HandleFunc("GET /v1/market", s.handleMarket)
 	s.mux.HandleFunc("GET /v1/publishers", s.handlePublishers)
 	s.mux.HandleFunc("GET /v1/publishers/{addr}", s.handlePublisher)
@@ -566,7 +569,10 @@ func rate(num, den int64) Rate {
 // ---- meta ----
 
 type metaResponse struct {
-	APIVersion             string      `json:"api_version"`
+	APIVersion string `json:"api_version"`
+	// MethodologyVersion is verdict.MethodologyVersion: the rules the figures
+	// on every page were computed under.
+	MethodologyVersion     string      `json:"methodology_version"`
 	Vantage                string      `json:"vantage"`
 	VantageInfo            VantageInfo `json:"vantage_info"`
 	VantageCount           int         `json:"vantage_count"`
@@ -613,7 +619,8 @@ type metaResponse struct {
 	// pin — so the site announced "degraded" with nothing after the colon,
 	// on the one day (an upgrade halt) when everyone was looking.
 	Checks []healthCheck `json:"checks"`
-	// ScanGaps are height ranges the scanner could not read from its node.
+	// ScanGaps are height ranges the scanner could not read from its node,
+	// or that the operator told it to skip (-skip-heights; Reason says which).
 	// A publication in one of them is unknown to this observer.
 	ScanGaps []scan.ScanGap `json:"scan_gaps,omitempty"`
 	// ParamUncertainty is every range of heights this observer could not
@@ -860,6 +867,22 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	var pinned string
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT pinned_celestia_app FROM publications ORDER BY settlement_height DESC LIMIT 1`).Scan(&pinned)
 	h := s.health(ctx, now)
+	// A run row's heartbeat is only as fresh as what reached the database:
+	// the prober writes JSONL and never this table, so its row kept the
+	// start time and read "alive": false beside a components entry, from
+	// the process's own status file, that said it was running. The status
+	// file is the live signal /v1/health already trusts; it decides here too.
+	for _, c := range h.Components {
+		if !c.Present {
+			continue
+		}
+		switch {
+		case c.Component == "collector" && col != nil:
+			col.Alive = c.Alive
+		case c.Component == "prober" && pr != nil:
+			pr.Alive = c.Alive
+		}
+	}
 	var ranges []paramUncertainty
 	if us, err := s.st.ParamRanges(ctx); err == nil {
 		for _, u := range us {
@@ -872,7 +895,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		ParamUncertainty:         ranges,
 		UnassignablePublications: s.unassignablePublications(ctx),
 		APIVersion:               Version, Vantage: s.vantage, VantageInfo: s.info,
-		VantageCount: vantages, ObservedFromOneVantage: vantages == 1,
+		MethodologyVersion: verdict.MethodologyVersion,
+		VantageCount:       vantages, ObservedFromOneVantage: vantages == 1,
 		ChainID: meta["chain_id"], LastScannedHeight: meta["last_scanned_height"], EndpointsHeight: meta["endpoints_height"],
 		AppVersion: meta["app_version"], FibreAppVersion: meta["fibre_app_version"], FibreActive: meta["fibre_active"] == "yes",
 		ChainHeight:          meta["chain_height"],
@@ -3104,6 +3128,9 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 	}
 	if win.AsOf {
 		out["as_of_note"] = AsOfNote
+	}
+	if c, err := s.lastEndpointCheck(ctx, addr, win); err == nil && c != nil {
+		out["last_endpoint_check"] = c
 	}
 	if _, label, err := s.rolledFor(ctx, win, addr); err == nil && label != nil {
 		out["rolled_up"] = label

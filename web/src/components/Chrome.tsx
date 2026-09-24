@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { useApi, type Meta, int, ago, utcWord } from "@/lib/api";
+import { useApi, type Meta, type Tip, int, ago, span, utcWord } from "@/lib/api";
 import { SOURCE_URL } from "@/lib/site";
 
 /**
@@ -127,19 +127,62 @@ function NetworkChip({ meta, error }: { meta: Meta | null; error: string | null 
   );
 }
 
+/**
+ * The newest block this observer has read, and how old it is, ticking every
+ * second: the one thing on the page that moves on its own, so a reader can
+ * see at a glance that the observer is following the chain. The dot turns
+ * amber when the block is over thirty seconds old (a halted chain, or an
+ * observer that stopped reading) and grey when the API does not answer.
+ * Until Fibre is live it also counts down to the upgrade that brings it.
+ */
+function BlockTicker({ meta }: { meta: Meta | null }) {
+  const { data: tip, error, fetchedAt } = useApi<Tip>("/v1/tip", 4000);
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!tip || !tip.height) {
+    return error ? <span className="blocktick" title={`Observer API unreachable: ${error}`}><i className="dot none" />—</span> : null;
+  }
+  // The server's clock, not the reader's: a laptop a minute fast would
+  // otherwise call every block a minute old.
+  const skew = fetchedAt ? Date.parse(tip.server_time) - Date.parse(fetchedAt) : 0;
+  const age = tip.block_time && now ? Math.max(0, (now + skew - Date.parse(tip.block_time)) / 1000) : null;
+  const dot = error ? "none" : age === null || age > 30 ? "hold" : "ok";
+  const ageWord = age === null ? "" : age < 90 ? `${Math.round(age)}s` : ago(tip.block_time!);
+  const sig = meta?.upgrade_signal;
+  const countdown = !tip.fibre_active && sig?.eta_seconds ? span(sig.eta_seconds) : "";
+  const title = [
+    `Block #${int(tip.height)}${tip.block_time ? ` · made ${utcWord(tip.block_time)}` : ""}`,
+    error ? `API unreachable (${error}); showing the last reading` : "",
+    countdown && sig?.upgrade_height ? `Fibre activates at #${int(sig.upgrade_height)}, about ${countdown} at the chain's recent pace` : "",
+  ].filter(Boolean).join(" · ");
+  return (
+    <span className="blocktick" title={title}>
+      <i key={tip.height} className={"dot " + dot + (dot === "ok" ? " beat" : "")} />
+      <span className="num">#{int(tip.height)}</span>
+      {ageWord && <span className="age">{ageWord}</span>}
+      {countdown && <span className="soon">Fibre in {countdown}</span>}
+    </span>
+  );
+}
+
 export function Header() {
   const { data: meta, error } = useApi<Meta>("/v1/meta", 30000);
   const path = usePathname();
   return (
     <header className="top">
       <div className="wrap">
-        <Link className="brand" href="/" aria-label="Tensile, the independent observer for Celestia Fibre"><Mark />Tensile<span className="brand-for">for Celestia Fibre</span></Link>
+        <Link className="brand" href="/" aria-label="Tensile, the independent observer for Celestia Fibre"><Mark />Tensile</Link>
         <nav aria-label="site">
           {NAV.map(([href, name]) => (
             <Link key={href} href={href} className={(href === "/" ? path === "/" : path.startsWith(href)) ? "on" : ""}>{name}</Link>
           ))}
         </nav>
         <div className="right">
+          <BlockTicker meta={meta} />
           <NetworkChip meta={meta} error={error} />
           <span className="divider" aria-hidden="true" />
           <ThemeToggle />

@@ -283,3 +283,14 @@ func ReadAll(dataDir string) ([]Report, error) {
 func (r Report) Alive(now time.Time) bool {
 	return r.StoppedAt == nil && now.Sub(r.UpdatedAt) < StaleAfter
 }
+
+// ReadOne reads one component's report from a status directory, false when
+// it is missing or unreadable.
+func ReadOne(dir, component string) (Report, bool) {
+	var r Report
+	b, err := os.ReadFile(filepath.Join(dir, component+".json"))
+	if err != nil || json.Unmarshal(b, &r) != nil {
+		return Report{}, false
+	}
+	return r, true
+}

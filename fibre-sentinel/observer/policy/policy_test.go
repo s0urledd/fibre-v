@@ -3,7 +3,9 @@ package policy
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -437,5 +439,135 @@ func TestEphemeralSamplingSecretIsRefusedOutsideTests(t *testing.T) {
 	day := time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC)
 	if p2.DayCommitment(day) != p3.DayCommitment(day) {
 		t.Fatal("two policies over the same secret file produced different day commitments")
+	}
+}
+
+// admitConcurrently asks BeforeProbe for the same validator from n
+// goroutines at once, as the prober's workers do on the first burst after a
+// start, and returns the answers.
+func admitConcurrently(p *Policy, pub scan.Publication, tgt probe.Target, n int) (allowed int, reasons []string) {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			allow, _, reason := p.BeforeProbe(pub, tgt, time.Now())
+			mu.Lock()
+			defer mu.Unlock()
+			if allow {
+				allowed++
+			} else {
+				reasons = append(reasons, reason)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	return allowed, reasons
+}
+
+// Admission reserves: N concurrent asks for one validator, none of them yet
+// accounted, admit no more than the request cap allows. BeforeProbe used to
+// only read, and AfterProbe was the only writer, so all N passed on the same
+// empty state.
+func TestBeforeProbe_ConcurrentAdmissionsHoldTheRequestCap(t *testing.T) {
+	cfg := Default()
+	cfg.Caps.PerValidator.MinRequestSpacing = 0
+	cfg.Caps.PerValidator.RequestsPerMinute = 3
+	p := newTest(t, cfg)
+	pub := pubOf(hexHash(21), time.Now(), 1<<20, 148)
+	tgt := probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148, Assigned: true}
+
+	allowed, reasons := admitConcurrently(p, pub, tgt, 8)
+	if allowed != 3 {
+		t.Fatalf("8 concurrent asks admitted %d, want exactly the cap of 3 (denials: %v)", allowed, reasons)
+	}
+	for _, r := range reasons {
+		if r != "budget:validator_requests_per_minute=3" {
+			t.Fatalf("denied for %q", r)
+		}
+	}
+	// A released reservation frees its slot; an accounted one keeps it.
+	p.Release(pub, tgt)
+	if allow, _, reason := p.BeforeProbe(pub, tgt, time.Now()); !allow {
+		t.Fatalf("a released slot was not given back: %s", reason)
+	}
+	p.AfterProbe(pub, probe.Measurement{ValidatorAddress: tgt.AddressHex, AssignedRowCount: 148, StartedAt: time.Now(), Outcome: probe.OutcomeNotFound})
+	if allow, _, _ := p.BeforeProbe(pub, tgt, time.Now()); allow {
+		t.Fatal("an accounted probe gave its slot back")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n := len(p.pending); n != 2 {
+		t.Fatalf("%d reservations pending, want 2 (3 admitted, 1 released, 1 re-admitted, 1 accounted)", n)
+	}
+}
+
+// The same for the byte cap: the shard every admission may download is
+// charged when it is admitted, so a burst cannot overshoot the hourly cap
+// by the shards still in flight.
+func TestBeforeProbe_ConcurrentAdmissionsHoldTheByteCap(t *testing.T) {
+	cfg := Default()
+	cfg.Caps.PerValidator.MinRequestSpacing = 0
+	cfg.Caps.PerValidator.RequestsPerMinute = 0
+	pub := pubOf(hexHash(22), time.Now(), 1<<20, 148)
+	tgt := probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148, Assigned: true}
+	shard := ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, 148)
+	// an hourly cap of two and a half shards
+	cfg.Capacity.FloorValidatorBps = int64(float64(shard)*2.5*8/3600/cfg.Caps.PerValidator.BytesPerHourFraction) + 1
+	cfg.Caps.PerValidator.BytesPerDayFraction = 1
+	p := newTest(t, cfg)
+	if c := p.cfg.bytesPerHourCap(148); c < 2*shard || c >= 3*shard {
+		t.Fatalf("test setup: cap %d for a %d-byte shard", c, shard)
+	}
+	allowed, reasons := admitConcurrently(p, pub, tgt, 8)
+	if allowed != 2 {
+		t.Fatalf("8 concurrent asks admitted %d, want the 2 shards the hourly cap holds (denials: %v)", allowed, reasons)
+	}
+	for _, r := range reasons {
+		if r != "budget:validator_bytes_per_hour" {
+			t.Fatalf("denied for %q", r)
+		}
+	}
+}
+
+// Admission books the spacing too: concurrent asks for one validator are
+// admitted MinRequestSpacing apart, not all in the same instant.
+func TestBeforeProbe_ConcurrentAdmissionsAreSpaced(t *testing.T) {
+	cfg := Default()
+	cfg.Caps.PerValidator.MinRequestSpacing = 60 * time.Millisecond
+	cfg.Caps.PerValidator.RequestsPerMinute = 0
+	p := newTest(t, cfg)
+	pub := pubOf(hexHash(23), time.Now(), 1<<20, 148)
+	tgt := probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148, Assigned: true}
+
+	const n = 5
+	allowed, reasons := admitConcurrently(p, pub, tgt, n)
+	if allowed != n {
+		t.Fatalf("admitted %d of %d: %v", allowed, n, reasons)
+	}
+	p.mu.Lock()
+	ats := make([]time.Time, 0, len(p.pending))
+	for _, r := range p.pending {
+		ats = append(ats, r.at)
+	}
+	p.mu.Unlock()
+	sort.Slice(ats, func(i, j int) bool { return ats[i].Before(ats[j]) })
+	for i := 1; i < len(ats); i++ {
+		if gap := ats[i].Sub(ats[i-1]); gap < cfg.Caps.PerValidator.MinRequestSpacing {
+			t.Fatalf("admissions %d and %d only %s apart, spacing is %s", i-1, i, gap, cfg.Caps.PerValidator.MinRequestSpacing)
+		}
+	}
+	// And an ask inside the spacing of the last admission waits it out
+	// rather than going straight through.
+	began := time.Now()
+	if allow, _, _ := p.BeforeProbe(pub, tgt, time.Now()); !allow {
+		t.Fatal("denied")
+	}
+	if waited := time.Since(began); waited < cfg.Caps.PerValidator.MinRequestSpacing/2 {
+		t.Fatalf("an ask right after an admission went through after %s", waited)
 	}
 }
