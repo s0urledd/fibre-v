@@ -49,6 +49,16 @@ func newHostingPass(st *store.Store, dataDir string, logf func(string, ...any)) 
 	}
 	r := &hosting.Refresher{DB: st.DB(), Cfg: cfg, Logf: logf}
 	return func(ctx context.Context, now time.Time) {
+		// The databases usually arrive after the collector has started
+		// (deploy/hosting-db.sh runs once the new binaries are up), and the
+		// paths were resolved at start. While no ASN file was found, look
+		// again every pass: a stat per minute, and no restart needed.
+		if r.Cfg.ASNPath == "" {
+			if c := hosting.ResolveConfig(*hostingASNFlag, *hostingCountryFlag, dataDir); c.ASNPath != "" {
+				logf("hosting: asn db %s appeared, country db %q; lookup on", c.ASNPath, c.CountryPath)
+				r.Cfg = c
+			}
+		}
 		res, err := r.Run(ctx, now)
 		switch {
 		case err != nil:
