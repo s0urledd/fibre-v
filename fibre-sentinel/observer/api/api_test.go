@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cosmos/cosmos-sdk/types/bech32"
+
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/api"
@@ -487,19 +489,27 @@ func TestErrorsAreOpaqueAndUncached(t *testing.T) {
 	}
 }
 
-// An operator or account address must not be accepted as a consensus address.
+// An operator or account address must never be looked up as a consensus
+// address: its bytes are a different key's. It is resolved through the
+// staking set instead (validator_addr.go), so one the set has never named is
+// a 404, and a string that is no validator address at all stays a 400.
 func TestValidatorAddressRequiresConsensusPrefix(t *testing.T) {
 	ts := serverWithSample(t)
-	for _, addr := range []string{
-		"celestiavaloper1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqfk0xdj",
-		"celestia1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+	valoper, err := bech32.ConvertAndEncode("celestiavaloper", make([]byte, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for addr, want := range map[string]int{
+		valoper: 404, // well formed, not in the sample's staking set
+		"celestia1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq": 400, // bad checksum
+		"celestiavalconspub1qqqq":                               400,
 	} {
-		if code := get(t, ts, "/v1/validators/"+addr, nil); code != 400 {
-			t.Errorf("%s -> %d, want 400", addr, code)
+		if code := get(t, ts, "/v1/validators/"+addr, nil); code != want {
+			t.Errorf("%s -> %d, want %d", addr, code, want)
 		}
 	}
-	if code := get(t, ts, "/v1/probes?validator=celestiavaloper1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqfk0xdj", nil); code != 400 {
-		t.Errorf("probes with an operator address -> %d, want 400", code)
+	if code := get(t, ts, "/v1/probes?validator="+valoper, nil); code != 404 {
+		t.Errorf("probes with an unknown operator address -> %d, want 404", code)
 	}
 }
 

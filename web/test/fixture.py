@@ -38,7 +38,21 @@ def make_schema(path):
 OUT = sys.argv[1] if len(sys.argv) > 1 else "/tmp/fibre-fixture/observer.db"
 rnd = random.Random(51)   # CIP-51. Deterministic: same fixture every run.
 
-NOW = datetime(2026, 9, 16, 10, 30, tzinfo=timezone.utc)
+# Every timestamp is placed relative to NOW, and the API reads its windows off
+# the real clock, so NOW has to be the moment the fixture is generated. It used
+# to be a fixed date, and a week later the 24h and 7d windows were empty and
+# every page rendered its "nothing in this period" state over a full store.
+# FIXTURE_NOW (RFC 3339, e.g. 2026-09-16T10:30:00Z) pins it when two runs have
+# to be compared byte for byte; the random draws are seeded either way, so an
+# unpinned run differs from another only by where its clock started.
+def _now():
+    pinned = os.environ.get("FIXTURE_NOW", "").strip()
+    if pinned:
+        return datetime.fromisoformat(pinned.replace("Z", "+00:00")).astimezone(timezone.utc)
+    # Whole minutes, so the heartbeats land on the same seconds as the
+    # schedule a real prober keeps.
+    return datetime.now(timezone.utc).replace(second=0, microsecond=0)
+NOW = _now()
 def ts(dt): return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 # Moniker set chosen for SHAPE, not realism: the design has to survive a
@@ -160,11 +174,23 @@ for t in ("publications","assignments","probes","reachability","endpoints",
     db.execute(f"DELETE FROM {t}")
 
 PAYMENT_TIMEOUT, RETENTION = 3600, 14400   # 1h / 4h, the spec's default shape
+# One day, as the rows below have always used; params_history says the same,
+# so a delay computed from the queue matches the parameter it ran under.
+WITHDRAWAL_DELAY = timedelta(days=1)
 JAILED_AT = NOW - timedelta(hours=6)       # when the jailed validators left the bonded list
 MSU = max(PAYMENT_TIMEOUT, RETENTION)
 
-db.execute("INSERT INTO params_history VALUES (?,?,?,?,?,?,?,?)",
-           (1, 0, "genesis", 604800, PAYMENT_TIMEOUT, 100, RETENTION, 1<<40))
+# Every INSERT below names its columns. Positional inserts broke each time a
+# migration added a column (params_history gained effective_from_time and
+# escrow_accounts the withdrawal read in schema 21), and the failure was a
+# crash at generation rather than anything that pointed at the migration.
+db.execute("""INSERT INTO params_history
+    (effective_from_height, effective_from_tx_index, source, withdrawal_delay_s,
+     payment_promise_timeout_s, payment_promise_height_window, shard_retention_s,
+     full_stake_storage_budget, effective_from_time)
+    VALUES (?,?,?,?,?,?,?,?,?)""",
+           (1, 0, "genesis", int(WITHDRAWAL_DELAY.total_seconds()), PAYMENT_TIMEOUT, 100, RETENTION, 1<<40,
+            ts(NOW - timedelta(days=60))))
 
 for v in vals:
     db.execute("""INSERT INTO validator_identities
@@ -366,7 +392,11 @@ def wire(b, v, at, frac):
         return ("TCP_REFUSED", dict(tcp=0, tls=0, idok=0, ms=0,
                                     err=f"dial tcp {v['host']}: connect: connection refused"))
     if b == "identity" and impaired(v["i"], at):
-        return ("IDENTITY_FAIL", dict(idok=0, idreason="certificate validity window has lapsed"))
+        # The reason is the verifier's machine code (fibre-tlsverify/errors.go),
+        # which is what the prober stores. A prose reason fell through the API's
+        # identityStatus switch to "mismatch" and put a lapsed renewal on the
+        # page as another validator's key.
+        return ("IDENTITY_FAIL", dict(idok=0, idreason="cert_expired"))
     if b == "prunes_early" and frac >= 0.72 and impaired(v["i"], at):
         return ("NOT_FOUND", {})
     if b == "erroring":
@@ -511,13 +541,17 @@ for v in vals:
         # The certificate is endorsed unless this validator's endorsement has
         # lapsed, and it only lapsed from its own start time onward.
         endorsed = up and not (b == "identity" and impaired(i, at))
-        db.execute("""INSERT INTO reachability VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+        db.execute("""INSERT INTO reachability
+            (dedupe_key, vantage, validator_address, validator_host, height, scheduled_at,
+             started_at, dns_ok, tcp_ok, tcp_ms, tls_ok, tls_ms, peer_cert_sha256,
+             identity_ok, identity_reason, outcome, raw_error, total_duration_ms, raw_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
             hashlib.sha256(f"reach{i}-{r}".encode()).hexdigest(), "eu1",
             v["cons"], v["host"], 900_000 - r, ts(at), ts(at),
             1, 1 if up else 0, rnd.randint(4, 40), 1 if up else 0, rnd.randint(8, 90),
             hashlib.sha256(f"cert{i}".encode()).hexdigest() if up else "",
             1 if endorsed else 0,
-            "certificate validity window has lapsed" if (up and not endorsed) else "",
+            "cert_expired" if (up and not endorsed) else "",
             "OK" if up else "TCP_REFUSED",
             "" if up else f"dial tcp {v['host']}: connect: connection refused",
             rnd.randint(20, 200), "{}"))
@@ -538,6 +572,7 @@ def payment_row(key, kind, height, at, txh, pub, proc, ph, ns, size, amount, ava
             fee(size) if size else 0, "utia", amount, ts(avail) if avail else None, "{}")
 
 PAYMENTS = []
+QUEUE = []
 publishers = {}
 for p, pub in enumerate(pubs):
     signer = bech32ish("celestia", p % 17)
@@ -562,19 +597,46 @@ for i, (signer, since) in enumerate(publishers.items()):
     if i % 4 == 0:
         at = NOW - timedelta(days=2, hours=i)
         PAYMENTS.append(payment_row(f"W{i}:0", "withdrawal_request", 880_000 + i, at, hashlib.sha256(f"wr{i}".encode()).hexdigest().upper(),
-                                    signer, "", "", "", 0, 500_000_000, avail=at + timedelta(days=1)))
-        PAYMENTS.append(payment_row(f"h{881_000+i}:executed:0", "withdrawal_executed", 881_000 + i, at + timedelta(days=1), "",
+                                    signer, "", "", "", 0, 500_000_000, avail=at + WITHDRAWAL_DELAY))
+        PAYMENTS.append(payment_row(f"h{881_000+i}:executed:0", "withdrawal_executed", 881_000 + i, at + WITHDRAWAL_DELAY, "",
                                     signer, "", "", "", 0, 500_000_000))
+        # The queue as the collector reads it (store/withdrawals.go): seen
+        # while queued, gone at the payout block, and attributed to exactly
+        # that payout, which is the only way a request-to-payout delay is
+        # ever published.
+        QUEUE.append((signer, ts(at), ts(at + WITHDRAWAL_DELAY), "utia", 500_000_000, 500_000_000,
+                      880_000 + i, ts(at), 880_900 + i, ts(at + WITHDRAWAL_DELAY - timedelta(minutes=5)),
+                      881_000 + i, ts(at + WITHDRAWAL_DELAY), "executed", "",
+                      f"h{881_000+i}:executed:0", 881_000 + i, ts(at + WITHDRAWAL_DELAY), 500_000_000, ts(NOW)))
+    elif i % 4 == 2:
+        # Still queued: requested ten hours ago, payable in fourteen. A
+        # fixture whose every withdrawal has already been paid never shows
+        # the pending side of the escrow panel.
+        at = NOW - timedelta(hours=10 + i)
+        PAYMENTS.append(payment_row(f"W{i}:0", "withdrawal_request", 899_000 + i, at, hashlib.sha256(f"wr{i}".encode()).hexdigest().upper(),
+                                    signer, "", "", "", 0, 250_000_000, avail=at + WITHDRAWAL_DELAY))
+        QUEUE.append((signer, ts(at), ts(at + WITHDRAWAL_DELAY), "utia", 250_000_000, 250_000_000,
+                      899_000 + i, ts(at), 900_000, ts(NOW), None, None, None, "", None, None, None, None, ts(NOW)))
 db.executemany("""INSERT INTO payments (dedupe_key, kind, height, time, tx_hash, tx_index, msg_index, publisher,
     processor, promise_hash, namespace, blob_size, gas_units, denom, amount_utia, available_at, raw_json)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", PAYMENTS)
+db.executemany("""INSERT INTO withdrawal_queue (publisher, requested_at, available_at, denom, first_amount_utia,
+    amount_utia, first_seen_height, first_seen_at, last_seen_height, last_seen_at, gone_height, gone_at, outcome,
+    outcome_reason, paid_key, paid_height, paid_at, paid_utia, recorded_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", QUEUE)
 for i, signer in enumerate(publishers):
     spent = sum(r[14] for r in PAYMENTS if r[7] == signer and r[1] in ("settlement", "timeout"))
     withdrawn = sum(r[14] for r in PAYMENTS if r[7] == signer and r[1] == "withdrawal_executed")
+    pending = sum(q[5] for q in QUEUE if q[0] == signer and q[10] is None)
     bal = 6_000_000_000 - spent - withdrawn
     found = i != 16   # one publisher emptied and closed its escrow
-    db.execute("INSERT INTO escrow_accounts VALUES (?,?,?,?,?,?,?)",
-               (signer, 1 if found else 0, "utia" if found else "", bal if found else 0, bal if found else 0, 900_000, ts(NOW)))
+    # available is balance minus what the queue has locked, and the queue
+    # read is taken at the same height as the balance, so the API's
+    # balance - available = pending check holds on every row.
+    db.execute("""INSERT INTO escrow_accounts (publisher, found, denom, balance_utia, available_utia, height,
+        updated_at, withdrawals_height, withdrawals_at, pending_utia) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               (signer, 1 if found else 0, "utia" if found else "", bal if found else 0,
+                bal - pending if found else 0, 900_000, ts(NOW), 900_000, ts(NOW), pending if found else 0))
 
 for comp in ("collector", "prober", "api", "heartbeat"):
     db.execute("""INSERT INTO observer_runs

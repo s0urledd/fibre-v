@@ -24,6 +24,7 @@ function Overview() {
   const vals = useApi<{ validators: Validator[] }>(`/v1/validators?window=${win}`);
   const market = useApi<Market>("/v1/market?window=7d");
   const [disc, setDisc] = useState<"" | "outcomes" | "blobs">("");
+  const [about, setAbout] = useState(false);
 
   const N = net.data;
   const rows = vals.data?.validators ?? [];
@@ -51,7 +52,10 @@ function Overview() {
   return (
     <>
       <div className="title">
-        <div><h1>Celestia Fibre · {meta ? netName(meta.chain_id) : "…"}</h1><p className="lede">Independent checks that validators serve the data they signed for.</p></div>
+        <div><h1>Celestia Fibre · {meta ? netName(meta.chain_id) : "…"}</h1><p className="lede">Independent checks that validators serve the data they signed for. <button type="button" className="dis" aria-expanded={about} onClick={() => setAbout(!about)}>What is measured?</button></p>
+          <p className="disc about" hidden={!about}>
+            Fibre is Celestia's low-latency data path. Each validator signs for its share of a blob and must keep serving that share until the retention window ends; the chain records the signature, never the serving. Tensile downloads the shares from outside, as any client would, checks every row against the on-chain commitment, and publishes each result with the evidence behind it. An endpoint it cannot reach is never counted as a failure. <Link href="/methodology/">Methodology →</Link>
+          </p></div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
       <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt, status: net.status }} measuring={measuring} />
