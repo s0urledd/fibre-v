@@ -435,7 +435,8 @@ the database aside, restore or delete it, start the collector, and check
   `celestia-app` line plus the copied `replace` block in
   `fibre-sentinel/go.mod`, re-run `fibre-assign/reftest`, rebuild, deploy.
   `docs/research/R1-fibre-protocol-surface.md` has the detail.
-- **A publication with no assignment** (`unassignable_publications` > 0):
+- **A publication with no assignment** (`unassignable_publications` > 0;
+  `/v1/health` fails while one settled in the last 24h, then lists it passing):
   a blob version this build does not know. Same bump; the scanner does not
   re-scan settled publications, so re-scan from that height afterwards.
 - **A process crash-loops.** `journalctl` shows the reason at the top of

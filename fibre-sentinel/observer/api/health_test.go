@@ -2,8 +2,10 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,5 +153,83 @@ func TestHealthWithoutDataDirIsDown(t *testing.T) {
 	var h healthBody
 	if code := getAny(t, ts, "/v1/health", &h); code != 503 || h.Status != "down" {
 		t.Fatalf("no status files: code=%d status=%s", code, h.Status)
+	}
+}
+
+// insertUnassignable writes one publication the scanner could not assign,
+// settled at height h and time at.
+func insertUnassignable(t *testing.T, st *store.Store, idx int, h int64, at time.Time) {
+	t.Helper()
+	hash := fmt.Sprintf("%064x", 0xbad000+idx)
+	if _, err := st.DB().Exec(`INSERT INTO publications (
+		promise_hash, commitment, blob_version, blob_size, namespace, chain_id,
+		promise_height, creation_timestamp, signer, signer_public_key,
+		validator_signature_count, settlement_height, settlement_time,
+		settlement_tx_hash, settlement_tx_index, settlement_tx_code,
+		must_serve_until, must_serve_until_basis, shard_retention_s,
+		payment_promise_timeout_s, assignment_error, validator_set_height,
+		total_voting_power, sigma_rows, distinct_rows, wrap_overlaps,
+		validators_with_rows, recorded_at, raw_json
+	) VALUES (?,?,99,1024,'ns','test',?,?,'signer','pk',0,?,?,'tx',0,0,?,'shard_retention',7200,3600,
+		'unknown blob version 99',?,0,0,0,0,0,?,'{}')`,
+		hash, hash, h-1, store.TS(at), h, store.TS(at), store.TS(at.Add(2*time.Hour)), h, store.TS(at)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// One publication nobody could assign, long ago, must not hold health at
+// 503 forever: nothing ever clears assignment_error, so an all-time count
+// latches "degraded" and masks every later failure. An old one is listed,
+// passing, with its count; a recent one fails.
+func TestHealthUnassignableAgesOut(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// A live collector at a tip far above the old publication, so the
+	// height prefilter is in play: the recent one must still fall inside it.
+	const tip = 1_000_000
+	cw := status.New(dir, "collector", "test", "t")
+	cw.Start()
+	cw.OK()
+	cw.Progress(tip)
+	defer cw.Stop("test")
+	time.Sleep(1200 * time.Millisecond) // the delayed status write
+
+	srv := api.NewWithVantage(st, api.VantageInfo{Name: "test"}, nil, api.WithDataDir(dir))
+	ts := httptest.NewServer(srv)
+	defer func() { ts.Close(); srv.Close() }()
+
+	var h healthBody
+	getAny(t, ts, "/v1/health", &h)
+	if _, detail, found := check(h, "unassignable_publications"); found {
+		t.Fatalf("no unassignable publications, but the check is listed: %s", detail)
+	}
+
+	// Settled two days and 30,000 blocks ago: history, not a failure.
+	insertUnassignable(t, st, 1, tip-30_000, time.Now().Add(-48*time.Hour))
+	getAny(t, ts, "/v1/health", &h)
+	ok, detail, found := check(h, "unassignable_publications")
+	if !found || !ok {
+		t.Fatalf("an old unassignable publication must pass: found=%v ok=%v %s", found, ok, detail)
+	}
+	if !strings.Contains(detail, "1 older") {
+		t.Fatalf("the all-time count must stay visible: %q", detail)
+	}
+
+	// Settled an hour ago: still happening, so health fails, and says both.
+	insertUnassignable(t, st, 2, tip-600, time.Now().Add(-time.Hour))
+	getAny(t, ts, "/v1/health", &h)
+	ok, detail, found = check(h, "unassignable_publications")
+	if !found || ok {
+		t.Fatalf("a recent unassignable publication must fail: found=%v ok=%v %s", found, ok, detail)
+	}
+	if !strings.HasPrefix(detail, "1 publication(s) settled in the last 24h") || !strings.Contains(detail, "2 all time") {
+		t.Fatalf("detail: %q", detail)
+	}
+	if h.Status == "ok" {
+		t.Fatal("a failing check must not leave health ok")
 	}
 }

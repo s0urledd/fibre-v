@@ -50,6 +50,20 @@ const scannerLagBlocks = 200
 // it is. Mocha's blocks are seconds apart; ten minutes is a long silence.
 const chainStaleAfter = 10 * time.Minute
 
+// unassignableWindow is how recently a publication must have settled, on
+// the chain's clock, for a missing row assignment to fail health. A day is
+// long enough that a monitor polling every few minutes cannot miss it and
+// an operator who was asleep still finds it failing in the morning, and
+// short enough that one bad blob does not mask every later failure.
+const unassignableWindow = 24 * time.Hour
+
+// minBlockSeconds is the shortest block interval the height prefilter in
+// recentUnassignable assumes. It only has to be a floor: a height bound of
+// unassignableWindow / minBlockSeconds blocks below the tip reaches back
+// past the window as long as blocks are at least this far apart, and
+// Celestia's are several seconds apart.
+const minBlockSeconds = 1
+
 // diskFloor is the free share of the data disk below which health fails.
 const diskFloor = 0.05
 
@@ -262,11 +276,28 @@ func (s *Server) health(ctx context.Context, now time.Time) healthResponse {
 		checks = append(checks, healthCheck{"pin", false,
 			fmt.Sprintf("chain app version %s is past this build's pin (%s): row assignments may be stale; bump the pin", appVersion, assign.PinnedCelestiaAppVersion)})
 	}
-	var unassignable int64
-	_ = s.st.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM publications WHERE assignment_error != ''`).Scan(&unassignable)
-	if unassignable > 0 {
-		checks = append(checks, healthCheck{"unassignable_publications", false,
-			fmt.Sprintf("%d publication(s) with no row assignment (unknown blob version or params): never probed", unassignable)})
+	// Unassignable publications fail health only while they are recent. The
+	// scanner does not re-scan a settled publication, and nothing else ever
+	// clears assignment_error, so an all-time count is a latch: one blob of
+	// an unknown version the day Fibre activated would hold /v1/health at 503
+	// for the life of the database, and a monitor that sees "degraded" all
+	// the time stops telling anyone when the prober dies next to it. What an
+	// operator can act on is "this is still happening" — a build that cannot
+	// assign what the chain is settling now — so the failing count is the
+	// publications settled within unassignableWindow. The all-time count
+	// stays in the detail (and in /v1/meta) so the history is not hidden,
+	// and the check stays listed, passing, while any exist.
+	if total := s.unassignablePublications(ctx); total > 0 {
+		recent := s.recentUnassignable(ctx, now, max(scannerH, chainH))
+		if recent > 0 {
+			checks = append(checks, healthCheck{"unassignable_publications", false,
+				fmt.Sprintf("%d publication(s) settled in the last %s with no row assignment (unknown blob version or params): never probed; %d all time",
+					recent, fmtWindow(unassignableWindow), total)})
+		} else {
+			checks = append(checks, healthCheck{"unassignable_publications", true,
+				fmt.Sprintf("none settled in the last %s; %d older publication(s) with no row assignment, never probed",
+					fmtWindow(unassignableWindow), total)})
+		}
 	}
 
 	st := "ok"
@@ -305,4 +336,36 @@ func (s *Server) unassignablePublications(ctx context.Context) int64 {
 	var n sql.NullInt64
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM publications WHERE assignment_error != ''`).Scan(&n)
 	return n.Int64
+}
+
+// recentUnassignable counts publications with no row assignment that
+// settled within unassignableWindow of now. settlement_time is the exact
+// criterion, but it has no index; settlement_height does. So when a tip
+// height is known (the collector's or the scanner's, from the status
+// files) the query is also bounded below by a height that is certainly
+// older than the window — tip minus the window at minBlockSeconds per
+// block — and SQLite walks publications_settlement over roughly the last
+// day instead of the whole table on every health poll. With no tip known
+// the height bound is 0 and the time filter alone decides: correct, only
+// slower. The time bound uses store.TS, the fixed-width layout
+// settlement_time is written in, so the string comparison is a time one.
+func (s *Server) recentUnassignable(ctx context.Context, now time.Time, tip int64) int64 {
+	floor := tip - int64(unassignableWindow/time.Second)/minBlockSeconds
+	if floor < 0 {
+		floor = 0
+	}
+	var n sql.NullInt64
+	_ = s.st.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM publications WHERE settlement_height >= ? AND settlement_time >= ? AND assignment_error != ''`,
+		floor, store.TS(now.Add(-unassignableWindow))).Scan(&n)
+	return n.Int64
+}
+
+// fmtWindow prints a whole-hour duration the way a reader says it: "24h",
+// not time.Duration's "24h0m0s".
+func fmtWindow(d time.Duration) string {
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", d/time.Hour)
+	}
+	return d.String()
 }
