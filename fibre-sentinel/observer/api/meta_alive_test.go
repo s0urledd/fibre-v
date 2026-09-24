@@ -46,3 +46,26 @@ func TestMetaProberAliveFollowsItsStatusFile(t *testing.T) {
 		t.Fatalf("a running prober reported %+v", meta.Prober)
 	}
 }
+
+// Before any publication, the pin is the one this binary assigns rows with,
+// not an empty string (the footer printed no pin at all).
+func TestMetaPinBeforeAnyPublication(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := api.NewWithVantage(st, api.VantageInfo{Name: "test"}, nil, api.WithDataDir(dir))
+	ts := httptest.NewServer(srv)
+	defer func() { ts.Close(); srv.Close() }()
+	var meta struct {
+		Pinned string `json:"pinned_celestia_app_commit"`
+	}
+	if code := getAny(t, ts, "/v1/meta", &meta); code != 200 {
+		t.Fatalf("meta: %d", code)
+	}
+	if len(meta.Pinned) != 40 {
+		t.Fatalf("pinned_celestia_app_commit %q, want the binary's 40-hex pin", meta.Pinned)
+	}
+}

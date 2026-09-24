@@ -58,6 +58,20 @@ export default function StatusLine({ meta, metaError, snap, client }: {
   const suspectRows = snap?.vantage_health?.suspect_rows ?? 0;
   const sig = meta?.upgrade_signal;
 
+  // What each failing check means for a reader, in their words rather than
+  // the process names. Scan gaps and the pin have lines of their own below.
+  const IMPACT: Record<string, string> = {
+    scanner: "new blobs are not being read from the chain",
+    scanner_lag: "the observer is catching up with the chain",
+    prober: "validators are not being probed",
+    heartbeat: "endpoint checks are paused",
+    collector: "figures are not being updated",
+    disk: "the observer is short of disk",
+    unassignable_publications: "some recent blobs could not be assigned to validators",
+  };
+  const chainStopped = failing.some((c) => c.name === "chain_liveness");
+  const impacts = [...new Set(failing.flatMap((c) =>
+    c.name === "chain_liveness" ? ["the chain has not produced a block recently"] : IMPACT[c.name] ? [IMPACT[c.name]] : c.name === "scan_gaps" || c.name === "pin" ? [] : [`${c.name}: ${brief(c.detail)}`]))];
   const lines: React.ReactNode[] = [];
   if (apiDown) {
     const err = client.error ?? metaError ?? "no answer";
@@ -70,11 +84,12 @@ export default function StatusLine({ meta, metaError, snap, client }: {
         This is an observer outage, not a Fibre network outage.
       </p>,
     );
-  } else if (failing.length > 0) {
+  } else if (impacts.length > 0) {
     lines.push(
-      <p className="notice" key="checks">
-        <b>Observer degraded</b> · {failing.map((c) => <span key={c.name} title={c.detail}>{c.name}: {brief(c.detail)}. </span>)}
-        Figures below may lag; nothing the observer failed to see is counted against a validator.{" "}
+      <p className="notice" key="checks" title={failing.map((c) => `${c.name}: ${c.detail}`).join(" · ")}>
+        {chainStopped && impacts.length === 1
+          ? <><b>The chain has stopped producing blocks.</b> Nothing new can be settled or measured until it resumes; this is the network, not the observer.</>
+          : <><b>Observer partly down:</b> {impacts.join("; ")}. Figures below may lag. Checks the observer missed are never counted against a validator.</>}{" "}
         <Link href="/methodology/#gaps">Why →</Link>
       </p>,
     );

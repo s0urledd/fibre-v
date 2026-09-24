@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useApi, type Meta, type Tip, int, ago, span, utcWord } from "@/lib/api";
-import { SOURCE_URL } from "@/lib/site";
+import { SOURCE_URL, DISPUTE_URL } from "@/lib/site";
 
 /**
  * Sibling deployments of this observer on other networks, from
@@ -199,6 +199,8 @@ export function Header() {
 export function Footer() {
   const { data: meta } = useApi<Meta>("/v1/meta", 30000);
   const pinned = meta?.pinned_celestia_app_commit ? meta.pinned_celestia_app_commit.slice(0, 7) : "";
+  const vi = meta?.vantage_info;
+  const egress = (vi?.egress_addresses ?? []).join(", ");
   return (
     <footer className="foot">
       <div>
@@ -207,9 +209,12 @@ export function Footer() {
         <Link href="/methodology/#evidence" title="What this observer's own network saw from one location.">Observer measurements</Link>
       </div>
       <div title={meta?.server_time ? `Observer time ${utcWord(meta.server_time)}${meta.last_probe_at ? ` · newest probe ${ago(meta.last_probe_at)}` : ""}` : undefined}>
-        Tensile · independent observer for Celestia Fibre · by Huginn Tech
+        Tensile · run by <a href="https://huginn.tech" rel="noopener noreferrer" target="_blank">Huginn Tech</a>
+        <span title="Huginn Tech also runs a Mocha validator. It is measured by the same code as every other validator and marked in the table.">, a validator scored here like every other</span>
+        {vi?.location && <><span>·</span><span title={`Every reachability figure is a statement about the path from here. Operators: probes come from ${egress || "the addresses in /v1/meta"}.`}>measured from {vi.location}{vi.asn ? ` (${vi.asn})` : ""}{egress ? `, probes from ${egress}` : ""}</span></>}
         {pinned && <span title={`Assignment pinned to celestia-app ${meta!.pinned_celestia_app_commit} · pin ${meta!.pin_status}`}> · pin {pinned}</span>}
         <span>·</span><a href={SOURCE_URL} rel="noopener noreferrer" target="_blank">source</a>
+        <span>·</span><a href={DISPUTE_URL} rel="noopener noreferrer" target="_blank">dispute a verdict</a>
       </div>
     </footer>
   );

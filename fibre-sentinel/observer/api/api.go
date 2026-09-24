@@ -25,6 +25,7 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 
+	assign "github.com/plsgiveup/fibre/fibre-assign"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/hosting"
@@ -858,6 +859,12 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	var pinned string
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT pinned_celestia_app FROM publications ORDER BY settlement_height DESC LIMIT 1`).Scan(&pinned)
+	// Before the first publication there is no row to read it from, and the
+	// footer printed no pin at all. The commit this binary assigns rows with
+	// is the same answer until a publication says otherwise.
+	if pinned == "" {
+		pinned = assign.PinnedCelestiaAppCommit
+	}
 	h := s.health(ctx, now)
 	// A run row's heartbeat is only as fresh as what reached the database:
 	// the prober writes JSONL and never this table, so its row kept the
@@ -2973,7 +2980,10 @@ func consHex(bech string) (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
-// parseAddr accepts a 40-hex consensus address or a bech32 celestiavalcons address.
+// parseAddr accepts a 40-hex consensus address or a bech32 celestiavalcons
+// address. It is pure, for the places that must not touch the store (the
+// exclude list); the routes a person types an address into use resolveAddr
+// (validator_addr.go), which also takes operator and account addresses.
 func parseAddr(s string) (string, error) {
 	s = strings.TrimSpace(strings.ToLower(s))
 	if len(s) == 40 {
@@ -3050,9 +3060,12 @@ func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleValidator(w http.ResponseWriter, r *http.Request) {
-	addr, err := parseAddr(r.PathValue("addr"))
+	// Any spelling an operator would paste: consensus, operator or account
+	// address (validator_addr.go). Everything below works on the consensus
+	// address alone, so the cache and the answer are one per validator.
+	addr, err := s.resolveAddr(r.Context(), r.PathValue("addr"))
 	if err != nil {
-		writeErr(w, 400, "address must be 40 hex chars or celestiavalcons1...")
+		s.writeAddrErr(w, r.URL.Path, err)
 		return
 	}
 	now := time.Now()
@@ -3976,9 +3989,9 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 	var conds []string
 	var args []any
 	if v := q.Get("validator"); v != "" {
-		addr, err := parseAddr(v)
+		addr, err := s.resolveAddr(r.Context(), v)
 		if err != nil {
-			writeErr(w, 400, "validator must be 40 hex chars or celestiavalcons1...")
+			s.writeAddrErr(w, r.URL.Path, err)
 			return
 		}
 		conds, args = append(conds, `validator_address = ?`), append(args, addr)
