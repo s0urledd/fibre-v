@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATED } from "@/lib/api";
 import Avatar from "./Avatar";
+import { HostingCell } from "./Hosting";
 import { SELF_VALIDATOR } from "@/lib/site";
 
 /**
@@ -64,6 +65,9 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     nohost: rows.filter((v) => bonded(v) && !v.host).length,
   }), [rows]);
 
+  // The hosting column only exists while the lookup is on (observer/hosting):
+  // a column of dashes would read as "nobody knows", which is not what off means.
+  const showHosting = useMemo(() => rows.some((v) => !!v.hosting), [rows]);
   const needle = q.trim().toLowerCase();
   const list = useMemo(() => {
     const pool = rows.filter((v) => {
@@ -80,7 +84,8 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
       || (v.cons_address ?? "").toLowerCase().includes(needle)
       || (v.moniker ?? "").toLowerCase().includes(needle)
       || (v.operator_address ?? "").toLowerCase().includes(needle)
-      || (v.host || v.last_host || "").toLowerCase().includes(needle));
+      || (v.host || v.last_host || "").toLowerCase().includes(needle)
+      || (v.hosting ? [v.hosting.provider, v.hosting.as_org, v.hosting.country, v.hosting.asn ? "as" + v.hosting.asn : ""].join(" ").toLowerCase().includes(needle) : false));
     return [...pool].sort((a, b) => {
       const av = sortValue(a, sort.key), bv = sortValue(b, sort.key);
       if (av === null && bv === null) return b.voting_power - a.voting_power;
@@ -142,6 +147,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
             <tr>
               <th className="col-pin">Validator</th>
               <th title="The newest handshake with the registered endpoint; the chain's own words (jailed, not bonded) come first.">Endpoint now</th>
+              {showHosting && <th title="Network provider and country the endpoint resolved into, as resolved from this vantage. Hover a cell for the network (AS) and address.">Hosting</th>}
               <Th k="power" dflt={-1} label="Voting power" title="From the staking module. The default order, and never a performance rank." />
               <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />
               <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />
@@ -152,7 +158,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr className="empty"><td colSpan={8}>
+              <tr className="empty"><td colSpan={showHosting ? 9 : 8}>
                 {loading && rows.length === 0 ? "Loading…"
                   : rows.length === 0 ? "No validators on record yet."
                   : needle ? `Nothing matches “${q}”.`
@@ -180,6 +186,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                     </span>
                   </td>
                   <td><span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span></td>
+                  {showHosting && <td><HostingCell h={v.hosting} /></td>}
                   <td className="num">{int(v.voting_power)}</td>
                   <td className="num">{rate(v)}</td>
                   <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>

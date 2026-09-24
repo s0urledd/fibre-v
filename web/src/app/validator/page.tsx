@@ -9,6 +9,7 @@ import { Metric, Metrics } from "@/components/Metrics";
 import OutcomeBar from "@/components/OutcomeBar";
 import Copy from "@/components/Copy";
 import { endpoint } from "@/components/Validators";
+import { HostingChip } from "@/components/Hosting";
 import { DISPUTE_URL, SELF_VALIDATOR } from "@/lib/site";
 
 type Span = { window: Window; serve_rate: Rate; probe_count: number; obligations: Obligations; classes: ClassCounts };
@@ -94,6 +95,7 @@ function Page() {
             <span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span>
             {v.host && <span title={v.identity_reason || "The consensus-key check on the newest handshake."}>TLS identity <b className="word">{identityWord[v.identity_status] ?? v.identity_status}</b></span>}
             {v.host && <span><span className="mono">{v.host}</span>{v.endpoint_since && <> · registered since {dateUTC(v.endpoint_since)}</>}</span>}
+            {v.host && <HostingChip h={v.hosting} />}
             {!v.host && v.last_host && <span title="The registration stays on chain; the validator left the bonded provider list.">last endpoint <span className="mono">{v.last_host}</span>{v.endpoint_closed_at && <> · left the bonded list {dateUTC(v.endpoint_closed_at)}</>}</span>}
             {att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">signed <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs</span>}
             {(v.timeouts_enforced ?? 0) > 0 && <span title="MsgPaymentPromiseTimeout submitted by this validator’s operator account in the period: abandoned promises reported so the escrow was charged. The chain pays nothing for it.">{int(v.timeouts_enforced)} timeout{v.timeouts_enforced === 1 ? "" : "s"} enforced</span>}
@@ -102,6 +104,7 @@ function Page() {
             {v.cons_address && <span title={v.cons_address}><span className="mono">{shortMid(v.cons_address, 22, 6)}</span><Copy text={v.cons_address} label="consensus address" /></span>}
             {v.operator_address && <span title={v.operator_address}><span className="mono">{shortMid(v.operator_address, 22, 6)}</span><Copy text={v.operator_address} label="operator address" /></span>}
             <span title={`consensus address, hex: ${v.address}`}><span className="mono">{shortMid(v.address, 10, 6)}</span><Copy text={v.address} label="hex address" /></span>
+            <span title="An Atom feed of this validator’s endpoint changes: registered or changed host, bonded-list changes, unreachable and recovered, certificate problems, first fault. Paste the link into any feed reader; nothing is stored about you."><a href={`${API_BASE}/v1/validators/${v.address}/feed.atom`} type="application/atom+xml">Subscribe (Atom)</a> <span className="soft">· endpoint changes in any feed reader</span></span>
             {v.website && <span><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a></span>}
           </div>
         </div>

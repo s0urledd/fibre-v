@@ -253,6 +253,7 @@ func main() {
 	}
 	defer corrFile.Close()
 	corr := correct.New(st, corrFile, *pruneTol)
+	hostingPass := newHostingPass(st, *dataDir, log.Printf) // hosting.go
 
 	log.Printf("collector up: run=%d vantage=%s db=%s data=%s exports=%s", runID, *vantage, *dbPath, *dataDir, *expDir)
 
@@ -590,6 +591,9 @@ func main() {
 				log.Printf("validator identities: %d of %d stored", n, len(ids))
 				_ = st.SetMeta("validator_identities", itoa(int64(n)), now)
 			}
+		}
+		if pollEndpoints {
+			hostingPass(ctx, now) // provider/country of each open endpoint; local files only
 		}
 		// A pass that failed to ingest says so on the status file, which is
 		// what /v1/health reads. Named last so it is not overwritten by the

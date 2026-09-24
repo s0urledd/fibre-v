@@ -27,6 +27,7 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/hosting"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/keybase"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/rollup"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
@@ -241,6 +242,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/market", s.handleMarket)
 	s.mux.HandleFunc("GET /v1/publishers", s.handlePublishers)
 	s.mux.HandleFunc("GET /v1/publishers/{addr}", s.handlePublisher)
+	s.registerExtraRoutes()
 	return s
 }
 
@@ -2258,6 +2260,11 @@ type validatorRow struct {
 	// runs the enforcement path at all. Matched on address bytes, so an
 	// operator that submits from another account is not counted.
 	TimeoutsEnforced int64 `json:"timeouts_enforced"`
+	// Hosting is the network (origin AS, provider bucket) and country the
+	// open endpoint's host resolved into, as resolved from this vantage;
+	// absent when the lookup is off or has not reached this host. See
+	// hosting.go and observer/hosting.
+	Hosting *hosting.Info `json:"hosting,omitempty"`
 }
 
 func loadBand(rows int) string {
@@ -2857,6 +2864,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			}
 		}
 		out = append(out, *v)
+	}
+	if err := s.attachHosting(ctx, out, win); err != nil {
+		return nil, err
 	}
 	// voting power desc, then address
 	sortRows(out)

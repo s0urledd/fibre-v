@@ -381,6 +381,8 @@ export type Validator = {
    * operator runs the enforcement path at all.
    */
   timeouts_enforced?: number;
+  /** network and country the open endpoint resolved into, from this vantage; absent when the lookup is off */
+  hosting?: import("./hosting").Hosting;
 };
 
 export type Probe = {

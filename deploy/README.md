@@ -534,6 +534,75 @@ Fibre blocks are when a format this build misreads would show up. Do not
 wait for a build: follow the Runbook item "The scanner crash-loops on one
 block", which moves past that height and publishes it as a scan gap.
 
+## 7b. Hosting and concentration (optional)
+
+The site can show which network provider and country each registered Fibre
+host resolves into (a "Hosting" column in the validators table, a
+concentration panel on the overview, `hosting` on every row of
+`/v1/validators`, and `/v1/hosting`). The Foundation Delegation Program asks
+recipients not to run on Hetzner or OVH, and delegators care how
+concentrated the set is; nothing else on the site answers either.
+
+It is **off until you download two database files**. The collector makes no
+network call for it, ever: the addresses are the ones the heartbeat already
+resolved and stored on its reachability rows, and the IP-to-network mapping
+is read from local files.
+
+| file | source | licence |
+| --- | --- | --- |
+| `ip2asn-combined.tsv.gz` (required) | [iptoasn.com](https://iptoasn.com/) — IPv4+IPv6 range → origin AS, AS name, AS registry country | Public Domain, [ODC PDDL v1.0](https://opendatacommons.org/licenses/pddl/1-0/) |
+| `dbip-country-lite.csv.gz` (optional) | [DB-IP IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite) — range → country (geolocation estimate) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); the site prints the required "IP Geolocation by DB-IP" credit |
+
+Considered and not used: CAIDA's AS-to-Organization dataset (and the
+RouteViews pfx2as files usually paired with it) is under CAIDA's acceptable
+use agreement, which is not a licence to republish; MaxMind GeoLite needs an
+account key and has its own EULA.
+
+Enable it, per network, as the service user:
+
+```
+sudo install -m 0755 deploy/hosting-db.sh /usr/local/bin/fibre-hosting-db
+sudo -u fibre-observer fibre-hosting-db /var/lib/fibre-observer/mocha/hosting
+```
+
+(the path is `<DATA_DIR>/hosting`; the script downloads to a temp name,
+checks the format and line count, and renames, so a failed download never
+replaces a good file). Within one endpoint poll (a minute) the collector
+logs `hosting: N open endpoint(s), N resolved, N with an origin AS`, and
+`/v1/hosting` answers `"enabled": true`. No restart, no unit change. To keep
+the files elsewhere, set `HOSTING_ASN_DB=` and `HOSTING_COUNTRY_DB=` in the
+network's env file (or pass `-hosting-asn-db` / `-hosting-country-db`), then
+restart the collector.
+
+Refresh monthly (DB-IP publishes monthly; iptoasn hourly) by re-running the
+same command, e.g. from cron. The collector re-runs the lookup when a file's
+size or mtime changes. Removing `ip2asn-combined.tsv.gz` turns the feature
+off again, and the next pass clears the stored lookups so the API never
+serves one that can no longer be reproduced.
+
+What it is and is not: the provider is a mapping from the **origin AS
+number** (the list, with sources, is in `observer/hosting/providers.go` and
+published as `provider_asns` on `/v1/hosting`); anything not on the list is
+"Other", which the concentration counts never treat as a single entity.
+Everything is "as resolved from this vantage": GeoDNS, proxies, tunnels and
+anycast can hide where a host really runs, and a geolocated country is an
+estimate. The site shows it without a verdict. The table the lookups live in
+(`endpoint_hosting`) is derived state, created by the collector with
+`CREATE TABLE IF NOT EXISTS` rather than a schema migration; it is not in the
+exports and needs no backup.
+
+### Atom feeds
+
+Nothing to deploy. `/api/v1/feed.atom` (network: registrations, host
+changes, bonded-list changes, first faults, observer incidents) and
+`/api/v1/validators/<address>/feed.atom` (one validator's endpoint state
+changes) are derived per request from the store, cached five minutes, and
+carry `ETag`/`Last-Modified`. Entry IDs are `tag:` URIs built from the host
+name the feed is requested at, the chain id, the validator and the moment
+the change happened, so they stay stable across restarts: do not change
+the public host name casually, or every subscriber sees the last 30 days
+again once.
+
 ## 8. Checks after deploy
 
 Run the smoke test first. It installs nothing and changes nothing: it parses

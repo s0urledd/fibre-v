@@ -1,0 +1,81 @@
+/**
+ * Hosting: the network (origin AS, provider bucket) and country each
+ * registered Fibre host resolves into, and how concentrated the set is.
+ * Types mirror observer/hosting (per validator, on /v1/validators) and
+ * /v1/hosting (the concentration summary with its sources).
+ *
+ * Everything here is "as resolved from this vantage": the site never turns
+ * it into a verdict about an operator.
+ */
+
+export type HostingAddress = { ip: string; asn?: number; as_org?: string; country?: string; provider: string; connected?: boolean };
+
+export type Hosting = {
+  status: "ok" | "no_asn" | "unresolved";
+  host: string;
+  ip?: string;
+  asn?: number;
+  as_org?: string;
+  country?: string;
+  /** geolocation (DB-IP's estimate) | as_registry (where the AS is registered) */
+  country_basis?: "geolocation" | "as_registry";
+  provider: string;
+  addresses?: HostingAddress[];
+  mixed_networks?: boolean;
+  resolved_at?: string;
+  resolved_by?: "heartbeat" | "literal";
+  looked_up_at: string;
+};
+
+export type DBSource = { file: string; modified?: string; name: string; url: string; license: string; license_url: string; attribution?: string };
+
+export type HostingSources = { enabled: boolean; asn_db?: DBSource; country_db?: DBSource; looked_up_at?: string; caveat: string };
+
+export type HostingBucket = { key: string; label?: string; provider?: string; hosts: number; host_share: number; stake: number; stake_share: number };
+
+export type Nakamoto = { count: number | null; entities: string[]; share: number; note: string };
+
+export type HostingSummary = {
+  registered_hosts: number;
+  resolved_hosts: number;
+  unresolved_hosts: number;
+  total_stake: number;
+  resolved_stake: number;
+  resolved_stake_share: number;
+  by_provider: HostingBucket[];
+  by_country: HostingBucket[];
+  by_asn: HostingBucket[];
+  nakamoto_third: { provider: Nakamoto; asn: Nakamoto; country: Nakamoto };
+  basis: "stake" | "hosts";
+};
+
+export type HostingResponse = {
+  vantage: string;
+  sources: HostingSources;
+  summary?: HostingSummary;
+  provider_asns: { asn: number; provider: string }[];
+  stake_basis: string;
+  computed_at: string;
+};
+
+/** the providers the Foundation Delegation Program names; marked, never judged */
+export const FDP_NAMED = new Set(["Hetzner", "OVH"]);
+
+/** "AS24940 HETZNER-AS" */
+export function asLabel(h: { asn?: number; as_org?: string }): string {
+  if (!h.asn) return "";
+  return `AS${h.asn}${h.as_org ? ` ${h.as_org}` : ""}`;
+}
+
+/** the one-line tooltip for a validator's hosting cell */
+export function hostingTitle(h: Hosting): string {
+  if (h.status === "unresolved") return `${h.host}: no address recorded by a recent heartbeat, so the network is unknown.`;
+  const parts = [
+    `${h.host} → ${h.ip}`,
+    h.asn ? asLabel(h) : "no routed network for this address in the database",
+    h.country ? `${h.country} (${h.country_basis === "geolocation" ? "geolocation estimate" : "country the network is registered in"})` : "",
+    h.mixed_networks ? `the name resolves into ${new Set((h.addresses ?? []).map((a) => a.asn).filter(Boolean)).size} networks; shown is the address the heartbeat connected to` : "",
+    "as resolved from this vantage",
+  ];
+  return parts.filter(Boolean).join(" · ");
+}

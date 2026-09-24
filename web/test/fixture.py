@@ -589,6 +589,37 @@ for k, val in (("chain_id","mocha-5"), ("last_scanned_height","900000"),
                ("protocol_params_fingerprint","fp")):
     db.execute("INSERT INTO meta VALUES (?,?,?)", (k, val, ts(NOW)))
 
+# Hosting lookups (observer/hosting), as the collector would have stored them
+# from the heartbeat's addresses and the two database files. The mix leans on
+# Hetzner and OVH the way real validator sets do, so the concentration panel
+# has something to say; one host is unresolved and one resolves into two
+# networks, the two cases a design must not hide. Addresses are documentation
+# ranges; the AS numbers and names are the real ones from providers.go.
+HOSTING = [("Hetzner", 24940, "HETZNER-AS", "DE"), ("Hetzner", 24940, "HETZNER-AS", "FI"),
+           ("OVH", 16276, "OVH", "FR"), ("AWS", 16509, "AMAZON-02", "US"), ("Google Cloud", 396982, "GOOGLE-CLOUD-PLATFORM", "DE"),
+           ("DigitalOcean", 14061, "DIGITALOCEAN-ASN", "NL"), ("Contabo", 51167, "CONTABO", "DE"), ("Vultr", 20473, "AS-VULTR", "JP"),
+           ("Other", 64512, "LATITUDE-SH", "US"), ("Other", 64513, "CHERRYSERVERS1-AS", "LT"), ("Other", 64514, "LEASEWEB-NL-AMS-01", "NL")]
+hrnd = random.Random(16)
+for v in vals:
+    if BEHAVIOUR[v["i"]] in ("jailed", "unregistered"):
+        continue
+    ip = f"203.0.113.{v['i']}"
+    if v["i"] == 38:
+        row = ("unresolved", "", 0, "", "", "", "", "Unknown", "[]")
+    else:
+        prov, asn, org, cc = HOSTING[0] if v["i"] < 4 else hrnd.choice(HOSTING + HOSTING[:3])
+        addrs = [{"ip": ip, "asn": asn, "as_org": org, "country": cc, "provider": prov, "connected": True}]
+        if v["i"] == 11:
+            addrs.append({"ip": "2001:db8::11", "asn": 16276, "as_org": "OVH", "country": "FR", "provider": "OVH"})
+        row = ("ok", ip, asn, org, cc, cc, "geolocation", prov, json.dumps(addrs))
+    db.execute("""INSERT INTO endpoint_hosting (validator_address, host, status, ip, asn, as_org, as_country, country,
+        country_basis, provider, addresses_json, resolved_at, resolved_by, looked_up_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (v["cons"], v["host"]) + row + (ts(NOW), "heartbeat", ts(NOW)))
+for k, val in (("hosting_enabled", "yes"), ("hosting_asn_db", "ip2asn-combined.tsv.gz"),
+               ("hosting_asn_db_modified", ts(NOW - timedelta(days=1))), ("hosting_country_db", "dbip-country-lite.csv.gz"),
+               ("hosting_country_db_modified", ts(NOW - timedelta(days=20))), ("hosting_looked_up_at", ts(NOW))):
+    db.execute("INSERT OR REPLACE INTO meta VALUES (?,?,?)", (k, val, ts(NOW)))
+
 db.commit()
 n = lambda t: db.execute(f"select count(*) from {t}").fetchone()[0]
 print(f"validators {n('validator_identities')}  publications {n('publications')}  "
