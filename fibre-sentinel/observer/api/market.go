@@ -130,6 +130,10 @@ type marketResponse struct {
 	// at EscrowTotalAt. Absent until the collector has read it once.
 	EscrowTotalUtia *int64  `json:"escrow_total_utia,omitempty"`
 	EscrowTotalAt   *string `json:"escrow_total_at,omitempty"`
+	// WithdrawalQueue is the queue read from state (withdrawals.go): pending
+	// now, outcomes and payout delays over the window. Absent on an as_of
+	// request, because the queue is not kept as a series of past states.
+	WithdrawalQueue *withdrawalQueue `json:"withdrawal_queue,omitempty"`
 
 	Daily        []dayBucket      `json:"daily"`
 	DailyByPub   []dayPublisher   `json:"daily_by_publisher"`
@@ -180,6 +184,9 @@ type publisherRow struct {
 	FirstSeen string      `json:"first_seen_at"`
 	LastSeen  string      `json:"last_seen_at"`
 	Escrow    *escrowInfo `json:"escrow"`
+	// PendingWithdrawals is the account's withdrawal queue as last read
+	// from state (withdrawals.go); null until the queue has been read.
+	PendingWithdrawals *pendingSummary `json:"pending_withdrawals"`
 }
 
 // ---- label registry ----
@@ -295,6 +302,14 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 				r.EscrowTotalAt = &at
 			}
 		}
+	}
+
+	if !win.AsOf {
+		wq, err := s.withdrawalQueueSummary(ctx, win)
+		if err != nil {
+			return nil, fmt.Errorf("withdrawal queue: %w", err)
+		}
+		r.WithdrawalQueue = wq
 	}
 
 	// Daily buckets, over settlements and timeouts. The day is the block
@@ -438,28 +453,19 @@ func (s *Server) publisherRows(ctx context.Context, win Window, only string) ([]
 		FROM payments WHERE kind = 'settlement' AND time >= ? AND time <= ?`, start, end).Scan(&totalFees, &totalBytes); err != nil {
 		return nil, err
 	}
-	// `in` is the window test each aggregate is gated on; MIN/MAX(p.time)
-	// stay unbounded on purpose, because first_seen and last_seen are facts
-	// about the publisher rather than about the window.
-	const in = "p.time >= ? AND p.time <= ?"
-	rows, err := db.QueryContext(ctx, `SELECT p.publisher,
-			SUM(CASE WHEN p.kind = 'settlement' AND `+in+` THEN 1 ELSE 0 END),
-			COALESCE(SUM(CASE WHEN p.kind = 'settlement' AND `+in+` THEN p.blob_size END), 0),
-			COALESCE(SUM(CASE WHEN p.kind = 'settlement' AND `+in+` THEN p.amount_utia END), 0),
-			COALESCE(MAX(CASE WHEN p.kind = 'settlement' AND `+in+` THEN p.blob_size END), 0),
-			SUM(CASE WHEN p.kind = 'timeout' AND `+in+` THEN 1 ELSE 0 END),
-			COALESCE(SUM(CASE WHEN p.kind = 'timeout' AND `+in+` THEN p.amount_utia END), 0),
-			MIN(p.time), MAX(p.time),
-			SUM(CASE WHEN `+in+` THEN 1 ELSE 0 END),
-			e.found, e.balance_utia, e.available_utia, e.height, e.updated_at
-		FROM payments p
-		LEFT JOIN escrow_accounts e ON e.publisher = p.publisher
-		WHERE 1 = 1`+filter+`
-		GROUP BY p.publisher
-		HAVING SUM(CASE WHEN `+in+` THEN 1 ELSE 0 END) > 0
-		ORDER BY 4 DESC, 3 DESC, p.publisher`,
-		append([]any{start, end, start, end, start, end, start, end, start, end, start, end, start, end},
-			append(args[1:], start, end)...)...)
+	// The window's aggregates are taken over the window's rows only, found
+	// through payments_time (or payments_publisher_time for one address),
+	// and a publisher is listed when it has at least one of them — the
+	// same set the HAVING clause used to select. first_seen and last_seen
+	// stay unbounded on purpose, because they are facts about the
+	// publisher rather than about the window; they are asked per listed
+	// publisher of payments_publisher_time, where MIN and MAX are one seek
+	// each.
+	//
+	// The first cut grouped every payment ever recorded and filtered
+	// afterwards, so a 24h view cost the whole history and grew by one row
+	// per blob settled, on a route that is not cached.
+	rows, err := db.QueryContext(ctx, publisherRowsSQL(filter), append([]any{start, end}, args[1:]...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -692,6 +698,10 @@ func (s *Server) handlePublishers(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []publisherRow{}
 	}
+	if err := s.attachPending(r.Context(), rows); err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
 	writeJSON(w, 200, map[string]any{
 		"window": win, "publishers": rows, "count": len(rows),
 		"source": marketSource, "price_formula": formula, "notes": marketNotes, "vantage": s.vantage,
@@ -790,8 +800,17 @@ func (s *Server) handlePublisher(w http.ResponseWriter, r *http.Request) {
 		blobs = []blobRow{}
 	}
 	blobs, moreBlobs := trim(blobs, 50)
+	if err := s.attachPending(ctx, rows); err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	withdrawals, err := s.publisherWithdrawalDetail(ctx, addr)
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
 	writeJSON(w, 200, map[string]any{
-		"window": win, "publisher": rows[0], "windows": spans,
+		"window": win, "publisher": rows[0], "windows": spans, "withdrawals": withdrawals,
 		"recent_payments": payments, "recent_blobs": blobs, "recent_blobs_truncated": moreBlobs,
 		"source": marketSource, "price_formula": formula, "notes": marketNotes, "vantage": s.vantage,
 	})
@@ -808,4 +827,29 @@ func sortShares(v []publisherShare) {
 		}
 		return v[i].Publisher < v[j].Publisher
 	})
+}
+
+// publisherRowsSQL is publisherRows' query; filter narrows the window's rows
+// (to one publisher) and must refer to payments as p.
+func publisherRowsSQL(filter string) string {
+	return `WITH w AS (
+			SELECT publisher,
+				SUM(CASE WHEN kind = 'settlement' THEN 1 ELSE 0 END) AS settlements,
+				COALESCE(SUM(CASE WHEN kind = 'settlement' THEN blob_size END), 0) AS bytes,
+				COALESCE(SUM(CASE WHEN kind = 'settlement' THEN amount_utia END), 0) AS fees,
+				COALESCE(MAX(CASE WHEN kind = 'settlement' THEN blob_size END), 0) AS largest,
+				SUM(CASE WHEN kind = 'timeout' THEN 1 ELSE 0 END) AS timeouts,
+				COALESCE(SUM(CASE WHEN kind = 'timeout' THEN amount_utia END), 0) AS timed_out,
+				COUNT(*) AS in_window
+			FROM payments p
+			WHERE p.time >= ? AND p.time <= ?` + filter + `
+			GROUP BY publisher)
+		SELECT w.publisher, w.settlements, w.bytes, w.fees, w.largest, w.timeouts, w.timed_out,
+			(SELECT MIN(x.time) FROM payments x WHERE x.publisher = w.publisher),
+			(SELECT MAX(x.time) FROM payments x WHERE x.publisher = w.publisher),
+			w.in_window,
+			e.found, e.balance_utia, e.available_utia, e.height, e.updated_at
+		FROM w
+		LEFT JOIN escrow_accounts e ON e.publisher = w.publisher
+		ORDER BY 4 DESC, 3 DESC, w.publisher`
 }

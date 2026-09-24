@@ -5,6 +5,8 @@ import { Panel } from "@/components/Panel";
 import { useSearchParams } from "next/navigation";
 import { useApi, type Blob, utc, ago, shortHex, nsDisplay, bytes } from "@/lib/api";
 import { Mark, type Tier } from "@/components/Verdict";
+import SigningHistogram from "@/components/SigningHistogram";
+import type { SigningDistribution } from "@/lib/signing";
 
 // Reconstructability as a mark and a word, in the same channel the verdicts
 // use, so "degraded" on this page means what "held out" means everywhere else.
@@ -34,6 +36,9 @@ function Page() {
   const [limit, setLimit] = useState(50);
   const q = ns.trim() ? `/v1/blobs?limit=${limit}&namespace=${encodeURIComponent(ns.trim())}` : `/v1/blobs?limit=${limit}`;
   const { data, error, loading } = useApi<{ blobs: Blob[] }>(q);
+  // Signatures collected per promise over a fixed week, like the volume
+  // chart on the overview: this page lists blobs and has no period switch.
+  const sig = useApi<SigningDistribution>("/v1/signing?window=7d");
   return (
     <>
       <div className="section-head">
@@ -45,6 +50,10 @@ function Page() {
       {error && !data && <p className="notice">The observer API is not answering ({error}); the page retries every 30 seconds. This is an observer outage, not a Fibre network outage.</p>}
       {error && data && <p className="sample">Showing the last list received; the API is not answering right now ({error}).</p>}
       {loading && !data && <p className="muted">Loading…</p>}
+      <Panel title="Signatures per promise · 7 days" right={<Link href="/methodology/#signing">what this is</Link>}>
+        <p className="sub">Share of total voting power whose signature on the settled promise verified. Publishers stop at the ⅔ quorum, so the rest of the set is unsigned, not at fault.</p>
+        <SigningHistogram data={sig.data} />
+      </Panel>
       {data && (
         <Panel title="Publications" right={<>{data.blobs.length} newest{ns.trim() && ` in namespace ${ns.trim()}`}
               {data.blobs.length >= limit && limit < 500 && <> · <button className="btn" onClick={() => setLimit(Math.min(500, limit * 4))}>show more</button></>}</>}>

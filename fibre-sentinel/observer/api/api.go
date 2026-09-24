@@ -27,6 +27,7 @@ import (
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
+	"github.com/plsgiveup/fibre/fibre-sentinel/observer/hosting"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/keybase"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/rollup"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
@@ -102,12 +103,6 @@ type Server struct {
 	// empty means liveness is not reported.
 	dataDir string
 
-	// How many vantages the store holds, and the table watermarks it was
-	// counted at: see vantageCount.
-	vantageMu   sync.Mutex
-	vantageN    int
-	vantageMark [2]int64
-
 	// Per-publication verdicts, keyed by what the publication's probes look
 	// like right now. See blobcache.go.
 	blobs *blobCache
@@ -115,6 +110,8 @@ type Server struct {
 	asOf asOfLimiter
 	// details caches the validator page (see validator_detail.go).
 	details detailCache
+	// signing caches /v1/signing (see signing.go).
+	signing signingCache
 	// bg counts the server's own background work (the blob-page warm-up,
 	// the snapshot keeper), for Close.
 	bg sync.WaitGroup
@@ -234,6 +231,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/runs", s.handleRuns)
 	s.mux.HandleFunc("GET /v1/sampling", s.handleSampling)
 	s.mux.HandleFunc("GET /v1/exports", s.handleExports)
+	s.mux.HandleFunc("GET /v1/exports/pubkey", s.handleExportPubkey) // exports_signing.go; more specific than {name}
 	s.mux.HandleFunc("GET /v1/exports/{name}", s.handleExportFile)
 	s.mux.HandleFunc("GET /v1/avatars/{identity}", s.handleAvatar)
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
@@ -241,6 +239,9 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/market", s.handleMarket)
 	s.mux.HandleFunc("GET /v1/publishers", s.handlePublishers)
 	s.mux.HandleFunc("GET /v1/publishers/{addr}", s.handlePublisher)
+	s.mux.HandleFunc("GET /v1/params", s.handleParams)
+	s.mux.HandleFunc("GET /v1/signing", s.handleSigning)
+	s.registerExtraRoutes()
 	return s
 }
 
@@ -776,46 +777,37 @@ type runStatus struct {
 // heartbeat (a second location that only runs the heartbeat still counts).
 // vantageCount is how many distinct places the stored observations were made
 // from. It decides one sentence on every page — whether this is a single
-// vantage or several — and it is the most expensive query /v1/meta runs: no
-// index covers `vantage`, so it scans both probe tables in full and unions them
-// through a temp B-tree. Measured on an 85,000-probe store it was 49ms of the
-// endpoint's 58ms of SQL, on the endpoint every page polls.
+// vantage or several — and it was the most expensive query /v1/meta ran: no
+// index covered `vantage`, so it scanned both probe tables in full and unioned
+// them through a temp B-tree (49ms of the endpoint's 58ms of SQL on an
+// 85,000-probe store). A cache keyed on each table's highest rowid kept it off
+// most requests, but under traffic the tables grow every collector pass, so the
+// full scan came back every ten seconds and grew with the store.
 //
-// It is also a number that essentially never changes: a second vantage appears
-// once, when a second observer's file is first ingested. So it is computed once
-// and reused until the tables it reads have actually grown. Both are
-// append-only, so the highest rowid in each is an exact watermark — a vantage
-// cannot appear without a row, and a row cannot arrive without raising it — and
-// MAX(rowid) is a single seek to the end of the b-tree rather than a scan.
-//
-// Exact rather than a timer on purpose. The claim this drives is the one-vantage
-// caveat printed above every page, and a cached count is a claim about how much
-// the site's own evidence is worth.
+// It is now asked of probes_vantage and reachability_vantage (migration 22),
+// one seek per distinct vantage, which is cheap enough to run on every request
+// and so needs no cache at all. Exact, as before: the claim this drives is the
+// one-vantage caveat printed above every page, and a cached count is a claim
+// about how much the site's own evidence is worth.
 func (s *Server) vantageCount(ctx context.Context) int {
-	db := s.st.DB()
-	var pr, re sql.NullInt64
-	_ = db.QueryRowContext(ctx, `SELECT MAX(rowid) FROM probes`).Scan(&pr)
-	_ = db.QueryRowContext(ctx, `SELECT MAX(rowid) FROM reachability`).Scan(&re)
-	mark := [2]int64{pr.Int64, re.Int64}
-
-	s.vantageMu.Lock()
-	if s.vantageN > 0 && s.vantageMark == mark {
-		n := s.vantageN
-		s.vantageMu.Unlock()
-		return n
-	}
-	s.vantageMu.Unlock()
-
 	var n int
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT vantage FROM probes UNION SELECT vantage FROM reachability)`).Scan(&n)
+	_ = s.st.DB().QueryRowContext(ctx, vantageCountSQL).Scan(&n)
 	if n == 0 {
 		n = 1
 	}
-	s.vantageMu.Lock()
-	s.vantageN, s.vantageMark = n, mark
-	s.vantageMu.Unlock()
 	return n
 }
+
+// vantageCountSQL counts the distinct vantages across both tables by
+// walking probes_vantage and reachability_vantage (migration 22) from one
+// distinct value to the next — a loose index scan, one seek per vantage —
+// instead of reading every row's vantage and de-duplicating them.
+const vantageCountSQL = `WITH RECURSIVE
+	vp(v) AS (SELECT (SELECT MIN(vantage) FROM probes)
+	         UNION ALL SELECT (SELECT MIN(vantage) FROM probes WHERE vantage > vp.v) FROM vp WHERE vp.v IS NOT NULL),
+	vr(v) AS (SELECT (SELECT MIN(vantage) FROM reachability)
+	         UNION ALL SELECT (SELECT MIN(vantage) FROM reachability WHERE vantage > vr.v) FROM vr WHERE vr.v IS NOT NULL)
+	SELECT COUNT(*) FROM (SELECT v FROM vp WHERE v IS NOT NULL UNION SELECT v FROM vr WHERE v IS NOT NULL)`
 
 // latestRun is the newest run row for a component, with whether its heartbeat
 // is recent enough to call it alive.
@@ -1130,6 +1122,10 @@ type networkResponse struct {
 	LatencyP50    *int64 `json:"serve_latency_p50_ms"`
 	LatencyP95    *int64 `json:"serve_latency_p95_ms"`
 	LatencySample int64  `json:"serve_latency_sample"`
+
+	// ProvisionalFaults is the part of Obligations.Broken still settling
+	// (provisional.go); absent when there is none.
+	ProvisionalFaults *provisionalFaults `json:"provisional_faults,omitempty"`
 }
 
 // latencyWhere returns the median and 95th percentile of a whole probe over the
@@ -1874,6 +1870,11 @@ func (s *Server) computeNetwork(ctx context.Context, win Window, ex excludeSet, 
 		return nil, err
 	}
 	resp.ByObligation = resp.Obligations.Rate
+	prov, err := s.provisionalByValidator(ctx, win, ss, time.Now(), ex.clause("pr.validator_address"), ex.addrs...)
+	if err != nil {
+		return nil, err
+	}
+	resp.ProvisionalFaults = provisionalTotal(prov)
 	_ = total
 	// The same population the class tally above was drawn from, suspect
 	// points and all. Without the exclusion here the two were counts of
@@ -2064,48 +2065,93 @@ func (s *Server) registeredValidators(ctx context.Context, win Window) (map[stri
 func (s *Server) reachabilityNow(ctx context.Context, only, asOf string) (map[string]reachState, error) {
 	out := map[string]reachState{}
 	// The newest row per validator is the highest rowid: both files are
-	// ingested in write order. MAX(rowid) GROUP BY uses the validator index
-	// instead of a correlated MAX(started_at) per row over the whole table.
-	// A pinned window (asOf) asks for the newest row started by then.
-	rf, pf, args := "", "", []any{}
-	if only != "" {
-		rf, pf = " AND validator_address = ?", " AND validator_address = ?"
-		args = []any{only, only}
-	}
-	if asOf != "" {
-		rf += " AND started_at <= ?"
-		pf += " AND started_at <= ?"
-		if only != "" {
-			args = []any{only, asOf, only, asOf}
-		} else {
-			args = []any{asOf, asOf}
-		}
-	}
-	q := `SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'heartbeat' FROM reachability
-	      WHERE rowid IN (SELECT MAX(rowid) FROM reachability WHERE outcome <> 'PROBE_ERROR'` + rf + ` GROUP BY validator_address)
-	      UNION ALL
-	      SELECT validator_address, validator_host, started_at, tcp_ok, tls_ok, identity_ok, identity_reason, 'probe' FROM probes
-	      WHERE rowid IN (SELECT MAX(rowid) FROM probes WHERE outcome NOT IN ('MISSED','PROBE_ERROR')` + pf + ` GROUP BY validator_address)`
-	rows, err := s.st.DB().QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var addr string
-		var st reachState
-		var tcp, tls, id int
-		if err := rows.Scan(&addr, &st.host, &st.at, &tcp, &tls, &id, &st.identityReason, &st.source); err != nil {
+	// ingested in write order. A pinned window (asOf) asks for the newest
+	// row started by then.
+	//
+	// This used to be MAX(rowid) ... GROUP BY validator_address, which is
+	// the right answer asked the expensive way: the outcome filter is not in
+	// any index on validator_address, so SQLite walked every probe and every
+	// heartbeat in the store, through the table, to keep ~80 rows (1.7s on
+	// a 990,000-probe fixture, on every validators snapshot and every
+	// validator page, growing with every row stored). The same rows are now
+	// found by seeking:
+	//
+	//   - the validators, by a loose index scan (the recursive CTE): each
+	//     step is one seek to the next distinct validator_address, so
+	//     listing them costs one seek per validator, not one step per row;
+	//   - each one's newest qualifying row, from probes_latest_answer and
+	//     reachability_latest_answer (migration 22):
+	//     an index on validator_address alone, partial on exactly this
+	//     outcome test, keeps a validator's entries in rowid order, so
+	//     ORDER BY rowid DESC LIMIT 1 reads its last entry and stops.
+	//
+	// Pinned to a moment, the walk goes back from the newest entry to the
+	// first one started by then. started_at is written with a unary plus
+	// there so SQLite keeps walking that index in rowid order rather than
+	// switching to probes_validator_time, which would
+	// hand back every earlier row to sort. TestHotQueriesUseIndexes pins
+	// both plans.
+	for _, t := range []struct{ table, ok, source string }{
+		{"reachability", `outcome <> 'PROBE_ERROR'`, "heartbeat"},
+		{"probes", `outcome NOT IN ('MISSED','PROBE_ERROR')`, "probe"},
+	} {
+		q, args := latestAnswerSQL(t.table, t.ok, t.source, only, asOf)
+		rows, err := s.st.DB().QueryContext(ctx, q, args...)
+		if err != nil {
 			return nil, err
 		}
-		st.tcpOK, st.tlsOK = tcp == 1, tls == 1
-		st.reachable = st.tcpOK && st.tlsOK
-		st.identityOK = id == 1
-		if cur, ok := out[addr]; !ok || st.at > cur.at {
-			out[addr] = st
+		for rows.Next() {
+			var addr string
+			var st reachState
+			var tcp, tls, id int
+			if err := rows.Scan(&addr, &st.host, &st.at, &tcp, &tls, &id, &st.identityReason, &st.source); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			st.tcpOK, st.tlsOK = tcp == 1, tls == 1
+			st.reachable = st.tcpOK && st.tlsOK
+			st.identityOK = id == 1
+			if cur, ok := out[addr]; !ok || st.at > cur.at {
+				out[addr] = st
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
 		}
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+// latestAnswerSQL is the query reachabilityNow runs against one table: the
+// newest row per validator (or for only) among those whose outcome passes
+// ok, started no later than asOf when it is set. ok must be spelled exactly
+// as the partial index's WHERE is (probes_latest_answer,
+// reachability_latest_answer), or SQLite cannot use it.
+func latestAnswerSQL(table, ok, source, only, asOf string) (string, []any) {
+	var args []any
+	// The validators: one, or every one with a qualifying row, listed by
+	// seeking from each to the next.
+	v := `WITH RECURSIVE v(a) AS (
+			SELECT (SELECT MIN(validator_address) FROM ` + table + ` WHERE ` + ok + `)
+			UNION ALL
+			SELECT (SELECT MIN(validator_address) FROM ` + table + ` WHERE ` + ok + ` AND validator_address > v.a)
+			FROM v WHERE v.a IS NOT NULL)`
+	if only != "" {
+		v = `WITH v(a) AS (SELECT ?)`
+		args = append(args, only)
+	}
+	pin := ""
+	if asOf != "" {
+		pin = ` AND +q.started_at <= ?`
+		args = append(args, asOf)
+	}
+	return v + `
+		SELECT r.validator_address, r.validator_host, r.started_at, r.tcp_ok, r.tls_ok, r.identity_ok, r.identity_reason, '` + source + `'
+		FROM v JOIN ` + table + ` r ON r.rowid = (
+			SELECT q.rowid FROM ` + table + ` q
+			WHERE q.validator_address = v.a AND q.` + ok + pin + `
+			ORDER BY q.rowid DESC LIMIT 1)`, args
 }
 
 // ---- validators ----
@@ -2258,6 +2304,19 @@ type validatorRow struct {
 	// runs the enforcement path at all. Matched on address bytes, so an
 	// operator that submits from another account is not counted.
 	TimeoutsEnforced int64 `json:"timeouts_enforced"`
+	// Signing is how often this validator's verified signature is on the
+	// settled promises that assigned it rows in the window. Descriptive, never
+	// a fault: see signing.go.
+	Signing signingStats `json:"signing"`
+	// Hosting is the network (origin AS, provider bucket) and country the
+	// open endpoint's host resolved into, as resolved from this vantage;
+	// absent when the lookup is off or has not reached this host. See
+	// hosting.go and observer/hosting.
+	Hosting *hosting.Info `json:"hosting,omitempty"`
+
+	// ProvisionalFaults is the part of Obligations.Broken whose faults are
+	// all still settling (provisional.go); absent when there is none.
+	ProvisionalFaults *provisionalFaults `json:"provisional_faults,omitempty"`
 }
 
 func loadBand(rows int) string {
@@ -2396,21 +2455,19 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	// count, and the table sorts faults to the top: the row that looked worst
 	// was the one we had the least current information about. The height the
 	// figures come from is published with them.
-	innerWhere, outerWhere := "", ""
-	assignArgs := []any{}
-	if only != "" {
-		innerWhere, outerWhere = " WHERE a2.validator_address = ?", " WHERE a.validator_address = ?"
-		assignArgs = []any{only, only}
-	}
+	//
+	// Found by seeking, not by joining every assignment to its publication:
+	// assignments are never pruned and grow by one row per validator per
+	// blob, so the GROUP BY this replaced grew without bound (0.37s at
+	// 180,000 assignments). The validators are listed by a loose index
+	// scan over assignments_validator_height (one seek each), the newest
+	// height per validator is the last entry under it (one seek), and the
+	// rows at that height are an equality seek on both columns. The height
+	// is still checked against the publication's own, so a copy that ever
+	// disagreed would drop the row rather than publish a wrong height.
+	q, assignArgs := latestAssignmentSQL(only)
 	tieHash := map[string]string{}
-	rows, err := db.QueryContext(ctx, `SELECT a.validator_address, a.voting_power, a.row_count, a.attested, p.settlement_height, a.promise_hash
-		FROM assignments a
-		JOIN publications p ON p.promise_hash = a.promise_hash
-		JOIN (
-			SELECT a2.validator_address AS va, MAX(p2.settlement_height) AS h
-			FROM assignments a2 JOIN publications p2 ON p2.promise_hash = a2.promise_hash`+innerWhere+`
-			GROUP BY a2.validator_address
-		) m ON m.va = a.validator_address AND m.h = p.settlement_height`+outerWhere, assignArgs...)
+	rows, err := db.QueryContext(ctx, q, assignArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -2797,6 +2854,10 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	if err != nil {
 		return nil, err
 	}
+	provisional, err := s.provisionalByValidator(ctx, win, ss, time.Now(), vfilter("pr.validator_address"), vargs()...)
+	if err != nil {
+		return nil, err
+	}
 
 	timeouts, err := s.timeoutsByAccount(ctx, win)
 	if err != nil {
@@ -2835,6 +2896,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			byObligation[addr] = o
 		}
 	}
+	if err := s.fillSigning(ctx, win, only, byAddr); err != nil {
+		return nil, err
+	}
 	out := make([]validatorRow, 0, len(byAddr))
 	for addr, v := range byAddr {
 		if only != "" && addr != only {
@@ -2845,6 +2909,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		v.HeldOut = heldOut(v.Classes)
 		v.Obligations = byObligation[addr]
 		v.ByObligation = v.Obligations.Rate
+		v.ProvisionalFaults = provisional[addr]
 		if v.Operator != "" {
 			v.TimeoutsEnforced = timeouts[accountKey(v.Operator)]
 		}
@@ -2857,6 +2922,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			}
 		}
 		out = append(out, *v)
+	}
+	if err := s.attachHosting(ctx, out, win); err != nil {
+		return nil, err
 	}
 	// voting power desc, then address
 	sortRows(out)
@@ -3053,6 +3121,8 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 		HeldOut      map[string]int64 `json:"serve_rate_held_out"`
 		Classes      classCounts      `json:"classes"`
 		RolledUp     *rolledUp        `json:"rolled_up,omitempty"`
+		// Provisional is the part of obligations.broken still settling.
+		Provisional *provisionalFaults `json:"provisional_faults,omitempty"`
 	}
 	var spans []span
 	// The suspect points over all time, so the recent-probes list can mark
@@ -3079,6 +3149,10 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 		if err != nil {
 			return 0, nil, err
 		}
+		prov, err := s.provisionalByValidator(ctx, sw, ss, time.Now(), ` AND pr.validator_address = ?`, addr)
+		if err != nil {
+			return 0, nil, err
+		}
 		rolled, label, err := s.rolledFor(ctx, sw, addr)
 		if err != nil {
 			return 0, nil, err
@@ -3095,7 +3169,7 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 		spans = append(spans, span{
 			Window: sw, Rate: serveRate(classes), Count: total,
 			Coverage: coverage(classes), Obligations: obl, ByObligation: obl.Rate, HeldOut: heldOut(classes), Classes: classes,
-			RolledUp: label,
+			RolledUp: label, Provisional: prov[addr],
 		})
 	}
 	rows, err := s.validatorRows(ctx, win, addr)
@@ -3128,6 +3202,16 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 	}
 	if win.AsOf {
 		out["as_of_note"] = AsOfNote
+	}
+	hm, err := s.validatorHeatmap(ctx, addr, win)
+	if err != nil {
+		return 0, nil, err
+	}
+	out["heatmap"] = hm
+	// The network's rate over the same window from the same vantage, for the
+	// page's service-rate context (provisional.go).
+	if ref := s.networkReference(ctx, win); ref != nil {
+		out["network_reference"] = ref
 	}
 	if c, err := s.lastEndpointCheck(ctx, addr, win); err == nil && c != nil {
 		out["last_endpoint_check"] = c
@@ -3812,6 +3896,9 @@ type probeRow struct {
 	HostChanged           bool   `json:"host_changed,omitempty"`
 	SettlementHostOutcome string `json:"settlement_host_outcome,omitempty"`
 	SettlementHostServed  *bool  `json:"settlement_host_served,omitempty"`
+	// Provisional marks a FAULT younger than verdict.FaultSettling: it
+	// counts, and it can still be withdrawn (provisional.go).
+	Provisional bool `json:"provisional,omitempty"`
 }
 
 func (s *Server) probeRows(ctx context.Context, where string, limit int, args ...any) ([]probeRow, error) {
@@ -3844,6 +3931,7 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 	}
 	defer rows.Close()
 	out := []probeRow{}
+	now := time.Now()
 	for rows.Next() {
 		var p probeRow
 		var assigned, tls, id, held int
@@ -3859,6 +3947,7 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 			return nil, err
 		}
 		p.RetentionUnverified = held == 1
+		p.Provisional = isProvisional(p.Classification, p.StartedAt, now)
 		p.HostChanged = p.HostAtSettlement != "" && p.ValidatorHost != "" && p.ValidatorHost != p.HostAtSettlement
 		if served.Valid {
 			b := served.Int64 == 1
@@ -4003,7 +4092,7 @@ func (s *Server) handleExports(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, 200, map[string]any{
+	out := map[string]any{
 		"vantage": s.vantage,
 		"exports": entries,
 		"how_to_verify": "download /v1/exports/<name>, check its sha256 against the entry (and the .sha256 sidecar), " +
@@ -4011,7 +4100,14 @@ func (s *Server) handleExports(w http.ResponseWriter, r *http.Request) {
 			"every row's phase and classification from the row's own fields and the run's recorded configuration, and every " +
 			"obligation figure from the rows, and prints what differs from this API's /v1/validators?as_of=<day end>.",
 		"rule": "records are assigned to a day by their own timestamp; a record that reached the file after its day's export was built is in the next export, counted as late",
-	})
+	}
+	// Whether exports are signed, by which key, and how to check (see
+	// exports_signing.go). An unreadable key record hides the block rather
+	// than failing the list: the exports are still the exports.
+	if sig, err := s.exportSigning(); err == nil {
+		out["signing"] = sig
+	}
+	writeJSON(w, 200, out)
 }
 
 // handleExportFile serves one export or its digest sidecar. Names are
@@ -4073,6 +4169,9 @@ func (s *Server) handleExportFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasSuffix(name, ".sha256") {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	} else if strings.HasSuffix(name, ".sig") {
+		// The signature over the manifest digest (export/sign.go).
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	} else {
 		w.Header().Set("Content-Type", "application/gzip")
 		w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
@@ -4080,4 +4179,25 @@ func (s *Server) handleExportFile(w http.ResponseWriter, r *http.Request) {
 	// An export is written once and never changes; its name carries the day.
 	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 	http.ServeContent(w, r, name, info.ModTime(), f)
+}
+
+// latestAssignmentSQL is the newest-assignment query validatorRows runs,
+// for every validator or for only; see the comment where it is used.
+func latestAssignmentSQL(only string) (string, []any) {
+	v := `WITH RECURSIVE v(a) AS (
+			SELECT (SELECT MIN(validator_address) FROM assignments)
+			UNION ALL
+			SELECT (SELECT MIN(validator_address) FROM assignments WHERE validator_address > v.a)
+			FROM v WHERE v.a IS NOT NULL)`
+	var args []any
+	if only != "" {
+		v = `WITH v(a) AS (SELECT ?)`
+		args = []any{only}
+	}
+	return v + `,
+		m(va, h) AS (SELECT a, (SELECT MAX(settlement_height) FROM assignments WHERE validator_address = v.a) FROM v WHERE a IS NOT NULL)
+		SELECT a.validator_address, a.voting_power, a.row_count, a.attested, p.settlement_height, a.promise_hash
+		FROM m
+		JOIN assignments a ON a.validator_address = m.va AND a.settlement_height = m.h
+		JOIN publications p ON p.promise_hash = a.promise_hash AND p.settlement_height = m.h`, args
 }

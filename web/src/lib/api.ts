@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import type { Signing } from "./signing";
 
 // Base URL of observer-api. Same-origin "/api" is what deploy/Caddyfile
 // proxies; override with NEXT_PUBLIC_API_BASE for local development.
@@ -189,6 +190,8 @@ export type Network = {
   serve_rate_coverage: Rate;
   /** one observation per (validator, blob), judged by the newest probe; the headline */
   obligations: Obligations;
+  /** the part of obligations.broken whose faults are all still settling; absent when none (see ProvisionalFaults) */
+  provisional_faults?: ProvisionalFaults;
   /** obligations.rate, repeated */
   serve_rate_by_obligation: Rate;
   /** class -> probes the rate does not speak for */
@@ -339,6 +342,8 @@ export type Validator = {
   serve_rate_coverage: Rate;
   /** one observation per (validator, blob), judged by the newest probe; the headline */
   obligations: Obligations;
+  /** the part of obligations.broken whose faults are all still settling; absent when none (see ProvisionalFaults) */
+  provisional_faults?: ProvisionalFaults;
   /** obligations.rate, repeated */
   serve_rate_by_obligation: Rate;
   serve_rate_held_out: ClassCounts;
@@ -381,6 +386,10 @@ export type Validator = {
    * operator runs the enforcement path at all.
    */
   timeouts_enforced?: number;
+  /** signing participation over the period: see lib/signing.ts. Descriptive, never a fault. */
+  signing?: Signing;
+  /** network and country the open endpoint resolved into, from this vantage; absent when the lookup is off */
+  hosting?: import("./hosting").Hosting;
 };
 
 export type Probe = {
@@ -424,6 +433,8 @@ export type Probe = {
   /** the evidence probe of the settlement host, run when the current host did not serve; never the verdict */
   settlement_host_outcome?: string;
   settlement_host_served?: boolean;
+  /** a FAULT younger than the settling period: counted, and still able to be withdrawn */
+  provisional?: boolean;
 };
 
 // Below this many rated probes a percentage is noise dressed as a
@@ -927,4 +938,34 @@ export type EndpointCheck = {
   identity_reason?: string;
   raw_error?: string;
   vantage: string;
+};
+
+/**
+ * Provisional faults: broken obligations whose every failed probe is younger
+ * than the observer's settling period (30 minutes). They are counted in
+ * broken and in the rate; the flag says evidence still on its way (the rest
+ * of the schedule point, an x/fibre params change not yet reconciled) can
+ * withdraw them. `until` is when the youngest settles, so a cached answer
+ * still tells the page when to drop the badge.
+ */
+export type ProvisionalFaults = { obligations: number; until: string; settling_seconds: number; note: string };
+
+/** how many of these faults are still provisional right now; 0 once `until` has passed */
+export function provisionalNow(p: ProvisionalFaults | null | undefined, now = Date.now()): number {
+  if (!p || !p.obligations) return 0;
+  const until = Date.parse(p.until);
+  return Number.isFinite(until) && until > now ? p.obligations : 0;
+}
+
+/** the network's service rate over the same window from the same vantage, beside a validator's own */
+export type NetworkReference = {
+  window: Window;
+  /** median of validators' own rates, over those with at least min_rated decided; null when none */
+  median_rate: number | null;
+  validators: number;
+  min_rated: number;
+  /** every obligation together */
+  pooled_rate: Rate;
+  computed_at: string;
+  note: string;
 };

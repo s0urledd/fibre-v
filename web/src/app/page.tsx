@@ -1,7 +1,7 @@
 "use client";
 import { Suspense, useState } from "react";
 import Link from "next/link";
-import { useApi, type Network, type Validator, type Meta, type Market, int, pctOf, bytes, undecided, MIN_RATED } from "@/lib/api";
+import { API_BASE, useApi, type Network, type Validator, type Meta, type Market, int, pctOf, bytes, undecided, MIN_RATED } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
@@ -9,6 +9,7 @@ import OutcomeBar from "@/components/OutcomeBar";
 import VolumeChart from "@/components/VolumeChart";
 import Validators from "@/components/Validators";
 import { netName } from "@/components/Chrome";
+import { Concentration } from "@/components/Hosting";
 
 /**
  * The overview: the network's obligations over the selected period, the
@@ -112,7 +113,10 @@ function Overview() {
         </div>
       </section>
 
+      <Concentration />
+
       <Validators rows={rows} window={win} notLive={notLive} loading={vals.loading} />
+      <p className="tnote"><a href={`${API_BASE}/v1/feed.atom`} type="application/atom+xml">Network events (Atom)</a> · host registrations, bonded-list changes, first faults and observer incidents, for any feed reader. Each validator has its own feed on its page.</p>
       {notLive && meta && <p className="tnote">Fibre is not live on {meta.chain_id}: the chain runs app v{meta.app_version}{meta.fibre_app_version ? ` and Fibre needs v${meta.fibre_app_version}` : ""}. “Signalled” is x/signal’s word on whether the validator has signalled for the version that brings Fibre.</p>}
     </>
   );

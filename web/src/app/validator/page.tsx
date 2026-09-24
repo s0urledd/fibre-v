@@ -2,16 +2,19 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, badRequest, MIN_RATED, API_BASE } from "@/lib/api";
+import { useApi, type Validator, type Probe, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
 import OutcomeBar from "@/components/OutcomeBar";
 import Copy from "@/components/Copy";
 import { endpoint } from "@/components/Validators";
+import { HostingChip } from "@/components/Hosting";
 import { DISPUTE_URL, SELF_VALIDATOR } from "@/lib/site";
+import Heatmap from "@/components/Heatmap";
+import type { Heatmap as HeatmapData } from "@/lib/signing";
 
-type Span = { window: Window; serve_rate: Rate; probe_count: number; obligations: Obligations; classes: ClassCounts };
+type Span = { window: Window; serve_rate: Rate; probe_count: number; obligations: Obligations; classes: ClassCounts; provisional_faults?: ProvisionalFaults };
 type Detail = {
   window: Window;
   record_through?: RecordThrough;
@@ -25,7 +28,14 @@ type Detail = {
   suspect_points: { at: string; label: string; reason: string }[];
   /** the newest heartbeat against this validator's host, stage by stage */
   last_endpoint_check?: EndpointCheck;
+  /** served over rated probes per UTC day and schedule point */
+  heatmap?: HeatmapData;
+  /** the network's service rate over the same window from the same vantage; absent on a pinned window */
+  network_reference?: NetworkReference;
 };
+
+/** a fraction as the site prints a share */
+const pctFrac = (f: number) => (f >= 1 ? "100%" : `${(f * 100).toFixed(1)}%`);
 
 /** the verdict as a word and a mark; the classification is the observer's, never re-derived here */
 const WORDS: Record<string, [string, string]> = {
@@ -83,6 +93,14 @@ function Page() {
   const defaultPoints = points.length === 4 && points.every((p, i) => p.key === `w${i + 1}`);
   const measuring = !!o && o.total > 0 && decided < MIN_RATED && o.pending > 0;
   const att = v.attestation;
+  const sig = v.signing;
+  // Broken obligations whose faults are all younger than the settling
+  // period: counted, and still able to be withdrawn. provisionalNow drops
+  // them once `until` passes, so a cached answer does not keep the badge.
+  const prov = provisionalNow(v.provisional_faults);
+  const ref = data.network_reference;
+  const refText = ref && ref.median_rate != null ? `network median ${pctFrac(ref.median_rate)}` : ref && ref.pooled_rate.den > 0 ? `network ${pctOf(ref.pooled_rate.num, ref.pooled_rate.den)}` : "";
+  const refTitle = ref ? `The same period from the same location: the median service rate over ${int(ref.validators)} validator${ref.validators === 1 ? "" : "s"} with at least ${int(ref.min_rated)} assessed obligations${ref.median_rate == null ? " (none yet)" : ""}; every obligation together, ${ref.pooled_rate.den > 0 ? `${pctOf(ref.pooled_rate.num, ref.pooled_rate.den)} (${int(ref.pooled_rate.num)}/${int(ref.pooled_rate.den)})` : "none assessed"}.` : undefined;
 
   return (
     <>
@@ -94,14 +112,18 @@ function Page() {
             <span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span>
             {v.host && <span title={v.identity_reason || "The consensus-key check on the newest handshake."}>TLS identity <b className="word">{identityWord[v.identity_status] ?? v.identity_status}</b></span>}
             {v.host && <span><span className="mono">{v.host}</span>{v.endpoint_since && <> · registered since {dateUTC(v.endpoint_since)}</>}</span>}
+            {v.host && <HostingChip h={v.hosting} />}
             {!v.host && v.last_host && <span title="The registration stays on chain; the validator left the bonded provider list.">last endpoint <span className="mono">{v.last_host}</span>{v.endpoint_closed_at && <> · left the bonded list {dateUTC(v.endpoint_closed_at)}</>}</span>}
-            {att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">signed <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs</span>}
+            {sig && sig.assigned > 0
+              ? <span title={`Settled promises in this period that assigned this validator rows and carry its verified signature, ${pctOf(sig.signed, sig.assigned)}. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.`}>signed <b className="word">{int(sig.signed)} / {int(sig.assigned)}</b> promises</span>
+              : att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">signed <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs</span>}
             {(v.timeouts_enforced ?? 0) > 0 && <span title="MsgPaymentPromiseTimeout submitted by this validator’s operator account in the period: abandoned promises reported so the escrow was charged. The chain pays nothing for it.">{int(v.timeouts_enforced)} timeout{v.timeouts_enforced === 1 ? "" : "s"} enforced</span>}
           </div>
           <div className="idkv">
             {v.cons_address && <span title={v.cons_address}><span className="mono">{shortMid(v.cons_address, 22, 6)}</span><Copy text={v.cons_address} label="consensus address" /></span>}
             {v.operator_address && <span title={v.operator_address}><span className="mono">{shortMid(v.operator_address, 22, 6)}</span><Copy text={v.operator_address} label="operator address" /></span>}
             <span title={`consensus address, hex: ${v.address}`}><span className="mono">{shortMid(v.address, 10, 6)}</span><Copy text={v.address} label="hex address" /></span>
+            <span title="An Atom feed of this validator’s endpoint changes: registered or changed host, bonded-list changes, unreachable and recovered, certificate problems, first fault. Paste the link into any feed reader; nothing is stored about you."><a href={`${API_BASE}/v1/validators/${v.address}/feed.atom`} type="application/atom+xml">Subscribe (Atom)</a> <span className="soft">· endpoint changes in any feed reader</span></span>
             {v.website && <span><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a></span>}
           </div>
         </div>
@@ -113,11 +135,12 @@ function Page() {
         <Metric label="Service rate"
           value={notLive || !o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}
           tone={notLive || !o || decided === 0 ? "absent" : undefined}
-          help={notLive ? "nothing to measure yet" : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed`} />
+          help={notLive ? "nothing to measure yet" : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed${refText ? ` · ${refText}` : ""}`}
+          title={notLive ? undefined : refTitle} />
         <Metric label="Broken obligations"
           value={notLive ? "—" : int(o?.broken ?? 0)} tone={notLive ? "absent" : (o?.broken ?? 0) > 0 ? "fault" : !o || o.total === 0 ? "absent" : undefined}
-          help={notLive ? "nothing to measure yet" : (o?.broken ?? 0) > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}` : faults > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"} · none broken in this period` : "none in this period"}
-          title={(o?.broken ?? 0) > 0 ? "One obligation counts once, however many probes of it failed. The probe rows are in the evidence below." : faults > 0 ? "A failed probe of an obligation still inside its retention window is not a verdict yet; the obligation is decided at the end of the window." : undefined} />
+          help={notLive ? "nothing to measure yet" : (o?.broken ?? 0) > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}${prov > 0 ? ` · ${int(prov)} provisional` : ""}` : faults > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"} · none broken in this period` : "none in this period"}
+          title={prov > 0 ? `${int(prov)} of these rest only on failed probes younger than ${Math.round((v.provisional_faults?.settling_seconds ?? 1800) / 60)} minutes. They count in the rate now, and become final at ${whenUTC(v.provisional_faults!.until)} unless evidence still arriving withdraws them: the rest of the schedule point's probes, or an x/fibre params change not yet reconciled.` : (o?.broken ?? 0) > 0 ? "One obligation counts once, however many probes of it failed. The probe rows are in the evidence below." : faults > 0 ? "A failed probe of an obligation still inside its retention window is not a verdict yet; the obligation is decided at the end of the window." : undefined} />
         <Metric label="Undecided" value={notLive ? "—" : int(und)} tone={notLive || !o || o.total === 0 ? "absent" : undefined} help={notLive ? "nothing to measure yet" : `${int(o?.pending ?? 0)} pending`} />
         <Metric label="Reachability"
           value={!bonded ? "—" : rw && rw.den > 0 ? int(rw.num) : "—"} den={bonded && rw && rw.den > 0 ? int(rw.den) : undefined}
@@ -143,7 +166,7 @@ function Page() {
                   <tr key={name} className={name === win ? "on" : undefined}>
                     <td><button type="button" className="rowlink" aria-pressed={name === win} onClick={() => setWin(name as typeof win)} title={`show the ${windowLabel(name)} period`}>{windowLabel(name)}</button></td>
                     <td>{notLive || wd === 0 ? "—" : <>{pctOf(wo.served, wd)}<span className="den"> · {int(wo.served)}/{int(wd)}</span></>}</td>
-                    <td>{notLive ? "—" : wo.broken > 0 ? <span className="word fault">{int(wo.broken)}</span> : "0"}</td>
+                    <td>{notLive ? "—" : wo.broken > 0 ? <><span className="word fault">{int(wo.broken)}</span>{provisionalNow(w.provisional_faults) > 0 && <span className="den" title="Counted, and still settling: see the broken obligations figure above."> · {int(provisionalNow(w.provisional_faults))} provisional</span>}</> : "0"}</td>
                     <td>{notLive ? "—" : int(wo.pending)}</td>
                   </tr>
                 );
@@ -177,6 +200,12 @@ function Page() {
         </div>
       </section>
 
+      <section className="hm-band" id="calendar">
+        <h2>Day by day</h2>
+        <p className="sub">Served over rated probes at each point of the retention window, per UTC day</p>
+        <Heatmap data={data.heatmap} />
+      </section>
+
       <section id="evidence">
         <div className="vhead">
           <div><h2>Recent evidence</h2><p className="sub">Newest {int(probes.length)} probe rows, as classified by the observer{data.recent_probes_truncated ? " · the rest in the API" : ""}</p></div>
@@ -190,8 +219,12 @@ function Page() {
               {probes.map((p) => {
                 const sus = suspect.get(p.scheduled_at);
                 // at a point the observer does not trust itself at, nothing is this validator's: no red, no verdict word
-                const [word, mk] = sus ? ["Not counted", "gone"] : probeWord(p);
+                const [word0, mk] = sus ? ["Not counted", "gone"] : probeWord(p);
+                // a fault younger than the settling period counts, and can still be withdrawn
+                const provisional = !sus && p.classification === "FAULT" && !!p.provisional;
+                const word = provisional ? `${word0} · provisional` : word0;
                 const notes = [
+                  provisional && "provisional: younger than the settling period, so the rest of this schedule point or a params change not yet reconciled can still withdraw it; counted meanwhile",
                   p.attested === false && "no signature from this validator on this promise, so the probe is outside the rate",
                   p.retry_first_outcome && `first attempt ${p.retry_first_outcome}, retried once from the same location`,
                   p.host_changed && `the validator re-registered during the window: the upload went to ${p.host_at_settlement}${p.settlement_host_outcome ? `; asked as evidence, the old host answered ${p.settlement_host_outcome}${p.settlement_host_served ? " with the exact rows" : ""}` : ""}`,

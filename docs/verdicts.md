@@ -468,10 +468,15 @@ One sentence each, and what a reader should conclude.
   `FibreProviderInfo` query at the settlement height, in force from the
   seed height since every later change is an event on record) or, when
   that state is pruned, at the tip (`seed_current`, in force from the tip
-  only); `host_at_settlement_source` says event, seed, seed_lazy,
-  seed_current, none (the chain's explicit answer that nothing is
-  registered, never inferred from absence), or unknown because a scan gap
-  or a missing seed leaves the question open; `host_history.jsonl` is the record and the export carries
+  only), and read again after a scan gap whose blocks' events were not
+  read (`reseed`: the registry at the height before the scan's position,
+  in force from the gap's end, for each validator with no event of its own
+  since; settlements inside or before the gap stay unknown). A gap where
+  only a publication's validator set was pruned read the block's events
+  and does not make hosts unknown; `host_at_settlement_source` says event,
+  seed, seed_lazy, seed_current, reseed, none (the chain's explicit answer
+  that nothing is registered, never inferred from absence), or unknown
+  because a scan gap or a missing seed leaves the question open; `host_history.jsonl` is the record and the export carries
   it) with
   `settlement_host_probe` (what that host answered when the current one
   did not serve and differs from it), `observer.build` (the observer's VCS revision), and
@@ -881,6 +886,63 @@ microseconds between the RPC's return and the row's finish time. An
 obligation figure that differs from the API's with the same rows and the
 same `as_of` is a bug in one of the two implementations, and is why there
 are two.
+
+## Provisional faults
+
+A `FAULT` younger than **30 minutes** (`verdict.FaultSettling`, measured from
+the probe's `started_at`) is *provisional*: `provisional: true` on the probe
+row, `provisional_faults` (`obligations`, `until`, `settling_seconds`) on the
+network row, on every validator row and on each span of the validator page,
+and "Broken · provisional" on the site. A broken obligation is provisional
+when **every** FAULT behind it is that young; one settled fault makes it final.
+After `until` the label is gone, whatever snapshot is being served.
+
+**Why 30 minutes.** The period covers the evidence that can withdraw a
+FAULT without a human, and nothing else:
+
+| path | how long after the fault | what it does |
+|---|---|---|
+| correlated-failure guard | the rest of the schedule point's rows can land up to `MaxLatenessFraction` (5%) of the window after it: 12 min on mocha's 4 h `shard_retention` | a point where half the set, and at least three, faulted or were unreachable leaves every count |
+| silent params change | the scanner re-reads `x/fibre` params every 60 blocks (~6 min) | the range withholds its publications' rows (`RETENTION_UNVERIFIED`) in the transaction that records it |
+| ingest | collector tail every 10 s, scanner catch-up in minutes | the row, or the evidence against it, reaches the store |
+
+Twice the longest (12 min), rounded up to the half hour. Deferred shadow
+verdicts (`amendments.jsonl`) never touch a `FAULT` — they re-judge
+`PROBE_ERROR` rows — and a dispute has no time bound, so neither sets the
+period; an amendment is on the record whenever it lands.
+
+**Why provisional faults are in the headline.** Three options:
+
+- *Hold provisional faults out of the rate.* Rejected. It withholds the
+  accusation and not the credit, which this document refuses for
+  `RETENTION_UNVERIFIED`, `UNATTESTED` and grace for the same reason: it
+  raises every rate it touches. A validator failing now would read cleaner
+  for half an hour than one that failed yesterday.
+- *Hold every obligation decided in the last 30 minutes, served and broken
+  alike.* Symmetric, but it is only a longer `pending`: every figure is half
+  an hour older, and the thing a reader should know — this fault is fresh
+  and can still move — is not shown at all.
+- *Count it and flag it.* Chosen. A FAULT is conclusive from one reading
+  (the shard was not there at that minute; see "`served` and `broken` are
+  deliberately not symmetric"), and the automatic withdrawal paths above
+  already act on the store and move the snapshot revision, so a withdrawn
+  fault leaves the headline by itself. The flag tells a reader which part
+  of the figure can still move and until when.
+
+Nothing about it changes a count, which is why it did not move
+`MethodologyVersion`.
+
+## Network reference on the validator page
+
+The validator page's service rate is printed beside the network's over the
+same window from the same vantage (`network_reference` on
+`/v1/validators/{addr}`): `median_rate`, the median of the validators' own
+obligation rates over those with at least 20 decided obligations (each
+validator once, so one large validator cannot move it), and `pooled_rate`,
+every obligation together. It is read from the same validators snapshot
+`/v1/validators` serves, so the page and the table agree; a pinned
+(`as_of`) window omits it rather than computing every validator's row per
+page view.
 
 ## Disputing a verdict
 

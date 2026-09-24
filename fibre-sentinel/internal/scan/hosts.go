@@ -42,6 +42,18 @@ const (
 	// from that height on, and earlier settlements without an event are
 	// unknown (HostUnknownNoSeed), never this value.
 	HostFromSeedCurrent = "seed_current"
+	// HostFromReseed: a scan gap lost blocks whose events were never read,
+	// so a registration inside it may be missing from the record. The
+	// registry was read again after the gap (the bonded registry once, or
+	// one validator's registration the first time it was needed) and the
+	// value recorded from the first height after the gap. Every block from
+	// there to the read height was read, events included, and a
+	// registration is never removed, so the value holds from the gap's end
+	// for a validator with no event of its own in that span (one with an
+	// event is known from the event on, and unknown before it). Settlements
+	// inside or before the gap are untouched: still unknown_gap where the
+	// gap hides their registration.
+	HostFromReseed = "reseed"
 	// HostNone: the chain was asked for this validator's registration and
 	// answered that there is none (an explicit empty seed entry). A registry
 	// state, as NOT_REGISTERED is; never inferred from absence.
@@ -170,6 +182,80 @@ func (h *HostHistory) AddTxEvent(height int64, txIndex int, consAddrHex, host st
 	return e, len(h.entries) > before
 }
 
+// Reseed records the bonded registry as read at readHeight (the state after
+// that block) as in force from fromHeight, the first height after a scan
+// gap that lost events: one HostFromReseed entry per provider. A validator
+// with an entry on record after fromHeight and at or before readHeight is
+// left alone: its own event changed the host inside that span, the value
+// read postdates the change, and placing it at fromHeight would back-date
+// it. A validator missing from the bonded list gets nothing (absence is
+// not "none"); it is read on its own when it is next needed. Returns the
+// entries added.
+func (h *HostHistory) Reseed(fromHeight, readHeight int64, providers []FibreProvider) []HostEntry {
+	var out []HostEntry
+	for _, p := range providers {
+		addr, err := consHexOf(p.ConsAddressBech32)
+		if err != nil {
+			continue
+		}
+		if e, ok := h.ReseedOne(addr, p.Host, fromHeight, readHeight); ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// ReseedOne is Reseed for one validator's registration, read with a single
+// FibreProviderInfo query; an empty host is the chain's explicit "none".
+// ok is false when nothing was added: the validator has an entry after
+// fromHeight and at or before readHeight (see Reseed), or the same re-seed
+// is already on record.
+func (h *HostHistory) ReseedOne(consAddrHex, host string, fromHeight, readHeight int64) (HostEntry, bool) {
+	addr := strings.ToLower(consAddrHex)
+	for _, x := range h.byAddr[addr] {
+		if lessKey(fromHeight, -1, x.FromHeight, x.FromTxIndex) && x.FromHeight <= readHeight {
+			return HostEntry{}, false
+		}
+	}
+	e := HostEntry{FromHeight: fromHeight, FromTxIndex: -1, ConsAddress: addr, Host: host, Source: HostFromReseed}
+	before := len(h.entries)
+	h.add(e)
+	return e, len(h.entries) > before
+}
+
+// ReseededAt reports whether the bonded registry has been re-read for the
+// gap that ended at fromHeight-1: some HostFromReseed entry starts there.
+// Derived from the entries, so it survives a restart without a state field
+// of its own. (One validator's lazy re-read also counts; the bulk read it
+// then skips is only an optimisation, and every validator still in the
+// dark is re-read on its own when a publication needs it.)
+func (h *HostHistory) ReseededAt(fromHeight int64) bool {
+	for _, e := range h.entries {
+		if e.Source == HostFromReseed && e.FromHeight == fromHeight {
+			return true
+		}
+	}
+	return false
+}
+
+// LastHostLossGapEnd is the end of the newest gap that ends below height
+// and whose blocks' events were not read (ScanGap.HostEventsRead unset),
+// and false when there is none. Only inside such a gap can a registration
+// be missing from the record, so it is the point a re-seed starts after.
+func LastHostLossGapEnd(gaps []ScanGap, height int64) (int64, bool) {
+	var end int64
+	found := false
+	for _, g := range gaps {
+		if g.HostEventsRead || g.To >= height {
+			continue
+		}
+		if !found || g.To > end {
+			end, found = g.To, true
+		}
+	}
+	return end, found
+}
+
 // HostAt returns the host a validator had registered when a promise settled
 // by the tx at txIndex in block height, and where that came from (a Host*
 // constant). gaps are the scanner's unread ranges: an event inside a gap
@@ -208,9 +294,17 @@ func (h *HostHistory) HostAt(consAddrHex string, height int64, txIndex int, gaps
 }
 
 // gapBetween reports whether any gap touches (after, upTo]: heights the
-// scanner did not read where a registration could have happened.
+// scanner did not read where a registration could have happened. A gap
+// whose blocks' events were read (HostEventsRead: only a publication's
+// validator set at its promise height was missing) lost no registration
+// and does not count. Counting it made one pruned promise height turn every
+// later host_at_settlement into unknown_gap, for every validator, until
+// each one happened to register again.
 func gapBetween(gaps []ScanGap, after, upTo int64) bool {
 	for _, g := range gaps {
+		if g.HostEventsRead {
+			continue
+		}
 		if g.To > after && g.From <= upTo {
 			return true
 		}

@@ -95,6 +95,17 @@ type Scanner struct {
 	// than at the next inactiveRetryEvery boundary.
 	activationSeen bool
 
+	// reseedFor is the end of the event-losing gap the bonded registry was
+	// last re-read for in this process (or tried: reseedTriedAt is the
+	// height of that try), so a gap costs one AllBondedFibreProviders query,
+	// and one every inactiveRetryEvery heights while that query fails,
+	// rather than one per block. reseedOneTried remembers the validators
+	// already re-read on their own for that gap, so a failing query is not
+	// repeated for every publication they are in.
+	reseedFor      int64
+	reseedTriedAt  int64
+	reseedOneTried map[string]int64
+
 	// valSets caches the validator set per promise height: the fibre-assign
 	// view used for row assignment and the raw members (with consensus keys)
 	// used to verify signatures, kept in one entry so the two can never
@@ -136,8 +147,9 @@ func New(cfg Config, log *Logger) (*Scanner, error) {
 		// that first question was a nil dereference: every scanner started
 		// on an empty data directory died in resume, on any chain, while
 		// one with a state.json to load never noticed.
-		hosts:   NewHostHistory(),
-		valSets: map[int64]valSetEntry{},
+		hosts:          NewHostHistory(),
+		valSets:        map[int64]valSetEntry{},
+		reseedOneTried: map[string]int64{},
 	}, nil
 }
 
@@ -352,11 +364,26 @@ func (s *Scanner) checkpoint(lastScanned int64) {
 // the dashboard show them. Consecutive heights merge into one range. Returns
 // false when err is not that kind of failure.
 func (s *Scanner) recordGap(h int64, err error, blockTime time.Time) bool {
+	return s.recordGapRead(h, err, blockTime, false)
+}
+
+// recordPublicationGap is recordGap for a height whose block and
+// block_results were read and processed — params, host registrations,
+// escrow — and only a publication in it could not be built (its validator
+// set at the promise height is pruned). The gap is published like any
+// other, but it is marked as having lost no events: a host registration in
+// that block is on record, so host_at_settlement must not turn unknown
+// because of it.
+func (s *Scanner) recordPublicationGap(h int64, err error, blockTime time.Time) bool {
+	return s.recordGapRead(h, err, blockTime, true)
+}
+
+func (s *Scanner) recordGapRead(h int64, err error, blockTime time.Time, eventsRead bool) bool {
 	var ue *ErrHeightUnavailable
 	if !errors.As(err, &ue) {
 		return false
 	}
-	s.addGap(h, "height unavailable from the RPC node (pruned, or storage.discard_abci_responses = true)", ue.Err.Error(), blockTime)
+	s.noteGap(h, "height unavailable from the RPC node (pruned, or storage.discard_abci_responses = true)", ue.Err.Error(), blockTime, eventsRead)
 	s.log.Printf("WARNING: GAP h=%d not scanned: %v; recorded and moving on (%d gap ranges so far)", h, ue.Err, len(s.gaps))
 	s.status.Error(fmt.Sprintf("gap at h=%d: %v", h, ue.Err))
 	return true
@@ -367,19 +394,27 @@ func (s *Scanner) recordGap(h int64, err error, blockTime time.Time) bool {
 // range, so a height the operator skipped never hides inside a run the node
 // could not serve, or the other way round.
 func (s *Scanner) addGap(h int64, reason, lastErr string, blockTime time.Time) {
+	s.noteGap(h, reason, lastErr, blockTime, false)
+}
+
+// noteGap is addGap with the HostEventsRead mark. A range only ever holds
+// heights of one kind: a gap that lost events never absorbs one that did
+// not, or host attribution would ignore a height whose registrations were
+// never read (or distrust one whose registrations were).
+func (s *Scanner) noteGap(h int64, reason, lastErr string, blockTime time.Time, eventsRead bool) {
 	var bt *time.Time
 	if !blockTime.IsZero() {
 		t := blockTime.UTC()
 		bt = &t
 	}
-	if n := len(s.gaps); n > 0 && s.gaps[n-1].To == h-1 && s.gaps[n-1].Reason == reason {
+	if n := len(s.gaps); n > 0 && s.gaps[n-1].To == h-1 && s.gaps[n-1].Reason == reason && s.gaps[n-1].HostEventsRead == eventsRead {
 		s.gaps[n-1].To = h
 		s.gaps[n-1].LastError = lastErr
 		if bt != nil {
 			s.gaps[n-1].ToTime = bt
 		}
 	} else {
-		s.gaps = append(s.gaps, ScanGap{From: h, To: h, Reason: reason, LastError: lastErr, At: time.Now().UTC(), FromTime: bt, ToTime: bt})
+		s.gaps = append(s.gaps, ScanGap{From: h, To: h, Reason: reason, LastError: lastErr, At: time.Now().UTC(), FromTime: bt, ToTime: bt, HostEventsRead: eventsRead})
 	}
 }
 
@@ -938,6 +973,9 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 	if seeded, _ := s.hosts.Seeded(); !seeded && h%inactiveRetryEvery == 0 {
 		s.seedHosts(ctx, h)
 	}
+	// A gap that lost events is behind the scan: read the registry again so
+	// host_at_settlement recovers from here on (see reseedHosts).
+	s.maybeReseedHosts(ctx, h)
 	var blk *Block
 	var res *BlockResults
 	if err := s.retryRPCAt(ctx, fmt.Sprintf("fetch block %d", h), h, func() error {
@@ -1087,7 +1125,7 @@ func (s *Scanner) processBlock(ctx context.Context, h int64) int {
 			// Recorded as a gap at the settlement height instead: the
 			// obligations in it are unobserved and say so, and the scan
 			// moves on.
-			if s.recordGap(h, berr, blk.Time) {
+			if s.recordPublicationGap(h, berr, blk.Time) {
 				continue
 			}
 			s.log.Fatalf("h=%d tx=%d: build publication: %v%s", h, i, berr, skipHint(h))
@@ -1205,6 +1243,13 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 			s.lazySeed(ctx, v.Address, blk.Height)
 		}
 		v.Host, v.HostSource = s.hosts.HostAt(v.Address, blk.Height, txIndex, s.gaps)
+		// Unknown only because an event-losing gap lies behind this
+		// validator's newest entry, and the bulk re-read did not cover it
+		// (not bonded then, or that query failed): read its registration
+		// on its own, once per gap, and ask again.
+		if v.RowCount > 0 && v.HostSource == HostUnknownGap && s.reseedOne(ctx, v.Address, blk.Height) {
+			v.Host, v.HostSource = s.hosts.HostAt(v.Address, blk.Height, txIndex, s.gaps)
+		}
 	}
 
 	return Publication{
@@ -1373,6 +1418,122 @@ func (s *Scanner) lazySeed(ctx context.Context, consAddrHex string, h int64) {
 	e := s.hosts.SeedOne(consAddrHex, host, HostFromSeedCurrent, tip)
 	s.appendHost(e)
 	s.log.Printf("host registration of %s read at the tip h=%d (state at h=%d pruned): %q, in force from h=%d", consAddrHex, tip, h, host, tip)
+}
+
+// maybeReseedHosts runs reseedHosts when an event-losing gap ends below h
+// and the registry has not been re-read for it: once at the first height
+// after the gap, then every inactiveRetryEvery heights while the read
+// fails. Nothing happens before the first seed (the seed itself is then
+// the answer) or when no such gap exists.
+func (s *Scanner) maybeReseedHosts(ctx context.Context, h int64) {
+	if seeded, _ := s.hosts.Seeded(); !seeded {
+		return
+	}
+	end, ok := LastHostLossGapEnd(s.gaps, h)
+	if !ok || s.reseedFor == end {
+		return
+	}
+	if s.hosts.ReseededAt(end + 1) {
+		// done by an earlier process: remembered, so the entries are not
+		// walked again on every block
+		s.reseedFor = end
+		return
+	}
+	if s.reseedTriedAt != 0 && s.reseedTriedAt > end && h-s.reseedTriedAt < inactiveRetryEvery {
+		return
+	}
+	s.reseedHosts(ctx, h, end)
+}
+
+// reseedHosts reads the bonded registry again after a scan gap that lost
+// events, so host attribution recovers instead of staying unknown_gap for
+// every validator until each one happens to register again.
+//
+// Why it is needed: host_at_settlement is the newest registration on
+// record, and a gap whose blocks were never read may hold one that is not
+// on record. HostAt is right to answer unknown_gap across such a gap — but
+// with nothing after it, that answer never ended: after one transient gap
+// the whole feed's host attribution was unknown for good.
+//
+// What it records: the registry as it stood after block h-1 — not h, whose
+// registrations may come after a settlement in it — as in force from
+// gapEnd+1. That is exact, not a guess: every block from gapEnd+1 to h-1
+// was read, events and all (gapEnd is the newest event-losing gap below
+// h), and a registration is never removed, so a validator whose host
+// changed in that span has an event on record and is left alone (Reseed),
+// and for every other one the value read is the value since gapEnd+1.
+// Settlements inside or before the gap keep their unknown_gap: nothing
+// here says what happened in it.
+//
+// One attempt, no retryRPC: a state that is pruned or slow to answer is
+// retried later on maybeReseedHosts's cadence, and each validator still in
+// the dark is re-read on its own when a publication needs it (reseedOne),
+// so the scan is never held here.
+func (s *Scanner) reseedHosts(ctx context.Context, h, gapEnd int64) {
+	s.reseedTriedAt = h
+	read := h - 1
+	provs, err := s.chain.BondedFibreProvidersAt(ctx, read)
+	if err != nil {
+		s.log.Printf("WARNING: bonded registry at h=%d could not be read to re-seed the host history after the gap ending at h=%d (%v); host_at_settlement stays unknown until it is read (retried every %d heights, and per validator as needed)", read, gapEnd, err, inactiveRetryEvery)
+		return
+	}
+	s.reseedFor = gapEnd
+	added := s.hosts.Reseed(gapEnd+1, read, provs)
+	for _, e := range added {
+		s.appendHost(e)
+	}
+	s.log.Printf("host history re-seeded after the gap ending at h=%d: registry read at h=%d, %d of %d registrations recorded from h=%d", gapEnd, read, len(added), len(provs), gapEnd+1)
+}
+
+// reseedOne reads one validator's registration after an event-losing gap:
+// the one the bulk re-read did not cover. Same rule as reseedHosts, for one
+// validator, read with FibreProviderInfo (registration outlives bonding,
+// so it answers for a validator AllBondedFibreProviders leaves out), at
+// h-1, recorded from the gap's end. An explicit "not registered" is
+// recorded as "none": it is the chain's answer, and nothing changed since
+// the gap's end, or an event would be on record. Asked once per validator
+// per gap in this process, and only after the bulk re-read for the gap
+// worked; reports whether an entry was added.
+func (s *Scanner) reseedOne(ctx context.Context, consAddrHex string, h int64) bool {
+	if seeded, _ := s.hosts.Seeded(); !seeded {
+		return false
+	}
+	end, ok := LastHostLossGapEnd(s.gaps, h)
+	if !ok {
+		return false
+	}
+	// Only once the bulk re-read for this gap has worked. Until then the
+	// state after the gap is most likely not being served (a pruned or
+	// catching-up node), and one query per validator per publication
+	// against it, each up to the RPC timeout, would hold the scan for
+	// nothing; the bulk read is retried on its own cadence.
+	if s.reseedFor != end {
+		return false
+	}
+	if s.reseedOneTried == nil {
+		s.reseedOneTried = map[string]int64{}
+	}
+	if t, tried := s.reseedOneTried[consAddrHex]; tried && t == end {
+		return false
+	}
+	s.reseedOneTried[consAddrHex] = end
+	bech, err := bech32.ConvertAndEncode("celestiavalcons", mustHexBytes(consAddrHex))
+	if err != nil {
+		return false
+	}
+	read := h - 1
+	host, _, err := s.chain.FibreProviderInfoAt(ctx, bech, read)
+	if err != nil {
+		s.log.Printf("WARNING: registration of %s at h=%d could not be read after the gap ending at h=%d (%v); host_at_settlement unknown_gap for it until it registers or the registry is re-read", consAddrHex, read, end, err)
+		return false
+	}
+	e, added := s.hosts.ReseedOne(consAddrHex, host, end+1, read)
+	if !added {
+		return false
+	}
+	s.appendHost(e)
+	s.log.Printf("host registration of %s re-read at h=%d after the gap ending at h=%d: %q, in force from h=%d", consAddrHex, read, end, host, end+1)
+	return true
 }
 
 func (s *Scanner) appendHost(e HostEntry) {

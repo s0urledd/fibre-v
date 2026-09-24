@@ -1,8 +1,9 @@
 "use client";
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATED } from "@/lib/api";
+import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATED, provisionalNow } from "@/lib/api";
 import Avatar from "./Avatar";
+import { HostingCell } from "./Hosting";
 import { SELF_VALIDATOR } from "@/lib/site";
 
 /**
@@ -24,7 +25,7 @@ function isSelf(v: Validator): boolean {
 }
 
 type Filter = "all" | "broken" | "unreachable" | "collecting" | "nohost";
-type SortKey = "power" | "kept" | "broken" | "undecided" | "seen";
+type SortKey = "power" | "kept" | "broken" | "undecided" | "signed" | "seen";
 
 /** the endpoint right now: the chain's own words first, then the newest handshake */
 export function endpoint(v: Validator): { dot: string; word: string; title: string; warn?: boolean } {
@@ -47,6 +48,8 @@ function sortValue(v: Validator, k: SortKey): number | null {
     case "kept": { const d = o ? o.served + o.broken : 0; return d >= MIN_RATED ? o.served / d : null; }
     case "broken": return o?.broken ?? 0;
     case "undecided": return o && o.total > 0 ? undecided(o) : null;
+    // Signing is descriptive, and below the sample floor it is not ranked either.
+    case "signed": { const s = v.signing; return s && s.assigned >= MIN_RATED ? s.signed / s.assigned : null; }
     case "seen": return v.last_seen_at ? new Date(v.last_seen_at).getTime() : null;
   }
 }
@@ -64,6 +67,9 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     nohost: rows.filter((v) => bonded(v) && !v.host).length,
   }), [rows]);
 
+  // The hosting column only exists while the lookup is on (observer/hosting):
+  // a column of dashes would read as "nobody knows", which is not what off means.
+  const showHosting = useMemo(() => rows.some((v) => !!v.hosting), [rows]);
   const needle = q.trim().toLowerCase();
   const list = useMemo(() => {
     const pool = rows.filter((v) => {
@@ -80,7 +86,8 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
       || (v.cons_address ?? "").toLowerCase().includes(needle)
       || (v.moniker ?? "").toLowerCase().includes(needle)
       || (v.operator_address ?? "").toLowerCase().includes(needle)
-      || (v.host || v.last_host || "").toLowerCase().includes(needle));
+      || (v.host || v.last_host || "").toLowerCase().includes(needle)
+      || (v.hosting ? [v.hosting.provider, v.hosting.as_org, v.hosting.country, v.hosting.asn ? "as" + v.hosting.asn : ""].join(" ").toLowerCase().includes(needle) : false));
     return [...pool].sort((a, b) => {
       const av = sortValue(a, sort.key), bv = sortValue(b, sort.key);
       if (av === null && bv === null) return b.voting_power - a.voting_power;
@@ -111,11 +118,25 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     if (d === 0) return <span className="muted" title={`Awaiting results: ${int(o.total)} obligation${o.total === 1 ? "" : "s"} in this period, none assessed yet (pending or inconclusive).`}>—</span>;
     return <span title={d < MIN_RATED ? `Fewer than ${MIN_RATED} assessed obligations: shown, not ranked.` : undefined}><span className="rate">{pctOf(o.served, d)}</span><span className="den"> · {int(o.served)}/{int(d)}</span></span>;
   };
+  // The signing cell, in the service rate's form: share and counts, a dash
+  // with its reason when nothing was assigned. Never a fault colour: a
+  // missing signature is the two-thirds quorum closing, not a missed duty.
+  const signed = (v: Validator) => {
+    const s = v.signing;
+    if (!s || s.assigned === 0) return <span className="muted" title={s && s.unknown > 0 ? `${int(s.unknown)} assigned promise${s.unknown === 1 ? "" : "s"} recorded before signatures were verified: nothing to say either way.` : "No settled promise assigned this validator rows in this period."}>—</span>;
+    const why = `Verified signature on ${int(s.signed)} of the ${int(s.assigned)} settled promises that assigned it rows. Publishers stop collecting at two thirds of voting power, so 100% is not expected and an unsigned promise is not a fault.`;
+    return <span title={s.assigned < MIN_RATED ? `${why} Fewer than ${MIN_RATED} promises: shown, not ranked.` : why}><span className="rate">{pctOf(s.signed, s.assigned)}</span><span className="den"> · {int(s.signed)}/{int(s.assigned)}</span></span>;
+  };
   const count = (v: Validator, n: number, kind: "broken" | "undecided") => {
     const o = v.obligations;
     if (!o || o.total === 0) return <span className="muted">—</span>;
     if (n === 0) return <span className="muted">0</span>;
-    if (kind === "broken") return <Link className="fault" href={href(v, "#evidence")} title={`${int(n)} obligation${n === 1 ? "" : "s"} broken: the validator answered and did not hand over a shard it had signed for. Opens the evidence.`}>{int(n)}</Link>;
+    if (kind === "broken") {
+      // Counted either way; the badge says how many are still settling.
+      const prov = provisionalNow(v.provisional_faults);
+      return <><Link className="fault" href={href(v, "#evidence")} title={`${int(n)} obligation${n === 1 ? "" : "s"} broken: the validator answered and did not hand over a shard it had signed for. Opens the evidence.`}>{int(n)}</Link>
+        {prov > 0 && <span className="ours" title={`${int(prov)} of these rest only on failed probes younger than the settling period. Counted now; final unless evidence still arriving withdraws them.`}>{prov === n ? "provisional" : `${int(prov)} provisional`}</span>}</>;
+    }
     return <Link className="plain" href={href(v, "#outcomes")} title={`${int(n)} obligation${n === 1 ? "" : "s"} the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault.`}>{int(n)}</Link>;
   };
 
@@ -142,17 +163,19 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
             <tr>
               <th className="col-pin">Validator</th>
               <th title="The newest handshake with the registered endpoint; the chain's own words (jailed, not bonded) come first.">Endpoint now</th>
+              {showHosting && <th title="Network provider and country the endpoint resolved into, as resolved from this vantage. Hover a cell for the network (AS) and address.">Hosting</th>}
               <Th k="power" dflt={-1} label="Voting power" title="From the staking module. The default order, and never a performance rank." />
               <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />
               <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />
               <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />
+              <Th k="signed" dflt={-1} label="Signed" title="Share of the settled promises that assigned this validator rows carrying its verified signature. Descriptive: the publisher stops at two thirds of voting power, so an unsigned promise is not a fault." />
               <Th k="seen" dflt={-1} label="Last evidence" title="When the observer last had any reading from this endpoint." />
               <th className="go" />
             </tr>
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr className="empty"><td colSpan={8}>
+              <tr className="empty"><td colSpan={showHosting ? 10 : 9}>
                 {loading && rows.length === 0 ? "Loading…"
                   : rows.length === 0 ? "No validators on record yet."
                   : needle ? `Nothing matches “${q}”.`
@@ -180,10 +203,12 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                     </span>
                   </td>
                   <td><span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span></td>
+                  {showHosting && <td><HostingCell h={v.hosting} /></td>}
                   <td className="num">{int(v.voting_power)}</td>
                   <td className="num">{rate(v)}</td>
                   <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>
                   <td className="num">{count(v, undecided(o), "undecided")}</td>
+                  <td className="num">{signed(v)}</td>
                   <td className="num" title={v.last_seen_at ? utcWord(v.last_seen_at) : "no reading yet"}>{v.last_seen_at ? ago(v.last_seen_at) : <span className="muted">—</span>}</td>
                   <td className="go"><Link href={href(v)} aria-label={`open ${v.moniker || v.address}`}>→</Link></td>
                 </tr>
