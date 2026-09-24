@@ -50,7 +50,7 @@ function Overview() {
   return (
     <>
       <div className="title">
-        <div><h1>Are validators serving the Fibre data they signed for?</h1><p className="lede">Tensile follows every blob settled through Celestia Fibre on {meta ? netName(meta.chain_id) : "…"}, fetches the shards each validator signed for at four points across the retention window, and checks every row against the on-chain commitment. Run independently, from outside the validator set.</p></div>
+        <div><h1>Celestia Fibre · {meta ? netName(meta.chain_id) : "…"}</h1><p className="lede">Independent checks that validators serve the data they signed for.</p></div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
       <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt, status: net.status }} measuring={measuring} />
@@ -119,5 +119,5 @@ function Overview() {
 }
 
 export default function Page() {
-  return <Suspense fallback={<div className="title"><div><h1>Are validators serving the Fibre data they signed for?</h1></div></div>}><Overview /></Suspense>;
+  return <Suspense fallback={<div className="title"><div><h1>Celestia Fibre</h1><p className="lede">Independent checks that validators serve the data they signed for.</p></div></div>}><Overview /></Suspense>;
 }
