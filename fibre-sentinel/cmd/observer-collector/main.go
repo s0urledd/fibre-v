@@ -439,29 +439,11 @@ func main() {
 			// clock: a balance moves when a payment lands, and the payments
 			// themselves arrive through the file, not this poll.
 			lastEscrow = now
-			if pubs, err := st.Publishers(); err != nil {
-				log.Printf("escrow: publishers: %v", err)
-			} else {
-				polled := 0
-				for _, pub := range pubs {
-					if ctx.Err() != nil {
-						break
-					}
-					e, err := chain.EscrowAccount(ctx, pub, 0)
-					if err != nil {
-						log.Printf("escrow: %s: %v", pub, err)
-						continue
-					}
-					if err := st.UpsertEscrowAccount(e, now); err != nil {
-						log.Printf("escrow: store: %v", err)
-						continue
-					}
-					polled++
-				}
-				if polled > 0 {
-					_ = st.SetMeta("escrow_accounts", itoa(int64(polled)), now)
-				}
-			}
+			// Balance and withdrawal queue of every known publisher, both
+			// read from one height (withdrawals.go), then the block time
+			// of every params change not yet dated.
+			pollEscrow(ctx, chain, st, now, log.Printf)
+			fillParamTimes(ctx, chain, st, log.Printf)
 			// The total, from the module account every escrow lives in: exact
 			// where the sum above is a floor, since it covers only accounts
 			// this observer has seen publish.

@@ -130,6 +130,10 @@ type marketResponse struct {
 	// at EscrowTotalAt. Absent until the collector has read it once.
 	EscrowTotalUtia *int64  `json:"escrow_total_utia,omitempty"`
 	EscrowTotalAt   *string `json:"escrow_total_at,omitempty"`
+	// WithdrawalQueue is the queue read from state (withdrawals.go): pending
+	// now, outcomes and payout delays over the window. Absent on an as_of
+	// request, because the queue is not kept as a series of past states.
+	WithdrawalQueue *withdrawalQueue `json:"withdrawal_queue,omitempty"`
 
 	Daily        []dayBucket      `json:"daily"`
 	DailyByPub   []dayPublisher   `json:"daily_by_publisher"`
@@ -180,6 +184,9 @@ type publisherRow struct {
 	FirstSeen string      `json:"first_seen_at"`
 	LastSeen  string      `json:"last_seen_at"`
 	Escrow    *escrowInfo `json:"escrow"`
+	// PendingWithdrawals is the account's withdrawal queue as last read
+	// from state (withdrawals.go); null until the queue has been read.
+	PendingWithdrawals *pendingSummary `json:"pending_withdrawals"`
 }
 
 // ---- label registry ----
@@ -295,6 +302,14 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 				r.EscrowTotalAt = &at
 			}
 		}
+	}
+
+	if !win.AsOf {
+		wq, err := s.withdrawalQueueSummary(ctx, win)
+		if err != nil {
+			return nil, fmt.Errorf("withdrawal queue: %w", err)
+		}
+		r.WithdrawalQueue = wq
 	}
 
 	// Daily buckets, over settlements and timeouts. The day is the block
@@ -692,6 +707,10 @@ func (s *Server) handlePublishers(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []publisherRow{}
 	}
+	if err := s.attachPending(r.Context(), rows); err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
 	writeJSON(w, 200, map[string]any{
 		"window": win, "publishers": rows, "count": len(rows),
 		"source": marketSource, "price_formula": formula, "notes": marketNotes, "vantage": s.vantage,
@@ -790,8 +809,17 @@ func (s *Server) handlePublisher(w http.ResponseWriter, r *http.Request) {
 		blobs = []blobRow{}
 	}
 	blobs, moreBlobs := trim(blobs, 50)
+	if err := s.attachPending(ctx, rows); err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
+	withdrawals, err := s.publisherWithdrawalDetail(ctx, addr)
+	if err != nil {
+		s.writeInternal(w, r.URL.Path, err)
+		return
+	}
 	writeJSON(w, 200, map[string]any{
-		"window": win, "publisher": rows[0], "windows": spans,
+		"window": win, "publisher": rows[0], "windows": spans, "withdrawals": withdrawals,
 		"recent_payments": payments, "recent_blobs": blobs, "recent_blobs_truncated": moreBlobs,
 		"source": marketSource, "price_formula": formula, "notes": marketNotes, "vantage": s.vantage,
 	})
