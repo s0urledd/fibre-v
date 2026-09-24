@@ -288,7 +288,8 @@ reachable from YAML: commitments from one could never be audited.
 GET /v1/meta                  chain, counts, components, vantage
 GET /v1/network               the window summary
 GET /v1/validators            one row per validator
-GET /v1/validators/{addr}     one validator, four windows
+GET /v1/validators/{addr}     one validator, four windows (addr: consensus hex or
+                              valcons1…, operator valoper1…, account address)
 GET /v1/blobs                 publication list
 GET /v1/blobs/{hash}          one blob, per-validator probe matrix
 GET /v1/probes                raw rows (?blob=, ?at=, ?validator=)

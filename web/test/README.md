@@ -22,15 +22,30 @@ fibre-sentinel/bin/observer-api -db /tmp/fx/observer.db -listen 127.0.0.1:8099 \
 
 It creates the schema by running `observer-collector -once`, so it can never
 drift from the shipped migrations, then fills it with sixty validators, 260
-publications and about 84,000 probes. The draw is seeded, so the same fixture
+publications and about 85,000 probes. The draw is seeded, so the same fixture
 comes out every run and two screenshots are comparable.
+
+Every row is placed relative to **the moment the script runs**, because the
+API reads its 24h / 7d / 30d windows off the real clock: a fixture pinned to a
+fixed date goes empty in every short window a day later. Set
+`FIXTURE_NOW=2026-09-16T10:30:00Z` to pin it when two runs have to match byte
+for byte. Every insert names its columns, so a migration that adds a nullable
+column does not break the script; a new NOT NULL column or a new table still
+needs a line here. The escrow side includes the withdrawal queue (schema 21):
+paid withdrawals attributed to their payout, and a few still queued.
+
+Two routes do not answer 200 against a fixture, by design: `/v1/health` is
+503, because no observer process is running to keep a status file fresh, and
+`/v1/exports/pubkey` is 404, because the fixture's exports are not signed.
+Every page carries an "Observer degraded" line for the first reason.
 
 The population is deliberately mostly healthy, because a fixture that is half
 broken teaches you to design for a network that does not exist. Eleven of the
 sixty are impaired, each in a different way, so every class the taxonomy can
 produce is present and findable: a repeated fault, two occasional ones, two
 outages that begin at a known hour, a validator with no registered host, one
-whose certificate has lapsed, one that never signed, one that prunes before
+whose certificate has lapsed (identity reason `cert_expired`, the verifier's
+own code, so the API calls it expired and not a mismatch), one that never signed, one that prunes before
 the deadline, one that is reachable and answers every download with a server
 error, and one that rate-limits most downloads. Two more are jailed: their
 endpoint rows are closed with the reason the collector records and their

@@ -174,9 +174,9 @@ func feedAuthority(r *http.Request) string {
 }
 
 func (s *Server) handleValidatorFeed(w http.ResponseWriter, r *http.Request) {
-	addr, err := parseAddr(r.PathValue("addr"))
+	addr, err := s.resolveAddr(r.Context(), r.PathValue("addr"))
 	if err != nil {
-		writeErr(w, 400, "address must be 40 hex chars or celestiavalcons1...")
+		s.writeAddrErr(w, r.URL.Path, err)
 		return
 	}
 	s.serveFeed(w, r, func(ctx context.Context, authority string, now time.Time) (*feed.Feed, int, error) {

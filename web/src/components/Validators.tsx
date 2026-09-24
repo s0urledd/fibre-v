@@ -5,6 +5,7 @@ import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATE
 import Avatar from "./Avatar";
 import { HostingCell } from "./Hosting";
 import { SELF_VALIDATOR } from "@/lib/site";
+import { isOperatorAccount } from "@/lib/addr";
 
 /**
  * The validators table: who, whether the endpoint answers right now, how
@@ -86,6 +87,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
       || (v.cons_address ?? "").toLowerCase().includes(needle)
       || (v.moniker ?? "").toLowerCase().includes(needle)
       || (v.operator_address ?? "").toLowerCase().includes(needle)
+      || isOperatorAccount(needle, v.operator_address)
       || (v.host || v.last_host || "").toLowerCase().includes(needle)
       || (v.hosting ? [v.hosting.provider, v.hosting.as_org, v.hosting.country, v.hosting.asn ? "as" + v.hosting.asn : ""].join(" ").toLowerCase().includes(needle) : false));
     return [...pool].sort((a, b) => {
