@@ -32,9 +32,6 @@ export default function PublishersPage() {
             <p className="mono">fee = ({m.price_formula.base_gas.toLocaleString("en-US")} + {m.price_formula.gas_per_chunk.toLocaleString("en-US")} × ⌈size / {bytes(m.price_formula.chunk_bytes)}⌉) gas × {m.price_formula.utia_per_gas} utia</p>
           </Info>
         )}
-        {m?.computed_at && (
-          <span className="sample" title={`Snapshot taken ${utc(m.computed_at)}, computed in ${m.compute_ms} ms.${through(m.record_through) ? " " + through(m.record_through)!.title : ""}`}>updated {ago(m.computed_at)}{through(m.record_through) && <> · {through(m.record_through)!.text}</>}</span>
-        )}
         <span className="spacer" />
         <div className="pills" role="group" aria-label="window">
           {WINDOWS.map((w) => <button key={w} aria-pressed={win === w} onClick={() => setWin(w)}>{w}</button>)}

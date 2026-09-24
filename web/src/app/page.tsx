@@ -73,7 +73,7 @@ function Overview() {
           den={vals.data && reg.of > 0 ? int(reg.of) : undefined}
           tone={!vals.data || reg.count === 0 ? "absent" : undefined}
           title="Bonded validators with a Fibre host in x/valaddr, and the share of bonded voting power they hold. A validator without one cannot serve Fibre data."
-          help={!vals.data ? " " : reg.count === 0 ? (notLive ? "registration opens at activation" : "none registered yet")
+          help={!vals.data ? " " : reg.count === 0 ? (notLive ? "opens at activation" : "none yet")
             : <>{reg.share} of stake{reach && reach.den > 0 ? <> · {int(reach.num)} reachable now</> : null}</>} />
         <Metric label="Settled data"
           value={!N ? "—" : bytes(N.publication_bytes)}
