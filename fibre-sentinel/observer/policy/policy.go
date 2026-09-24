@@ -3,9 +3,11 @@
 // of publications when the byte or request budget would be exceeded,
 // per-validator and global caps, and a backoff that never adds requests.
 //
-// The policy plugs into the prober through probe.Policy. It keeps only
-// in-memory counters; the durable record of every decision is the
-// NOT_PROBED measurement the prober writes with the policy's reason.
+// The policy plugs into the prober through probe.Policy. Its counters live
+// in memory and, when a state file is configured, are saved to the data
+// dir so a restart does not start on a fresh budget (budgetstate.go); the
+// durable record of every decision is the NOT_PROBED measurement the prober
+// writes with the policy's reason.
 package policy
 
 import (
@@ -73,6 +75,18 @@ type Config struct {
 		SkipDownloadAfter int           `yaml:"skip_download_after"` // consecutive transport failures before L4 is skipped
 		SkipWindow        time.Duration `yaml:"skip_window"`         // how long after the last failure the skip holds
 	} `yaml:"backoff"`
+	// State is where the budget and backoff state survives a restart
+	// (budgetstate.go). File is set by sentinel-probe to
+	// <data-dir>/probe-budget.json, like the master secret, and is not read
+	// from YAML; empty (tests) keeps everything in memory, as before.
+	State struct {
+		File string `yaml:"-"`
+		// UnknownCooldown is how long nothing is admitted after a start that
+		// found no trustworthy state file (missing, corrupt, another
+		// version): the budget already spent is unknown, so it is assumed
+		// spent for this long rather than fresh. 0 turns the cool-down off.
+		UnknownCooldown time.Duration `yaml:"unknown_cooldown"`
+	} `yaml:"budget_state"`
 }
 
 // Default returns the R4 defaults.
@@ -90,6 +104,7 @@ func Default() Config {
 	c.Sampling.ProjectionLookback = time.Hour
 	c.Backoff.SkipDownloadAfter = 3
 	c.Backoff.SkipWindow = 20 * time.Minute
+	c.State.UnknownCooldown = 10 * time.Minute
 	return c
 }
 
@@ -133,6 +148,9 @@ func (c Config) validate() error {
 	}
 	if c.Backoff.SkipWindow < 0 || c.Backoff.SkipDownloadAfter < 0 {
 		return errors.New("backoff: skip_window and skip_download_after must not be negative")
+	}
+	if c.State.UnknownCooldown < 0 {
+		return errors.New("budget_state: unknown_cooldown must not be negative")
 	}
 	return nil
 }
@@ -214,6 +232,19 @@ type Policy struct {
 	// beside the commitment so a reader is never told to verify something
 	// that cannot be verified.
 	ephemeral bool
+
+	// Persisted budget state (budgetstate.go). stateFile is empty when the
+	// state lives in memory only. cooldownUntil closes admission after a
+	// start that found no trustworthy state; restoredAt is the loaded
+	// file's save time, from which every validator's spacing counts;
+	// saveFailing closes admission while the state cannot be written.
+	stateFile     string
+	cooldownUntil time.Time
+	restoredAt    time.Time
+	saveFailing   bool
+	saveTimer     *time.Timer
+	saveMu        sync.Mutex // one save at a time, taken before mu
+	startupLog    []string   // what restore said before SetLogger
 }
 
 // EphemeralSecret reports whether the master secret is process-local, and so
@@ -254,7 +285,7 @@ func New(cfg Config) (*Policy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Policy{
+	p := &Policy{
 		cfg:        cfg,
 		ephemeral:  cfg.Sampling.MasterSecretFile == "",
 		master:     master,
@@ -262,7 +293,12 @@ func New(cfg Config) (*Policy, error) {
 		recentPubs: map[string]pubLoad{},
 		decisions:  map[string]decision{},
 		lastP:      1,
-	}, nil
+		stateFile:  cfg.State.File,
+	}
+	if p.stateFile != "" {
+		p.restore(time.Now())
+	}
+	return p, nil
 }
 
 func loadOrCreateSecret(path string) ([]byte, error) {
@@ -540,6 +576,10 @@ func (p *Policy) SetLogger(logf func(string, ...any)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.logf = logf
+	for _, msg := range p.startupLog {
+		logf("%s", msg)
+	}
+	p.startupLog = nil
 }
 
 func (p *Policy) logProjection(prev Projection, cur Projection) {
@@ -789,6 +829,16 @@ func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time
 	// the same validator can have booked the slot this one woke up for; only
 	// when that read finds no wait does the lock stay held, through the
 	// checks and the reservation, so no second admission can slip in between.
+	//
+	// A start with no trustworthy budget state, or a state that cannot be
+	// saved, denies before anything else, and before any spacing is waited
+	// out for a probe that will not run.
+	p.mu.Lock()
+	if denied := p.stateGuard(now); denied != "" {
+		p.mu.Unlock()
+		return false, false, denied
+	}
+	p.mu.Unlock()
 	for {
 		p.mu.Lock()
 		wait := p.spacingWait(t.AddressHex, now)
@@ -838,6 +888,7 @@ func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time
 	}
 	p.pending = append(p.pending, reservation{addr: t.AddressHex, at: now, bytes: est})
 	vs.lastRequest = now
+	p.markDirty()
 	if backedOff {
 		return true, true, fmt.Sprintf("backoff:transport:k=%d", vs.consecFail)
 	}
@@ -904,6 +955,7 @@ func (p *Policy) Release(_ scan.Publication, t probe.Target) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.takePending(t.AddressHex)
+	p.markDirty()
 }
 
 // spacingWait reports how long to hold off before touching this validator
@@ -911,10 +963,16 @@ func (p *Policy) Release(_ scan.Publication, t probe.Target) {
 func (p *Policy) spacingWait(addr string, now time.Time) time.Duration {
 	vs := p.state(addr)
 	spacing := p.cfg.Caps.PerValidator.MinRequestSpacing
-	if vs.lastRequest.IsZero() || spacing <= 0 {
+	// After a restore, spacing counts from the save at the latest: a request
+	// made after the last save and before the restart is not on record.
+	last := vs.lastRequest
+	if p.restoredAt.After(last) {
+		last = p.restoredAt
+	}
+	if last.IsZero() || spacing <= 0 {
 		return 0
 	}
-	if d := spacing - now.Sub(vs.lastRequest); d > 0 {
+	if d := spacing - now.Sub(last); d > 0 {
 		return d
 	}
 	return 0
@@ -956,6 +1014,7 @@ func (p *Policy) AfterProbe(pub scan.Publication, m probe.Measurement) {
 	ev := event{at: m.StartedAt, bytes: bytes}
 	vs.events = append(vs.events, ev)
 	p.global = append(p.global, ev)
+	defer p.markDirty() // after the backoff counters below change too
 
 	switch m.Outcome {
 	case probe.OutcomeDNSFail, probe.OutcomeTCPRefused, probe.OutcomeTCPTimeout, probe.OutcomeTCPUnreachable,

@@ -267,6 +267,12 @@ against chain time every cycle and stamps the offset on every row;
 - backoff only ever **removes** the download step: 3 consecutive transport
   failures → 20 minutes without `DownloadShard`, recorded as a gap, never a
   verdict
+- budgets and backoff survive a restart: `<data-dir>/probe-budget.json`
+  (versioned, written atomically at most once a second and on exit) holds
+  each validator's last 24 h of probes in minute buckets, its last request
+  and its failure streak. A missing or corrupt file means the spend is
+  unknown, so nothing is admitted for `budget_state.unknown_cooldown`
+  (10 min); a file that cannot be written closes admission until it can be
 
 The master secret lives at `<data-dir>/sampling-master.key` and never leaves
 the host. An ephemeral (per-process) secret is a test-only path and is not

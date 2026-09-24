@@ -151,6 +151,14 @@ type ScanGap struct {
 	// rather than the scanner's; absent, At is the only clue.
 	FromTime *time.Time `json:"from_time,omitempty"`
 	ToTime   *time.Time `json:"to_time,omitempty"`
+	// HostEventsRead is set when the gap's blocks were read, events and
+	// all, and only a publication in them could not be recorded (its
+	// validator set at the promise height was pruned). No registration is
+	// missing from the record for such a gap, so host_at_settlement ignores
+	// it. Absent (a gap from before the field, a block or block_results the
+	// node could not serve, an operator skip) means the events were not
+	// read, and a registration may be missing.
+	HostEventsRead bool `json:"host_events_read,omitempty"`
 }
 
 // Spans reports the chain-time interval a gap covers, falling back to the

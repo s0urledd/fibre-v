@@ -118,6 +118,12 @@ func main() {
 			cfg.Sampling.MasterSecretFile = filepath.Join(*dataDir, "sampling-master.key")
 		}
 		cfg.Sampling.AllowEphemeralSecret = *ephemeralSampling
+		// The budget and backoff state beside it, so a restart (or a restart
+		// loop) does not start every validator on a fresh budget. Same
+		// directory for the same reason: the only one the unit can write.
+		if *dataDir != "" {
+			cfg.State.File = filepath.Join(*dataDir, policy.BudgetStateFile)
+		}
 		p, err := policy.New(cfg)
 		if err != nil {
 			log.Fatalf("policy: %v", err)
@@ -175,7 +181,15 @@ func main() {
 	if revealer != nil {
 		go revealer.RevealLoop(ctx, filepath.Join(*dataDir, policy.SecretsFile), *revealAfter, log.Printf)
 	}
-	if err := pr.Run(ctx); err != nil {
+	err = pr.Run(ctx)
+	// What was spent since the last timed save goes to disk before the
+	// process ends, clean exit or not.
+	if revealer != nil {
+		if ferr := revealer.Flush(); ferr != nil {
+			log.Printf("WARNING: probe budget state not saved on exit: %v", ferr)
+		}
+	}
+	if err != nil {
 		log.Fatalf("run: %v", err)
 	}
 }
