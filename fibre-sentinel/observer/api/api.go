@@ -25,6 +25,7 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 
+	assign "github.com/plsgiveup/fibre/fibre-assign"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/export"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/hosting"
@@ -858,6 +859,12 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	var pinned string
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT pinned_celestia_app FROM publications ORDER BY settlement_height DESC LIMIT 1`).Scan(&pinned)
+	// Before the first publication there is no row to read it from, and the
+	// footer printed no pin at all. The commit this binary assigns rows with
+	// is the same answer until a publication says otherwise.
+	if pinned == "" {
+		pinned = assign.PinnedCelestiaAppCommit
+	}
 	h := s.health(ctx, now)
 	// A run row's heartbeat is only as fresh as what reached the database:
 	// the prober writes JSONL and never this table, so its row kept the

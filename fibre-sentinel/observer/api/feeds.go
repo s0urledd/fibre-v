@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -146,7 +147,18 @@ func etagMatch(header, etag string) bool {
 // Feed readers subscribe at one URL, so from any one reader's point of view
 // it never changes; and it is a name the operator of this deployment
 // controls, which is what RFC 4151 asks of a tag authority.
+//
+// A deployment should fix it with $TENSILE_PUBLIC_HOST: taken from the
+// request, any client could send a different X-Forwarded-Host each time, and
+// since the authority is part of the cache key every such request missed the
+// cache and rebuilt the feed (a full pass over the probes), and minted entry
+// IDs under a name the operator does not control.
+const feedAuthorityEnv = "TENSILE_PUBLIC_HOST"
+
 func feedAuthority(r *http.Request) string {
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv(feedAuthorityEnv))); v != "" {
+		return v
+	}
 	h := r.Host
 	if fh := r.Header.Get("X-Forwarded-Host"); fh != "" {
 		h = strings.TrimSpace(strings.Split(fh, ",")[0])

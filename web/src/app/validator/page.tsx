@@ -107,7 +107,7 @@ function Page() {
       <div className="head">
         <div>
           <p className="crumb"><Link href={win === "24h" ? "/" : `/?window=${win}`}>Validators</Link> › {v.moniker || shortMid(v.cons_address || v.address, 18, 4)}</p>
-          <h1>{v.moniker || <span className="mono">{shortMid(v.cons_address || v.address, 22, 6)}</span>}{self && <span className="ours" title="Run by this observer’s operator. Measured by the same code as every other validator; never filtered or adjusted.">ours</span>}</h1>
+          <h1>{v.moniker || <span className="mono">{shortMid(v.cons_address || v.address, 22, 6)}</span>}{self && <span className="ours" title="Huginn Tech runs both this validator and Tensile. It is measured by the same code as every other validator, never filtered or adjusted.">runs Tensile</span>}</h1>
           <div className="chips">
             <span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span>
             {v.host && <span title={v.identity_reason || "The consensus-key check on the newest handshake."}>TLS identity <b className="word">{identityWord[v.identity_status] ?? v.identity_status}</b></span>}
