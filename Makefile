@@ -31,7 +31,7 @@ shellcheck:
 test-scripts:
 	for f in fibre-devnet/*.sh fibre-sentinel/*.sh deploy/test/*.sh; do bash -n "$$f"; done
 	@for f in deploy/*.py deploy/test/*.py web/test/*.py; do python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$$f" || exit 1; done
-	@for f in web/test/*.cjs; do node --check "$$f" || exit 1; done
+	@for f in web/test/*.cjs deploy/*.cjs; do node --check "$$f" || exit 1; done
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 
 # the acceptance tests' own regression tests: fake servers on loopback, no root
@@ -41,8 +41,13 @@ test-deploy:
 web:
 	cd web && npm ci --no-audit --no-fund && npm run build
 
+# REVISION is stamped into every binary too, so a copy built here and shipped
+# as a tarball still says which commit produced its measurements.
+REVISION ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
+LDFLAGS := -X github.com/plsgiveup/fibre/fibre-sentinel/internal/status.revision=$(REVISION)
+
 build:
-	cd fibre-sentinel && go build -o bin/ ./cmd/...
+	cd fibre-sentinel && go build -ldflags "$(LDFLAGS)" -o bin/ ./cmd/...
 	cd web && npm ci --no-audit --no-fund && npm run build
 
 # the ~17 minute devnet run with fault injection (needs celestia-appd + fibre on PATH)

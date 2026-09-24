@@ -1,5 +1,5 @@
 /* =============================================================================
-   Fibrescope — stylesheet.
+   Tensile — stylesheet.
 
    White paper and hairlines instead of cards; one family (IBM Plex Sans) for
    prose and figures, Plex Mono only for addresses, hashes and heights; nothing
@@ -111,6 +111,7 @@ button { font: inherit; color: inherit; }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 600; font-size: 16px; letter-spacing: -.01em; white-space: nowrap; }
 .brand:hover { text-decoration: none; }
 .brand .mark-logo { color: var(--accent); flex: none; }
+.brand .brand-for { font-size: 12px; font-weight: 500; letter-spacing: 0; color: var(--accent-ink); background: var(--accent-tint); padding: 2px 9px; border-radius: 999px; margin-left: 2px; }
 .top nav { display: flex; gap: 28px; height: 56px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .top nav a { color: var(--text-2); font-weight: 500; display: flex; align-items: center; height: 56px; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
 .top nav a.on { color: var(--text); border-bottom-color: var(--accent); }
@@ -513,6 +514,7 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 
 /* phone width: the pinned identity column gives the figures room */
 @media (max-width: 480px) {
+  .brand .brand-for { font-size: 11px; padding: 1px 7px; }
   .vt .addr { display: none; }
   .vt .col-pin { min-width: 0; max-width: 150px; }
   .vt .col-pin .mon { display: inline-block; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }

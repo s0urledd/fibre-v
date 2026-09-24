@@ -105,3 +105,20 @@ func (s *Server) retentionUncertaintyNow(ctx context.Context) *retentionUncertai
 	}
 	return &retentionUncertainty{OpenRanges: ranges, PublicationsHeld: pubs, ProbesHeld: probes, Note: retentionUncertaintyNote}
 }
+
+// activationRevision is the collector's record of whether Fibre is live on
+// this chain. It changes once, at activation, and every snapshot computed
+// before it describes a chain with no Fibre on it.
+func (s *Server) activationRevision() string {
+	v, err := s.st.Meta("fibre_active")
+	if err != nil {
+		return "unreadable"
+	}
+	return v
+}
+
+// snapshotRevision is what a verdict-carrying snapshot must match to be
+// served: the holds it was computed under and the activation state.
+func (s *Server) snapshotRevision() string {
+	return s.paramHoldsRevision() + "|" + s.activationRevision()
+}

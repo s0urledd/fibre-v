@@ -1,0 +1,35 @@
+[Unit]
+Description=Fibre observer (%i): static site and /api proxy (site-server)
+After=network-online.target fibre-api@%i.service
+Wants=network-online.target
+
+# Only for hosts whose front proxy cannot serve the site itself (see the top of
+# deploy/site-server.cjs). The export is copied to /srv/fibre-site/%i so the
+# unit reads nothing from a checkout or a home directory.
+[Service]
+DynamicUser=true
+EnvironmentFile=/etc/fibre-observer/%i.env
+Environment=SITE_ROOT=/srv/fibre-site/%i
+ExecStart=/usr/bin/node /usr/local/lib/fibre-observer/site-server.cjs
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target
+# one instance per network: systemctl enable --now fibre-site@mocha

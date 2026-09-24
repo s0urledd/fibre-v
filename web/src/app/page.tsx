@@ -40,7 +40,7 @@ function Overview() {
   return (
     <>
       <div className="title">
-        <div><h1>Fibre on {meta ? netName(meta.chain_id) : "…"}</h1><p className="lede">Whether validators keep serving the shards they signed for, checked from outside.</p></div>
+        <div><h1>Celestia Fibre on {meta ? netName(meta.chain_id) : "…"}</h1><p className="lede">Whether validators keep serving the shards they signed for, checked from outside.</p></div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
       <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt, status: net.status }} measuring={measuring} />
@@ -107,5 +107,5 @@ function Overview() {
 }
 
 export default function Page() {
-  return <Suspense fallback={<div className="title"><div><h1>Fibre on …</h1><p className="lede">Whether validators keep serving the shards they signed for, checked from outside.</p></div></div>}><Overview /></Suspense>;
+  return <Suspense fallback={<div className="title"><div><h1>Celestia Fibre on …</h1><p className="lede">Whether validators keep serving the shards they signed for, checked from outside.</p></div></div>}><Overview /></Suspense>;
 }

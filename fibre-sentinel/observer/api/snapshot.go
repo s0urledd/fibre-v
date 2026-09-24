@@ -31,8 +31,9 @@ import (
 // Refreshing happens in the background, one at a time per window, and a stale
 // snapshot keeps being served while its replacement is computed, so a reader
 // never waits for an aggregate. Every window is warmed at startup, so the first
-// visitor does not wait either. After that a refresh is triggered by a read,
-// which means a window nobody is looking at stops costing anything.
+// visitor does not wait either. After that a keeper refreshes every window as
+// its TTL runs out (keepSnapshotsFresh), read or not: a refresh triggered only
+// by a read served the triggering reader a figure as old as the last visit.
 //
 // What this does not yet do: a refresh still recomputes the reconstructability
 // of every publication in the sample, and a publication whose retention window
@@ -388,4 +389,62 @@ func windowFor(name string, now time.Time) Window {
 		w.Start = now.Add(-span)
 	}
 	return w
+}
+
+// keeperInterval is how often the keeper looks for windows past their TTL.
+// The shortest TTL is a minute, so a looser tick would let the 24h window
+// run past it.
+const keeperInterval = time.Minute
+
+// refreshDue recomputes, one at a time, every window whose snapshot has
+// outlived its TTL, was computed under another revision, or was dropped for
+// one. It does what a read would have started, without waiting for the read:
+// a stale snapshot is served whole to the reader who triggers its refresh,
+// and on a quiet site that reader may be the first of the morning, handed a
+// figure from the evening before.
+func (c *snapshotCache[T]) refreshDue(log logf, now time.Time) {
+	rev := c.rev()
+	var due []string
+	c.mu.Lock()
+	for _, name := range warmWindows {
+		s := c.entries[name]
+		if c.refreshing[name] {
+			continue
+		}
+		if s == nil || s.rev != rev || now.Sub(s.at) >= c.ttl(name) {
+			c.refreshing[name] = true
+			due = append(due, name)
+		}
+	}
+	if len(due) > 0 {
+		c.bg.Add(1)
+	}
+	c.mu.Unlock()
+	if len(due) == 0 {
+		return
+	}
+	defer c.bg.Done()
+	for _, name := range due {
+		// each window ends when its own computation starts, not at the tick
+		c.background(log, windowFor(name, time.Now()))
+	}
+}
+
+// keepSnapshotsFresh runs refreshDue for every cache until Close. The caches
+// take turns, as the warm-up does: these are the heaviest queries the
+// process runs, and a tick that finds the previous one still computing
+// skips the windows it holds rather than stacking a second copy.
+func (s *Server) keepSnapshotsFresh(every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case now := <-t.C:
+			s.net.refreshDue(s.logf(), now)
+			s.vals.refreshDue(s.logf(), now)
+			s.market.refreshDue(s.logf(), now)
+		}
+	}
 }

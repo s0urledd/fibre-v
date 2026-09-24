@@ -92,6 +92,12 @@ git clone https://github.com/plsgiveup/fibre && cd fibre
 make build            # fibre-sentinel/bin/* and web/out/
 ```
 
+`make build` stamps the commit into every binary (`REVISION`, defaulting to
+`git rev-parse` with `-dirty` for a modified tree). Every measurement and
+status file carries it; a binary built without it says `unknown`, and then
+no one can say which code produced a verdict. Building from a tarball, pass
+it: `make build REVISION=<commit>`.
+
 ## 3. Configure
 
 Everything is per network. The examples below set up `mocha`; repeat with
@@ -255,7 +261,7 @@ Caddy serves the same static export on every site, proxies each site's
 `/api/*` to that network's `observer-api` port, and gets TLS certificates
 from Let's Encrypt. Delete the second site block if you run one network.
 
-Build the site once with the sibling networks listed, and the header shows
+, and the header shows
 a switch between them (the current one is marked by origin):
 
 ```bash

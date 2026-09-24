@@ -133,7 +133,7 @@ func (c *Client) Lookup(ctx context.Context, identity string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "fibrescope-observer (+https://github.com/plsgiveup/fibre)")
+	req.Header.Set("User-Agent", "tensile-observer (+https://github.com/plsgiveup/fibre)")
 	resp, err := c.http().Do(req)
 	if err != nil {
 		return "", err
@@ -215,7 +215,7 @@ func (c *Client) Fetch(ctx context.Context, pictureURL string) (contentType stri
 }
 
 func (c *Client) fetchWith(cl *http.Client, req *http.Request) (contentType string, data []byte, err error) {
-	req.Header.Set("User-Agent", "fibrescope-observer (+https://github.com/plsgiveup/fibre)")
+	req.Header.Set("User-Agent", "tensile-observer (+https://github.com/plsgiveup/fibre)")
 	resp, err := cl.Do(req)
 	if err != nil {
 		return "", nil, err

@@ -1,5 +1,8 @@
 # fibre
 
+The source of **Tensile** (https://fibre.huginn.tech), the independent
+observer for Celestia Fibre, and the modules it is built on.
+
 Independent, outside-the-validator tooling for **Celestia Fibre** — the
 low-latency data-availability path where validators sign for a blob and then owe
 a retention window of serving it.

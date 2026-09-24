@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -79,13 +80,21 @@ func (w *Writer) appendRun(kind, reason string, at time.Time) {
 	}
 }
 
+// revision is the build's revision stamped at link time
+// (-ldflags "-X github.com/plsgiveup/fibre/fibre-sentinel/internal/status.revision=<rev>"),
+// for builds that carry no VCS information: from a tarball, a Docker context
+// without .git, or -buildvcs=false. `make build` and deploy/Dockerfile set it.
+var revision string
+
 // BuildRevision is the VCS revision the binary was built from, "-dirty" when
-// the tree had uncommitted changes, "unknown" when the build carried no VCS
-// information (a build from a tarball, or with -buildvcs=false).
+// the tree had uncommitted changes. Without VCS information it is the
+// link-time revision, and "unknown" only when neither is there: every
+// measurement carries this string, and "unknown" in the record means no one
+// can say which code produced a verdict.
 func BuildRevision() string {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
-		return "unknown"
+		return stamped()
 	}
 	rev, dirty := "", false
 	for _, kv := range bi.Settings {
@@ -97,7 +106,7 @@ func BuildRevision() string {
 		}
 	}
 	if rev == "" {
-		return "unknown"
+		return stamped()
 	}
 	if len(rev) > 12 {
 		rev = rev[:12]
@@ -106,4 +115,12 @@ func BuildRevision() string {
 		rev += "-dirty"
 	}
 	return rev
+}
+
+// stamped is the link-time revision, or "unknown" without one.
+func stamped() string {
+	if r := strings.TrimSpace(revision); r != "" {
+		return r
+	}
+	return "unknown"
 }
