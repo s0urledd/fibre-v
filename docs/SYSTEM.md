@@ -298,7 +298,8 @@ GET /v1/exports[/{name}]      daily tarballs + digests
 GET /v1/avatars/{identity}    Keybase picture
 GET /v1/health                machine-readable liveness (200 / 503)
 GET /v1/market                the publisher side
-GET /v1/publishers[/{addr}]
+GET /v1/publishers[/{addr}]   incl. the escrow withdrawal queue read from state
+GET /v1/params                x/fibre params + change log (heights, block times), pinned protocol constants
 ```
 
 **Windows**: `24h`, `7d`, `30d`, `all`.
@@ -354,7 +355,7 @@ Next.js `output: "export"` — plain files, all data fetched in the browser from
 | `/blob/?hash=` | `/v1/blobs/{hash}` |
 | `/publishers/` | `/v1/market`, `/v1/publishers` |
 | `/publisher/?addr=` | `/v1/publishers/{addr}` |
-| `/methodology/` | static |
+| `/methodology/` | `/v1/params` (the protocol-parameters section; the rest is static) |
 
 `MIN_RATED` (20) gates every *ranked rate* — serve, reachability, throughput:
 below it the figure prints without a gauge and does not sort in either

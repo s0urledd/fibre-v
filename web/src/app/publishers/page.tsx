@@ -1,10 +1,12 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { useApi, type Market, type Publisher, fmtPct, fmtCount, fmtShare, bytes, utc, ago, tia, shortBech, publisherName, through } from "@/lib/api";
+import { useApi, fmtPct, fmtCount, fmtShare, bytes, utc, ago, tia, shortBech, publisherName, through } from "@/lib/api";
 import { Panel, Cell } from "@/components/Panel";
 import Chart, { calendar, CATEGORICAL, OTHER_COLOR, type Row, type Series } from "@/components/Chart";
 import Info from "@/components/Info";
+import { WithdrawalQueueCells, pendingLine } from "@/components/Withdrawals";
+import type { MarketWithQueue, PublisherWithQueue } from "@/lib/withdrawals";
 
 const WINDOWS = ["24h", "7d", "30d", "all"];
 
@@ -16,8 +18,8 @@ const WINDOWS = ["24h", "7d", "30d", "all"];
  */
 export default function PublishersPage() {
   const [win, setWin] = useState("7d");
-  const { data: m, error, loading } = useApi<Market>(`/v1/market?window=${win}`);
-  const { data: list } = useApi<{ publishers: Publisher[] }>(`/v1/publishers?window=${win}`);
+  const { data: m, error, loading } = useApi<MarketWithQueue>(`/v1/market?window=${win}`);
+  const { data: list } = useApi<{ publishers: PublisherWithQueue[] }>(`/v1/publishers?window=${win}`);
   const busy = loading && !m;
   const pubs = list?.publishers ?? [];
 
@@ -91,6 +93,11 @@ export default function PublishersPage() {
       </div>
       </Panel>
 
+      {/* The withdrawal queue, read from chain state rather than rebuilt from
+          events (see WithdrawalQueueCells). Absent until the collector has
+          read it, and on a pinned window. */}
+      {m?.withdrawal_queue && <WithdrawalQueueCells q={m.withdrawal_queue} win={win} />}
+
       {m && (() => {
         const days = calendar(m.window.start.startsWith("0001-") || m.window.name === "all"
           ? new Date((m.daily[0]?.day ?? m.window.end.slice(0, 10)) + "T00:00:00Z") : new Date(m.window.start), new Date(m.window.end));
@@ -139,11 +146,12 @@ export default function PublishersPage() {
             <th className="right">per MiB</th>
             <th className="right">timed out</th>
             <th className="right">escrow</th>
+            <th className="right">queued out</th>
             <th>first seen</th>
             <th>last seen</th>
           </tr></thead>
           <tbody>
-            {pubs.length === 0 && <tr><td colSpan={11} className="muted">{list ? "No escrow movement recorded in this window." : "Loading…"}</td></tr>}
+            {pubs.length === 0 && <tr><td colSpan={12} className="muted">{list ? "No escrow movement recorded in this window." : "Loading…"}</td></tr>}
             {pubs.map((p) => (
               <tr key={p.publisher}>
                 <td className="mono">
@@ -160,6 +168,7 @@ export default function PublishersPage() {
                 <td className="right mono" title={p.escrow ? (p.escrow.found ? `available ${tia(p.escrow.available_utia)} · read at height ${p.escrow.height.toLocaleString("en-US")}, ${ago(p.escrow.updated_at)}` : "no escrow account on chain") : "not polled yet"}>
                   {p.escrow ? (p.escrow.found ? tia(p.escrow.balance_utia) : <span className="faint">none</span>) : <span className="faint">—</span>}
                 </td>
+                <td className={"right mono" + (p.pending_withdrawals?.count ? "" : " faint")} title={pendingLine(p.pending_withdrawals)}>{p.pending_withdrawals ? (p.pending_withdrawals.count ? tia(p.pending_withdrawals.utia) : "none") : "—"}</td>
                 <td className="mono faint" title={utc(p.first_seen_at)}>{ago(p.first_seen_at)}</td>
                 <td className="mono faint" title={utc(p.last_seen_at)}>{ago(p.last_seen_at)}</td>
               </tr>

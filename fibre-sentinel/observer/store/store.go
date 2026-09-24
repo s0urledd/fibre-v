@@ -36,7 +36,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 20
+const SchemaVersion = 21
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -591,6 +591,10 @@ var migrations = []migration{
 			 WHERE kind = 'silent_change' AND corrected_at IS NULL`,
 		},
 	},
+	// Version 21's statements live beside the code that writes them, in
+	// withdrawals.go (withdrawalQueueMigration): the withdrawal queue read
+	// from state, and the block time each params value took effect at.
+	withdrawalQueueMigration,
 }
 
 // Store wraps one SQLite database.

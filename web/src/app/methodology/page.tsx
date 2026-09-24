@@ -1,5 +1,6 @@
 import { Legend } from "@/components/Verdict";
 import { DISPUTE_URL, SOURCE_URL } from "@/lib/site";
+import ProtocolParams from "@/components/ProtocolParams";
 
 // The rules version, as verdict.MethodologyVersion in the Go code and
 // methodology_version in /v1/meta and every export manifest. Bumped in the
@@ -28,6 +29,10 @@ export default function Methodology() {
 
       <h2 id="promise">The promise being checked</h2>
       <p>When a client publishes a blob to Fibre, the validators sign that they received their assigned rows and the chain records the payment (<code>MsgPayForFibre</code>). Each signing validator then owes serving of its rows to anyone who asks until <code>must_serve_until = creation_timestamp + max(payment_promise_timeout, shard_retention)</code>, using the x/fibre parameters in force when the blob settled. The chain does not observe whether serving continues. This site does, from outside, as an ordinary client.</p>
+
+      <h2 id="params">Protocol parameters</h2>
+      <p>The numbers the deadline above is computed from, as this site holds them. The x/fibre parameters are the chain&rsquo;s: read from state at the height the record begins, then updated from every <code>EventUpdateFibreParams</code>, each dated by its block. The protocol constants are compiled into the celestia-app build this site pins and no node or Fibre server exposes them, so they are read from that code and the commit is named. Both are served at <code>/v1/params</code>; nothing below is typed into this page.</p>
+      <ProtocolParams />
 
       <h2 id="probe">One probe</h2>
       <p>A probe is one attempt to fetch one validator's shard for one blob: resolve the registered host (x/valaddr), open TCP, complete a TLS 1.3 handshake, check that the certificate's extension is endorsed by the validator's consensus key (<code>fibre-tlsverify</code>), call <code>DownloadShard</code>, verify every returned row against the blob commitment, and check that the returned row indices are exactly the ones assigned (<code>fibre-assign</code>, a bit-identical reimplementation of celestia-app's assignment, verified across about 890 differential scenarios). Each layer is timed and recorded separately.</p>
@@ -116,6 +121,7 @@ export default function Methodology() {
         <li><strong>Timeouts are a floor.</strong> A promise that was signed and never settled leaves no trace on chain until someone submits its timeout, and the chain pays nobody for doing so. The count of timed-out promises is therefore the number somebody bothered to report, never the number abandoned. The settlement rate is stated over settlements plus reported timeouts and can only overstate how often publishers pay.</li>
         <li><strong>Timeouts enforced</strong> on a validator&rsquo;s page counts the timeouts its operator account submitted. It is matched on address bytes, so an operator that submits from another account is not credited; a zero says nothing.</li>
         <li><strong>Escrow</strong> is read by state query for every account already seen in a payment. The chain offers no query for every escrow, so an account that deposited and never published does not appear.</li>
+        <li id="withdrawals"><strong>Withdrawals.</strong> A withdrawal request locks escrow until the withdrawal delay in force at the request has passed; the chain then pays it out in the first block whose time reaches that moment. Between the two, a settlement or timeout that finds the account&rsquo;s available balance short takes the difference out of its queued withdrawals, oldest first, shrinking one or removing it outright, and emits no event for it. The queue therefore cannot be rebuilt from events, and this site does not try: it reads it from chain state (<code>Withdrawals</code>) with each escrow balance, both at one height, and keeps the reads as history. What was taken from a queued withdrawal is shown as such. One that left the queue before it became payable was consumed by a settlement, with certainty. One that left after is called paid out only when exactly one payout of its last-seen amount landed between the two reads that bracket its departure; only those get a request-to-payout delay. Anything else is published as unattributed rather than guessed.</li>
         <li><strong>Not shown.</strong> Fees go to the fee collector and are distributed by stake through the distribution module; the chain records no per-validator share of Fibre income, so none is claimed. No publisher is scored: there is nothing in these records a publisher can do wrong.</li>
       </ul>
 
