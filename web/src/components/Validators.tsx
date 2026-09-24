@@ -24,7 +24,7 @@ function isSelf(v: Validator): boolean {
 }
 
 type Filter = "all" | "broken" | "unreachable" | "collecting" | "nohost";
-type SortKey = "power" | "kept" | "broken" | "undecided" | "seen";
+type SortKey = "power" | "kept" | "broken" | "undecided" | "signed" | "seen";
 
 /** the endpoint right now: the chain's own words first, then the newest handshake */
 export function endpoint(v: Validator): { dot: string; word: string; title: string; warn?: boolean } {
@@ -47,6 +47,8 @@ function sortValue(v: Validator, k: SortKey): number | null {
     case "kept": { const d = o ? o.served + o.broken : 0; return d >= MIN_RATED ? o.served / d : null; }
     case "broken": return o?.broken ?? 0;
     case "undecided": return o && o.total > 0 ? undecided(o) : null;
+    // Signing is descriptive, and below the sample floor it is not ranked either.
+    case "signed": { const s = v.signing; return s && s.assigned >= MIN_RATED ? s.signed / s.assigned : null; }
     case "seen": return v.last_seen_at ? new Date(v.last_seen_at).getTime() : null;
   }
 }
@@ -111,6 +113,15 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     if (d === 0) return <span className="muted" title={`Awaiting results: ${int(o.total)} obligation${o.total === 1 ? "" : "s"} in this period, none assessed yet (pending or inconclusive).`}>—</span>;
     return <span title={d < MIN_RATED ? `Fewer than ${MIN_RATED} assessed obligations: shown, not ranked.` : undefined}><span className="rate">{pctOf(o.served, d)}</span><span className="den"> · {int(o.served)}/{int(d)}</span></span>;
   };
+  // The signing cell, in the service rate's form: share and counts, a dash
+  // with its reason when nothing was assigned. Never a fault colour: a
+  // missing signature is the two-thirds quorum closing, not a missed duty.
+  const signed = (v: Validator) => {
+    const s = v.signing;
+    if (!s || s.assigned === 0) return <span className="muted" title={s && s.unknown > 0 ? `${int(s.unknown)} assigned promise${s.unknown === 1 ? "" : "s"} recorded before signatures were verified: nothing to say either way.` : "No settled promise assigned this validator rows in this period."}>—</span>;
+    const why = `Verified signature on ${int(s.signed)} of the ${int(s.assigned)} settled promises that assigned it rows. Publishers stop collecting at two thirds of voting power, so 100% is not expected and an unsigned promise is not a fault.`;
+    return <span title={s.assigned < MIN_RATED ? `${why} Fewer than ${MIN_RATED} promises: shown, not ranked.` : why}><span className="rate">{pctOf(s.signed, s.assigned)}</span><span className="den"> · {int(s.signed)}/{int(s.assigned)}</span></span>;
+  };
   const count = (v: Validator, n: number, kind: "broken" | "undecided") => {
     const o = v.obligations;
     if (!o || o.total === 0) return <span className="muted">—</span>;
@@ -146,13 +157,14 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />
               <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />
               <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />
+              <Th k="signed" dflt={-1} label="Signed" title="Share of the settled promises that assigned this validator rows carrying its verified signature. Descriptive: the publisher stops at two thirds of voting power, so an unsigned promise is not a fault." />
               <Th k="seen" dflt={-1} label="Last evidence" title="When the observer last had any reading from this endpoint." />
               <th className="go" />
             </tr>
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr className="empty"><td colSpan={8}>
+              <tr className="empty"><td colSpan={9}>
                 {loading && rows.length === 0 ? "Loading…"
                   : rows.length === 0 ? "No validators on record yet."
                   : needle ? `Nothing matches “${q}”.`
@@ -184,6 +196,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                   <td className="num">{rate(v)}</td>
                   <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>
                   <td className="num">{count(v, undecided(o), "undecided")}</td>
+                  <td className="num">{signed(v)}</td>
                   <td className="num" title={v.last_seen_at ? utcWord(v.last_seen_at) : "no reading yet"}>{v.last_seen_at ? ago(v.last_seen_at) : <span className="muted">—</span>}</td>
                   <td className="go"><Link href={href(v)} aria-label={`open ${v.moniker || v.address}`}>→</Link></td>
                 </tr>

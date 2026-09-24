@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import type { Signing } from "./signing";
 
 // Base URL of observer-api. Same-origin "/api" is what deploy/Caddyfile
 // proxies; override with NEXT_PUBLIC_API_BASE for local development.
@@ -381,6 +382,8 @@ export type Validator = {
    * operator runs the enforcement path at all.
    */
   timeouts_enforced?: number;
+  /** signing participation over the period: see lib/signing.ts. Descriptive, never a fault. */
+  signing?: Signing;
 };
 
 export type Probe = {

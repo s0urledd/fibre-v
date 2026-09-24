@@ -115,6 +115,8 @@ type Server struct {
 	asOf asOfLimiter
 	// details caches the validator page (see validator_detail.go).
 	details detailCache
+	// signing caches /v1/signing (see signing.go).
+	signing signingCache
 	// bg counts the server's own background work (the blob-page warm-up,
 	// the snapshot keeper), for Close.
 	bg sync.WaitGroup
@@ -242,6 +244,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/publishers", s.handlePublishers)
 	s.mux.HandleFunc("GET /v1/publishers/{addr}", s.handlePublisher)
 	s.mux.HandleFunc("GET /v1/params", s.handleParams)
+	s.mux.HandleFunc("GET /v1/signing", s.handleSigning)
 	return s
 }
 
@@ -2259,6 +2262,10 @@ type validatorRow struct {
 	// runs the enforcement path at all. Matched on address bytes, so an
 	// operator that submits from another account is not counted.
 	TimeoutsEnforced int64 `json:"timeouts_enforced"`
+	// Signing is how often this validator's verified signature is on the
+	// settled promises that assigned it rows in the window. Descriptive, never
+	// a fault: see signing.go.
+	Signing signingStats `json:"signing"`
 }
 
 func loadBand(rows int) string {
@@ -2836,6 +2843,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			byObligation[addr] = o
 		}
 	}
+	if err := s.fillSigning(ctx, win, only, byAddr); err != nil {
+		return nil, err
+	}
 	out := make([]validatorRow, 0, len(byAddr))
 	for addr, v := range byAddr {
 		if only != "" && addr != only {
@@ -3130,6 +3140,11 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 	if win.AsOf {
 		out["as_of_note"] = AsOfNote
 	}
+	hm, err := s.validatorHeatmap(ctx, addr, win)
+	if err != nil {
+		return 0, nil, err
+	}
+	out["heatmap"] = hm
 	if c, err := s.lastEndpointCheck(ctx, addr, win); err == nil && c != nil {
 		out["last_endpoint_check"] = c
 	}

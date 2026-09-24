@@ -10,6 +10,8 @@ import OutcomeBar from "@/components/OutcomeBar";
 import Copy from "@/components/Copy";
 import { endpoint } from "@/components/Validators";
 import { DISPUTE_URL, SELF_VALIDATOR } from "@/lib/site";
+import Heatmap from "@/components/Heatmap";
+import type { Heatmap as HeatmapData } from "@/lib/signing";
 
 type Span = { window: Window; serve_rate: Rate; probe_count: number; obligations: Obligations; classes: ClassCounts };
 type Detail = {
@@ -25,6 +27,8 @@ type Detail = {
   suspect_points: { at: string; label: string; reason: string }[];
   /** the newest heartbeat against this validator's host, stage by stage */
   last_endpoint_check?: EndpointCheck;
+  /** served over rated probes per UTC day and schedule point */
+  heatmap?: HeatmapData;
 };
 
 /** the verdict as a word and a mark; the classification is the observer's, never re-derived here */
@@ -83,6 +87,7 @@ function Page() {
   const defaultPoints = points.length === 4 && points.every((p, i) => p.key === `w${i + 1}`);
   const measuring = !!o && o.total > 0 && decided < MIN_RATED && o.pending > 0;
   const att = v.attestation;
+  const sig = v.signing;
 
   return (
     <>
@@ -95,7 +100,9 @@ function Page() {
             {v.host && <span title={v.identity_reason || "The consensus-key check on the newest handshake."}>TLS identity <b className="word">{identityWord[v.identity_status] ?? v.identity_status}</b></span>}
             {v.host && <span><span className="mono">{v.host}</span>{v.endpoint_since && <> · registered since {dateUTC(v.endpoint_since)}</>}</span>}
             {!v.host && v.last_host && <span title="The registration stays on chain; the validator left the bonded provider list.">last endpoint <span className="mono">{v.last_host}</span>{v.endpoint_closed_at && <> · left the bonded list {dateUTC(v.endpoint_closed_at)}</>}</span>}
-            {att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">signed <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs</span>}
+            {sig && sig.assigned > 0
+              ? <span title={`Settled promises in this period that assigned this validator rows and carry its verified signature, ${pctOf(sig.signed, sig.assigned)}. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.`}>signed <b className="word">{int(sig.signed)} / {int(sig.assigned)}</b> promises</span>
+              : att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">signed <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs</span>}
             {(v.timeouts_enforced ?? 0) > 0 && <span title="MsgPaymentPromiseTimeout submitted by this validator’s operator account in the period: abandoned promises reported so the escrow was charged. The chain pays nothing for it.">{int(v.timeouts_enforced)} timeout{v.timeouts_enforced === 1 ? "" : "s"} enforced</span>}
           </div>
           <div className="idkv">
@@ -175,6 +182,12 @@ function Page() {
           </p>
           {data.last_endpoint_check && <EndpointCheckLine c={data.last_endpoint_check} />}
         </div>
+      </section>
+
+      <section className="hm-band" id="calendar">
+        <h2>Day by day</h2>
+        <p className="sub">Served over rated probes at each point of the retention window, per UTC day</p>
+        <Heatmap data={data.heatmap} />
       </section>
 
       <section id="evidence">

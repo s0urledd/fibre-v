@@ -530,3 +530,47 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
   .vt .avatar { display: none; }
   .metric .value { white-space: normal; font-size: 24px; }
 }
+
+/* ------------------------------------------------ day × point heatmap --- */
+/* The validator page's calendar (components/Heatmap). Served is the accent,
+   the one colour the site spends on a kept obligation; only the FAULT share
+   of a cell is --fault, as a band from the bottom whose height is that
+   share. No verdict is flat --pending, no data the gap hatch: neither is red.
+   The grid shrinks with the page; past a month its columns get a floor and
+   the grid scrolls inside .hm-scroll, never the page. */
+.hm-band { padding: 14px 0 14px; border-bottom: 1px solid var(--line-soft); }
+.hm { margin-top: 10px; }
+.hm-scroll { overflow-x: auto; }
+.hm-grid { display: grid; gap: 2px; align-items: center; }
+.hm-grid.wide { gap: 1px; }
+.hm-y { font-size: 11px; color: var(--text-2); padding-right: 6px; white-space: nowrap; }
+.hm-y.total, .hm-c.total { margin-top: 4px; }
+.hm-c { position: relative; height: 16px; border-radius: 2px; overflow: hidden; }
+.hm-c.rated { background: var(--accent); }
+.hm-c.rated i { position: absolute; left: 0; right: 0; bottom: 0; background: var(--fault); }
+.hm-c.noverdict { background: var(--pending); }
+.hm-c.nodata { background: var(--gap-hatch); box-shadow: inset 0 0 0 1px var(--line-soft); }
+.hm-x { font-size: 11px; color: var(--text-3); white-space: nowrap; overflow: visible; margin-top: 4px; min-width: 0; }
+/* labels in the right half hang leftwards from their column, so the last one is never cut by the frame */
+.hm-x.end { direction: rtl; }
+.hm-k { display: inline-block; position: relative; width: 12px; height: 10px; border-radius: 2px; vertical-align: -1px; overflow: hidden; }
+.hm-k.rated { background: var(--accent); }
+.hm-k.rated i { position: absolute; left: 0; right: 0; bottom: 0; height: 45%; background: var(--fault); }
+.hm-k.noverdict { background: var(--pending); }
+.hm-k.nodata { background: var(--gap-hatch); box-shadow: inset 0 0 0 1px var(--line-soft); }
+
+/* ---------------------------------------- signatures per promise (blobs) --- */
+/* Horizontal bars so the bucket labels stay readable at phone width. The
+   bucket below the quorum is neutral, not red: it is the observer's view of
+   the signatures, not a validator's failure. The quorum is a dashed rule. */
+.sighist { margin: 10px 0 0; max-width: 640px; }
+.sighist ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.sighist li { display: grid; grid-template-columns: 7.5em 1fr 3.5em; align-items: center; gap: 10px; font-size: 13px; }
+.sighist li.quorum { border-top: 1px dashed var(--text-3); padding-top: 4px; margin-top: 2px; position: relative; }
+.sighist li.quorum::before { content: "⅔ quorum"; position: absolute; right: 0; top: -9px; font-size: 11px; color: var(--text-3); background: var(--paper); padding-left: 6px; }
+.sighist .l { color: var(--text-2); white-space: nowrap; }
+.sighist .n { text-align: right; }
+.sighist .bar { height: 12px; background: var(--wash); border-radius: 2px; overflow: hidden; }
+.sighist .bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+.sighist li.below .bar i { background: var(--neutral); }
+.sighist .sub { margin-top: 10px; }
