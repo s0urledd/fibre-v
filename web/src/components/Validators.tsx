@@ -200,7 +200,8 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                         {isSelf(v) && <span className="ours" title="Huginn Tech runs both this validator and Tensile. It is measured by the same code as every other row, never filtered or adjusted.">runs Tensile</span>}
                         {notLive && v.signaled_upgrade === true && <span className="ours" title="Signalled for the app version that brings Fibre (x/signal, a chain record).">signalled</span>}
                         {notLive && v.signaled_upgrade === false && <span className="ours" title="Has not signalled for the app version that brings Fibre (x/signal, a chain record).">not signalled</span>}
-                        <span className="addr mono" title={v.cons_address || v.address}>{shortMid(v.cons_address || v.address, 16, 4)}</span>
+                        {/* The operator address is the one operators and delegators know (explorers list it); the consensus address stays in the tooltip and on the validator page. */}
+                        <span className="addr mono" title={[v.operator_address, v.cons_address || v.address].filter(Boolean).join(" · ")}>{shortMid(v.operator_address || v.cons_address || v.address, 18, 4)}</span>
                       </span>
                     </span>
                   </td>
