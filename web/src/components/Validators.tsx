@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATED, provisionalNow } from "@/lib/api";
 import Avatar from "./Avatar";
 import { HostingCell } from "./Hosting";
@@ -59,6 +60,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "power", dir: -1 });
+  const router = useRouter();
 
   const counts = useMemo(() => ({
     all: rows.length,
@@ -145,7 +147,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   return (
     <section>
       <div className="vhead">
-        <div><h2>Validators</h2><p className="sub">{notLive ? "Names and voting power from the staking module; nothing to measure until Fibre is live." : "Current reachability and service over the selected period."}</p></div>
+        <div><h2>Validators</h2><p className="sub">{notLive ? "Names and voting power from the staking module." : "Current reachability and service over the selected period."}</p></div>
         <div className="tools">
           <label className="search"><span className="sr-only">Search validators</span><input type="search" placeholder="Search name or address" value={q} onChange={(e) => setQ(e.target.value)} /></label>
           <label className="select"><span className="sr-only">Filter</span>
@@ -172,12 +174,11 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />
               <Th k="signed" dflt={-1} label="Signed" title="Share of the settled promises that assigned this validator rows carrying its verified signature. Descriptive: the publisher stops at two thirds of voting power, so an unsigned promise is not a fault." />
               <Th k="seen" dflt={-1} label="Last evidence" title="When the observer last had any reading from this endpoint." />
-              <th className="go" />
             </tr>
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr className="empty"><td colSpan={showHosting ? 10 : 9}>
+              <tr className="empty"><td colSpan={showHosting ? 9 : 8}>
                 {loading && rows.length === 0 ? "Loading…"
                   : rows.length === 0 ? "No validators on record yet."
                   : needle ? `Nothing matches “${q}”.`
@@ -191,7 +192,9 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               const e = endpoint(v);
               const o = v.obligations;
               return (
-                <tr key={v.address} className={e.warn ? "warn" : undefined}>
+                // A click that lands on a titled figure (above the cover link) opens the page too; links keep their own target.
+                <tr key={v.address} className={e.warn ? "warn" : undefined}
+                  onClick={(ev) => { if (!(ev.target as HTMLElement).closest("a") && !window.getSelection()?.toString()) router.push(href(v)); }}>
                   <td className="id col-pin">
                     <span className="who">
                       <Avatar v={v} />
@@ -200,11 +203,12 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                         {isSelf(v) && <span className="ours" title="Huginn Tech runs both this validator and Tensile. It is measured by the same code as every other row, never filtered or adjusted.">runs Tensile</span>}
                         {notLive && v.signaled_upgrade === true && <span className="ours" title="Signalled for the app version that brings Fibre (x/signal, a chain record).">signalled</span>}
                         {notLive && v.signaled_upgrade === false && <span className="ours" title="Has not signalled for the app version that brings Fibre (x/signal, a chain record).">not signalled</span>}
-                        <span className="addr mono" title={v.cons_address || v.address}>{shortMid(v.cons_address || v.address, 16, 4)}</span>
+                        {/* The operator address is the one operators and delegators know (explorers list it); the consensus address stays in the tooltip and on the validator page. */}
+                        <span className="addr mono" title={[v.operator_address, v.cons_address || v.address].filter(Boolean).join(" · ")}>{shortMid(v.operator_address || v.cons_address || v.address, 18, 4)}</span>
                       </span>
                     </span>
                   </td>
-                  <td><span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span></td>
+                  <td><Link className="rowcover" href={href(v)} tabIndex={-1} aria-hidden="true" /><span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span></td>
                   {showHosting && <td><HostingCell h={v.hosting} /></td>}
                   <td className="num">{int(v.voting_power)}</td>
                   <td className="num">{rate(v)}</td>
@@ -212,7 +216,6 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                   <td className="num">{count(v, undecided(o), "undecided")}</td>
                   <td className="num">{signed(v)}</td>
                   <td className="num" title={v.last_seen_at ? utcWord(v.last_seen_at) : "no reading yet"}>{v.last_seen_at ? ago(v.last_seen_at) : <span className="muted">—</span>}</td>
-                  <td className="go"><Link href={href(v)} aria-label={`open ${v.moniker || v.address}`}>→</Link></td>
                 </tr>
               );
             })}

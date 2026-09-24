@@ -21,8 +21,11 @@ export default function VolumeChart({ market, days = 7 }: { market: Market | nul
   const label = (d: string) => new Date(d + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
   return (
     <div className="vchart" role="img" aria-label={`settled volume per day over the last ${days} days`}>
-      <div className="y"><span>{bytes(top)}</span><span>{bytes(top / 2)}</span><span>0</span></div>
+      {/* With nothing settled in the whole week an axis would only label an empty box: no tick labels, one sentence. */}
+      <div className="y" aria-hidden={max === 0}>{max > 0 && <><span style={{ top: 0 }}>{bytes(top)}</span><span style={{ top: "50%" }}>{bytes(top / 2)}</span><span style={{ top: "100%" }}>0</span></>}</div>
       <div className="plot">
+        {max > 0 && <><i className="gl" style={{ top: 0 }} /><i className="gl" style={{ top: "50%" }} /></>}
+        {max === 0 && <span className="none">No settled volume yet</span>}
         {list.map((d) => {
           const b = byDay.get(d);
           const v = b?.bytes ?? 0;

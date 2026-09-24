@@ -3,7 +3,9 @@ import { Suspense, useState } from "react";
 import Link from "next/link";
 import { Panel } from "@/components/Panel";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Blob, utc, ago, shortHex, nsDisplay, bytes } from "@/lib/api";
+import PreLive from "@/components/PreLive";
+import { unit } from "@/components/Unit";
+import { useApi, type Meta, type Blob, utc, ago, shortHex, nsDisplay, bytes } from "@/lib/api";
 import { Mark, type Tier } from "@/components/Verdict";
 import SigningHistogram from "@/components/SigningHistogram";
 import type { SigningDistribution } from "@/lib/signing";
@@ -39,6 +41,7 @@ function Page() {
   // Signatures collected per promise over a fixed week, like the volume
   // chart on the overview: this page lists blobs and has no period switch.
   const sig = useApi<SigningDistribution>("/v1/signing?window=7d");
+  const { data: meta } = useApi<Meta>("/v1/meta");
   return (
     <>
       <div className="section-head">
@@ -47,6 +50,7 @@ function Page() {
         <span className="spacer" />
         <input type="search" placeholder="Filter by namespace (56 hex)" value={ns} onChange={(e) => setNs(e.target.value)} aria-label="namespace filter" />
       </div>
+      <PreLive meta={meta} />
       {error && !data && <p className="notice">The observer API is not answering ({error}); the page retries every 30 seconds. This is an observer outage, not a Fibre network outage.</p>}
       {error && data && <p className="sample">Showing the last list received; the API is not answering right now ({error}).</p>}
       {loading && !data && <p className="muted">Loading…</p>}
@@ -68,7 +72,7 @@ function Page() {
                   <td className="mono" title={ago(b.settlement_time)}>{utc(b.settlement_time)}</td>
                   <td className="right mono">{b.settlement_height.toLocaleString("en-US")}</td>
                   <td className="mono" title={b.namespace}>{nsDisplay(b.namespace)}</td>
-                  <td className="right mono">{bytes(b.blob_size)}</td>
+                  <td className="right mono">{unit(bytes(b.blob_size))}</td>
                   <td className="right mono">{b.validators_with_rows}</td>
                   <td className="right mono">{b.probe_count}</td>
                   <td className="mono faint" title={`must serve until ${utc(b.must_serve_until)}`}>{ago(b.must_serve_until)}</td>

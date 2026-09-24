@@ -96,7 +96,7 @@ export function WithdrawalQueueCells({ q, win }: { q: WithdrawalQueueT; win: str
   return (
     <Panel title="Withdrawal queue" right={<>read from chain state{p.read_height != null ? ` at height ${p.read_height.toLocaleString("en-US")}` : ""}{p.read_at ? `, ${ago(p.read_at)}` : ""} · <Link href="/methodology/#withdrawals">methodology →</Link></>}>
       <div className="cells three">
-        <Cell label="Queued to withdraw" evidence="chain"
+        <Cell label="Queued to withdraw"
           value={tia(p.utia, { unit: false })} unit="TIA"
           tone={p.count === 0 ? "absent" : undefined}
           sub={p.count === 0 ? "nothing queued" : `${p.count} withdrawal${p.count === 1 ? "" : "s"} · ${q.publishers} account${q.publishers === 1 ? "" : "s"}${p.next_available_at ? ` · next payable ${ago(p.next_available_at)}` : ""}`}
@@ -105,13 +105,13 @@ export function WithdrawalQueueCells({ q, win }: { q: WithdrawalQueueT; win: str
             <p>Escrow a publisher has asked to take back, locked until the withdrawal delay in force at the request has passed, then paid out by the chain in the first block after that.</p>
             <p>Read from the chain&rsquo;s own queue, not from events: when a settlement finds the available balance short, the chain takes the difference out of queued withdrawals, oldest first, and announces nothing.</p>
           </>} />
-        <Cell label="Paid out" evidence="chain"
+        <Cell label="Paid out"
           value={q.executed.count.toLocaleString("en-US")}
           tone={q.executed.count === 0 ? "absent" : undefined}
           sub={d.median_s != null ? `median ${span(d.median_s)} request → payout` : `none in the ${win} window`}
           detail={d.count > 0 && d.min_s != null && d.max_s != null ? `${tia(q.executed.utia)} over ${d.count} payout${d.count === 1 ? "" : "s"}; request → payout from ${span(d.min_s)} to ${span(d.max_s)}${d.median_lag_s != null ? `, a median ${span(d.median_lag_s)} after becoming payable` : ""}.` : undefined}
           info={<p>Withdrawals that left the queue in the window and are matched to exactly one payout of their last-seen amount. The delay is from the request block to the payout block; only matched withdrawals have one.</p>} />
-        <Cell label="Consumed by settlements" evidence="chain"
+        <Cell label="Consumed by settlements"
           value={q.consumed.count.toLocaleString("en-US")}
           tone={q.consumed.count === 0 ? "absent" : undefined}
           sub={q.consumed.count > 0 ? `${tia(q.consumed.utia)} never paid out` : "none in the window"}
