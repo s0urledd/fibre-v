@@ -1,0 +1,323 @@
+package api
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+)
+
+// Signing participation: how often a validator's signature is on the settled
+// promises it was assigned rows of, and, network-wide, how much voting power
+// each settled promise collected. EigenDA publishes the same pair as
+// "signing info"; the difference here is what the figures are allowed to mean.
+//
+// What is counted. Every settled MsgPayForFibre (settlement_tx_code = 0) whose
+// assignment the scanner could compute is one promise. The scanner runs
+// fibre-assign over the validator set at the promise height, so a validator is
+// ASSIGNED a promise exactly when that table gives it rows (row_count > 0):
+// the minimum-rows floor gives every member of the set rows, so in practice
+// that is "every validator in the set at the promise height". It is not
+// conditioned on a registered Fibre host: the protocol assigns rows to
+// validators, not to hosts, and a validator without one is assigned all the
+// same (it simply cannot receive the upload, so it cannot sign). A validator
+// SIGNED a promise when its signature over the promise verified against its
+// consensus key (internal/scan/attest.go): the observer checks every entry
+// itself, it never counts them.
+//
+// Promises recorded before signatures were verified (scan schema 1, attested
+// NULL) say nothing either way, so they are outside both sides of the rate and
+// counted as unknown, the same rule the probe-level attestation split follows.
+//
+// What it does NOT mean. An unsigned promise is not a fault and is never
+// published as one. The reference client stops collecting signatures the
+// moment it holds two thirds of voting power and keeps delivering to everyone
+// else in the background (fibre/client_upload.go), so on any promise about a
+// third of the stake is unsigned by construction and very often holds the
+// shard all the same. The rate describes how often a validator was among the
+// signatures the publisher kept: roughly, how often it answered an upload
+// before the quorum closed. It is published beside the serve rate, never
+// folded into it, and it does not rank anybody.
+//
+// Publications are never pruned (observer/rollup prunes probe rows only), so
+// every window, "all" included, is computed from the raw record and needs no
+// rollup fold-in.
+
+// signingStats is one validator's signing participation over a window.
+type signingStats struct {
+	// Assigned is how many settled promises in the window gave this validator
+	// rows and whose signatures were verified: the rate's denominator.
+	Assigned int64 `json:"assigned"`
+	// Signed is how many of those carry this validator's verified signature.
+	Signed int64 `json:"signed"`
+	// Rate is Signed / Assigned; value null when nothing was assigned.
+	Rate Rate `json:"rate"`
+	// Unknown counts assigned promises recorded before signatures were
+	// verified, which are in neither side of Rate.
+	Unknown int64 `json:"unknown"`
+}
+
+// signingPopulation is the promise population both figures are drawn from:
+// settled in the window, the transaction succeeded, and the assignment was
+// computed. The arguments are the window's start and end, in that order.
+const signingPopulation = `p.settlement_time >= ? AND p.settlement_time <= ?
+	AND p.settlement_tx_code = 0 AND p.assignment_error = ''`
+
+// signingByValidator counts signing participation per validator over win,
+// only for one validator when only is set.
+func (s *Server) signingByValidator(ctx context.Context, win Window, only string) (map[string]signingStats, error) {
+	q := `SELECT a.validator_address,
+			COALESCE(SUM(CASE WHEN a.attested IS NOT NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.attested = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.attested IS NULL THEN 1 ELSE 0 END), 0)
+		FROM assignments a JOIN publications p ON p.promise_hash = a.promise_hash
+		WHERE ` + signingPopulation + ` AND a.row_count > 0`
+	args := []any{win.startArg(), win.endArg()}
+	if only != "" {
+		q += ` AND a.validator_address = ?`
+		args = append(args, only)
+	}
+	rows, err := s.st.DB().QueryContext(ctx, q+` GROUP BY a.validator_address`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]signingStats{}
+	for rows.Next() {
+		var addr string
+		var st signingStats
+		if err := rows.Scan(&addr, &st.Assigned, &st.Signed, &st.Unknown); err != nil {
+			return nil, err
+		}
+		st.Rate = rate(st.Signed, st.Assigned)
+		out[addr] = st
+	}
+	return out, rows.Err()
+}
+
+// fillSigning sets Signing on every row validatorRows built. A validator with
+// no assigned promise in the window keeps the zero value, whose rate has a
+// null value: nothing to say, not zero per cent.
+func (s *Server) fillSigning(ctx context.Context, win Window, only string, byAddr map[string]*validatorRow) error {
+	sig, err := s.signingByValidator(ctx, win, only)
+	if err != nil {
+		return err
+	}
+	for addr, v := range byAddr {
+		st, ok := sig[addr]
+		if !ok {
+			st.Rate = rate(0, 0)
+		}
+		v.Signing = st
+	}
+	return nil
+}
+
+// ---- network: the distribution of signatures collected per promise ----
+
+// signingBucket is one bar of the distribution: promises whose verified
+// signatures cover a share of total voting power in [From, To). The last
+// bucket is the closed point 1 (every validator's signature verified).
+type signingBucket struct {
+	Key   string  `json:"key"`
+	Label string  `json:"label"`
+	From  float64 `json:"from"`
+	To    float64 `json:"to"`
+	// AboveThreshold is false only for the bucket below the chain's quorum.
+	AboveThreshold bool  `json:"above_threshold"`
+	Count          int64 `json:"count"`
+}
+
+// signingResponse is /v1/signing.
+type signingResponse struct {
+	Window  Window `json:"window"`
+	Vantage string `json:"vantage"`
+	// Threshold is the quorum the chain checks, stated as its own rule so a
+	// reader can reproduce which bucket a promise falls in.
+	Threshold struct {
+		Num  int64  `json:"num"`
+		Den  int64  `json:"den"`
+		Rule string `json:"rule"`
+	} `json:"threshold"`
+	// Promises is every settled promise in the window whose signatures were
+	// verified and whose validator set has voting power: the histogram's
+	// population. Unknown is the settled promises recorded before signatures
+	// were verified, outside it.
+	Promises int64 `json:"promises"`
+	Unknown  int64 `json:"unknown"`
+	// MeetsThreshold is the promises whose verified signatures reach the
+	// quorum, over Promises. Below 1 does not mean the chain accepted a
+	// promise without quorum: the chain stops verifying at the quorum and
+	// this observer re-verifies every entry against its own reading of the
+	// validator set, so a promise below the line here is one whose
+	// signatures this observer could not all match. It is published because
+	// it is a statement about the observer's view, not hidden because it is
+	// awkward.
+	MeetsThreshold Rate            `json:"meets_threshold"`
+	Buckets        []signingBucket `json:"buckets"`
+	// SignersMedian is the median, over the population, of how many assigned
+	// validators' signatures verified on a promise (attested_with_rows): how
+	// many validators it took to close the quorum. Null when it is empty.
+	SignersMedian *int64 `json:"signers_median"`
+	AsOfNote      string `json:"as_of_note,omitempty"`
+	ComputedAt    string `json:"computed_at"`
+	Note          string `json:"note"`
+}
+
+// signingNote goes out with every answer, because the histogram invites a
+// reading it does not support.
+const signingNote = "A promise's share is the voting power whose signature over it verified, over the total voting power of the set at the promise height. " +
+	"Publishers stop collecting at the quorum, so mass just above two thirds is the protocol working, not validators failing; an unsigned validator is unproven, never at fault."
+
+// The bucket edges, as fractions of total voting power. The first edge is the
+// chain's quorum, applied as the chain applies it (integer floor); the rest
+// are plain fractions compared exactly in integers, so no promise lands in a
+// bucket because of float rounding.
+var signingEdges = []struct {
+	key, label string
+	num, den   int64
+}{
+	{"q_70", "⅔ – 70%", 70, 100},
+	{"70_75", "70 – 75%", 75, 100},
+	{"75_80", "75 – 80%", 80, 100},
+	{"80_90", "80 – 90%", 90, 100},
+	{"90_100", "90 – <100%", 1, 1},
+}
+
+func (s *Server) computeSigning(ctx context.Context, win Window) (*signingResponse, error) {
+	db := s.st.DB()
+	resp := &signingResponse{Window: win, Vantage: s.vantage, Note: signingNote}
+	resp.Threshold.Num, resp.Threshold.Den = 2, 3
+	resp.Threshold.Rule = "attested_voting_power >= floor(total_voting_power * 2 / 3), the check x/fibre runs when the transaction settles (keeper/msg_server.go, fibre/validator/signature_set.go)"
+	if win.AsOf {
+		resp.AsOfNote = AsOfNote
+	}
+
+	// One pass, every bucket a SUM of an exact integer comparison.
+	// attested_voting_power is NULL on a record from before verification;
+	// such a row matches none of the CASEs below except the unknown one.
+	sel := `COALESCE(SUM(CASE WHEN p.attested_voting_power IS NULL THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN p.attested_voting_power IS NOT NULL AND p.total_voting_power > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN p.total_voting_power > 0 AND p.attested_voting_power < p.total_voting_power * 2 / 3 THEN 1 ELSE 0 END), 0)`
+	lower := "p.attested_voting_power >= p.total_voting_power * 2 / 3"
+	for _, e := range signingEdges {
+		sel += `,
+		COALESCE(SUM(CASE WHEN p.total_voting_power > 0 AND ` + lower + ` AND p.attested_voting_power * ? < p.total_voting_power * ? THEN 1 ELSE 0 END), 0)`
+		lower = "p.attested_voting_power * " + strconv.FormatInt(e.den, 10) + " >= p.total_voting_power * " + strconv.FormatInt(e.num, 10)
+	}
+	sel += `,
+		COALESCE(SUM(CASE WHEN p.total_voting_power > 0 AND p.attested_voting_power >= p.total_voting_power THEN 1 ELSE 0 END), 0)`
+
+	args := []any{}
+	for _, e := range signingEdges {
+		args = append(args, e.den, e.num)
+	}
+	args = append(args, win.startArg(), win.endArg())
+
+	counts := make([]int64, len(signingEdges)+2) // below, the edges, full
+	dest := []any{&resp.Unknown, &resp.Promises}
+	for i := range counts {
+		dest = append(dest, &counts[i])
+	}
+	if err := db.QueryRowContext(ctx, `SELECT `+sel+` FROM publications p WHERE `+signingPopulation, args...).Scan(dest...); err != nil {
+		return nil, err
+	}
+
+	third := 2.0 / 3.0
+	resp.Buckets = append(resp.Buckets, signingBucket{Key: "below", Label: "below ⅔", From: 0, To: third, Count: counts[0]})
+	from := third
+	for i, e := range signingEdges {
+		to := float64(e.num) / float64(e.den)
+		resp.Buckets = append(resp.Buckets, signingBucket{Key: e.key, Label: e.label, From: from, To: to, AboveThreshold: true, Count: counts[i+1]})
+		from = to
+	}
+	resp.Buckets = append(resp.Buckets, signingBucket{Key: "all", Label: "100%", From: 1, To: 1, AboveThreshold: true, Count: counts[len(counts)-1]})
+	resp.MeetsThreshold = rate(resp.Promises-counts[0], resp.Promises)
+
+	// The median number of assigned signers: how many validators it took. With
+	// an even population it is the lower of the two middle values, so it is
+	// always a count some promise actually had.
+	if resp.Promises > 0 {
+		var med int64
+		err := db.QueryRowContext(ctx, `SELECT p.attested_with_rows FROM publications p
+			WHERE `+signingPopulation+` AND p.attested_voting_power IS NOT NULL AND p.attested_with_rows IS NOT NULL AND p.total_voting_power > 0
+			ORDER BY p.attested_with_rows LIMIT 1 OFFSET ?`, win.startArg(), win.endArg(), (resp.Promises-1)/2).Scan(&med)
+		switch {
+		case err == nil:
+			resp.SignersMedian = &med
+		case !errors.Is(err, sql.ErrNoRows):
+			return nil, err
+		}
+	}
+	return resp, nil
+}
+
+// signingCache keeps the unpinned answer per window for signingTTL. The
+// query is one pass over the window's publications, cheap next to the probe
+// aggregates, but the page it feeds polls every thirty seconds. Usable as its
+// zero value.
+type signingCache struct {
+	mu      sync.Mutex
+	entries map[string]signingEntry
+}
+
+type signingEntry struct {
+	resp *signingResponse
+	at   time.Time
+}
+
+const signingTTL = 60 * time.Second
+
+func (s *Server) handleSigning(w http.ResponseWriter, r *http.Request) {
+	win, err := parseWindow(r, time.Now())
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if win.AsOf {
+		// Rationed like every other pinned computation, and never cached.
+		if !s.asOf.allow(time.Now()) {
+			w.Header().Set("Retry-After", "2")
+			writeErr(w, 429, "as_of requests are limited to one every two seconds")
+			return
+		}
+		if !s.asOf.enter() {
+			w.Header().Set("Retry-After", "5")
+			writeErr(w, 429, "as_of computations already in flight; try again shortly")
+			return
+		}
+		defer s.asOf.leave()
+		resp, err := s.computeSigning(r.Context(), win)
+		if err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		resp.ComputedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, 200, resp)
+		return
+	}
+	c := &s.signing
+	c.mu.Lock()
+	e, ok := c.entries[win.Name]
+	c.mu.Unlock()
+	if !ok || time.Since(e.at) >= signingTTL {
+		resp, err := s.computeSigning(r.Context(), win)
+		if err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+		e = signingEntry{resp: resp, at: time.Now()}
+		resp.ComputedAt = e.at.UTC().Format(time.RFC3339Nano)
+		c.mu.Lock()
+		if c.entries == nil {
+			c.entries = map[string]signingEntry{}
+		}
+		c.entries[win.Name] = e
+		c.mu.Unlock()
+	}
+	writeJSON(w, 200, e.resp)
+}

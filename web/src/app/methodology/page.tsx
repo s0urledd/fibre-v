@@ -55,6 +55,9 @@ export default function Methodology() {
       <p>This is the main reason each validator&rsquo;s page leads with reachability and certificate validity rather than with the serve rate. Those come from a TLS handshake with every registered endpoint every five minutes whether or not anything was assigned, so their coverage does not depend on a quorum anyone happened to be in, and they carry no selection effect of this kind.</p>
       <p>Counts of unproven obligations are published per blob, never per probe. Each obligation is visited at four schedule points, so a probe count of the same fact reads about four times larger than the fact — and a four-figure number beside an operator&rsquo;s name reads as an accusation where the chain is merely quiet.</p>
 
+      <h2 id="signing">Signing participation</h2>
+      <p><strong>Signed</strong> is, for one validator over the period, the settled promises carrying its verified signature over the settled promises that assigned it rows &mdash; every promise whose validator set at the promise height included it, host or no host, since the minimum-rows floor gives every member rows. Promises from before this site verified signatures sit on neither side; none assigned is a dash, and under twenty the figure is shown but not ranked. The Blobs page shows the other side: each promise&rsquo;s signed share of total voting power, against the chain&rsquo;s quorum of <code>floor(total &times; 2 / 3)</code>. Neither measures duty. The publisher stops at the quorum, so an unsigned promise is unproven, never a fault.</p>
+
       <h2 id="what-this-excludes">What the serve rate leaves out</h2>
       <p>The rate is <code>HEALTHY / (HEALTHY + FAULT)</code> over probes of an assigned shard, in window, where the settled promise proves the validator stored it. Everything else is published under its own name beside the rate, never folded into it:</p>
       <ul>
