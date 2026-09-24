@@ -78,7 +78,7 @@ func TestBuilder_EveryLineInExactlyOneExport(t *testing.T) {
 	if err := json.Unmarshal(members["manifest.json"], &man); err != nil {
 		t.Fatal(err)
 	}
-	if man.Day != d1 || man.Vantage != "eu/west 1" || man.Build != "abc" {
+	if man.Day != d1 || man.Vantage != "eu/west 1" || man.Build != "abc" || man.Methodology == "" {
 		t.Errorf("manifest = %+v", man)
 	}
 	byName := map[string]Member{}

@@ -462,6 +462,15 @@ func main() {
 					_ = st.SetMeta("escrow_accounts", itoa(int64(polled)), now)
 				}
 			}
+			// The total, from the module account every escrow lives in: exact
+			// where the sum above is a floor, since it covers only accounts
+			// this observer has seen publish.
+			if bal, err := chain.ModuleBalance(ctx, scan.FibreModuleName, "utia"); err != nil {
+				log.Printf("escrow: module balance: %v", err)
+			} else {
+				_ = st.SetMeta("escrow_module_utia", itoa(bal), now)
+				_ = st.SetMeta("escrow_module_polled_at", store.TS(now), now)
+			}
 		}
 		if pollEndpoints && chain != nil {
 			// Whether Fibre exists on this chain at all, recorded rather than

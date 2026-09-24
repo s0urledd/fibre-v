@@ -29,6 +29,8 @@ export type ClassCounts = Record<string, number>;
 
 export type Meta = {
   api_version: string;
+  /** the rules every figure was computed under (a date); see the methodology page */
+  methodology_version?: string;
   vantage: string;
   vantage_info: VantageInfo;
   vantage_count: number;
@@ -528,6 +530,9 @@ export type Market = {
   withdrawals_executed: Sum;
   escrow_held_utia: number;
   escrow_accounts: number;
+  /** x/fibre's module account: every escrow on the chain, read at escrow_total_at */
+  escrow_total_utia?: number;
+  escrow_total_at?: string;
   daily: DayBucket[];
   daily_by_publisher: DayPublisher[];
   top_publishers: PublisherShare[];
@@ -897,3 +902,29 @@ export function fmtShare(v: number | null | undefined): string {
   if (s === "0.0" && v > 0) return "<0.1%";
   return s + "%";
 }
+
+/** /v1/tip: the newest block the observer has read, for the header ticker */
+export type Tip = {
+  height: number;
+  block_time?: string;
+  observed_at?: string;
+  source: "scanner" | "collector";
+  fibre_active: boolean;
+  server_time: string;
+};
+
+/** the newest heartbeat against one validator's Fibre host, stage by stage */
+export type EndpointCheck = {
+  at: string;
+  host: string;
+  outcome: string;
+  dns_ok: boolean;
+  tcp_ok: boolean;
+  tcp_ms: number;
+  tls_ok: boolean;
+  tls_ms: number;
+  identity_ok: boolean;
+  identity_reason?: string;
+  raw_error?: string;
+  vantage: string;
+};

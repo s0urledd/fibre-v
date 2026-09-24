@@ -81,12 +81,15 @@ export default function PublishersPage() {
           sub={m?.settlement_rate.den ? `${fmtCount(m.settlement_rate)} promises` : "nothing to rate"}
           info={<p>Settlements over settlements plus reported timeouts. Because unreported timeouts are invisible, this can only overstate how often publishers pay.</p>} />
         <Cell label="Escrow held" loading={busy} evidence="chain"
-          value={m ? tia(m.escrow_held_utia, { unit: false }) : "—"} unit={m ? "TIA" : undefined}
-          tone={m && m.escrow_accounts === 0 ? "absent" : undefined}
-          sub={m ? `${tia(m.deposits.utia)} deposited · ${tia(m.withdrawals_executed.utia)} withdrawn` : undefined}
+          value={m ? tia(m.escrow_total_utia ?? m.escrow_held_utia, { unit: false }) : "—"} unit={m ? "TIA" : undefined}
+          tone={m && (m.escrow_total_utia ?? m.escrow_held_utia) === 0 ? "absent" : undefined}
+          sub={m ? `${tia(m.deposits.utia)} deposited · ${tia(m.withdrawals_requested.utia)} requested out · ${tia(m.withdrawals_executed.utia)} paid out` : undefined}
+          detail={m && m.withdrawals_requested.count > 0 ? `${m.withdrawals_requested.count.toLocaleString("en-US")} withdrawal request${m.withdrawals_requested.count === 1 ? "" : "s"} in the window, ${m.withdrawals_executed.count.toLocaleString("en-US")} paid out. A request pays out after the withdrawal delay; a settlement can shrink a queued request when the balance runs short, which the chain does not announce.` : undefined}
           info={<>
-            <p>The balance the chain currently holds for every publisher this observer has seen in a payment, read by state query. Deposits and withdrawals are the window&rsquo;s.</p>
-            <p>There is no query for every escrow on the chain, so an account that deposited and never published is not here.</p>
+            {m?.escrow_total_utia != null
+              ? <p>Every escrow on the chain: the balance of the x/fibre module account, which every deposit is paid into and every settlement, timeout and withdrawal is paid out of{m.escrow_total_at ? <>, read {ago(m.escrow_total_at)}</> : null}. {tia(m.escrow_held_utia)} of it belongs to the {m.escrow_accounts} account{m.escrow_accounts === 1 ? "" : "s"} this observer has seen publish.</p>
+              : <p>The balance the chain holds for every publisher this observer has seen in a payment, read by state query, until the module account&rsquo;s total has been read.</p>}
+            <p>Deposits, withdrawal requests and payouts are the window&rsquo;s.</p>
           </>} />
       </div>
       </Panel>

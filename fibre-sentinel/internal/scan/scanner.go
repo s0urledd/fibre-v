@@ -388,6 +388,12 @@ func (s *Scanner) waitForHeight(ctx context.Context, want int64) (int64, error) 
 			return tip, nil
 		}
 		s.status.Set("chain_tip", tip)
+		// Caught up, the tip is the block just scanned and its time is known:
+		// the dashboard's block ticker reads both from this file every few
+		// seconds, rather than from state.json, which moves every 20 blocks.
+		if tip == want-1 && !s.lastBlockTime.IsZero() {
+			s.status.Set("tip_block_time", s.lastBlockTime.UTC())
+		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return 0, fmt.Errorf("no new block: tip stuck at %d, waited %s for height %d", tip, s.cfg.FollowTimeout, want)
 		}

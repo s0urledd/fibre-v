@@ -412,3 +412,42 @@ func TestMarketAsOfIsPinnedAndLeavesTheSnapshotAlone(t *testing.T) {
 			after, afterFees, asOf, live, liveFees)
 	}
 }
+
+// The escrow total is the module account's balance, read by the collector,
+// and it is published beside the sum over known publishers rather than in
+// place of it: the two differ exactly by the accounts nobody saw publish.
+func TestMarketEscrowTotalIsTheModuleBalance(t *testing.T) {
+	ts, st := marketServer(t, nil)
+	type body struct {
+		Total *int64  `json:"escrow_total_utia"`
+		At    *string `json:"escrow_total_at"`
+		Held  int64   `json:"escrow_held_utia"`
+	}
+	// as_of computes the window on the spot, so the answer is not a snapshot
+	// taken before the meta row below was written
+	pinned := func() string { return "/v1/market?window=30d&as_of=" + time.Now().UTC().Format(time.RFC3339) }
+	var before body
+	if code := get(t, ts, pinned(), &before); code != 200 {
+		t.Fatalf("market: %d", code)
+	}
+	if before.Total != nil {
+		t.Fatalf("no module balance read yet, but a total of %d was published", *before.Total)
+	}
+	now := time.Now()
+	if err := st.SetMeta("escrow_module_utia", "123456789", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMeta("escrow_module_polled_at", store.TS(now), now); err != nil {
+		t.Fatal(err)
+	}
+	var after body
+	if code := get(t, ts, pinned(), &after); code != 200 {
+		t.Fatalf("market: %d", code)
+	}
+	if after.Total == nil || *after.Total != 123456789 || after.At == nil {
+		t.Fatalf("total %v at %v, want 123456789 with its read time", after.Total, after.At)
+	}
+	if after.Held != before.Held {
+		t.Errorf("the known-publisher sum moved (%d -> %d); the total must sit beside it", before.Held, after.Held)
+	}
+}
