@@ -134,8 +134,11 @@ type Builder struct {
 	Logf func(string, ...any)
 }
 
-// NamePattern is what an export file name looks like.
-var NamePattern = regexp.MustCompile(`^fibrescope-[A-Za-z0-9._-]+-\d{4}-\d{2}-\d{2}\.tar\.gz(\.sha256)?$`)
+// NamePattern is what an export file name looks like. Exports built before
+// the observer was named Tensile carry the old "fibrescope-" prefix; they are
+// part of the record and stay downloadable under the name they were published
+// with.
+var NamePattern = regexp.MustCompile(`^(?:tensile|fibrescope)-[A-Za-z0-9._-]+-\d{4}-\d{2}-\d{2}\.tar\.gz(\.sha256)?$`)
 
 func (b *Builder) name(day string) string {
 	v := strings.Map(func(r rune) rune {
@@ -147,7 +150,7 @@ func (b *Builder) name(day string) string {
 	if v == "" {
 		v = "local"
 	}
-	return "fibrescope-" + v + "-" + day + ".tar.gz"
+	return "tensile-" + v + "-" + day + ".tar.gz"
 }
 
 // Run builds every export that is due at now and not built yet: from the

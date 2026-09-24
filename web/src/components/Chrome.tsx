@@ -24,14 +24,18 @@ const NAV: [string, string][] = [
   ["/methodology/", "Methodology"],
 ];
 
-/** The mark: a blob's rows, one of them this validator's shard. */
+/**
+ * The mark: a tensile specimen between the grips of a testing machine, its
+ * gauge section marked. Tensile holds a validator to what it signed for
+ * across the whole retention window and records whether it held.
+ */
 function Mark() {
   return (
-    <svg className="mark-logo" width="22" height="22" viewBox="0 0 16 16" aria-hidden="true">
-      <rect x="1" y="1" width="14" height="14" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
-      <rect x="4" y="4" width="8" height="1.6" fill="currentColor" opacity=".35" />
-      <rect x="4" y="7.2" width="8" height="1.6" fill="currentColor" />
-      <rect x="4" y="10.4" width="8" height="1.6" fill="currentColor" opacity=".35" />
+    <svg className="mark-logo" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <rect x="3.5" y="1.5" width="17" height="4.5" rx="1.3" />
+      <rect x="3.5" y="18" width="17" height="4.5" rx="1.3" />
+      <path opacity=".5" d="M7.4 6H16.6C16.6 8.3 13.5 8.4 13.5 10.1V13.9C13.5 15.6 16.6 15.7 16.6 18H7.4C7.4 15.7 10.5 15.6 10.5 13.9V10.1C10.5 8.4 7.4 8.3 7.4 6Z" />
+      <rect x="8.6" y="11.3" width="6.8" height="1.4" rx=".45" />
     </svg>
   );
 }
@@ -129,7 +133,7 @@ export function Header() {
   return (
     <header className="top">
       <div className="wrap">
-        <Link className="brand" href="/"><Mark />Fibrescope</Link>
+        <Link className="brand" href="/" aria-label="Tensile, the independent observer for Celestia Fibre"><Mark />Tensile<span className="brand-for">for Celestia Fibre</span></Link>
         <nav aria-label="site">
           {NAV.map(([href, name]) => (
             <Link key={href} href={href} className={(href === "/" ? path === "/" : path.startsWith(href)) ? "on" : ""}>{name}</Link>
@@ -160,7 +164,7 @@ export function Footer() {
         <Link href="/methodology/#evidence" title="What this observer's own network saw from one location.">Observer measurements</Link>
       </div>
       <div title={meta?.server_time ? `Observer time ${utcWord(meta.server_time)}${meta.last_probe_at ? ` · newest probe ${ago(meta.last_probe_at)}` : ""}` : undefined}>
-        Fibrescope · Celestia Fibre observer · by Huginn Tech · independent observation
+        Tensile · independent observer for Celestia Fibre · by Huginn Tech
         {pinned && <span title={`Assignment pinned to celestia-app ${meta!.pinned_celestia_app_commit} · pin ${meta!.pin_status}`}> · pin {pinned}</span>}
         <span>·</span><a href={SOURCE_URL} rel="noopener noreferrer" target="_blank">source</a>
       </div>

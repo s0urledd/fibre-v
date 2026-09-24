@@ -13,8 +13,8 @@ import { Header, Footer } from "@/components/Chrome";
 const preloaded = ["ibm-plex-sans-latin", "ibm-plex-mono-latin", "ibm-plex-mono-latin-500"];
 
 export const metadata: Metadata = {
-  title: "Fibrescope · Celestia Fibre observer",
-  description: "Independent measurement of whether Celestia validators keep their Fibre serving promise.",
+  title: "Tensile · Celestia Fibre observer",
+  description: "Tensile: independent measurement of whether Celestia validators keep their Fibre serving promise.",
 };
 
 // Applies a saved theme before the first paint so a dark-mode reader never

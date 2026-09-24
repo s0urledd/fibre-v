@@ -9,5 +9,5 @@
 # observer-api -publishers /etc/fibre-observer/publishers.yaml
 publishers:
   - address: celestia1exampleexampleexampleexampleexampleqqqqqq
-    label: Fibrescope test publisher
+    label: Tensile test publisher
     source: this observer's own devnet publisher

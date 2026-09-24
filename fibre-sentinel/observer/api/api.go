@@ -115,9 +115,12 @@ type Server struct {
 	asOf asOfLimiter
 	// details caches the validator page (see validator_detail.go).
 	details detailCache
-	// bg counts the server's own background work (the blob-page warm-up),
-	// for Close.
+	// bg counts the server's own background work (the blob-page warm-up,
+	// the snapshot keeper), for Close.
 	bg sync.WaitGroup
+	// stop ends the snapshot keeper; Close closes it once.
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // Option configures a Server before it warms its caches.
@@ -180,9 +183,12 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	// cached for up to half an hour. A hold landing in the database moves
 	// nothing they hold, so without this the figure a hold withdrew stays
 	// on the front page until the TTL runs out. The market snapshot carries
-	// no verdicts and needs none.
-	s.net.revision = s.paramHoldsRevision
-	s.vals.revision = s.paramHoldsRevision
+	// no verdicts and needs no hold, but all three change meaning the moment
+	// Fibre goes live: a pre-activation zero served for half an hour after
+	// the first publication says "nothing happened" when something did.
+	s.net.revision = s.snapshotRevision
+	s.vals.revision = s.snapshotRevision
+	s.market.revision = s.activationRevision
 	// Serve the previous process's snapshots at once, then warm every window
 	// so the first visitor is not the one who waits.
 	if s.dataDir != "" {
@@ -194,6 +200,15 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.net.warm(s.logf(), time.Now())
 	s.vals.warm(s.logf(), time.Now())
 	s.market.warm(s.logf(), time.Now())
+	// Then keep every window inside its TTL whether or not anyone reads it,
+	// so a quiet night does not leave the first morning visitor a figure
+	// from the evening before.
+	s.stop = make(chan struct{})
+	s.bg.Add(1)
+	go func() {
+		defer s.bg.Done()
+		s.keepSnapshotsFresh(keeperInterval)
+	}()
 	// And the first page of blobs, for the same reason: with the verdict cache
 	// empty that page costs six queries per row, which is the one cold path
 	// left on the site. It is a single read of what /v1/blobs answers by
@@ -231,6 +246,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 // writing under the data directory once the caller tears it down. It does
 // not stop the HTTP side; the caller's listener does that.
 func (s *Server) Close() {
+	s.stopOnce.Do(func() { close(s.stop) })
 	s.bg.Wait()
 	s.net.wait()
 	s.vals.wait()

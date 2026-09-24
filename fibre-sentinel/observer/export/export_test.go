@@ -70,7 +70,7 @@ func TestBuilder_EveryLineInExactlyOneExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(built) != 1 || built[0] != "fibrescope-eu-west-1-2026-09-10.tar.gz" {
+	if len(built) != 1 || built[0] != "tensile-eu-west-1-2026-09-10.tar.gz" {
 		t.Fatalf("built %v", built)
 	}
 	members := readTar(t, filepath.Join(dir, built[0]))
@@ -163,12 +163,12 @@ func TestBuilder_EveryLineInExactlyOneExport(t *testing.T) {
 }
 
 func TestNamePattern(t *testing.T) {
-	for _, ok := range []string{"fibrescope-local-2026-09-10.tar.gz", "fibrescope-eu-west.1-2026-09-10.tar.gz.sha256"} {
+	for _, ok := range []string{"tensile-local-2026-09-10.tar.gz", "fibrescope-local-2026-09-10.tar.gz", "fibrescope-eu-west.1-2026-09-10.tar.gz.sha256"} {
 		if !NamePattern.MatchString(ok) {
 			t.Errorf("%q must match", ok)
 		}
 	}
-	for _, bad := range []string{"../x", "fibrescope-a-2026-09-10.tar", "index.json", "state.json", "fibrescope-a/b-2026-09-10.tar.gz"} {
+	for _, bad := range []string{"../x", "fibrescope-a-2026-09-10.tar", "tensile-a-2026-09-10.tar", "scope-a-2026-09-10.tar.gz", "index.json", "state.json", "fibrescope-a/b-2026-09-10.tar.gz"} {
 		if NamePattern.MatchString(bad) {
 			t.Errorf("%q must not match", bad)
 		}

@@ -3,7 +3,10 @@ FROM golang:1.26-bookworm AS go
 WORKDIR /src
 COPY . .
 ENV GOTOOLCHAIN=auto
-RUN cd fibre-sentinel && go build -o /out/ ./cmd/...
+# .git is not in the build context, so the revision comes in as an argument:
+# docker build --build-arg REVISION=$(git rev-parse --short=12 HEAD) ...
+ARG REVISION=
+RUN cd fibre-sentinel && go build -ldflags "-X github.com/plsgiveup/fibre/fibre-sentinel/internal/status.revision=${REVISION}" -o /out/ ./cmd/...
 
 FROM node:22-bookworm AS web
 WORKDIR /src/web

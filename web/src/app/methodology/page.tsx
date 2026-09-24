@@ -1,7 +1,7 @@
 import { Legend } from "@/components/Verdict";
 import { DISPUTE_URL } from "@/lib/site";
 
-export const metadata = { title: "Methodology · Fibrescope" };
+export const metadata = { title: "Methodology · Tensile · Celestia Fibre" };
 
 export default function Methodology() {
   return (
