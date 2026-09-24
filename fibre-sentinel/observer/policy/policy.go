@@ -194,6 +194,9 @@ type Policy struct {
 	mu         sync.Mutex
 	validators map[string]*validatorState
 	global     []event
+	// pending is every probe BeforeProbe admitted that AfterProbe or Release
+	// has not settled yet (see BeforeProbe).
+	pending []reservation
 	// publications seen in the projection lookback, keyed by promise hash,
 	// with the bytes a full schedule over all assigned validators would cost.
 	recentPubs map[string]pubLoad
@@ -758,25 +761,55 @@ func trim(events []event, since time.Time) []event {
 }
 
 // BeforeProbe implements probe.Policy.
+//
+// An allow is a reservation, not a reading. The checks and the booking of
+// the slot happen in one critical section: the request is entered as
+// pending (at now, for the shard it may download), every cap check after it
+// counts it, and lastRequest moves to now, so the next admission of this
+// validator waits out the spacing from this one. AfterProbe turns the
+// pending entry into the accounted event with the bytes actually asked for;
+// Release drops it when the admitted probe is not run after all.
+//
+// It used to only read. lastRequest and the byte events were written by
+// AfterProbe alone, once the probe had finished, so every admission taken
+// while a probe of the same validator was in flight decided on state that
+// did not include it yet. The first burst after a start puts one validator
+// in several work items at once; with eight workers they all passed here in
+// the same instant (no spacing to wait out, caps nowhere near) and then ran
+// back to back: up to seven shards over the per-validator byte and request
+// caps and no spacing at all, on exactly the endpoints R4 promises to be
+// gentlest with.
 func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time) (allow, skipDownload bool, reason string) {
-	// The spacing wait happens before the lock is taken. It used to run
-	// inside the critical section, which meant one validator's two-second
-	// wait blocked admission for every other validator in the pool: with
-	// eight workers and a flat lateness bound that turned into probes
-	// recorded as gaps for whoever happened to be scheduled behind it.
-	if wait := p.spacingWait(t.AddressHex, now); wait > 0 {
+	// The spacing wait happens outside the lock. It used to run inside the
+	// critical section, which meant one validator's two-second wait blocked
+	// admission for every other validator in the pool: with eight workers
+	// and a flat lateness bound that turned into probes recorded as gaps for
+	// whoever happened to be scheduled behind it. The wait is read again
+	// under the lock after every sleep, because a concurrent admission of
+	// the same validator can have booked the slot this one woke up for; only
+	// when that read finds no wait does the lock stay held, through the
+	// checks and the reservation, so no second admission can slip in between.
+	for {
+		p.mu.Lock()
+		wait := p.spacingWait(t.AddressHex, now)
+		if wait <= 0 {
+			break
+		}
+		p.mu.Unlock()
 		time.Sleep(wait)
 		now = time.Now()
 	}
-
-	p.mu.Lock()
 	defer p.mu.Unlock()
 	vs := p.state(t.AddressHex)
 	vs.events = trim(vs.events, now.Add(-24*time.Hour))
 	p.global = trim(p.global, now.Add(-24*time.Hour))
+	p.pending = trimPending(p.pending, now.Add(-24*time.Hour))
 	pv := p.cfg.Caps.PerValidator
 
-	if reqs, _ := sumSince(vs.events, now.Add(-time.Minute)); pv.RequestsPerMinute > 0 && reqs >= pv.RequestsPerMinute {
+	// Every sum below is the accounted events plus the reservations still in
+	// flight: an admitted probe costs the budget from the moment it is
+	// admitted, not from the moment it happens to finish.
+	if reqs, _ := p.sumWithPending(vs.events, t.AddressHex, now.Add(-time.Minute)); pv.RequestsPerMinute > 0 && reqs >= pv.RequestsPerMinute {
 		return false, false, fmt.Sprintf("budget:validator_requests_per_minute=%d", pv.RequestsPerMinute)
 	}
 	rows := t.RowCount
@@ -784,31 +817,98 @@ func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time
 		rows = vs.rowsLastSeen
 	}
 	est := ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, rows)
-	if _, hb := sumSince(vs.events, now.Add(-time.Hour)); hb+est > p.cfg.bytesPerHourCap(rows) {
+	if _, hb := p.sumWithPending(vs.events, t.AddressHex, now.Add(-time.Hour)); hb+est > p.cfg.bytesPerHourCap(rows) {
 		return false, false, "budget:validator_bytes_per_hour"
 	}
-	if _, db := sumSince(vs.events, now.Add(-24*time.Hour)); db+est > p.cfg.bytesPerDayCap(rows) {
+	if _, db := p.sumWithPending(vs.events, t.AddressHex, now.Add(-24*time.Hour)); db+est > p.cfg.bytesPerDayCap(rows) {
 		return false, false, "budget:validator_bytes_per_day"
 	}
-	if _, gh := sumSince(p.global, now.Add(-time.Hour)); gh+est > p.cfg.Caps.Global.BytesPerHour {
+	if _, gh := p.sumWithPending(p.global, "", now.Add(-time.Hour)); gh+est > p.cfg.Caps.Global.BytesPerHour {
 		return false, false, "budget:global_bytes_per_hour"
 	}
-	if _, gd := sumSince(p.global, now.Add(-24*time.Hour)); p.cfg.Caps.Global.BytesPerDay > 0 && gd+est > p.cfg.Caps.Global.BytesPerDay {
+	if _, gd := p.sumWithPending(p.global, "", now.Add(-24*time.Hour)); p.cfg.Caps.Global.BytesPerDay > 0 && gd+est > p.cfg.Caps.Global.BytesPerDay {
 		return false, false, "budget:global_bytes_per_day"
 	}
-	if p.cfg.Backoff.SkipDownloadAfter > 0 && vs.consecFail >= p.cfg.Backoff.SkipDownloadAfter &&
-		now.Sub(vs.lastFailAt) < p.cfg.Backoff.SkipWindow {
+	backedOff := p.cfg.Backoff.SkipDownloadAfter > 0 && vs.consecFail >= p.cfg.Backoff.SkipDownloadAfter &&
+		now.Sub(vs.lastFailAt) < p.cfg.Backoff.SkipWindow
+	// A backed-off probe skips L4 and downloads nothing: it books the
+	// request, not the shard.
+	if backedOff {
+		est = 0
+	}
+	p.pending = append(p.pending, reservation{addr: t.AddressHex, at: now, bytes: est})
+	vs.lastRequest = now
+	if backedOff {
 		return true, true, fmt.Sprintf("backoff:transport:k=%d", vs.consecFail)
 	}
 	return true, false, ""
 }
 
-// spacingWait reports how long to hold off before touching this validator
-// again, reading the state under the lock and returning so the caller can wait
-// without holding it.
-func (p *Policy) spacingWait(addr string, now time.Time) time.Duration {
+// reservation is one admitted probe not yet accounted: booked by
+// BeforeProbe, turned into an event by AfterProbe or dropped by Release.
+type reservation struct {
+	addr  string
+	at    time.Time
+	bytes int64
+}
+
+// sumWithPending is sumSince over events plus the reservations of addr (of
+// every validator when addr is empty) made since since. The caller holds the
+// lock.
+func (p *Policy) sumWithPending(events []event, addr string, since time.Time) (n int, bytes int64) {
+	n, bytes = sumSince(events, since)
+	for _, r := range p.pending {
+		if (addr == "" || r.addr == addr) && !r.at.Before(since) {
+			n++
+			bytes += r.bytes
+		}
+	}
+	return n, bytes
+}
+
+// trimPending drops reservations older than since. A reservation is settled
+// by AfterProbe or Release within one probe's time; one still here a day
+// later was leaked by a caller, and until it goes it has only ever made the
+// policy stricter (a request charged that never went out), never looser.
+func trimPending(rs []reservation, since time.Time) []reservation {
+	out := rs[:0]
+	for _, r := range rs {
+		if !r.at.Before(since) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// takePending removes addr's oldest reservation. The prober runs one probe
+// of a validator at a time, so the oldest is the one being settled; for a
+// caller that does not, any of them stands for the same request against the
+// same caps, and the bytes are reconciled to the actual figure either way.
+// The caller holds the lock.
+func (p *Policy) takePending(addr string) {
+	for i, r := range p.pending {
+		if r.addr == addr {
+			p.pending = append(p.pending[:i], p.pending[i+1:]...)
+			return
+		}
+	}
+}
+
+// Release implements probe.Policy: the probe BeforeProbe admitted for t is
+// not going to run (it went stale waiting for the validator, a queued retry
+// was abandoned, the sweep is stopping), so its reservation is given back.
+// lastRequest stays where the admission put it: at worst the next probe of
+// the validator waits out a spacing for a request that never went out,
+// which errs on the side R4 asks for.
+func (p *Policy) Release(_ scan.Publication, t probe.Target) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.takePending(t.AddressHex)
+}
+
+// spacingWait reports how long to hold off before touching this validator
+// again. The caller holds the lock, and sleeps (if it must) without it.
+func (p *Policy) spacingWait(addr string, now time.Time) time.Duration {
 	vs := p.state(addr)
 	spacing := p.cfg.Caps.PerValidator.MinRequestSpacing
 	if vs.lastRequest.IsZero() || spacing <= 0 {
@@ -820,12 +920,20 @@ func (p *Policy) spacingWait(addr string, now time.Time) time.Duration {
 	return 0
 }
 
-// AfterProbe implements probe.Policy.
+// AfterProbe implements probe.Policy. It settles the reservation BeforeProbe
+// made for this probe, replacing the estimate with what was actually asked
+// for. A probe the policy was never asked about (the prober has none; a test
+// may) is accounted all the same.
 func (p *Policy) AfterProbe(pub scan.Publication, m probe.Measurement) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.takePending(m.ValidatorAddress)
 	vs := p.state(m.ValidatorAddress)
-	vs.lastRequest = m.StartedAt
+	// The reservation already moved lastRequest to the admission time; the
+	// request itself started at or after it, and spacing counts from there.
+	if m.StartedAt.After(vs.lastRequest) {
+		vs.lastRequest = m.StartedAt
+	}
 	if m.AssignedRowCount > 0 {
 		vs.rowsLastSeen = m.AssignedRowCount
 	}
