@@ -574,3 +574,23 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 .sighist .bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
 .sighist li.below .bar i { background: var(--neutral); }
 .sighist .sub { margin-top: 10px; }
+/* --------------------------------------------------------------- hosting --- */
+/* The validators-table cell (provider · country) and the overview's
+   concentration band. Colours come from the categorical tokens above; the
+   remainder buckets (Other, Unknown) use the neutral ones so they never read
+   as a provider of their own. */
+.hosting { display: inline-flex; align-items: baseline; gap: 6px; color: var(--text); }
+.hosting .cc { font: 500 11px/1.4 var(--mono); color: var(--text-2); background: var(--tag-bg); border-radius: 3px; padding: 0 4px; }
+.hostingband .hkey { grid-template-columns: repeat(auto-fill, minmax(110px, auto)); gap: 8px 26px; }
+.hostingband .hkey .ours { margin-left: 5px; }
+.nak { display: grid; grid-template-columns: repeat(3, auto); justify-content: start; gap: 0 34px; margin: 12px 0 4px; font-size: 13px; color: var(--text-2); }
+.nak .n { display: block; font-size: 28px; font-weight: 500; color: var(--text); line-height: 1.15; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.hostingband .blobs span { white-space: nowrap; }
+.hostingband .sepd::before { content: "·"; margin: 0 8px; color: var(--text-3); }
+@media (max-width: 720px) {
+  .hostingband .hkey { grid-template-columns: repeat(2, auto); }
+  .nak { gap: 0 20px; }
+}
+/* the country list wraps between entries, never inside one */
+.hostingband .ctry { display: flex; flex-wrap: wrap; row-gap: 2px; }
+.hostingband .ctry .soft { margin-left: 0; }

@@ -384,6 +384,8 @@ export type Validator = {
   timeouts_enforced?: number;
   /** signing participation over the period: see lib/signing.ts. Descriptive, never a fault. */
   signing?: Signing;
+  /** network and country the open endpoint resolved into, from this vantage; absent when the lookup is off */
+  hosting?: import("./hosting").Hosting;
 };
 
 export type Probe = {
