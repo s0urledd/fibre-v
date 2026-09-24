@@ -1,5 +1,5 @@
 "use client";
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useApi, type Validator, type Probe, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
@@ -12,6 +12,8 @@ import { endpoint } from "@/components/Validators";
 import { HostingChip } from "@/components/Hosting";
 import { DISPUTE_URL, SELF_VALIDATOR } from "@/lib/site";
 import Heatmap from "@/components/Heatmap";
+import Diagnosis from "@/components/Diagnosis";
+import Info from "@/components/Info";
 import type { Heatmap as HeatmapData } from "@/lib/signing";
 
 type Span = { window: Window; serve_rate: Rate; probe_count: number; obligations: Obligations; classes: ClassCounts; provisional_faults?: ProvisionalFaults };
@@ -57,13 +59,55 @@ const PHASE: Record<string, string> = { in_window: "in window", grace: "grace", 
 const POINT: Record<string, string> = { w1: "w1 · 12% of the window", w2: "w2 · 45%", w3: "w3 · 72%", w4: "w4 · within 2 min 30 s of the deadline" };
 const identityWord: Record<string, string> = { verified: "verified", expired: "expired", mismatch: "not this validator’s key", no_tls: "no TLS", unverified: "unverified", unreachable: "unreachable" };
 
+/**
+ * What the newest probe rows add up to, by what came back.
+ *
+ * This replaced a line that read "No failed probe among the newest 50 rows"
+ * over fifty rows of "tcp refused", next to a Broken figure of six. Both were
+ * true in the narrow sense — none of the fifty was a FAULT, the six were older
+ * — and together they told an operator their endpoint was fine when it had
+ * not answered in a day. So the rows are counted by outcome group, every
+ * group that occurs is named, and "broken" is always named, zero included,
+ * because it is the one group that is a fault.
+ *
+ * The groups are read off the observer's own classification and the wire
+ * outcome, never re-judged: broken is FAULT outside a suspect point and
+ * nothing else. Served leads and broken closes the list, so the one count
+ * that is a fault is always in the same place.
+ */
+const REACH_FAIL = new Set(["DNS_FAIL", "TCP_REFUSED", "TCP_TIMEOUT", "TCP_UNREACHABLE", "TLS_HANDSHAKE_FAIL", "RPC_UNAVAILABLE", "RPC_ERROR"]);
+const GROUPS = ["served", "unreachable", "certificate rejected", "no endpoint", "pruned after the window", "not found, unsigned", "answered with an error", "not counted", "other", "broken"] as const;
+type Group = (typeof GROUPS)[number];
+function groupOf(p: Probe, suspect: boolean): Group {
+  if (suspect) return "not counted";
+  if (p.classification === "FAULT") return "broken";
+  if (p.classification === "HEALTHY" || p.outcome === "SERVED_OK") return "served";
+  if (p.classification === "NOT_REGISTERED") return "no endpoint";
+  if (p.classification.startsWith("IDENTITY_")) return "certificate rejected";
+  if (REACH_FAIL.has(p.outcome)) return "unreachable";
+  if (p.outcome === "NOT_FOUND" && p.phase !== "in_window") return "pruned after the window";
+  if (p.outcome === "NOT_FOUND" && p.classification === "UNATTESTED") return "not found, unsigned";
+  if (p.classification === "SERVER_ERROR" || p.classification === "THROTTLED") return "answered with an error";
+  return "other";
+}
+/** "Newest 50 probes: 43 served, 7 unreachable, 0 broken" */
+function evidenceSummary(rows: { g: Group }[]): string {
+  const n = new Map<Group, number>();
+  for (const r of rows) n.set(r.g, (n.get(r.g) ?? 0) + 1);
+  const parts = GROUPS.filter((g) => g === "broken" || (n.get(g) ?? 0) > 0).map((g) => `${int(n.get(g) ?? 0)} ${g}`);
+  return `Newest ${int(rows.length)} probe${rows.length === 1 ? "" : "s"}: ${parts.join(", ")}`;
+}
+/** the recent-evidence table's filter: every row, the FAULT rows (broken), or every row whose shard did not come back */
+type EvFilter = "all" | "failed" | "notserved";
+
 function Page() {
   const addr = useSearchParams().get("addr") ?? "";
   const [win, setWin] = useWindow("24h");
+  const [evFilter, setEvFilter] = useState<EvFilter>("all");
   const { data: meta, error: metaErr } = useApi<Meta>("/v1/meta");
   const d = useApi<Detail>(addr ? `/v1/validators/${addr}?window=${win}` : null);
   const notLive = !!meta?.app_version && !meta.fibre_active;
-  if (!addr) return <p className="notice">Open a validator from the <Link href="/">overview</Link>, or add <code>?addr=&lt;consensus address&gt;</code> to the address.</p>;
+  if (!addr) return <p className="notice">Open a validator from the <Link href="/">overview</Link>, or add <code>?addr=</code> with its consensus, operator (<code>celestiavaloper1…</code>) or account address to the address.</p>;
   const data = d.data;
   if (!data) {
     return (
@@ -71,7 +115,7 @@ function Page() {
         <div className="head"><div><p className="crumb"><Link href="/">Validators</Link> › …</p><h1>{notFound(d) ? "Validator not found" : badRequest(d) ? "Not a validator address" : d.error ? "Validator" : "Loading…"}</h1></div></div>
         <StatusLine meta={meta} metaError={metaErr} snap={null} client={{ error: d.error, fetchedAt: d.fetchedAt, status: d.status }} />
         {notFound(d) && <p className="notice">No validator with the address <span className="mono">{addr}</span> is on record: neither in the staking set nor in any probe. Check the address, or open one from the <Link href="/">overview</Link>.</p>}
-        {badRequest(d) && <p className="notice"><span className="mono">{addr}</span> is not a consensus address ({d.error}). Open a validator from the <Link href="/">overview</Link>.</p>}
+        {badRequest(d) && <p className="notice"><span className="mono">{addr}</span> is not a validator address ({d.error}). Open a validator from the <Link href="/">overview</Link>.</p>}
       </>
     );
   }
@@ -89,6 +133,21 @@ function Page() {
   // a failed probe at a point the observer does not trust itself at is not this validator's
   const lastFault = probes.find((p) => p.classification === "FAULT" && !suspect.has(p.scheduled_at));
   const lastOk = probes.find((p) => p.classification === "HEALTHY");
+  // Each row with its outcome group, once: the summary counts them and the
+  // filter selects on the same judgement, so the two cannot disagree.
+  const grouped = probes.map((p) => ({ p, g: groupOf(p, suspect.has(p.scheduled_at)) }));
+  const failedN = grouped.filter((r) => r.g === "broken").length;
+  // "Not served" is every row outside the served group, not every row short
+  // of HEALTHY: an unsigned probe that got its shard back reads "Served,
+  // unsigned", and a filter called Not served must not list it.
+  const notServedN = grouped.filter((r) => r.g !== "served").length;
+  const shown = evFilter === "failed" ? grouped.filter((r) => r.g === "broken")
+    : evFilter === "notserved" ? grouped.filter((r) => r.g !== "served") : grouped;
+  // Every failed row of the period, for when the broken obligations are older
+  // than the newest rows this page carries. /v1/probes filters on the class
+  // the rows are published with, and since bounds it to the period.
+  const failedHref = `${API_BASE}/v1/probes?validator=${v.address}&class=FAULT${data.window.start ? `&since=${encodeURIComponent(data.window.start)}` : ""}&limit=1000`;
+  const showFailed = () => setEvFilter("failed");
   const points = v.serve_rate_by_point ?? [];
   const defaultPoints = points.length === 4 && points.every((p, i) => p.key === `w${i + 1}`);
   const measuring = !!o && o.total > 0 && decided < MIN_RATED && o.pending > 0;
@@ -115,8 +174,8 @@ function Page() {
             {v.host && <HostingChip h={v.hosting} />}
             {!v.host && v.last_host && <span title="The registration stays on chain; the validator left the bonded provider list.">last endpoint <span className="mono">{v.last_host}</span>{v.endpoint_closed_at && <> · left the bonded list {dateUTC(v.endpoint_closed_at)}</>}</span>}
             {sig && sig.assigned > 0
-              ? <span title={`Settled promises in this period that assigned this validator rows and carry its verified signature, ${pctOf(sig.signed, sig.assigned)}. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.`}>signed <b className="word">{int(sig.signed)} / {int(sig.assigned)}</b> promises</span>
-              : att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">signed <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs</span>}
+              ? <span title={`Settled promises in this period that assigned this validator rows and carry its verified signature, ${pctOf(sig.signed, sig.assigned)}. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.`}>signed <b className="word">{int(sig.signed)} / {int(sig.assigned)}</b> promises<SignedInfo /></span>
+              : att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">signed <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs<SignedInfo /></span>}
             {(v.timeouts_enforced ?? 0) > 0 && <span title="MsgPaymentPromiseTimeout submitted by this validator’s operator account in the period: abandoned promises reported so the escrow was charged. The chain pays nothing for it.">{int(v.timeouts_enforced)} timeout{v.timeouts_enforced === 1 ? "" : "s"} enforced</span>}
           </div>
           <div className="idkv">
@@ -130,6 +189,9 @@ function Page() {
         <WindowSwitch value={win} onChange={setWin} />
       </div>
       <StatusLine meta={meta} metaError={metaErr} snap={{ record_through: data.record_through, window: data.window }} client={{ error: d.error, fetchedAt: d.fetchedAt, status: d.status }} measuring={measuring} />
+      {/* the conclusion before the evidence; before activation there is nothing to conclude, and StatusLine says so */}
+      {!notLive && <Diagnosis v={v} check={data.last_endpoint_check} meta={meta} decided={decided} provisional={prov}
+        failedShown={failedN} onShowFailed={showFailed} failedHref={failedHref} />}
 
       <Metrics>
         <Metric label="Service rate"
@@ -193,7 +255,8 @@ function Page() {
           <p className="errs">
             {lastFault
               ? <>Last failed probe <b>{whenUTC(lastFault.started_at)}</b> · <code>{lastFault.raw_error || lastFault.classification_reason || lastFault.outcome}</code> · blob <Link className="mono" href={`/blob/?hash=${lastFault.promise_hash}`}>{lastFault.promise_hash.slice(0, 10)}…</Link></>
-              : <>No failed probe among the newest {int(probes.length)} rows</>}
+              : probes.length === 0 ? <>No probe of this validator on record yet</>
+              : <>{evidenceSummary(grouped)}{(o?.broken ?? 0) > 0 && <> · the broken obligations are older: <a href={failedHref}>failed rows in the API →</a></>}</>}
             <br />Last successful probe <b>{lastOk ? whenUTC(lastOk.started_at) : "—"}</b> · last failed handshake <b>{v.last_unreachable_at ? whenUTC(v.last_unreachable_at) : "none on record"}</b>
           </p>
           {data.last_endpoint_check && <EndpointCheckLine c={data.last_endpoint_check} />}
@@ -208,15 +271,27 @@ function Page() {
 
       <section id="evidence">
         <div className="vhead">
-          <div><h2>Recent evidence</h2><p className="sub">Newest {int(probes.length)} probe rows, as classified by the observer{data.recent_probes_truncated ? " · the rest in the API" : ""}</p></div>
-          <div className="tools"><a className="dis" href={`${API_BASE}/v1/probes?validator=${v.address}&limit=1000`}>Full history →</a></div>
+          <div><h2>Recent evidence</h2><p className="sub">{probes.length > 0 ? evidenceSummary(grouped) : "No probe rows yet"}, as classified by the observer{data.recent_probes_truncated ? " · the rest in the API" : ""}</p></div>
+          <div className="tools">
+            {probes.length > 0 && (
+              <div className="seg" role="group" aria-label="show rows">
+                <button type="button" aria-pressed={evFilter === "all"} onClick={() => setEvFilter("all")}>All <span className="n">{int(probes.length)}</span></button>
+                <button type="button" aria-pressed={evFilter === "failed"} onClick={() => setEvFilter("failed")} title="Rows the observer classified FAULT: not found while the promise still held. The only rows that are a fault.">Failed <span className="n">{int(failedN)}</span></button>
+                <button type="button" aria-pressed={evFilter === "notserved"} onClick={() => setEvFilter("notserved")} title="Every row whose shard did not come back: unreachable, no endpoint, certificate rejected, pruned after the window, errors and failures alike. Only the failed ones are faults.">Not served <span className="n">{int(notServedN)}</span></button>
+              </div>
+            )}
+            <a className="dis" href={evFilter === "failed" ? failedHref : `${API_BASE}/v1/probes?validator=${v.address}&limit=1000`}>{evFilter === "failed" ? "Every failed row →" : "Full history →"}</a>
+          </div>
         </div>
         <div className="tablewrap">
           <table className="marks">
             <thead><tr><th>Started</th><th>Blob</th><th>Point</th><th>Verdict</th><th>Outcome</th><th className="num">Rows</th><th className="num">ms</th><th className="go" /></tr></thead>
             <tbody>
               {probes.length === 0 && <tr className="empty"><td colSpan={8}>No probe of this validator on record yet.</td></tr>}
-              {probes.map((p) => {
+              {probes.length > 0 && shown.length === 0 && <tr className="empty"><td colSpan={8}>{evFilter === "failed"
+                ? <>No failed row among the newest {int(probes.length)}.{(o?.broken ?? 0) > 0 && <> The broken obligations in this period are older: <a href={failedHref}>failed rows in the API →</a></>}</>
+                : <>Every one of the newest {int(probes.length)} rows got its shard back.</>}</td></tr>}
+              {shown.map(({ p }) => {
                 const sus = suspect.get(p.scheduled_at);
                 // at a point the observer does not trust itself at, nothing is this validator's: no red, no verdict word
                 const [word0, mk] = sus ? ["Not counted", "gone"] : probeWord(p);
@@ -253,6 +328,20 @@ function Page() {
         <p className="tnote">Verdicts are the observer’s own classification of each probe; this page never re-derives them. A greyed row sits at a point the observer does not trust itself at and counts nowhere. <a href={DISPUTE_URL} rel="noopener noreferrer" target="_blank">How to dispute a verdict</a>.</p>
       </section>
     </>
+  );
+}
+
+/**
+ * What "signed" means, one tap away. The same sentence as the overview
+ * table's Signed column, so the two pages never explain one figure two ways:
+ * a missing signature is the quorum rule working, not the validator failing.
+ */
+function SignedInfo() {
+  return (
+    <Info label="Signed">
+      <p>Settled promises in this period that assigned this validator rows and carry its verified signature.</p>
+      <p>Publishers stop collecting signatures at two thirds of stake, so roughly a third of validators miss any given promise by design. A low rate is normal; only a sustained 0 with a reachable host is worth a look.</p>
+    </Info>
   );
 }
 
