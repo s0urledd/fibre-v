@@ -74,13 +74,14 @@ func newUpgradeNode(t *testing.T, upgrade, tip int64, provs []byte) *upgradeNode
 		path, _ := req.Params["path"].(string)
 		n.mu.Lock()
 		n.calls[req.Method+" "+path]++
-		panicFrom, params := n.panicFrom, n.params
+		n.calls[fmt.Sprintf("%s@%d", req.Method, height)]++
+		panicFrom, params, tip := n.panicFrom, n.params, n.tip
 		n.mu.Unlock()
 
 		var result any
 		switch req.Method {
 		case "status":
-			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"node_info":{"network":"test-1","protocol_version":{"p2p":"8","block":"11","app":"10"},"id":"","listen_addr":"","version":"","channels":"","moniker":"fake","other":{"tx_index":"on","rpc_address":""}},"sync_info":{"latest_block_hash":"","latest_app_hash":"","latest_block_height":"%d","latest_block_time":"2026-09-24T18:00:00Z","earliest_block_hash":"","earliest_app_hash":"","earliest_block_height":"1","earliest_block_time":"2026-09-21T00:00:00Z","catching_up":false},"validator_info":{"address":"","pub_key":null,"voting_power":"0"}}}`, req.ID, n.tip)
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"node_info":{"network":"test-1","protocol_version":{"p2p":"8","block":"11","app":"10"},"id":"","listen_addr":"","version":"","channels":"","moniker":"fake","other":{"tx_index":"on","rpc_address":""}},"sync_info":{"latest_block_hash":"","latest_app_hash":"","latest_block_height":"%d","latest_block_time":"2026-09-24T18:00:00Z","earliest_block_hash":"","earliest_app_hash":"","earliest_block_height":"1","earliest_block_time":"2026-09-21T00:00:00Z","catching_up":false},"validator_info":{"address":"","pub_key":null,"voting_power":"0"}}}`, req.ID, tip)
 			return
 		case "header":
 			result = coretypes.ResultHeader{Header: header(height)}

@@ -421,7 +421,8 @@ the database aside, restore or delete it, start the collector, and check
 - **Health is 503.** Read the `checks` list: it names the process or
   condition. A dead process: `journalctl -u fibre-<name>@<network> -n 100`.
   A `scanner_lag`: the RPC node is behind or slow; the scanner catches up
-  on its own. A `scan_gaps`: the node could not serve those heights; point
+  on its own. A `scan_gaps`: the node could not serve those heights, or the
+  operator skipped them (each range's `reason` says which, see below); point
   the scanner at a node that keeps them and delete `gaps` from `state.json`
   after re-scanning from the lowest gap height with `-start-height`, or
   accept the gap (the dashboard says which blocks). A `pin`: see below.
@@ -442,6 +443,40 @@ the database aside, restore or delete it, start the collector, and check
   each attempt; the crash dump is the last 300 log lines. A full disk, an
   unreadable data directory or a chain-id mismatch are the known causes;
   none of them is an RPC outage.
+- **The scanner crash-loops on one block.** The scanner exits, rather than
+  guess, on a block it cannot make sense of: a params event or provider
+  registration it cannot parse, a publication it cannot build for a reason
+  other than the node lacking the height, a block whose tx and result
+  counts disagree. None is expected (the formats match upstream), but if one
+  fires, `Restart=always` brings it back to the same height and it dies
+  there again, forever, and the feed stops. Every such exit ends with
+  `to move past this height, restart with -skip-heights N`. To do that:
+
+  ```
+  journalctl -u fibre-scan@mocha -n 300 --no-pager > /root/scan-crash-<N>.log   # keep the evidence
+  echo 'SKIP_HEIGHTS=<N>' >> /etc/fibre-observer/mocha.env                       # or edit the existing line
+  systemctl restart fibre-scan@mocha
+  journalctl -u fibre-scan@mocha -n 50 --no-pager | grep -E "SKIP|skip-heights"
+  curl -s localhost:${API_LISTEN}/v1/health | jq '.scan_gaps'
+  ```
+
+  The value is comma-separated heights and ranges (`1234,2000-2005`); one
+  that does not parse stops the scanner at startup rather than skip the
+  wrong thing. A listed height is not read at all — not its publications,
+  params changes, host registrations or escrow movements — and is recorded
+  as a scan gap with the reason `skipped by the operator (-skip-heights)`,
+  exactly like a height the node could not serve: `state.json`, the API's
+  `scan_gaps`, the `scan_gaps` health check (health reads degraded while it
+  stands) and the site all show it, and a publication settled in it is
+  unknown, never counted served or unserved. The flag value is also in
+  `runs.jsonl` with the rest of each start's config. Nothing is skipped that
+  is not listed. It is safe to leave set: once the scan is past the height
+  it is inert (the scanner says so at every start) and a height already on
+  record as a gap is never added twice. Clear `SKIP_HEIGHTS` at the next
+  planned restart anyway, so it cannot bite a later re-scan. Skip only the
+  height the exit names, and report the crash dump: the real fix is a build
+  that reads the block. After that fix, re-scan the height the same way as
+  any other gap (the `scan_gaps` item above) with `SKIP_HEIGHTS` empty.
 - **Moving to a new host.** Copy the data directory (or restore from the
   two backups), install the binaries and units, copy `/etc/fibre-observer`,
   keep the same `VANTAGE` name if the egress addresses stay the same and a
@@ -490,6 +525,13 @@ read. `reachability` follows within a heartbeat interval. Publications appear
 only once somebody actually pays for a blob, which may be hours later; an
 empty publication feed on activation day is a quiet network, not a broken
 observer, and the site says which.
+
+What does not self-heal: a scanner that exits on the same block at every
+restart (`systemctl status fibre-scan@mocha` shows it cycling; the last line
+of each crash dump ends `restart with -skip-heights N`). The first real
+Fibre blocks are when a format this build misreads would show up. Do not
+wait for a build: follow the Runbook item "The scanner crash-loops on one
+block", which moves past that height and publishes it as a scan gap.
 
 ## 8. Checks after deploy
 

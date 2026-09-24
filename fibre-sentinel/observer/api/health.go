@@ -253,7 +253,7 @@ func (s *Server) health(ctx context.Context, now time.Time) healthResponse {
 			missing += g.To - g.From + 1
 		}
 		checks = append(checks, healthCheck{"scan_gaps", false,
-			fmt.Sprintf("%d height range(s), %d blocks the RPC node could not serve; publications in them are unknown to this observer", n, missing)})
+			fmt.Sprintf("%d height range(s), %d blocks not scanned (the RPC node could not serve them, or the operator skipped them with -skip-heights; each range gives its reason); publications in them are unknown to this observer", n, missing)})
 	}
 	var appVersion string
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'app_version'`).Scan(&appVersion)

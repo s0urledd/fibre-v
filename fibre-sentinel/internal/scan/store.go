@@ -132,8 +132,9 @@ type PersistState struct {
 	// a second check_skipped record for a stretch already on the record.
 	ReconcileFailingSince int64 `json:"reconcile_failing_since,omitempty"`
 	// Gaps are height ranges the scanner had to skip because the node could
-	// not serve them. Published, never hidden: a publication in one of these
-	// blocks is unknown to this observer.
+	// not serve them, or because the operator listed them in -skip-heights
+	// (Reason says which). Published, never hidden: a publication in one of
+	// these blocks is unknown to this observer.
 	Gaps []ScanGap `json:"gaps,omitempty"`
 }
 
