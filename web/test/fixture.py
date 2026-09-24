@@ -292,9 +292,13 @@ for p in range(PUBS):
         idx = [(cursor + k) % 16384 for k in range(rows)]
         cursor = (cursor + rows) % 16384
         db.execute("""INSERT INTO assignments
-            (promise_hash, validator_address, voting_power, row_count, rows_json, attested)
-            VALUES (?,?,?,?,?,?)""",
-            (ph, v["cons"], v["power"], rows, json.dumps(idx), 1 if attested[v["cons"]] else 0))
+            (promise_hash, validator_address, voting_power, row_count, rows_json, attested, settlement_height)
+            VALUES (?,?,?,?,?,?,?)""",
+            (ph, v["cons"], v["power"], rows, json.dumps(idx), 1 if attested[v["cons"]] else 0,
+             # the publication's settlement height, as the store copies it
+             # (migration 22): the validators table finds each one's newest
+             # assignment by it
+             800_000 + p + 1))
 
 # --- probes ---------------------------------------------------------------
 # Four in-window points at 12/45/72/92 percent of the retention window, one

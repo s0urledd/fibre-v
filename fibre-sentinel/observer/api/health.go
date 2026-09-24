@@ -331,7 +331,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, h)
 }
 
-// unassignablePublications is the count /v1/meta shows.
+// unassignablePublications is the count /v1/meta shows. Both /v1/meta and
+// /v1/health run it on every call, and it used to read every publication to
+// find the few with an assignment error; publications_unassignable
+// (migration 22) is partial on exactly this test, so it now reads only
+// those. The predicate must stay spelled so SQLite can match it to the
+// index's WHERE (`<>` and `!=` are the same operator).
 func (s *Server) unassignablePublications(ctx context.Context) int64 {
 	var n sql.NullInt64
 	_ = s.st.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM publications WHERE assignment_error != ''`).Scan(&n)
