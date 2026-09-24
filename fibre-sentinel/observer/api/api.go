@@ -569,10 +569,10 @@ func rate(num, den int64) Rate {
 // ---- meta ----
 
 type metaResponse struct {
-	APIVersion             string      `json:"api_version"`
+	APIVersion string `json:"api_version"`
 	// MethodologyVersion is verdict.MethodologyVersion: the rules the figures
 	// on every page were computed under.
-	MethodologyVersion string `json:"methodology_version"`
+	MethodologyVersion     string      `json:"methodology_version"`
 	Vantage                string      `json:"vantage"`
 	VantageInfo            VantageInfo `json:"vantage_info"`
 	VantageCount           int         `json:"vantage_count"`
@@ -896,7 +896,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		UnassignablePublications: s.unassignablePublications(ctx),
 		APIVersion:               Version, Vantage: s.vantage, VantageInfo: s.info,
 		MethodologyVersion: verdict.MethodologyVersion,
-		VantageCount: vantages, ObservedFromOneVantage: vantages == 1,
+		VantageCount:       vantages, ObservedFromOneVantage: vantages == 1,
 		ChainID: meta["chain_id"], LastScannedHeight: meta["last_scanned_height"], EndpointsHeight: meta["endpoints_height"],
 		AppVersion: meta["app_version"], FibreAppVersion: meta["fibre_app_version"], FibreActive: meta["fibre_active"] == "yes",
 		ChainHeight:          meta["chain_height"],

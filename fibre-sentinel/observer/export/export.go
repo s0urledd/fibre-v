@@ -101,8 +101,8 @@ type Manifest struct {
 	GeneratedAt time.Time `json:"generated_at"`
 	Build       string    `json:"build"`
 	// Methodology is the verdict.MethodologyVersion the day was recorded under.
-	Methodology string `json:"methodology_version,omitempty"`
-	Files       []Member  `json:"files"`
+	Methodology string   `json:"methodology_version,omitempty"`
+	Files       []Member `json:"files"`
 	// State is the scanner state snapshot carried beside the day's lines.
 	// Absent only on an export built from a data directory that had none.
 	State *Member `json:"state,omitempty"`
