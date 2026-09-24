@@ -239,6 +239,36 @@ func (s *Store) ParamRangeRows(ctx context.Context, clause string) ([]ParamRange
 // the row arrived.
 const StaleDeadline = `prb.must_serve_until <> (SELECT pb.must_serve_until FROM publications pb WHERE pb.promise_hash = prb.promise_hash)`
 
+// staleDeadlineRows is StaleDeadline asked the other way round, as a join a
+// statement can seek: the rows (aliased prb) of every corrected publication
+// (aliased pb) whose deadline disagrees with it.
+//
+// It is the same set, not an approximation of it, because of the invariant
+// StaleDeadline itself rests on: publications.must_serve_until only ever
+// moves through ApplyPublicationCorrection, which stamps corrected_at in the
+// same statement. A publication with corrected_at NULL still carries the
+// deadline the scanner stamped, which is the deadline every measurement of
+// it was scheduled from, so none of its rows can disagree with it. (A row
+// whose deadline disagreed with an uncorrected publication would mean the
+// invariant broke, and the correction the sweep would then write — against
+// no range at all — would be wrong anyway.)
+//
+// Asked row by row, as StaleDeadline is, it meant visiting every probe in
+// the store: SyncParamHolds did that in a write transaction every collector
+// pass, and the corrector's sweep did it again, 3.8s and 0.75s on a
+// 990,000-probe fixture, growing with every row ever stored. Asked this way
+// it starts from publications_corrected (migration 21), which holds the
+// handful of publications a params range ever moved, and reads only their
+// rows through probes_promise.
+//
+// CROSS JOIN is SQLite's way of fixing the join order, and it is needed:
+// without statistics (the store never runs ANALYZE) the planner rates a
+// walk of probes in started_at order, or of the whole table, as cheaper
+// than starting from a partial index it cannot size, and picks the full
+// scan this exists to avoid. TestHotQueriesUseIndexes pins the plan.
+const staleDeadlineRows = `publications pb CROSS JOIN probes prb ON prb.promise_hash = pb.promise_hash
+	WHERE pb.corrected_at IS NOT NULL AND prb.must_serve_until <> pb.must_serve_until`
+
 // CoveredByAHoldingRange is a publication (aliased pb) whose upload
 // interval overlaps a range that still withholds. It is the same overlap
 // SyncParamHolds uses, spelled so InsertProbe can ask it of one row.
@@ -284,22 +314,26 @@ const ProbeHeldAtInsert = `COALESCE((SELECT pb.retention_unverified = 1
 // overlapping ranges, which is what a crash between the record and the
 // scan cursor produces, and clearing the flag when one of them closes
 // would un-hold rows the other still covers.
+//
+// Every statement starts from what is held or could become held, never from
+// the whole table: this runs every collector pass inside a write
+// transaction, and the first cut scanned every probe row to find the few it
+// changes (3.8s on a 990,000-probe fixture, blocking every other writer for
+// that long, every ten seconds, and growing with the store). Each set in
+// syncParamHoldsStmts
+// is read through an index that holds only the rows it can contain —
+// param_uncertainty_holding, publications_held, publications_corrected,
+// probes_held — so a pass with nothing held costs a few empty index seeks
+// whatever the store's size, and one with holds costs what they cover.
+// TestHotQueriesUseIndexes pins the plans.
 func (s *Store) SyncParamHolds(ctx context.Context) (int64, error) {
-	const held = `SELECT pb.promise_hash FROM publications pb WHERE ` + CoveredByAHoldingRange
-	const rowHeld = `(promise_hash IN (SELECT promise_hash FROM publications WHERE retention_unverified = 1)
-		OR EXISTS (SELECT 1 FROM probes prb WHERE prb.dedupe_key = probes.dedupe_key AND ` + StaleDeadline + `))`
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
 	var changed int64
-	for _, q := range []string{
-		`UPDATE publications SET retention_unverified = 1 WHERE retention_unverified = 0 AND promise_hash IN (` + held + `)`,
-		`UPDATE publications SET retention_unverified = 0 WHERE retention_unverified = 1 AND promise_hash NOT IN (` + held + `)`,
-		`UPDATE probes SET retention_unverified = 1 WHERE retention_unverified = 0 AND ` + rowHeld,
-		`UPDATE probes SET retention_unverified = 0 WHERE retention_unverified = 1 AND NOT ` + rowHeld,
-	} {
+	for _, q := range syncParamHoldsStmts {
 		res, err := tx.ExecContext(ctx, q)
 		if err != nil {
 			return 0, err
@@ -308,6 +342,42 @@ func (s *Store) SyncParamHolds(ctx context.Context) (int64, error) {
 		changed += n
 	}
 	return changed, tx.Commit()
+}
+
+// The pieces of syncParamHoldsStmts, kept at package level so
+// TestHotQueriesUseIndexes can ask SQLite how it plans the exact statements
+// SyncParamHolds runs.
+const (
+	// The publications a holding range covers, found from the ranges: the
+	// same overlap as CoveredByAHoldingRange, but driven by the (normally
+	// empty) set of holding ranges and seeking publications_settlement,
+	// instead of testing every publication against them.
+	syncHeldPublications = `SELECT pb.promise_hash FROM param_uncertainty u
+		JOIN publications pb ON pb.settlement_height >= u.from_height AND pb.promise_height - 1 <= u.to_height
+		WHERE u.holds = 1`
+	// Raising: the rows of held publications, and the stale rows (see
+	// staleDeadlineRows for why these are all of them), by rowid. CROSS JOIN
+	// for the same reason as there: publications first, always.
+	syncRowsToHold = `SELECT prb.rowid FROM publications pb CROSS JOIN probes prb ON prb.promise_hash = pb.promise_hash
+			WHERE pb.retention_unverified = 1
+		UNION ALL
+		SELECT prb.rowid FROM ` + staleDeadlineRows
+	// Clearing keeps the row-by-row test, over probes_held: it only ever
+	// visits rows that are held now, and asking StaleDeadline of each one
+	// directly means a row is never released on the strength of the
+	// invariant above, only on its own deadline agreeing.
+	syncRowHeld = `(promise_hash IN (SELECT promise_hash FROM publications WHERE retention_unverified = 1)
+		OR EXISTS (SELECT 1 FROM probes prb WHERE prb.dedupe_key = probes.dedupe_key AND ` + StaleDeadline + `))`
+)
+
+// syncParamHoldsStmts are SyncParamHolds' four statements, in order:
+// publications raised, publications cleared, probe rows raised, probe rows
+// cleared.
+var syncParamHoldsStmts = []string{
+	`UPDATE publications SET retention_unverified = 1 WHERE retention_unverified = 0 AND promise_hash IN (` + syncHeldPublications + `)`,
+	`UPDATE publications SET retention_unverified = 0 WHERE retention_unverified = 1 AND promise_hash NOT IN (` + syncHeldPublications + `)`,
+	`UPDATE probes SET retention_unverified = 1 WHERE retention_unverified = 0 AND rowid IN (` + syncRowsToHold + `)`,
+	`UPDATE probes SET retention_unverified = 0 WHERE retention_unverified = 1 AND NOT ` + syncRowHeld,
 }
 
 // StaleRow is one probe row graded against a deadline that has since been
@@ -325,16 +395,12 @@ type StaleRow struct {
 // publication. This is the corrector's standing work: a range closing does
 // not stop rows arriving against the old deadline, so nothing keyed on a
 // range can be the thing that finds them.
+//
+// It runs every collector pass, so it is asked through staleDeadlineRows:
+// from the corrected publications down to their rows, rather than of every
+// row in the store.
 func (s *Store) StaleDeadlineRows(ctx context.Context, limit int) ([]StaleRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT prb.dedupe_key, prb.validator_address, prb.scheduled_at, prb.phase,
-			prb.classification, prb.must_serve_until, prb.raw_json, prb.promise_hash,
-			pb.must_serve_until,
-			COALESCE((SELECT c.uncertainty_id FROM publication_corrections c
-			          WHERE c.promise_hash = prb.promise_hash ORDER BY c.judged_at DESC LIMIT 1), '')
-		FROM probes prb JOIN publications pb ON pb.promise_hash = prb.promise_hash
-		WHERE `+StaleDeadline+`
-		ORDER BY prb.started_at
-		LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, staleDeadlineRowsSQL, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -631,3 +697,14 @@ func nullTime(t *time.Time) any {
 	}
 	return ts(*t)
 }
+
+// staleDeadlineRowsSQL is StaleDeadlineRows' query, at package level for
+// TestHotQueriesUseIndexes.
+const staleDeadlineRowsSQL = `SELECT prb.dedupe_key, prb.validator_address, prb.scheduled_at, prb.phase,
+		prb.classification, prb.must_serve_until, prb.raw_json, prb.promise_hash,
+		pb.must_serve_until,
+		COALESCE((SELECT c.uncertainty_id FROM publication_corrections c
+		          WHERE c.promise_hash = prb.promise_hash ORDER BY c.judged_at DESC LIMIT 1), '')
+	FROM ` + staleDeadlineRows + `
+	ORDER BY prb.started_at
+	LIMIT ?`

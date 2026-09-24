@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -36,7 +37,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 20
+const SchemaVersion = 21
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -591,11 +592,110 @@ var migrations = []migration{
 			 WHERE kind = 'silent_change' AND corrected_at IS NULL`,
 		},
 	},
+	{
+		version: 21,
+		note:    "indexes so the collector pass and the API's per-request queries cost what is new, not what is stored: the covering window indexes regain what migration 19 took from them, and every hot query that walked a whole table gets something to seek",
+		stmts: []string{
+			// Migration 19 made every published rate read EffectiveClass,
+			// which reads retention_unverified and outcome. Neither is in
+			// probes_window or probes_validator_window, so from that
+			// migration on neither index covered the queries it was built
+			// for: SQLite still sought by the leading columns but went back
+			// to the table for every row in the window, which is exactly
+			// the forty-column read migration 5 existed to avoid. Measured
+			// on a 990,000-probe fixture: the 7-day network tally 0.67s to
+			// 0.32s, the per-validator tally 0.91s to 0.51s.
+			//
+			// outcome was left out of migration 5 on purpose as "the widest
+			// column none of these queries reads"; that is no longer true,
+			// and it is a short enum, not a message. Same names, so every
+			// comment and plan that talks about them stays right.
+			`DROP INDEX IF EXISTS probes_window`,
+			`CREATE INDEX IF NOT EXISTS probes_window ON probes
+				(assigned, phase, started_at, classification, schedule_label,
+				 attested, validator_address, promise_hash, scheduled_at,
+				 retention_unverified, outcome)`,
+			`DROP INDEX IF EXISTS probes_validator_window`,
+			`CREATE INDEX IF NOT EXISTS probes_validator_window ON probes
+				(validator_address, assigned, phase, started_at, classification,
+				 schedule_label, attested, promise_hash, scheduled_at,
+				 retention_unverified, outcome)`,
+
+			// SyncParamHolds runs every collector pass, inside a write
+			// transaction, and found its rows by scanning: probes for
+			// retention_unverified = 0, publications for = 1. Held rows are
+			// the rare case and the one every statement starts from, so
+			// both tables get a partial index on it (probes_held already
+			// exists) and the statements are rewritten to start from them
+			// (store/uncertainty.go). Partial, so an unheld row — nearly
+			// all of them — costs nothing to write.
+			`CREATE INDEX IF NOT EXISTS publications_held ON publications (promise_hash) WHERE retention_unverified = 1`,
+			// The other reason a row is held is a deadline that disagrees
+			// with its publication's, and a publication's deadline only
+			// ever moves through ApplyPublicationCorrection, which stamps
+			// corrected_at. So the publications a stale row can belong to
+			// are exactly these: a handful, and the only ones the sync and
+			// the corrector's sweep need to look under.
+			`CREATE INDEX IF NOT EXISTS publications_corrected ON publications (promise_hash) WHERE corrected_at IS NOT NULL`,
+			// /v1/meta and /v1/health count unassignable publications on
+			// every call; nothing indexed assignment_error, so each call
+			// read every publication. Partial, and led by
+			// settlement_height so the recent-only count seeks by height
+			// too.
+			`CREATE INDEX IF NOT EXISTS publications_unassignable ON publications (settlement_height) WHERE assignment_error <> ''`,
+
+			// "Latest reachability answer per validator" is MAX(rowid)
+			// among the rows that carry one, and the rows that do not are
+			// excluded by outcome, which no index held: the validators
+			// table walked every probe and every heartbeat through the
+			// table to find ~80 rows. An index on validator_address alone
+			// keeps each validator's entries in rowid order, so the newest
+			// qualifying row is the last entry — one seek per validator —
+			// and partial on the same outcome test the query applies, so
+			// the walk never meets a row it would discard. See
+			// reachabilityNow.
+			`CREATE INDEX IF NOT EXISTS probes_latest_answer ON probes (validator_address)
+				WHERE outcome NOT IN ('MISSED','PROBE_ERROR')`,
+			`CREATE INDEX IF NOT EXISTS reachability_latest_answer ON reachability (validator_address)
+				WHERE outcome <> 'PROBE_ERROR'`,
+
+			// How many vantages wrote to this store is a UNION of both
+			// tables' vantage column, which nothing indexed: /v1/meta
+			// re-ran it whenever either table had grown, which under
+			// traffic is every collector pass. With these the distinct
+			// values are a loose index scan, one seek per vantage (there
+			// are one or two), however many rows each wrote. The column is
+			// a short label, so each entry is a few bytes plus the rowid.
+			`CREATE INDEX IF NOT EXISTS probes_vantage ON probes (vantage)`,
+			`CREATE INDEX IF NOT EXISTS reachability_vantage ON reachability (vantage)`,
+
+			// "Voting power and rows from the newest publication each
+			// validator appears in" joined every assignment to its
+			// publication to find one height per validator. Assignments
+			// are never pruned and grow by one per validator per blob, so
+			// that query grew without bound. The settlement height is
+			// copied onto the assignment (it never changes once written:
+			// nothing updates publications.settlement_height), and the
+			// index below makes the newest height per validator a single
+			// seek. It replaces assignments_validator, whose every use is
+			// served by the new index's leading column.
+			//
+			// Nullable, not NOT NULL DEFAULT 0: an assignment whose
+			// publication is missing has no height, and 0 would claim one.
+			`ALTER TABLE assignments ADD COLUMN settlement_height INTEGER`,
+			`UPDATE assignments SET settlement_height =
+				(SELECT p.settlement_height FROM publications p WHERE p.promise_hash = assignments.promise_hash)`,
+			`DROP INDEX IF EXISTS assignments_validator`,
+			`CREATE INDEX IF NOT EXISTS assignments_validator_height ON assignments (validator_address, settlement_height)`,
+		},
+	},
 }
 
 // Store wraps one SQLite database.
 type Store struct {
 	db *sql.DB
+	// counts keeps Count's running totals: see Count.
+	counts rowCounts
 }
 
 // Open opens or creates the SQLite database at path, applies the pragmas the
@@ -1207,9 +1307,11 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 		case scan.HostNone:
 			host = ""
 		}
-		if _, err := tx.Exec(`INSERT INTO assignments (promise_hash, validator_address, voting_power, row_count, rows_json, attested, host_at_settlement)
-			VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(promise_hash, validator_address) DO NOTHING`,
-			p.PromiseHash, v.Address, v.VotingPower, v.RowCount, rowsJSON, attested, host); err != nil {
+		// settlement_height is the publication's, copied so the newest
+		// assignment per validator is an index seek (migration 21).
+		if _, err := tx.Exec(`INSERT INTO assignments (promise_hash, validator_address, voting_power, row_count, rows_json, attested, host_at_settlement, settlement_height)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(promise_hash, validator_address) DO NOTHING`,
+			p.PromiseHash, v.Address, v.VotingPower, v.RowCount, rowsJSON, attested, host, p.SettlementHeight); err != nil {
 			return false, fmt.Errorf("assignment %s/%s: %w", p.PromiseHash, v.Address, err)
 		}
 	}
@@ -1744,19 +1846,62 @@ type Counts struct {
 	Publications, Assignments, Probes, OpenEndpoints, Runs int64
 }
 
+// countedTables are the tables Count keeps running totals for: the three
+// that grow with traffic. The other two figures are small tables counted
+// outright.
+var countedTables = [3]string{"publications", "assignments", "probes"}
+
+// countRecountEvery bounds how long a running total goes without a full
+// recount. See Count.
+const countRecountEvery = time.Hour
+
+// rowCounts is Count's running state: per counted table, the rows counted
+// and the highest rowid they were counted up to, plus what forces the next
+// full recount.
+type rowCounts struct {
+	mu      sync.Mutex
+	ok      bool
+	rawFrom string
+	fullAt  time.Time
+	n, mark [len(countedTables)]int64
+}
+
+// metaRawFrom is rollup's meta key for the first day whose raw rows are
+// all still present (rollup.metaRawFrom; the store cannot import rollup).
+// The prune moves it every time it deletes a day.
+const metaRawFrom = "raw_from"
+
 // Count returns row counts of the main tables.
+//
+// The collector calls it every pass and /v1/meta on every request, and a
+// COUNT(*) in SQLite is a walk of a whole index: it grows with every row
+// ever stored, which is the wrong shape for something run every ten
+// seconds and on every page load. So the three tables that grow are
+// counted once and then kept up to date by counting only the rows written
+// since: rowid is assigned in increasing order, so `rowid > mark` is a
+// seek to the new rows, and the total stays exact as long as nothing was
+// deleted.
+//
+// Deletes are what a running total cannot see, so the rules are:
+//
+//   - publications and assignments are never deleted;
+//   - probes are deleted only by the retention prune (rollup.Run), which
+//     moves raw_from in meta every time it deletes a day. A raw_from other
+//     than the one the totals were taken under forces a full recount, so a
+//     prune is reflected by the first call that sees it;
+//   - and, as a backstop against a delete this reasoning does not know
+//     about, nothing goes more than countRecountEvery without one.
+//
+// The figures therefore keep their meaning — the rows in each table — and
+// only the cost changes.
 func (s *Store) Count(ctx context.Context) (Counts, error) {
 	var c Counts
 	q := func(dst *int64, sqlText string) error { return s.db.QueryRowContext(ctx, sqlText).Scan(dst) }
-	if err := q(&c.Publications, `SELECT COUNT(*) FROM publications`); err != nil {
+	n, err := s.growingCounts(ctx)
+	if err != nil {
 		return c, err
 	}
-	if err := q(&c.Assignments, `SELECT COUNT(*) FROM assignments`); err != nil {
-		return c, err
-	}
-	if err := q(&c.Probes, `SELECT COUNT(*) FROM probes`); err != nil {
-		return c, err
-	}
+	c.Publications, c.Assignments, c.Probes = n[0], n[1], n[2]
 	if err := q(&c.OpenEndpoints, `SELECT COUNT(*) FROM endpoints WHERE closed_at IS NULL`); err != nil {
 		return c, err
 	}
@@ -1764,6 +1909,38 @@ func (s *Store) Count(ctx context.Context) (Counts, error) {
 		return c, err
 	}
 	return c, nil
+}
+
+// growingCounts is the running-total half of Count. Each table's count and
+// mark come from one statement, so they describe the same snapshot of that
+// table; the three tables are not one snapshot, which Count never was.
+func (s *Store) growingCounts(ctx context.Context) ([len(countedTables)]int64, error) {
+	var rawFrom string
+	_ = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, metaRawFrom).Scan(&rawFrom)
+	rc := &s.counts
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	full := !rc.ok || rc.rawFrom != rawFrom || time.Since(rc.fullAt) >= countRecountEvery
+	n, mark := rc.n, rc.mark
+	for i, t := range countedTables {
+		var got, top int64
+		var err error
+		if full {
+			err = s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM `+t).Scan(&got, &top)
+			n[i], mark[i] = got, top
+		} else {
+			err = s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(rowid), ?) FROM `+t+` WHERE rowid > ?`, mark[i], mark[i]).Scan(&got, &top)
+			n[i], mark[i] = n[i]+got, top
+		}
+		if err != nil {
+			return n, err
+		}
+	}
+	rc.n, rc.mark, rc.ok, rc.rawFrom = n, mark, true, rawFrom
+	if full {
+		rc.fullAt = time.Now()
+	}
+	return n, nil
 }
 
 // ---- reachability ----
@@ -2002,4 +2179,55 @@ func (s *Store) ApplyAmendment(a Amendment) (bool, error) {
 		return false, err
 	}
 	return true, tx.Commit()
+}
+
+// QueryPlan returns SQLite's plan for q, one line per step, as EXPLAIN
+// QUERY PLAN prints it ("SEARCH probes USING COVERING INDEX ..."). It
+// exists so tests can pin that the queries run on every request or every
+// collector pass seek an index rather than walk a table: a plan regression
+// is invisible on a test-sized store and only shows once the table is big.
+func (s *Store) QueryPlan(ctx context.Context, q string, args ...any) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `EXPLAIN QUERY PLAN `+q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			return nil, err
+		}
+		out = append(out, detail)
+	}
+	return out, rows.Err()
+}
+
+// FullScans is the steps of a plan that read a whole table, or a whole
+// index that is not partial: a "SCAN x" with no index, or a "SCAN x USING
+// ... INDEX i" whose i is not in partial. Scans of the query's own CTEs
+// (named in ctes), of subquery results and of a constant row are not reads
+// of the store.
+func FullScans(plan []string, ctes, partial []string) []string {
+	skip := map[string]bool{"CONSTANT": true}
+	for _, c := range ctes {
+		skip[c] = true
+	}
+	ok := map[string]bool{}
+	for _, p := range partial {
+		ok[p] = true
+	}
+	var out []string
+	for _, step := range plan {
+		f := strings.Fields(step)
+		if len(f) < 2 || f[0] != "SCAN" || skip[f[1]] || strings.HasPrefix(f[1], "(") {
+			continue
+		}
+		if i := len(f) - 1; len(f) > 3 && f[i-1] == "INDEX" && ok[f[i]] {
+			continue
+		}
+		out = append(out, step)
+	}
+	return out
 }

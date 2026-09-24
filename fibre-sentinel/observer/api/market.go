@@ -438,28 +438,19 @@ func (s *Server) publisherRows(ctx context.Context, win Window, only string) ([]
 		FROM payments WHERE kind = 'settlement' AND time >= ? AND time <= ?`, start, end).Scan(&totalFees, &totalBytes); err != nil {
 		return nil, err
 	}
-	// `in` is the window test each aggregate is gated on; MIN/MAX(p.time)
-	// stay unbounded on purpose, because first_seen and last_seen are facts
-	// about the publisher rather than about the window.
-	const in = "p.time >= ? AND p.time <= ?"
-	rows, err := db.QueryContext(ctx, `SELECT p.publisher,
-			SUM(CASE WHEN p.kind = 'settlement' AND `+in+` THEN 1 ELSE 0 END),
-			COALESCE(SUM(CASE WHEN p.kind = 'settlement' AND `+in+` THEN p.blob_size END), 0),
-			COALESCE(SUM(CASE WHEN p.kind = 'settlement' AND `+in+` THEN p.amount_utia END), 0),
-			COALESCE(MAX(CASE WHEN p.kind = 'settlement' AND `+in+` THEN p.blob_size END), 0),
-			SUM(CASE WHEN p.kind = 'timeout' AND `+in+` THEN 1 ELSE 0 END),
-			COALESCE(SUM(CASE WHEN p.kind = 'timeout' AND `+in+` THEN p.amount_utia END), 0),
-			MIN(p.time), MAX(p.time),
-			SUM(CASE WHEN `+in+` THEN 1 ELSE 0 END),
-			e.found, e.balance_utia, e.available_utia, e.height, e.updated_at
-		FROM payments p
-		LEFT JOIN escrow_accounts e ON e.publisher = p.publisher
-		WHERE 1 = 1`+filter+`
-		GROUP BY p.publisher
-		HAVING SUM(CASE WHEN `+in+` THEN 1 ELSE 0 END) > 0
-		ORDER BY 4 DESC, 3 DESC, p.publisher`,
-		append([]any{start, end, start, end, start, end, start, end, start, end, start, end, start, end},
-			append(args[1:], start, end)...)...)
+	// The window's aggregates are taken over the window's rows only, found
+	// through payments_time (or payments_publisher_time for one address),
+	// and a publisher is listed when it has at least one of them — the
+	// same set the HAVING clause used to select. first_seen and last_seen
+	// stay unbounded on purpose, because they are facts about the
+	// publisher rather than about the window; they are asked per listed
+	// publisher of payments_publisher_time, where MIN and MAX are one seek
+	// each.
+	//
+	// The first cut grouped every payment ever recorded and filtered
+	// afterwards, so a 24h view cost the whole history and grew by one row
+	// per blob settled, on a route that is not cached.
+	rows, err := db.QueryContext(ctx, publisherRowsSQL(filter), append([]any{start, end}, args[1:]...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -808,4 +799,29 @@ func sortShares(v []publisherShare) {
 		}
 		return v[i].Publisher < v[j].Publisher
 	})
+}
+
+// publisherRowsSQL is publisherRows' query; filter narrows the window's rows
+// (to one publisher) and must refer to payments as p.
+func publisherRowsSQL(filter string) string {
+	return `WITH w AS (
+			SELECT publisher,
+				SUM(CASE WHEN kind = 'settlement' THEN 1 ELSE 0 END) AS settlements,
+				COALESCE(SUM(CASE WHEN kind = 'settlement' THEN blob_size END), 0) AS bytes,
+				COALESCE(SUM(CASE WHEN kind = 'settlement' THEN amount_utia END), 0) AS fees,
+				COALESCE(MAX(CASE WHEN kind = 'settlement' THEN blob_size END), 0) AS largest,
+				SUM(CASE WHEN kind = 'timeout' THEN 1 ELSE 0 END) AS timeouts,
+				COALESCE(SUM(CASE WHEN kind = 'timeout' THEN amount_utia END), 0) AS timed_out,
+				COUNT(*) AS in_window
+			FROM payments p
+			WHERE p.time >= ? AND p.time <= ?` + filter + `
+			GROUP BY publisher)
+		SELECT w.publisher, w.settlements, w.bytes, w.fees, w.largest, w.timeouts, w.timed_out,
+			(SELECT MIN(x.time) FROM payments x WHERE x.publisher = w.publisher),
+			(SELECT MAX(x.time) FROM payments x WHERE x.publisher = w.publisher),
+			w.in_window,
+			e.found, e.balance_utia, e.available_utia, e.height, e.updated_at
+		FROM w
+		LEFT JOIN escrow_accounts e ON e.publisher = w.publisher
+		ORDER BY 4 DESC, 3 DESC, w.publisher`
 }
