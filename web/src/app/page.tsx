@@ -6,7 +6,6 @@ import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
 import OutcomeBar from "@/components/OutcomeBar";
-import VolumeChart from "@/components/VolumeChart";
 import Validators from "@/components/Validators";
 import PreLive from "@/components/PreLive";
 import HostMap from "@/components/HostMap";
@@ -48,6 +47,34 @@ function Overview() {
     return { count: withHost.length, of: bonded.length, share: power > 0 ? pctOf(hosted, power) : "—" };
   })();
 
+  const hasOutcomes = ((o?.total ?? 0) > 0 || (N?.publications ?? 0) > 0 || (market.data?.settlements ?? 0) > 0 || (market.data?.timeouts ?? 0) > 0);
+  const outcomesBeside = !!vals.data && !!meta?.fibre_active;
+  const outcomes = (
+    <div id="outcomes">
+        <h2>Obligation outcomes</h2>
+        <OutcomeBar o={o} absent={!N || notLive} />
+        <p className="blobs">
+          <button type="button" className="dis" aria-expanded={disc === "outcomes"} onClick={() => setDisc(disc === "outcomes" ? "" : "outcomes")}>About these outcomes</button>
+          <span className="sep">·</span>
+          <button type="button" className="dis" aria-expanded={disc === "blobs"} onClick={() => setDisc(disc === "blobs" ? "" : "blobs")}>Blob availability →</button>
+          {rc && judged > 0 && <span className="soft">{int(rc.yes)} / {int(judged)} fully served</span>}
+        </p>
+        <p className="disc" hidden={disc !== "outcomes"}>
+          {o && o.total > 0
+            ? <>The bar shows all <b>{int(o.total)}</b> obligations settled in the period — one per validator and blob it signed for. The service rate counts only the <b>{int(decided)}</b> assessed ones (served + broken); undecided (no reading at the end of the window {int(o.end_unobserved)}, never observed serving {int(o.unobserved)}{(o.held_param_unverified ?? 0) > 0 && <>, deadline unverified {int(o.held_param_unverified)}</>}) and pending stay outside it. Unreachable from here is never counted as broken.</>
+            : <>No obligation settled in this period. An obligation is one validator and one blob it signed for; it is decided by the last probe before the retention deadline.</>}
+          {" "}<Link href="/methodology/#rates">Methodology →</Link>
+        </p>
+        <p className="disc" hidden={disc !== "blobs"}>
+          {rc && judged > 0
+            ? <>Fully served <b>{int(rc.yes)} / {int(judged)}</b> judged blobs: every validator proven to hold a shard served its rows at the latest complete probe point. Rebuildable <b>{int(rc.yes + rc.degraded)} / {int(judged)}</b>: enough distinct rows were observed to rebuild the blob — an observation of rows, not an actual rebuild.{rc.pending > 0 && <> {int(rc.pending)} still in window.</>}{rc.unknown > 0 && <> {int(rc.unknown)} not judged.</>}</>
+            : rc && rc.pending > 0 ? <>No blob judged yet: <b>{int(rc.pending)}</b> still inside the retention window.</>
+            : <>No blob judged in this period.</>}
+          {" "}Full breakdown in <Link href="/blobs/">Blobs →</Link>
+        </p>
+    </div>
+  );
+
   return (
     <>
       <div className="title title-end">
@@ -58,7 +85,7 @@ function Overview() {
       <PreLive meta={meta} />
       <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt, status: net.status }} measuring={measuring} />
 
-      {vals.data && <HostMap rows={rows} showReadiness={!!meta?.fibre_active} />}
+      {vals.data && <HostMap rows={rows} showReadiness={!!meta?.fibre_active} aside={hasOutcomes ? outcomes : undefined} />}
 
       <Metrics>
         <Metric label="Service rate"
@@ -86,37 +113,8 @@ function Overview() {
           help={!N || notLive ? " " : `${int(N.publications)} publication${N.publications === 1 ? "" : "s"} · ${period}`} />
       </Metrics>
 
-      {/* Until a blob has settled both panels are empty frames; the readiness band above says why. */}
-      {((o?.total ?? 0) > 0 || (N?.publications ?? 0) > 0 || (market.data?.settlements ?? 0) > 0 || (market.data?.timeouts ?? 0) > 0) && <section className="band" id="outcomes">
-        <div>
-          <h2>Obligation outcomes</h2>
-          <OutcomeBar o={o} absent={!N || notLive} />
-          <p className="blobs">
-            <button type="button" className="dis" aria-expanded={disc === "outcomes"} onClick={() => setDisc(disc === "outcomes" ? "" : "outcomes")}>About these outcomes</button>
-            <span className="sep">·</span>
-            <button type="button" className="dis" aria-expanded={disc === "blobs"} onClick={() => setDisc(disc === "blobs" ? "" : "blobs")}>Blob availability →</button>
-            {rc && judged > 0 && <span className="soft">{int(rc.yes)} / {int(judged)} fully served</span>}
-          </p>
-          <p className="disc" hidden={disc !== "outcomes"}>
-            {o && o.total > 0
-              ? <>The bar shows all <b>{int(o.total)}</b> obligations settled in the period — one per validator and blob it signed for. The service rate counts only the <b>{int(decided)}</b> assessed ones (served + broken); undecided (no reading at the end of the window {int(o.end_unobserved)}, never observed serving {int(o.unobserved)}{(o.held_param_unverified ?? 0) > 0 && <>, deadline unverified {int(o.held_param_unverified)}</>}) and pending stay outside it. Unreachable from here is never counted as broken.</>
-              : <>No obligation settled in this period. An obligation is one validator and one blob it signed for; it is decided by the last probe before the retention deadline.</>}
-            {" "}<Link href="/methodology/#rates">Methodology →</Link>
-          </p>
-          <p className="disc" hidden={disc !== "blobs"}>
-            {rc && judged > 0
-              ? <>Fully served <b>{int(rc.yes)} / {int(judged)}</b> judged blobs: every validator proven to hold a shard served its rows at the latest complete probe point. Rebuildable <b>{int(rc.yes + rc.degraded)} / {int(judged)}</b>: enough distinct rows were observed to rebuild the blob — an observation of rows, not an actual rebuild.{rc.pending > 0 && <> {int(rc.pending)} still in window.</>}{rc.unknown > 0 && <> {int(rc.unknown)} not judged.</>}</>
-              : rc && rc.pending > 0 ? <>No blob judged yet: <b>{int(rc.pending)}</b> still inside the retention window.</>
-              : <>No blob judged in this period.</>}
-            {" "}Full breakdown in <Link href="/blobs/">Blobs →</Link>
-          </p>
-        </div>
-        <div>
-          <h2>Settled volume · 7 days</h2>
-          <p className="sub">UTC days · padded size</p>
-          <VolumeChart market={market.data} />
-        </div>
-      </section>}
+      {/* Beside the map when it shows the quorum panel; on its own otherwise. Until a blob settles there is nothing to show. */}
+      {hasOutcomes && !outcomesBeside && <section className="band" id="outcomes"><div>{outcomes}</div></section>}
 
       <Validators rows={rows} window={win} notLive={notLive} loading={vals.loading} />
       <p className="tnote"><a href={`${API_BASE}/v1/feed.atom`} type="application/atom+xml">Network events (Atom)</a></p>

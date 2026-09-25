@@ -167,7 +167,7 @@ function useFeedEvents(enabled: boolean): FeedEvent[] {
 
 const EVENT_WORD: Record<string, string> = { registered: "registered its Fibre host", "host-changed": "changed its Fibre host" };
 
-export default function HostMap({ rows, showReadiness }: { rows: Validator[]; showReadiness: boolean }) {
+export default function HostMap({ rows, showReadiness, aside }: { rows: Validator[]; showReadiness: boolean; /** shown under the quorum panel */ aside?: React.ReactNode }) {
   const r = readiness(rows);
   const total = r.total;
 
@@ -347,7 +347,7 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
     // Nothing to place yet: the readiness answer alone, as before.
     return showReadiness ? (
       <section className="band readiness" aria-labelledby="readiness-h">
-        <div><ReadyAnswer rows={rows} /></div>
+        <div><ReadyAnswer rows={rows} />{aside && <div className="fm-aside">{aside}</div>}</div>
       </section>
     ) : null;
   }
@@ -487,6 +487,7 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
       {showReadiness && (
         <div className="fm-side">
           <ReadyAnswer rows={rows} />
+          {aside && <div className="fm-aside">{aside}</div>}
         </div>
       )}
     </section>

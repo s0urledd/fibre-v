@@ -5,10 +5,11 @@ import { Panel } from "@/components/Panel";
 import { useSearchParams } from "next/navigation";
 import PreLive from "@/components/PreLive";
 import { unit } from "@/components/Unit";
-import { useApi, type Meta, type Blob, type NamespaceRow, utc, ago, shortHex, nsDisplay, bytes, int } from "@/lib/api";
+import { useApi, type Meta, type Market, type Blob, type NamespaceRow, utc, ago, shortHex, nsDisplay, bytes, int } from "@/lib/api";
 import { Mark, type Tier } from "@/components/Verdict";
 import SigningHistogram from "@/components/SigningHistogram";
 import type { SigningDistribution } from "@/lib/signing";
+import VolumeChart from "@/components/VolumeChart";
 
 // Reconstructability as a mark and a word, in the same channel the verdicts
 // use, so "degraded" on this page means what "held out" means everywhere else.
@@ -43,6 +44,7 @@ function Page() {
   const sig = useApi<SigningDistribution>("/v1/signing?window=24h");
   const { data: meta } = useApi<Meta>("/v1/meta");
   const nss = useApi<{ namespaces: NamespaceRow[] }>("/v1/namespaces?limit=20");
+  const market = useApi<Market>("/v1/market?window=7d");
   return (
     <>
       <div className="section-head">
@@ -57,6 +59,9 @@ function Page() {
       <Panel title="Signatures per promise · 24 hours" right={<Link href="/methodology/#signing">what this is</Link>}>
         <p className="sub">Share of stake that signed each settled promise.</p>
         <SigningHistogram data={sig.data} />
+      </Panel>
+      <Panel title="Settled volume · 7 days" right="UTC days · padded size">
+        <VolumeChart market={market.data} />
       </Panel>
       {nss.data && nss.data.namespaces.length > 0 && (
         <Panel title="Namespaces" right={ns.trim() ? <button className="btn" onClick={() => setNs("")}>show all</button> : undefined}>
