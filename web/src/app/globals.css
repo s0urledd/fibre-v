@@ -373,9 +373,11 @@ tr.suspect td { color: var(--text-3); }
 .tl .cut { position: absolute; top: 18px; width: 1px; height: 26px; background: var(--text-2); }
 .tl .cutlbl { position: absolute; top: 46px; transform: translateX(-50%); font-size: var(--t-tiny); color: var(--text); font-weight: 500; white-space: nowrap; }
 .tl .cutlbl.end { transform: translateX(-100%); }
-.ptcounts { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 12px 16px; margin-top: 16px; font-size: var(--t-small); color: var(--text-2); }
-.ptcounts > div > span { display: block; line-height: 1.5; }
-.ptcounts b { display: block; font-size: var(--t-cell); color: var(--text); font-weight: 500; }
+/* one probe point per line: its label, then its figures side by side */
+.ptcounts { display: grid; gap: 6px; margin-top: 16px; font-size: var(--t-small); color: var(--text-2); }
+.ptcounts > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; }
+.ptcounts > div > span + span::before { content: "·"; margin-right: 8px; color: var(--text-3); }
+.ptcounts b { min-width: 92px; font-size: var(--t-cell); color: var(--text); font-weight: 500; }
 .ptcounts b .soft { font-weight: 400; }
 
 /* rows meter */
