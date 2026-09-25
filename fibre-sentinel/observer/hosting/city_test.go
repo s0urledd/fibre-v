@@ -25,6 +25,7 @@ const cityCSV = "0.0.0.0,0.255.255.255,ZZ,ZZ,,,0,0\n" +
 	"51.68.0.0,51.68.255.255,EU,FR,Hauts-de-France,Roubaix,50.6942,3.17456\n" +
 	"203.0.113.0,203.0.113.255,EU,NL,\"North Holland\",\"Amsterdam \"\"Zuid\"\"\",52.37,0\n" +
 	"198.51.100.0,198.51.100.255,EU,NL,\"North Holland\",Haarlem,0,0\n" +
+	"192.0.2.0,192.0.2.255,EU,GB,England,\"London (Paddington)\",51.5176,-0.180429\n" +
 	"2a01:4f8::,2a01:4f8:0:ffff:ffff:ffff:ffff:ffff,EU,DE,Saxony,Falkenstein,50.4779,12.3713\n" +
 	"2a01:4f8:1::,2a01:4f8:ffff:ffff:ffff:ffff:ffff:ffff,EU,FI,Uusimaa,Helsinki,60.1699,24.9384\n"
 
@@ -38,7 +39,7 @@ func TestLookupCity(t *testing.T) {
 			"0.1.2.3",                    // ZZ
 			"51.67.255.255", "51.69.0.0", // just outside a range, both sides
 			"::ffff:51.68.0.0", // IPv4-mapped input
-			"203.0.113.9", "198.51.100.1",
+			"203.0.113.9", "198.51.100.1", "192.0.2.7",
 			"2a01:4f7:ffff:ffff:ffff:ffff:ffff:ffff", "2a01:4f8::", "2a01:4f8:0:ffff:ffff:ffff:ffff:ffff", "2a01:4f8:1::",
 		))
 		if err != nil {
@@ -59,6 +60,7 @@ func TestLookupCity(t *testing.T) {
 			"51.68.0.0":                           {"FR", "Hauts-de-France", "Roubaix", 50.6942, 3.17456, true},
 			"203.0.113.9":                         {"NL", "North Holland", `Amsterdam "Zuid"`, 52.37, 0, true}, // a zero longitude alone is a real point
 			"198.51.100.1":                        {"NL", "North Holland", "Haarlem", 0, 0, false},             // 0,0 is "no point"
+			"192.0.2.7":                           {"GB", "England", "London", 51.5176, -0.180429, true},       // district dropped
 			"2a01:4f8::":                          {"DE", "Saxony", "Falkenstein", 50.4779, 12.3713, true},
 			"2a01:4f8:0:ffff:ffff:ffff:ffff:ffff": {"DE", "Saxony", "Falkenstein", 50.4779, 12.3713, true},
 			"2a01:4f8:1::":                        {"FI", "Uusimaa", "Helsinki", 60.1699, 24.9384, true},

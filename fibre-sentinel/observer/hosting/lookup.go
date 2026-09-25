@@ -253,7 +253,7 @@ func parseCityFields(b []byte) (CityRecord, bool) {
 	rec := CityRecord{
 		Country: strings.ToUpper(strings.TrimSpace(f[1])),
 		Region:  strings.TrimSpace(f[2]),
-		City:    strings.TrimSpace(f[3]),
+		City:    cityName(f[3]),
 	}
 	if len(rec.Country) != 2 || rec.Country == "ZZ" || rec.City == "" {
 		return CityRecord{}, false
@@ -264,4 +264,15 @@ func parseCityFields(b []byte) (CityRecord, bool) {
 		rec.Lat, rec.Lon, rec.HasCoords = lat, lon, true
 	}
 	return rec, true
+}
+
+// cityName drops the district DB-IP appends to some cities ("London
+// (Paddington)", "Warsaw (Mokotów)"), so hosts in one city share one name
+// and one bucket instead of splitting by neighbourhood.
+func cityName(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, " ("); i > 0 && strings.HasSuffix(s, ")") {
+		s = strings.TrimSpace(s[:i])
+	}
+	return s
 }
