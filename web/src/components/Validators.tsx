@@ -177,7 +177,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               {showScores && <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />}
               {showScores && <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />}
               {showScores && <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />}
-              {showScores && <Th k="signed" dflt={-1} label="Signed" title="Share of the settled promises that assigned this validator rows carrying its verified signature. Descriptive: the publisher stops at two thirds of voting power, so an unsigned promise is not a fault." />}
+              {showScores && <Th k="signed" dflt={-1} label="In quorum" title="Share of the settled promises that assigned this validator rows where its verified signature made the two-thirds quorum. Descriptive: the publisher stops at two thirds of voting power, so a promise outside the quorum is not a fault." />}
             </tr>
           </thead>
           <tbody>

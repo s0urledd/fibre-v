@@ -198,8 +198,8 @@ function Page() {
             <span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span>
             {v.host && <span title={v.identity_reason || "The consensus-key check on the newest handshake."}>TLS identity <b className="word">{identityWord[v.identity_status] ?? v.identity_status}</b></span>}
             {sig && sig.assigned > 0
-              ? <span title={`Settled promises in this period that assigned this validator rows and carry its verified signature, ${pctOf(sig.signed, sig.assigned)}. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.`}>signed <b className="word">{int(sig.signed)} / {int(sig.assigned)}</b> promises<SignedInfo /></span>
-              : att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">signed <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs<SignedInfo /></span>}
+              ? <span title={`Settled promises in this period that assigned this validator rows and carry its verified signature, ${pctOf(sig.signed, sig.assigned)}. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.`}>in quorum <b className="word">{int(sig.signed)} / {int(sig.assigned)}</b> promises<SignedInfo /></span>
+              : att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">in quorum <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs<SignedInfo /></span>}
             {(v.timeouts_enforced ?? 0) > 0 && <span title="MsgPaymentPromiseTimeout submitted by this validator’s operator account in the period: abandoned promises reported so the escrow was charged. The chain pays nothing for it.">{int(v.timeouts_enforced)} timeout{v.timeouts_enforced === 1 ? "" : "s"} enforced</span>}
           </div>
         </div>
@@ -368,7 +368,7 @@ function Page() {
  */
 function SignedInfo() {
   return (
-    <Info label="Signed">
+    <Info label="In quorum">
       <p>Settled promises in this period that assigned this validator rows and carry its verified signature.</p>
       <p>Publishers stop collecting signatures at two thirds of stake, so roughly a third of validators miss any given promise by design. A low rate is normal; only a sustained 0 with a reachable host is worth a look.</p>
     </Info>
