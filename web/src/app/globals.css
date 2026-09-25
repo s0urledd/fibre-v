@@ -155,7 +155,6 @@ button { font: inherit; color: inherit; }
 .blocktick { display: flex; align-items: center; gap: 7px; font-size: var(--t-cell); color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .blocktick .dot { margin-right: 0; }
 .blocktick .num { color: var(--text); font-family: var(--mono, ui-monospace, monospace); font-size: 12.5px; }
-.blocktick .age { color: var(--text-3); min-width: 2.2em; }
 .blocktick .soon { color: var(--text-3); border-left: 1px solid var(--line); padding-left: 8px; }
 .dot.beat { animation: beat 1.2s ease-out 1; }
 @keyframes beat { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); } 100% { box-shadow: 0 0 0 7px transparent; } }
@@ -560,7 +559,7 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 
 /* phone width: the pinned identity column gives the figures room */
 @media (max-width: 480px) {
-  .blocktick .soon, .blocktick .age { display: none; }
+  .blocktick .soon { display: none; }
   .top nav { gap: 16px; }
   .vt .addr { display: none; }
   .vt .col-pin { min-width: 0; max-width: 150px; }
