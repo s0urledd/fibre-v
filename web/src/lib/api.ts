@@ -865,10 +865,25 @@ export function bytes(n: number): string {
 export function bytesPerSecond(n: number): string {
   return `${bytes(n)}/s`;
 }
+/**
+ * A namespace as a reader can take it in: its bytes as text when every
+ * significant byte is printable ASCII ("mochafibre"), else the hex with the
+ * leading zero padding dropped. The full hex belongs in a tooltip beside it.
+ */
 export function nsDisplay(ns: string): string {
   const stripped = ns.replace(/^(00)+/, "");
+  if (stripped.length >= 4 && stripped.length % 2 === 0) {
+    const bytes = stripped.match(/../g)!.map((h) => parseInt(h, 16));
+    if (bytes.every((b) => b >= 0x20 && b < 0x7f)) return String.fromCharCode(...bytes);
+  }
   return shortHex(stripped || ns, 6);
 }
+
+/** one row of /v1/namespaces */
+export type NamespaceRow = {
+  namespace: string; blobs: number; bytes: number; blobs_24h: number; bytes_24h: number;
+  accounts: number; first_seen: string; last_blob: string;
+};
 // Wilson 95% interval for a proportion. Both ends matter and they answer
 // different questions: the lower bound on the serve rate is the charitable
 // reading, the upper bound on the fault rate is the accusatory one. A table
