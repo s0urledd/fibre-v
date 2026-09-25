@@ -5,7 +5,7 @@ import { type Validator, type Probe, API_BASE, useApi, ago, utcWord } from "@/li
 import type { Hosting } from "@/lib/hosting";
 import { FRAME, COUNTRIES, project, countryPoint } from "@/lib/map/project";
 import { verdictDef } from "@/components/Verdict";
-import { Flag, countryName } from "@/components/Flag";
+import { countryName } from "@/components/Flag";
 import { type EndpointState, endpointState, readiness, ReadyAnswer, ReadyMissing } from "@/components/Readiness";
 
 /**
@@ -31,10 +31,6 @@ const ORDER: EndpointState[] = ["reachable", "flaky", "unreachable"];
 /** the box's height over its width: the whole frame on a wide screen, a taller crop of it on a phone */
 const WIDE = FRAME.h / FRAME.w, TALL = 0.62;
 const MAX_ZOOM = 12;
-type Box = [number, number, number, number]; // lon0, lat0, lon1, lat1
-/** the core of the Europe view, and the wider area whose hosts it grows to include */
-const EUROPE: Box = [-11, 36, 32, 60];
-const EUROPE_WIDE: Box = [-25, 34, 45, 72];
 
 function clampView(v: View, a: number): View {
   const w = Math.min(FRAME.w, FRAME.h / a, Math.max(FRAME.w / MAX_ZOOM, v.w)), h = w * a;
@@ -53,9 +49,6 @@ function homeView(pts: [number, number][], a: number): View {
   const xs = pts.map(([x]) => x), cx = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : FRAME.w / 2;
   return clampView({ w, x: cx - w / 2, y: 0 }, a);
 }
-const corners = ([lon0, lat0, lon1, lat1]: Box): [number, number][] =>
-  [project(lon0, lat1), project(lon1, lat1), project(lon0, lat0), project(lon1, lat0), project((lon0 + lon1) / 2, lat1)];
-const inBox = (lon: number, lat: number, [a, b, c, d]: Box) => lon >= a && lon <= c && lat >= b && lat <= d;
 
 function providerOf(h?: Hosting): string {
   if (!h || h.status === "unresolved") return "";
@@ -123,11 +116,11 @@ function placeLabel(c: Cluster): string {
   if (c.ccs.length === 2) return c.ccs.map(countryName).join(", ");
   return `${c.ccs.length} countries`;
 }
-/** the short tag beside a badge: one place's name, or nothing when it holds several countries (they show as flags) */
+/** the short tag beside a badge: one place's name, or how many countries it holds */
 function tagText(c: Cluster): string {
   if (c.locs === 1 && c.hosts[0].city) return c.hosts[0].city;
   if (c.ccs.length === 1) return countryName(c.ccs[0]);
-  return "";
+  return `${c.ccs.length} countries`;
 }
 
 let measureCtx: CanvasRenderingContext2D | null | undefined;
@@ -245,15 +238,6 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
 
   // Badges merge by the zoom the view is heading to, so they do not re-merge mid-flight.
   const clusters = useMemo(() => cluster(hosts, width / target.w, narrow), [hosts, width, target.w, narrow]);
-
-  // Europe: its core, grown to take in every European host with room for its badge.
-  const { euView, showEurope } = useMemo(() => {
-    const eu = hosts.filter((h) => inBox(h.lon, h.lat, EUROPE_WIDE));
-    const pts = [...corners(EUROPE), ...eu.map((h): [number, number] => [h.ux, h.uy])];
-    return { euView: fitView(pts, aspect, 0.07), showEurope: new Set(eu.map((h) => h.loc)).size >= 2 };
-  }, [hosts, aspect]);
-  const EUROPE_VIEW = euView;
-  const isEurope = Math.abs(target.w - EUROPE_VIEW.w) < 1 && Math.abs(target.x - EUROPE_VIEW.x) < 1 && Math.abs(target.y - EUROPE_VIEW.y) < 1;
 
   // ---- drag to pan, once zoomed in ----
   const drag = useRef<{ id: number; x: number; y: number; v: View; moved: boolean } | null>(null);
@@ -377,23 +361,21 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
   type Rect = [number, number, number, number];
   const hit = (a: Rect, b: Rect) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
   const taken: Rect[] = placed.map((p) => [p.x - p.d / 2 - 2, p.y - p.d / 2 - 2, p.d + 4, p.d + 4]);
-  taken.push([0, height - 42, (showEurope ? 130 : 0) + 80, 42]); // the view controls, bottom left
+  taken.push([0, height - 42, 80, 42]); // the zoom controls, bottom left
   // Each tag tries the right of its badge, then the left, then a little higher or lower, then above and below.
-  const tags = new Map<string, { x: number; y: number; w: number; text: string; flags: string[]; more: number }>();
+  const tags = new Map<string, { x: number; y: number; w: number; text: string }>();
   if (!moving) {
     for (const p of [...placed].sort((a, b) => b.c.hosts.length - a.c.hosts.length)) {
       const text = tagText(p.c);
-      const flags = text ? [p.c.ccs[0]].filter(Boolean) : p.c.ccs.slice(0, 3);
-      const more = text ? 0 : p.c.ccs.length - flags.length;
-      if (!flags.length && !text) continue;
-      const w = Math.ceil(10 + flags.length * 20 + (text ? textWidth(text) : 0) + (more ? textWidth(`+${more}`) + 4 : 0)), h = 20;
+      if (!text) continue;
+      const w = Math.ceil(10 + textWidth(text)), h = 20;
       const r = p.d / 2 + 3, right = r, left = -r - w, mid = -w / 2;
       for (const [dx, dy] of [[right, 0], [left, 0], [right, -11], [right, 11], [left, -11], [left, 11], [mid, -r - h / 2], [mid, r + h / 2]]) {
         const rect: Rect = [p.x + dx, p.y + dy - h / 2, w, h];
         if (rect[0] < 0 || rect[0] + w > width || rect[1] < 0 || rect[1] + h > height) continue;
         if (taken.some((t) => hit(t, rect))) continue;
         taken.push(rect);
-        tags.set(p.c.id, { x: dx, y: dy - h / 2, w, text, flags, more });
+        tags.set(p.c.id, { x: dx, y: dy - h / 2, w, text });
         break;
       }
     }
@@ -450,15 +432,13 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
                   </button>
                   {tag && (
                     <span className="fm-tag" aria-hidden="true" style={{ left: tag.x, top: tag.y, width: tag.w }}>
-                      {tag.flags.map((cc) => <Flag key={cc} cc={cc} />)}
-                      {tag.text && <span>{tag.text}</span>}
-                      {tag.more > 0 && <span className="fm-more">+{tag.more}</span>}
+                      <span>{tag.text}</span>
                     </span>
                   )}
                   {isOpen && (
                     <div className="fm-pop" style={pop} role="group" aria-label={place}>
                       <p className="fm-pop-h">
-                        <b>{!multi && <Flag cc={c.ccs[0]} />}{place}</b>
+                        <b>{place}</b>
                         <span>{c.hosts.length} host{c.hosts.length === 1 ? "" : "s"}</span>
                       </p>
                       <ul>
@@ -468,8 +448,7 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
                             <Link href={valLink(h.v)} className="fm-name">{name(h.v)}</Link>
                             <span className="fm-share">{fmtShare(h.share)}</span>
                             <span className="fm-meta">
-                              {multi && <Flag cc={h.cc} label />}
-                              {[h.provider, c.locs > 1 && h.city ? h.city : multi && !h.city ? countryName(h.cc) : "", h.state !== "reachable" ? STATE_WORD[h.state] : ""].filter(Boolean).join(" · ")}
+                              {[multi ? h.cc : "", h.provider, c.locs > 1 && h.city ? h.city : multi && !h.city ? countryName(h.cc) : "", h.state !== "reachable" ? STATE_WORD[h.state] : ""].filter(Boolean).join(" · ")}
                               {(h.v.obligations?.broken ?? 0) > 0 && <span className="fm-broken"> · {h.v.obligations.broken} broken</span>}
                             </span>
                           </li>
@@ -483,12 +462,6 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
             })}
           </ul>
           <div className="fm-ctl" role="group" aria-label="Map view">
-            {showEurope && (
-              <span className="fm-seg">
-                <button type="button" aria-pressed={!zoomed} onClick={() => go(home)}>World</button>
-                <button type="button" aria-pressed={isEurope} onClick={() => go(EUROPE_VIEW)}>Europe</button>
-              </span>
-            )}
             <span className="fm-seg">
               <button type="button" aria-label="Zoom in" disabled={target.w <= FRAME.w / MAX_ZOOM + 1} onClick={() => zoomBy(2)}>+</button>
               <button type="button" aria-label="Zoom out" disabled={!zoomed} onClick={() => zoomBy(0.5)}>−</button>
@@ -500,7 +473,7 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
             <p className="fm-pill fm-live" key={`${cur.v.address}|${cur.at}|${cur.event ?? ""}`}>
               <i className="fm-dot" style={{ background: cur.event === "last reachable" ? "var(--hold)" : "var(--accent)" }} />
               <span className="fm-who"><Link href={valLink(cur.v)}>{name(cur.v)}</Link>{cur.event && <> {cur.event}</>}</span>
-              {cur.host?.cc && <span><Flag cc={cur.host.cc} />{countryName(cur.host.cc)}</span>}
+              {cur.host?.cc && <span>{countryName(cur.host.cc)}</span>}
               {!cur.event && cur.host?.provider && <span>{cur.host.provider}</span>}
               <span className="fm-ago" title={utcWord(cur.at)}>{ago(cur.at)}</span>
             </p>
