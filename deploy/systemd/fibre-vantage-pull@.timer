@@ -1,0 +1,11 @@
+[Unit]
+Description=Fibre observer (%i): fetch second-vantage records every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=fibre-vantage-pull@%i.service
+
+[Install]
+WantedBy=timers.target

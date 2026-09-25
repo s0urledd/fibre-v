@@ -604,6 +604,40 @@ the change happened, so they stay stable across restarts: do not change
 the public host name casually, or every subscriber sees the last 30 days
 again once.
 
+## 7c. Second vantage (endpoint confirmation)
+
+An endpoint that fails from the observer is checked again from a second
+location before it is called unreachable. The second vantage is only
+`observer-heartbeat` on another host, under its own `-vantage` name; it
+needs outbound access alone (no open port) and reads the bonded provider list
+from any Mocha RPC:
+
+```
+# on the second host (here the backup server, sftp account tensile-backup)
+useradd --system --no-create-home --shell /usr/sbin/nologin --gid tensile-backup tensile-vantage
+install -d -o tensile-vantage -g tensile-backup -m 0750 /srv/tensile-backup/vantage /srv/tensile-backup/vantage/de-1
+install -m 0755 observer-heartbeat /usr/local/bin/tensile-heartbeat
+# unit: User=tensile-vantage, Group=tensile-backup, UMask=0027, ProtectSystem=strict,
+#   ReadWritePaths=/srv/tensile-backup/vantage/de-1, ExecStart=/usr/local/bin/tensile-heartbeat
+#   -rpc https://<mocha rpc>:443 -data-dir /srv/tensile-backup/vantage/de-1 -vantage de-1 -interval 5m
+```
+
+On the observer, `fibre-vantage-pull@<net>.timer` fetches each vantage's
+record once a minute over the backup account's sftp-only key, appending only
+new bytes, into `<data-dir>/vantages/<name>/reachability.jsonl`; the collector
+ingests every file there. Configure it in the network's env file:
+
+```
+VANTAGE_PULL_HOST=tensile-backup@85.10.211.222
+VANTAGE_PULL_NAMES=de-1
+```
+
+```
+install -m 0755 deploy/vantage-pull.sh /usr/local/bin/fibre-vantage-pull
+cp deploy/systemd/fibre-vantage-pull@.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now fibre-vantage-pull@mocha.timer
+```
+
 ## 8. Checks after deploy
 
 Run the smoke test first. It installs nothing and changes nothing: it parses
