@@ -488,6 +488,9 @@ export type Reconstruct = {
 
 export type Blob = {
   charge?: Charge | null;
+  /** voting power whose signature over the promise verified, over the set's total at the promise height */
+  attested_voting_power?: number;
+  total_voting_power?: number;
   promise_hash: string;
   commitment: string;
   namespace: string;

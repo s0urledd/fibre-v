@@ -51,7 +51,7 @@ function Overview() {
   const outcomesBeside = !!vals.data && !!meta?.fibre_active;
   const outcomes = (
     <div id="outcomes">
-        <h2>Obligation outcomes</h2>
+        <h2>Obligation outcomes <span className="soft">· all validators</span></h2>
         <OutcomeBar o={o} absent={!N || notLive} />
         <p className="blobs">
           <button type="button" className="dis" aria-expanded={disc === "outcomes"} onClick={() => setDisc(disc === "outcomes" ? "" : "outcomes")}>About these outcomes</button>

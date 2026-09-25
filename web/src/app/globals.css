@@ -827,3 +827,6 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
   .fm-ctl { left: 4px; bottom: 4px; }
   .fm-seg button { height: 24px; padding: 0 7px; }
 }
+
+/* the validator page: its avatar beside the name */
+.head h1 .avatar { width: 36px; height: 36px; margin-right: 12px; vertical-align: -6px; font-size: 13px; }

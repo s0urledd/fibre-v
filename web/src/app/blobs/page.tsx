@@ -7,8 +7,6 @@ import PreLive from "@/components/PreLive";
 import { unit } from "@/components/Unit";
 import { useApi, type Meta, type Market, type Blob, type NamespaceRow, utc, ago, shortHex, nsDisplay, bytes, int } from "@/lib/api";
 import { Mark, type Tier } from "@/components/Verdict";
-import SigningHistogram from "@/components/SigningHistogram";
-import type { SigningDistribution } from "@/lib/signing";
 import VolumeChart from "@/components/VolumeChart";
 
 // Reconstructability as a mark and a word, in the same channel the verdicts
@@ -39,9 +37,6 @@ function Page() {
   const [limit, setLimit] = useState(50);
   const q = ns.trim() ? `/v1/blobs?limit=${limit}&namespace=${encodeURIComponent(ns.trim())}` : `/v1/blobs?limit=${limit}`;
   const { data, error, loading } = useApi<{ blobs: Blob[] }>(q);
-  // Signatures collected per promise over a fixed week, like the volume
-  // chart on the overview: this page lists blobs and has no period switch.
-  const sig = useApi<SigningDistribution>("/v1/signing?window=24h");
   const { data: meta } = useApi<Meta>("/v1/meta");
   const nss = useApi<{ namespaces: NamespaceRow[] }>("/v1/namespaces?limit=20");
   const market = useApi<Market>("/v1/market?window=7d");
@@ -56,13 +51,39 @@ function Page() {
       {error && !data && <p className="notice">The observer API is not answering ({error}); the page retries every 30 seconds. This is an observer outage, not a Fibre network outage.</p>}
       {error && data && <p className="sample">Showing the last list received; the API is not answering right now ({error}).</p>}
       {loading && !data && <p className="muted">Loading…</p>}
-      <Panel title="Signatures per promise · 24 hours" right={<Link href="/methodology/#signing">what this is</Link>}>
-        <p className="sub">Share of stake that signed each settled promise.</p>
-        <SigningHistogram data={sig.data} />
-      </Panel>
       <Panel title="Settled volume · 7 days" right="UTC days · padded size">
         <VolumeChart market={market.data} />
       </Panel>
+      {data && (
+        <Panel title="Publications" right={<>{data.blobs.length} newest{ns.trim() && ` in namespace ${ns.trim()}`}
+              {data.blobs.length >= limit && limit < 500 && <> · <button className="btn" onClick={() => setLimit(Math.min(500, limit * 4))}>show more</button></>}</>}>
+        <div className="tablewrap">
+          <table>
+            <thead><tr><th>promise</th><th>settled (UTC)</th><th className="right">height</th><th>namespace</th><th className="right">size</th><th className="right">validators</th><th className="right" title="Share of stake whose signature over the promise verified. A blob settles at two thirds.">signed</th><th className="right">probes</th><th>serve until</th><th>availability</th></tr></thead>
+            <tbody>
+              {data.blobs.length === 0 && <tr><td colSpan={10} className="muted">No publications recorded{ns.trim() ? " in this namespace" : ""}.</td></tr>}
+              {data.blobs.map((b) => (
+                <tr key={b.promise_hash}>
+                  <td className="mono"><Link href={`/blob/?hash=${b.promise_hash}`}>{shortHex(b.promise_hash, 6)}</Link></td>
+                  <td className="mono" title={ago(b.settlement_time)}>{utc(b.settlement_time)}</td>
+                  <td className="right mono">{b.settlement_height.toLocaleString("en-US")}</td>
+                  <td className="mono" title={b.namespace}>{nsDisplay(b.namespace)}</td>
+                  <td className="right mono">{unit(bytes(b.blob_size))}</td>
+                  <td className="right mono">{b.validators_with_rows}</td>
+                  <td className="right mono">{b.attested_voting_power != null && b.total_voting_power ? `${(100 * b.attested_voting_power / b.total_voting_power).toFixed(1)}%` : "—"}</td>
+                  <td className="right mono">{b.probe_count}</td>
+                  <td className="mono faint" title={`must serve until ${utc(b.must_serve_until)}`}>{ago(b.must_serve_until)}</td>
+                  <td>{(() => { const rc = recon(b); return (
+                    <span className={`verdict verdict--${rc.tier}`} title={rc.title}>
+                      <Mark tier={rc.tier} /><span className="w">{rc.word}</span>
+                    </span>); })()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        </Panel>
+      )}
       {nss.data && nss.data.namespaces.length > 0 && (
         <Panel title="Namespaces" right={ns.trim() ? <button className="btn" onClick={() => setNs("")}>show all</button> : undefined}>
           <div className="tablewrap">
@@ -83,35 +104,6 @@ function Page() {
               </tbody>
             </table>
           </div>
-        </Panel>
-      )}
-      {data && (
-        <Panel title="Publications" right={<>{data.blobs.length} newest{ns.trim() && ` in namespace ${ns.trim()}`}
-              {data.blobs.length >= limit && limit < 500 && <> · <button className="btn" onClick={() => setLimit(Math.min(500, limit * 4))}>show more</button></>}</>}>
-        <div className="tablewrap">
-          <table>
-            <thead><tr><th>promise</th><th>settled (UTC)</th><th className="right">height</th><th>namespace</th><th className="right">size</th><th className="right">validators</th><th className="right">probes</th><th>serve until</th><th>availability</th></tr></thead>
-            <tbody>
-              {data.blobs.length === 0 && <tr><td colSpan={9} className="muted">No publications recorded{ns.trim() ? " in this namespace" : ""}.</td></tr>}
-              {data.blobs.map((b) => (
-                <tr key={b.promise_hash}>
-                  <td className="mono"><Link href={`/blob/?hash=${b.promise_hash}`}>{shortHex(b.promise_hash, 6)}</Link></td>
-                  <td className="mono" title={ago(b.settlement_time)}>{utc(b.settlement_time)}</td>
-                  <td className="right mono">{b.settlement_height.toLocaleString("en-US")}</td>
-                  <td className="mono" title={b.namespace}>{nsDisplay(b.namespace)}</td>
-                  <td className="right mono">{unit(bytes(b.blob_size))}</td>
-                  <td className="right mono">{b.validators_with_rows}</td>
-                  <td className="right mono">{b.probe_count}</td>
-                  <td className="mono faint" title={`must serve until ${utc(b.must_serve_until)}`}>{ago(b.must_serve_until)}</td>
-                  <td>{(() => { const rc = recon(b); return (
-                    <span className={`verdict verdict--${rc.tier}`} title={rc.title}>
-                      <Mark tier={rc.tier} /><span className="w">{rc.word}</span>
-                    </span>); })()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
         </Panel>
       )}
     </>
