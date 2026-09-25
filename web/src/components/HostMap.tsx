@@ -6,7 +6,7 @@ import type { Hosting } from "@/lib/hosting";
 import { FRAME, COUNTRIES, project, countryPoint } from "@/lib/map/project";
 import { verdictDef } from "@/components/Verdict";
 import { countryName } from "@/components/Flag";
-import { type EndpointState, endpointState, readiness, ReadyAnswer, ReadyMissing } from "@/components/Readiness";
+import { type EndpointState, endpointState, readiness, ReadyAnswer } from "@/components/Readiness";
 
 /**
  * The overview's host map: every registered Fibre host of the bonded set,
@@ -348,7 +348,6 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
     return showReadiness ? (
       <section className="band readiness" aria-labelledby="readiness-h">
         <div><ReadyAnswer rows={rows} /></div>
-        <div><ReadyMissing rows={rows} /></div>
       </section>
     ) : null;
   }
@@ -488,7 +487,6 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
       {showReadiness && (
         <div className="fm-side">
           <ReadyAnswer rows={rows} />
-          <ReadyMissing rows={rows} />
         </div>
       )}
     </section>
