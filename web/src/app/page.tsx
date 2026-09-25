@@ -51,7 +51,7 @@ function Overview() {
   const outcomesBeside = !!vals.data && !!meta?.fibre_active;
   const outcomes = (
     <div id="outcomes">
-        <h2>Obligation outcomes <span className="soft">· all validators</span></h2>
+        <h2>Obligation outcomes <span className="soft">· all validators · {period}</span></h2>
         <OutcomeBar o={o} absent={!N || notLive} />
         <p className="blobs">
           <button type="button" className="dis" aria-expanded={disc === "outcomes"} onClick={() => setDisc(disc === "outcomes" ? "" : "outcomes")}>About these outcomes</button>
@@ -77,16 +77,15 @@ function Overview() {
 
   return (
     <>
-      <div className="title title-end">
-        {/* No visible headline for now; the page keeps one for screen readers. */}
-        <h1 className="sr-only">Tensile · Celestia Fibre</h1>
-        <WindowSwitch value={win} onChange={setWin} />
-      </div>
+      {/* No visible headline for now; the page keeps one for screen readers. */}
+      <h1 className="sr-only">Tensile · Celestia Fibre</h1>
       <PreLive meta={meta} />
       <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt, status: net.status }} measuring={measuring} />
 
       {vals.data && <HostMap rows={rows} showReadiness={!!meta?.fibre_active} aside={hasOutcomes ? outcomes : undefined} />}
 
+      {/* the period drives the figures below it and the outcomes beside the map, not the map or the quorum */}
+      <div className="period-row"><WindowSwitch value={win} onChange={setWin} /></div>
       <Metrics>
         <Metric label="Service rate"
           value={!N || notLive || !o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}

@@ -168,6 +168,8 @@ button { font: inherit; color: inherit; }
 /* ----------------------------------------------------------- title block --- */
 .title { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 20px 0 0; }
 .title.title-end { justify-content: flex-end; }
+/* the overview's period switch, over the figures it drives */
+.period-row { display: flex; justify-content: flex-end; margin: 22px 0 -4px; }
 .lede { margin: 4px 0 0; font-size: var(--t-body); color: var(--text-2); }
 .eyebrow { margin: 0 0 4px; font-size: var(--t-small); font-weight: 500; color: var(--text-2); letter-spacing: .02em; }
 /* the one pre-activation line under a page title (components/PreLive) */
