@@ -50,6 +50,18 @@ const WORDS: Record<string, [string, string]> = {
   SHADOWED_SHARD: ["Shadowed", "other"], UNMATCHED_GENUINE: ["Unmatched genuine rows", "other"], PROBE_ERROR: ["Probe error", "gone"],
   EXPECTED_UNASSIGNED: ["Unassigned", "gone"], SERVING_UNASSIGNED: ["Serving unassigned", "other"],
 };
+/**
+ * The website a validator put in its staking description, as a link we are
+ * willing to render: anyone can write anything there, so only http(s) URLs
+ * pass, and a bare domain ("example.io") gets https:// in front.
+ */
+function safeSite(raw?: string): string | null {
+  const s = (raw ?? "").trim();
+  if (/^https?:\/\/[^\s"'<>]+$/i.test(s)) return s;
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}(\/[^\s"'<>]*)?$/i.test(s)) return `https://${s}`;
+  return null;
+}
+
 const wordOf = (cls: string): [string, string] => WORDS[cls] ?? [cls.toLowerCase().replace(/_/g, " "), "other"];
 /** an unsigned probe is not rated either way; the word says what came back, and nothing more */
 const probeWord = (p: Probe): [string, string] => {
@@ -154,6 +166,7 @@ function Page() {
   const measuring = !!o && o.total > 0 && decided < MIN_RATED && o.pending > 0;
   const att = v.attestation;
   const sig = v.signing;
+  const site = safeSite(v.website);
   // Broken obligations whose faults are all younger than the settling
   // period: counted, and still able to be withdrawn. provisionalNow drops
   // them once `until` passes, so a cached answer does not keep the badge.
@@ -188,7 +201,7 @@ function Page() {
         {v.operator_address && <div><dt>Operator address</dt><dd title={v.operator_address}><span className="mono">{shortMid(v.operator_address, 18, 6)}</span><Copy text={v.operator_address} label="operator address" /></dd></div>}
         <div><dt>Hex address</dt><dd title={v.address}><span className="mono">{shortMid(v.address, 10, 6)}</span><Copy text={v.address} label="hex address" /></dd></div>
         <div><dt>Links</dt><dd>
-          {v.website && <><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a><span className="soft"> · </span></>}
+          {site && <><a href={site} rel="nofollow noopener noreferrer" target="_blank">{site.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a><span className="soft"> · </span></>}
           <a href={`${API_BASE}/v1/validators/${v.address}/feed.atom`} type="application/atom+xml" title="Endpoint changes of this validator, as an Atom feed">Atom feed</a>
         </dd></div>
       </dl>

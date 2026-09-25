@@ -39,16 +39,67 @@ const TYPES = {
 };
 const COMPRESSIBLE = new Set([".html", ".js", ".css", ".json", ".txt", ".svg", ".webmanifest"]);
 
-// Scripts are not restricted: the export inlines its bootstrap and the theme
-// script, and a nonce needs a server that renders. What is restricted is
-// what cannot break the page: framing, plugins and the base URL.
+// Everything the pages load comes from this origin: scripts, styles, fonts,
+// flags and avatars (the API serves the Keybase pictures itself). Inline
+// scripts stay allowed because the static export inlines its bootstrap and
+// the theme script, and a nonce needs a server that renders; everything else
+// is held to 'self'. The site is only reached through the front proxy over
+// HTTPS, so HSTS is safe to send (no includeSubDomains: other hosts share the
+// parent domain).
 const SECURITY = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "strict-origin-when-cross-origin",
   "x-frame-options": "DENY",
-  "content-security-policy": "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+  "content-security-policy": [
+    "default-src 'self'", "script-src 'self' 'unsafe-inline'", "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:", "font-src 'self'", "connect-src 'self'", "form-action 'self'",
+    "frame-ancestors 'none'", "object-src 'none'", "base-uri 'self'",
+  ].join("; "),
   "permissions-policy": "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+  "strict-transport-security": "max-age=31536000",
 };
+
+// /api is rate limited per client, and the number of requests in flight to
+// the API is capped: a figure pinned to an arbitrary as_of bypasses the API's
+// caches and costs a second or more of database work, so a loop of them from
+// one address must not starve everyone else. A page load makes about ten
+// requests and then polls one every few seconds, far inside these limits.
+const RATE = { burst: 60, perSec: 6 };          // token bucket per client address
+const INFLIGHT_PER_CLIENT = 6, INFLIGHT_TOTAL = 32;
+const buckets = new Map();                      // address -> { tokens, at, inflight }
+let inflight = 0;
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, b] of buckets) if (b.inflight === 0 && now - b.at > 10 * 60_000) buckets.delete(k);
+}, 60_000).unref();
+
+// The client's address: the front proxy's X-Forwarded-For when the request
+// comes from a private address (the proxy's container), else the socket's.
+function clientOf(req) {
+  const peer = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+  const priv = /^(127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|::1$|f[cd])/.test(peer);
+  const xff = priv && typeof req.headers["x-forwarded-for"] === "string" ? req.headers["x-forwarded-for"].split(",")[0].trim() : "";
+  return xff || peer;
+}
+
+function admit(req, res) {
+  const who = clientOf(req), now = Date.now();
+  let b = buckets.get(who);
+  if (!b) buckets.set(who, b = { tokens: RATE.burst, at: now, inflight: 0 });
+  b.tokens = Math.min(RATE.burst, b.tokens + ((now - b.at) / 1000) * RATE.perSec);
+  b.at = now;
+  if (b.tokens < 1 || b.inflight >= INFLIGHT_PER_CLIENT || inflight >= INFLIGHT_TOTAL) {
+    res.writeHead(429, { ...SECURITY, "content-type": "application/json", "retry-after": "5" });
+    res.end('{"error":"too many requests"}');
+    return null;
+  }
+  b.tokens -= 1;
+  b.inflight++; inflight++;
+  let done = false;
+  const release = () => { if (!done) { done = true; b.inflight--; inflight--; } };
+  res.on("close", release);
+  return release;
+}
 
 // Next's hashed build output never changes under a name; everything else can.
 function cacheControl(rel) {
@@ -95,6 +146,7 @@ function proxy(req, res, u) {
     res.writeHead(405, { ...SECURITY, allow: "GET, HEAD" });
     return res.end();
   }
+  if (!admit(req, res)) return;
   const headers = {};
   for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k)) headers[k] = v;
   const up = http.request({ host: API.host, port: API.port, method: req.method, path: u.pathname.slice(4) + u.search, headers, timeout: 60_000 }, (r) => {
