@@ -135,7 +135,18 @@ func Current(ctx context.Context, db *sql.DB) (map[string]Info, error) {
 			return nil, err
 		}
 		in.ASN = uint32(asn)
+		// The bucket is a function of the AS number and of providers.go, not
+		// a fact about the lookup: recompute it on read, so a change to the
+		// provider list shows at once instead of after the next lookup pass.
+		if in.ASN != 0 {
+			in.Provider = ProviderFor(in.ASN)
+		}
 		_ = json.Unmarshal([]byte(addrs), &in.Addresses)
+		for i := range in.Addresses {
+			if in.Addresses[i].ASN != 0 {
+				in.Addresses[i].Provider = ProviderFor(in.Addresses[i].ASN)
+			}
+		}
 		seen := map[uint32]bool{}
 		for _, a := range in.Addresses {
 			if a.ASN != 0 {
