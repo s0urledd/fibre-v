@@ -74,7 +74,7 @@ function Page() {
                   <td className="right mono">{unit(bytes(b.blob_size))}</td>
                   <td className="right mono">{b.validators_with_rows}</td>
                   <td className="right mono">{b.attested_voting_power != null && b.total_voting_power ? `${(100 * b.attested_voting_power / b.total_voting_power).toFixed(1)}%` : "—"}</td>
-                  <td className="right mono">{b.probe_count}</td>
+                  <td className="right mono">{b.sampled_out ? <span className="soft" title="sampled out: not probed">—</span> : b.probe_count}</td>
                   <td className="mono faint" title={`must serve until ${utc(b.must_serve_until)}`}>{ago(b.must_serve_until)}</td>
                   <td>{(() => { const rc = recon(b); return (
                     <span className={`verdict verdict--${rc.tier}`} title={rc.title}>

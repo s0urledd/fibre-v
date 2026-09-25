@@ -51,6 +51,9 @@ function Page() {
   const b = data.blob;
   const probes = data.probes ?? [];
   const assignments = data.assignments ?? [];
+  // signatures are a fact of the settled promise, not of any probe: read them from the assignments
+  const signedKnown = assignments.some((a) => a.attested != null);
+  const signedN = assignments.filter((a) => a.attested === true).length;
   const suspectAt = new Map((data.suspect_points ?? []).map((sp) => [sp.at, sp.reason.replace(",", " and ")]));
   const rc = b.reconstructable;
   // drawn out of the sample: one record, with the probability it was drawn at
@@ -63,7 +66,7 @@ function Page() {
     : rc?.status === "degraded" ? ["hold", "Rebuildable, not fully served", `Enough distinct rows were observed to rebuild the blob, but not every validator proven to hold a shard served at ${rc.point}.`]
     : rc?.status === "no" ? ["hold", "Not rebuildable", `Fewer than the ${int(rc.needed_rows)} rows needed came back at ${rc.point}. Which validators answered is in the table below; unreachable from here is never counted as broken.`]
     : rc?.status === "pending" ? ["none", "Not judged yet", `${int(rc.probed_validators)} of ${int(rc.assigned_validators)} assigned validators have a result at ${rc.point}. A validator without a result is a gap, not a failure.`]
-    : so ? ["none", "Sampled out", `The load policy drew this blob out of its sample (${soText}), so it was not probed at any point. It is recorded once and counts as not probed for each of the ${int(so.validators)} assigned validators at each of its ${int(so.points)} points.`]
+    : so ? ["none", "Sampled out", `Not probed: the load policy drew this blob out of its sample (${soText}).`]
     : !over ? ["none", "In window", "The retention window has not ended; nothing is judged before the last in-window point completes."]
     : ["none", "Not judged", b.probe_count === 0 ? "No probe has run for this blob." : "Row lists were not recorded for this publication, or no in-window point was completed."];
 
@@ -150,9 +153,9 @@ function Page() {
         <Metric label="Validators served" value={rc && (judged || rc.status === "pending") ? int(rc.served_by_validators) : "—"} den={rc && (judged || rc.status === "pending") ? int(rc.assigned_validators) : undefined}
           tone={rc && (judged || rc.status === "pending") ? undefined : "absent"}
           help={rc && (judged || rc.status === "pending") ? `at ${rc.point} · ${hhmm(rc.point_at)}${rc.status === "pending" ? ` · ${int(rc.probed_validators)} with a result` : ""}` : "no in-window point completed"} />
-        <Metric label="Signed" value={rc?.attestation_known ? int(rc.attested_validators) : "—"} den={rc?.attestation_known ? int(rc.assigned_validators) : undefined}
-          tone={rc?.attestation_known ? undefined : "absent"}
-          help={rc?.attestation_known ? "unsigned is not a fault" : "signatures not recorded"}
+        <Metric label="Signed" value={signedKnown ? int(signedN) : "—"} den={signedKnown ? int(assignments.length) : undefined}
+          tone={signedKnown ? undefined : "absent"}
+          help={signedKnown ? "unsigned is not a fault" : "signatures not recorded"}
           title="Assigned validators whose signature on the settled promise verified against their consensus key. The publisher stops collecting at two thirds of voting power, so about a third of the set is unsigned on any blob." />
         <Metric label="Service window" value={winLen} help={`${hhmm(b.settlement_time).replace(" UTC", "")} → ${hhmm(b.must_serve_until)}${over ? " · over" : ""}`}
           title={`creation + max(payment_promise_timeout ${data.params.payment_promise_timeout_s} s, shard_retention ${data.params.shard_retention_s} s)`} />
@@ -216,19 +219,17 @@ function Page() {
             <thead><tr>
               <th className="col-pin">Validator</th><th className="num">Voting power</th><th className="num">Rows</th><th>Signed</th><th>Host at settlement</th>
               {order.map((k) => <th key={k} className={"m" + (suspectAt.has(byLabel.get(k)!.at) ? " soft" : "")} title={`${k} · ${utcWord(byLabel.get(k)!.at)}${suspectAt.has(byLabel.get(k)!.at) ? " · not counted: the observer does not trust itself at this point" : ""}`}>{k}</th>)}
-              {so && order.length === 0 && <th title={`The load policy drew this blob out of its sample; decided ${utcWord(so.decided_at)}, ${so.binding}`}>Probe points</th>}
               <th className="go" />
             </tr></thead>
             <tbody>
-              {rows.length === 0 && <tr className="empty"><td colSpan={6 + order.length + (so && order.length === 0 ? 1 : 0)}>No assignment recorded{b.assignment_error ? `: ${b.assignment_error}` : ""}.</td></tr>}
-              {rows.map((a, i) => (
+              {rows.length === 0 && <tr className="empty"><td colSpan={6 + order.length}>No assignment recorded{b.assignment_error ? `: ${b.assignment_error}` : ""}.</td></tr>}
+              {rows.map((a) => (
                 <tr key={a.validator_address}>
                   <td className="id col-pin"><Link className="mon" href={`/validator/?addr=${a.validator_address}`}>{a.moniker || shortMid(a.validator_address, 12, 4)}</Link></td>
                   <td className="num">{int(a.voting_power)}</td>
                   <td className="num">{int(a.row_count)}</td>
                   <td title={a.attested === true ? "Signature verified against the consensus key: proof of storage." : a.attested === false ? "No verified signature on the settled promise: unproven, not absent. The publisher stops collecting at two thirds of voting power." : "Recorded before the observer verified signatures."}>{a.attested === true ? "yes" : a.attested === false ? <span className="soft">no</span> : "—"}</td>
                   <td className="mono soft">{a.host_at_settlement ? a.host_at_settlement : a.host_at_settlement === "" ? <span title="no endpoint registered when the promise settled">—</span> : <span className="sans" title="the registry could not be read at that height">not read</span>}</td>
-                  {so && order.length === 0 && i === 0 && <td rowSpan={rows.length} className="soft">sampled out ({soText})</td>}
                   {order.map((k) => {
                     const p = cell.get(a.validator_address + "|" + k);
                     const sus = suspectAt.has(byLabel.get(k)!.at);
