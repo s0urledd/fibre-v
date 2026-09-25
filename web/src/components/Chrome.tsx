@@ -203,7 +203,7 @@ export function Footer() {
       <div title={meta?.server_time ? `Observer time ${utcWord(meta.server_time)}${meta.last_probe_at ? ` · newest probe ${ago(meta.last_probe_at)}` : ""}` : undefined}>
         Tensile by <a href="https://huginn.tech" rel="noopener noreferrer" target="_blank">Huginn Tech</a>
         <span>·</span><Link href="/methodology/">methodology</Link>
-        <span>·</span><a href={SOURCE_URL} rel="noopener noreferrer" target="_blank">source</a>
+        <span>·</span><a href={SOURCE_URL} rel="noopener noreferrer" target="_blank">GitHub</a>
         <span>·</span><a href={DISPUTE_URL} rel="noopener noreferrer" target="_blank">dispute a verdict</a>
         <span>·</span><a href="https://db-ip.com" rel="noopener noreferrer" target="_blank">IP geolocation by DB-IP</a>
       </div>
