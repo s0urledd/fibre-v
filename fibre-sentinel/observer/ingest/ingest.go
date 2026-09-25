@@ -251,7 +251,7 @@ func State(st *store.Store, path string, now time.Time) error {
 		return err
 	}
 	gaps := "[]"
-	if len(ps.Gaps) > 0 {
+	if ps.Gaps = scan.DedupeGaps(ps.Gaps); len(ps.Gaps) > 0 {
 		if b, err := json.Marshal(ps.Gaps); err == nil {
 			gaps = string(b)
 		}

@@ -19,9 +19,13 @@
 // blobtypes.DefaultEstimateGas for the message (the chain's own linear
 // model) and the fee is gas x -gas-price, rounded up.
 //
-// The account number and sequence a signature commits to come from
-// -account-number and -sequence, or, with -grpc, from one read-only
-// x/auth Account query against that node. Nothing else is sent anywhere.
+// The chain id, account number and sequence a signature commits to come
+// from -chain-id, -account-number and -sequence, or, with -grpc, from two
+// read-only queries against that node (its node info and the x/auth
+// account). There is no default chain id: one baked in goes stale at the
+// next hardspoon (mocha-4 became mocha-5), and a transaction signed for the
+// wrong chain is refused by every node. Given both, -chain-id must match
+// the node's. Nothing else is sent anywhere.
 //
 // Why dry-run only: anchoring spends real (testnet) funds from an account
 // the operator controls, and every anchor is permanent. The code path that
@@ -32,7 +36,7 @@
 //
 //	sentinel-anchor -exports-dir <data-dir>/exports -day 2026-09-10 \
 //	  -keyring-backend test -keyring-dir /etc/fibre-observer/keyring-mocha -key-name tensile-ops \
-//	  -chain-id mocha-4 -account-number N -sequence S
+//	  -grpc <node:9090>    # or: -chain-id <id> -account-number N -sequence S
 //
 // -keyring-dir has celestia-appd's --keyring-dir meaning: the test backend's
 // keys live in <dir>/keyring-test.
@@ -61,6 +65,7 @@ import (
 	blobtypes "github.com/celestiaorg/celestia-app/v10/x/blob/types"
 	"github.com/celestiaorg/go-square/v4/share"
 	blobtx "github.com/celestiaorg/go-square/v4/tx"
+	"github.com/cosmos/cosmos-sdk/client/grpc/cmtservice"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -75,11 +80,11 @@ func main() {
 		krDir    = flag.String("keyring-dir", "", "keyring root, as celestia-appd --keyring-dir (the test backend reads <dir>/keyring-test)")
 		krBack   = flag.String("keyring-backend", "test", "keyring backend: test | file | os")
 		keyName  = flag.String("key-name", "tensile-ops", "key in the keyring that signs the anchor")
-		chainID  = flag.String("chain-id", "mocha-4", "chain id the transaction is signed for")
+		chainID  = flag.String("chain-id", "", "chain id the transaction is signed for (required unless -grpc, which reads it from the node; given both, they must agree)")
 		nsHex    = flag.String("ns", hex.EncodeToString([]byte(export.AnchorNamespaceID)), "version-0 namespace ID for anchors, hex, at most 10 bytes")
 		accNum   = flag.Uint64("account-number", math.MaxUint64, "account number the signature commits to (required unless -grpc)")
 		seq      = flag.Uint64("sequence", math.MaxUint64, "account sequence the signature commits to (required unless -grpc)")
-		grpcAddr = flag.String("grpc", "", "optional: app gRPC address to read the account number and sequence from (one read-only query)")
+		grpcAddr = flag.String("grpc", "", "optional: app gRPC address to read the chain id, account number and sequence from (read-only queries)")
 		gasPrice = flag.Float64("gas-price", appconsts.DefaultMinGasPrice, "utia per gas")
 	)
 	flag.Parse()
@@ -139,13 +144,22 @@ func main() {
 			fatal("dial %s: %v", *grpcAddr, err)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		info, ierr := cmtservice.NewServiceClient(conn).GetNodeInfo(ctx, &cmtservice.GetNodeInfoRequest{})
 		n, s, err := user.QueryAccount(ctx, conn, ecfg.InterfaceRegistry, addr)
 		cancel()
 		conn.Close()
+		if ierr != nil {
+			fatal("node info from %s: %v", *grpcAddr, ierr)
+		}
 		if err != nil {
 			fatal("account %s: %v (an account the chain has never seen has not been funded yet)", addr, err)
 		}
+		if *chainID, err = resolveChainID(*chainID, info.GetDefaultNodeInfo().GetNetwork()); err != nil {
+			fatal("%v", err)
+		}
 		*accNum, *seq = n, s
+	} else if *chainID, err = resolveChainID(*chainID, ""); err != nil {
+		fatal("%v", err)
 	}
 	if *accNum == math.MaxUint64 || *seq == math.MaxUint64 {
 		fatal("give -account-number and -sequence, or -grpc to read them")
@@ -161,6 +175,21 @@ func main() {
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)
 	fmt.Fprintln(os.Stderr, "DRY RUN: nothing was broadcast. This build has no broadcast path; see docs/exports-signing.md.")
+}
+
+// resolveChainID is the chain id to sign for: the one -chain-id names, the
+// one the node reports (node, empty without -grpc), and the two must agree
+// when both are given. Neither is an error, never a default.
+func resolveChainID(flagged, node string) (string, error) {
+	switch {
+	case node != "" && flagged != "" && node != flagged:
+		return "", fmt.Errorf("-chain-id is %s but the node at -grpc is on %s; a transaction signed for one is refused by the other", flagged, node)
+	case node != "":
+		return node, nil
+	case flagged == "":
+		return "", errors.New("-chain-id is required without -grpc: the chain id is part of what the signature commits to, and there is no default to go stale")
+	}
+	return flagged, nil
 }
 
 // pickExport returns the export name for day, or the newest in the index.

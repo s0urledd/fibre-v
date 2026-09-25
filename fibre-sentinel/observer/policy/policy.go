@@ -237,11 +237,13 @@ type Policy struct {
 	// state lives in memory only. cooldownUntil closes admission after a
 	// start that found no trustworthy state; restoredAt is the loaded
 	// file's save time, from which every validator's spacing counts;
-	// saveFailing closes admission while the state cannot be written.
+	// saveFailing closes admission while the state cannot be written;
+	// dirty is whether there is anything to write.
 	stateFile     string
 	cooldownUntil time.Time
 	restoredAt    time.Time
 	saveFailing   bool
+	dirty         bool
 	saveTimer     *time.Timer
 	saveMu        sync.Mutex // one save at a time, taken before mu
 	startupLog    []string   // what restore said before SetLogger

@@ -222,3 +222,27 @@ func TestTheScannerReseedsTheHostHistoryAfterAnEventLosingGap(t *testing.T) {
 		t.Fatal("one-validator re-read repeated for the same gap")
 	}
 }
+
+// Two publications of one block whose promise heights are both pruned put the
+// block on record once, not as two ranges h-h; and a state written before
+// that, holding the range twice, is read back with it once.
+func TestAHeightIsNotRecordedAsAGapTwice(t *testing.T) {
+	s := &Scanner{log: NewLogger(10)}
+	unavail := &ErrHeightUnavailable{Height: 10, Err: errors.New("pruned")}
+	for _, h := range []int64{10, 10, 11, 11} {
+		if !s.recordPublicationGap(h, unavail, time.Time{}) {
+			t.Fatal("gap not recorded")
+		}
+	}
+	if len(s.gaps) != 1 || s.gaps[0].From != 10 || s.gaps[0].To != 11 {
+		t.Fatalf("gaps: %+v", s.gaps)
+	}
+
+	r := "height unavailable"
+	old := []ScanGap{{From: 10, To: 10, Reason: r, HostEventsRead: true}, {From: 10, To: 10, Reason: r, HostEventsRead: true},
+		{From: 10, To: 10, Reason: SkipReason}, {From: 12, To: 14, Reason: r}, {From: 13, To: 13, Reason: r}}
+	got := DedupeGaps(old)
+	if len(got) != 3 || got[0].From != 10 || got[1].Reason != SkipReason || got[2].From != 12 || got[2].To != 14 {
+		t.Fatalf("deduped: %+v", got)
+	}
+}

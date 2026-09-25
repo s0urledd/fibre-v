@@ -28,6 +28,7 @@ package main
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -58,17 +59,29 @@ func main() {
 	if flag.NArg() == 0 {
 		fatal(2, "usage: sentinel-verify-export [-pubkey KEY] [-require-signature] EXPORT.tar.gz ...")
 	}
-	var pub ed25519.PublicKey
+	// Every key the file holds: the pubkey JSON lists each key that ever
+	// signed here, and an export signed before a rotation is checked against
+	// its own. -fingerprint narrows them to the one pinned.
+	var pubs []ed25519.PublicKey
 	if *pubPath != "" {
 		raw, err := os.ReadFile(*pubPath)
 		if err != nil {
 			fatal(2, "read %s: %v", *pubPath, err)
 		}
-		if pub, err = export.ParsePublicKey(raw); err != nil {
+		if pubs, err = export.ParsePublicKeys(raw); err != nil {
 			fatal(2, "%s: %v", *pubPath, err)
 		}
-		if *pin != "" && export.Fingerprint(pub) != *pin {
-			fatal(1, "FAIL key %s is %s, not the pinned %s", *pubPath, export.Fingerprint(pub), *pin)
+		if *pin != "" {
+			var pinned []ed25519.PublicKey
+			for _, p := range pubs {
+				if export.Fingerprint(p) == *pin {
+					pinned = append(pinned, p)
+				}
+			}
+			if len(pinned) == 0 {
+				fatal(1, "FAIL key %s is %s, not the pinned %s", *pubPath, export.Fingerprint(pubs[0]), *pin)
+			}
+			pubs = pinned
 		}
 	}
 	worst := 0
@@ -77,7 +90,7 @@ func main() {
 		if sp == "" {
 			sp = path + ".sig"
 		}
-		if code := verify(path, sp, pub, *reqSig); code > worst {
+		if code := verify(path, sp, pubs, *reqSig); code > worst {
 			worst = code
 		}
 	}
@@ -85,7 +98,7 @@ func main() {
 }
 
 // verify checks one export and returns its exit status.
-func verify(path, sigPath string, pub ed25519.PublicKey, requireSig bool) int {
+func verify(path, sigPath string, pubs []ed25519.PublicKey, requireSig bool) int {
 	name := filepath.Base(path)
 	tarball, err := os.ReadFile(path)
 	if err != nil {
@@ -129,11 +142,13 @@ func verify(path, sigPath string, pub ed25519.PublicKey, requireSig bool) int {
 	case err != nil:
 		fmt.Printf("FAIL %s: %v\n", sigPath, err)
 		failed = true
-	case pub == nil:
+	case len(pubs) == 0:
 		fmt.Printf("FAIL signed, but no -pubkey given: a signature checked against the key it carries proves nothing\n")
 		failed = true
 	default:
-		sig, err := a.CheckSignature(sigJSON, pub)
+		var named export.Signature
+		_ = json.Unmarshal(sigJSON, &named) // a bad .sig fails in CheckSignature
+		sig, err := a.CheckSignature(sigJSON, export.KeyFor(pubs, &named))
 		if err != nil {
 			fmt.Printf("FAIL signature: %v\n", err)
 			failed = true

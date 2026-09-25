@@ -85,3 +85,23 @@ func TestBuildAnchorTxOffline(t *testing.T) {
 		t.Error("the all-zero (reserved) namespace was accepted")
 	}
 }
+
+// The chain id is never a default: it comes from the node or the flag, the
+// two must agree when both are given, and neither is an error.
+func TestTheChainIDIsReadOrRequired(t *testing.T) {
+	for _, c := range []struct {
+		flagged, node, want string
+		ok                  bool
+	}{
+		{"", "mocha-5", "mocha-5", true},
+		{"mocha-5", "mocha-5", "mocha-5", true},
+		{"mocha-5", "", "mocha-5", true},
+		{"mocha-4", "mocha-5", "", false},
+		{"", "", "", false},
+	} {
+		got, err := resolveChainID(c.flagged, c.node)
+		if (err == nil) != c.ok || got != c.want {
+			t.Errorf("resolveChainID(%q, %q) = %q, %v", c.flagged, c.node, got, err)
+		}
+	}
+}

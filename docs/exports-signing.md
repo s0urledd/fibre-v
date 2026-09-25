@@ -73,7 +73,9 @@ It checks the `.sha256` sidecar, every member against `manifest.json`
 (digest, bytes, lines, nothing extra in the tarball), and the `.sig` against
 the manifest digest and the key. Exit 0 pass, 1 a check failed, 2 usage, 3
 unsigned under `-require-signature`. `-pubkey` accepts the PEM, the raw key
-in hex or base64, or the JSON the pubkey route returns.
+in hex or base64, or the JSON the pubkey route returns; given the JSON, each
+export is checked against the listed key its `.sig` names, so exports signed
+before a rotation still verify.
 
 With nothing but coreutils, tar, jq and OpenSSL 3:
 
@@ -81,7 +83,9 @@ With nothing but coreutils, tar, jq and OpenSSL 3:
 API=https://<observer>          # the API origin
 N=tensile-<vantage>-2026-09-10.tar.gz
 curl -sO "$API/v1/exports/$N" -O "$API/v1/exports/$N.sha256" -O "$API/v1/exports/$N.sig"
-curl -s "$API/v1/exports/pubkey" | jq -r .current.public_key_pem > tensile-exports.pem   # once; keep it
+curl -s "$API/v1/exports/pubkey" > tensile-exports.json                        # once; keep it
+jq -r --arg fp "$(jq -r .key_fingerprint "$N.sig")" \
+  '.keys[] | select(.key_fingerprint == $fp) | .public_key_pem' tensile-exports.json > tensile-exports.pem
 
 sha256sum -c "$N.sha256"                                              # the tarball
 printf '%s' "tensile-export-manifest/v1:$(tar -xzOf "$N" manifest.json | sha256sum | cut -c1-64)" > msg
@@ -116,8 +120,12 @@ unsigned; nothing rewrites them. With no key configured the index, the
 tarballs and the sidecars are byte-for-byte what they were before signing
 existed (`signature` is omitted from the index, not written empty).
 
-Rotating: configure the new key. `signing-keys.json` in the exports
-directory keeps the old one with the days it signed; do not delete it.
+Rotating: make the new key and publish its fingerprint (step 3) first, beside
+the old one, then configure it. The new key reaches `signing-keys.json`
+before the first `.sig` and index entry that name it, and becomes `current`
+with that export; the file keeps the old key with the days it signed, so
+the exports it signed stay verifiable. Do not delete it, and do not remove
+the old fingerprint from wherever you announced it.
 
 ## Anchoring (optional; dry run only)
 
@@ -144,9 +152,14 @@ meaning, so the test backend reads `<dir>/keyring-test`):
 ```sh
 sentinel-anchor -exports-dir <data-dir>/exports -day 2026-09-10 \
   -keyring-backend test -keyring-dir /etc/fibre-observer/keyring-mocha -key-name tensile-ops \
-  -chain-id mocha-4 -account-number <n> -sequence <s>
-# or, instead of the two numbers, -grpc <node:9090> for one read-only account query
+  -grpc <node:9090>
+# or, offline: -chain-id <chain id> -account-number <n> -sequence <s>
 ```
+
+With `-grpc` the chain id, account number and sequence are read from the
+node (two read-only queries); without it `-chain-id` is required, since
+there is no default to go stale at the next hardspoon, and given both it
+must match the node.
 
 Run it as the unit user (`fibre-observer`), which owns the keyring. It
 prints `dry_run: true`, the signer
