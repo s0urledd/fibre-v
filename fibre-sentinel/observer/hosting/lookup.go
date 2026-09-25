@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"encoding/csv"
 	"fmt"
 	"io"
 	"net/netip"
@@ -181,4 +182,86 @@ func dedupe(in []netip.Addr) []netip.Addr {
 		out = append(out, a)
 	}
 	return out
+}
+
+// CityRecord is what a DB-IP "IP to City Lite" file says about one address:
+// the country, state or province, and city it estimates the address is used
+// in, and that city's approximate coordinates. HasCoords is false when the
+// file gave none (it writes 0,0 for "unknown").
+type CityRecord struct {
+	Country   string
+	Region    string
+	City      string
+	Lat, Lon  float64
+	HasCoords bool
+}
+
+// LookupCity finds the city of every target in a DB-IP "IP to City Lite" CSV
+// file (dbip-city-lite-YYYY-MM.csv.gz, gzipped or not):
+//
+//	ip_start,ip_end,continent,country,stateprov,city,latitude,longitude
+//
+// The name fields are quoted when they hold a space, a comma ("Ampelokipoi,
+// Thessaloniki") or an escaped quote, so the part after the two addresses is
+// read with a real CSV reader, and only for the lines that match a target.
+// The file is about 7.7 million lines; like the other lookups it is streamed
+// once per pass and nothing is kept beyond the matches. ZZ ranges, and
+// ranges with no city, leave the target out of the result.
+func LookupCity(path string, targets []netip.Addr) (map[netip.Addr]CityRecord, error) {
+	out := map[netip.Addr]CityRecord{}
+	_, _, err := scanRanges(path, dedupe(targets), splitCityLine, func(t netip.Addr, rest [][]byte) {
+		if _, seen := out[t]; seen || len(rest) != 1 {
+			return
+		}
+		rec, ok := parseCityFields(rest[0])
+		if ok {
+			out[t] = rec
+		}
+	})
+	return out, err
+}
+
+// splitCityLine reads only the two addresses of a city line, which never
+// contain a comma, and hands back the remainder whole: splitting all 7.7
+// million lines on every comma would both be slower and cut quoted names
+// in two.
+func splitCityLine(line []byte) (netip.Addr, netip.Addr, [][]byte, bool) {
+	i := bytes.IndexByte(line, ',')
+	if i < 0 {
+		return netip.Addr{}, netip.Addr{}, nil, false
+	}
+	j := bytes.IndexByte(line[i+1:], ',')
+	if j < 0 {
+		return netip.Addr{}, netip.Addr{}, nil, false
+	}
+	j += i + 1
+	a, b, _, ok := splitRange([][]byte{line[:i], line[i+1 : j], nil})
+	if !ok {
+		return netip.Addr{}, netip.Addr{}, nil, false
+	}
+	return a, b, [][]byte{line[j+1:]}, true
+}
+
+// parseCityFields reads "continent,country,stateprov,city,lat,lon".
+func parseCityFields(b []byte) (CityRecord, bool) {
+	cr := csv.NewReader(bytes.NewReader(b))
+	cr.FieldsPerRecord = -1
+	f, err := cr.Read()
+	if err != nil || len(f) < 6 {
+		return CityRecord{}, false
+	}
+	rec := CityRecord{
+		Country: strings.ToUpper(strings.TrimSpace(f[1])),
+		Region:  strings.TrimSpace(f[2]),
+		City:    strings.TrimSpace(f[3]),
+	}
+	if len(rec.Country) != 2 || rec.Country == "ZZ" || rec.City == "" {
+		return CityRecord{}, false
+	}
+	lat, err1 := strconv.ParseFloat(strings.TrimSpace(f[4]), 64)
+	lon, err2 := strconv.ParseFloat(strings.TrimSpace(f[5]), 64)
+	if err1 == nil && err2 == nil && (lat != 0 || lon != 0) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 {
+		rec.Lat, rec.Lon, rec.HasCoords = lat, lon, true
+	}
+	return rec, true
 }

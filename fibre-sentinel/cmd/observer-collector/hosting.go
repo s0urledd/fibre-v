@@ -7,11 +7,12 @@ package main
 //
 // Configuration, first match wins:
 //
-//	-hosting-asn-db / -hosting-country-db             flags
-//	HOSTING_ASN_DB / HOSTING_COUNTRY_DB               environment (the systemd
-//	                                                  units load <network>.env)
-//	<data-dir>/hosting/ip2asn-combined.tsv.gz         the files hosting-db.sh
-//	<data-dir>/hosting/dbip-country-lite.csv.gz       writes, when present
+//	-hosting-asn-db / -hosting-country-db / -hosting-city-db     flags
+//	HOSTING_ASN_DB / HOSTING_COUNTRY_DB / HOSTING_CITY_DB       environment (the systemd
+//	                                                            units load <network>.env)
+//	<data-dir>/hosting/ip2asn-combined.tsv.gz                   the files hosting-db.sh
+//	<data-dir>/hosting/dbip-country-lite.csv.gz                 writes, when present
+//	<data-dir>/hosting/dbip-city-lite.csv.gz
 //
 // No ASN file means the feature is off and nothing is looked up. The pass
 // never makes a network call: addresses come from the heartbeat's own
@@ -31,6 +32,7 @@ import (
 var (
 	hostingASNFlag     = flag.String("hosting-asn-db", "", "iptoasn.com ip2asn TSV (gz ok) for the hosting lookup (default $HOSTING_ASN_DB, else <data-dir>/hosting/"+hosting.DefaultASNFile+" if present; none = feature off)")
 	hostingCountryFlag = flag.String("hosting-country-db", "", "DB-IP IP-to-Country Lite CSV (gz ok), optional (default $HOSTING_COUNTRY_DB, else <data-dir>/hosting/"+hosting.DefaultCountryFile+" if present)")
+	hostingCityFlag    = flag.String("hosting-city-db", "", "DB-IP IP-to-City Lite CSV (gz ok), optional, adds city and coordinates (default $HOSTING_CITY_DB, else <data-dir>/hosting/"+hosting.DefaultCityFile+" if present)")
 )
 
 // newHostingPass prepares the table and returns the function the collector
@@ -41,30 +43,36 @@ func newHostingPass(st *store.Store, dataDir string, logf func(string, ...any)) 
 		logf("hosting: create table: %v; lookups disabled", err)
 		return func(context.Context, time.Time) {}
 	}
-	cfg := hosting.ResolveConfig(*hostingASNFlag, *hostingCountryFlag, dataDir)
+	cfg := hosting.ResolveConfig(*hostingASNFlag, *hostingCountryFlag, *hostingCityFlag, dataDir)
 	if cfg.ASNPath == "" {
 		logf("hosting: no ASN database configured; provider/country lookup off (deploy/hosting-db.sh enables it)")
 	} else {
-		logf("hosting: asn db %s, country db %q", cfg.ASNPath, cfg.CountryPath)
+		logf("hosting: asn db %s, country db %q, city db %q", cfg.ASNPath, cfg.CountryPath, cfg.CityPath)
 	}
 	r := &hosting.Refresher{DB: st.DB(), Cfg: cfg, Logf: logf}
 	return func(ctx context.Context, now time.Time) {
 		// The databases usually arrive after the collector has started
-		// (deploy/hosting-db.sh runs once the new binaries are up), and the
-		// paths were resolved at start. While no ASN file was found, look
-		// again every pass: a stat per minute, and no restart needed.
-		if r.Cfg.ASNPath == "" {
-			if c := hosting.ResolveConfig(*hostingASNFlag, *hostingCountryFlag, dataDir); c.ASNPath != "" {
-				logf("hosting: asn db %s appeared, country db %q; lookup on", c.ASNPath, c.CountryPath)
-				r.Cfg = c
+		// (deploy/hosting-db.sh runs once the new binaries are up), and an
+		// optional one (the city file) can be added to a host that already
+		// has the others. Resolve the paths again every pass, a few stats a
+		// minute, so a file that appears is used without a restart. A file
+		// that disappears is left to Run, which notices it by stat.
+		if c := hosting.ResolveConfig(*hostingASNFlag, *hostingCountryFlag, *hostingCityFlag, dataDir); c.ASNPath != "" &&
+			(c.ASNPath != r.Cfg.ASNPath || c.CountryPath != r.Cfg.CountryPath || c.CityPath != r.Cfg.CityPath) {
+			if r.Cfg.ASNPath == "" {
+				logf("hosting: asn db %s appeared, country db %q, city db %q; lookup on", c.ASNPath, c.CountryPath, c.CityPath)
+			} else {
+				logf("hosting: databases now asn %s, country %q, city %q", c.ASNPath, c.CountryPath, c.CityPath)
 			}
+			c.Lookback, c.MaxAge = r.Cfg.Lookback, r.Cfg.MaxAge
+			r.Cfg = c
 		}
 		res, err := r.Run(ctx, now)
 		switch {
 		case err != nil:
 			logf("hosting: %v", err)
 		case res.Enabled && !res.Skipped:
-			logf("hosting: %d open endpoint(s), %d resolved, %d with an origin AS", res.Hosts, res.Resolved, res.WithASN)
+			logf("hosting: %d open endpoint(s), %d resolved, %d with an origin AS, %d placed in a city", res.Hosts, res.Resolved, res.WithASN, res.WithCity)
 		}
 	}
 }

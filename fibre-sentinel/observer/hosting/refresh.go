@@ -17,10 +17,14 @@ import (
 )
 
 // Config is where the collector finds the database files. An empty or
-// missing ASNPath turns the feature off; CountryPath is optional.
+// missing ASNPath turns the feature off; CountryPath and CityPath are
+// optional.
 type Config struct {
 	ASNPath     string
 	CountryPath string
+	// CityPath is DB-IP's IP to City Lite file. Without it hosts are placed
+	// by country only and the API carries no city fields.
+	CityPath string
 	// Lookback is how far back a heartbeat's resolution still counts as
 	// the host's current address. The heartbeat runs every five minutes;
 	// the default six hours covers a heartbeat outage of that length
@@ -36,6 +40,7 @@ type Config struct {
 const (
 	DefaultASNFile     = "ip2asn-combined.tsv.gz"
 	DefaultCountryFile = "dbip-country-lite.csv.gz"
+	DefaultCityFile    = "dbip-city-lite.csv.gz"
 )
 
 // ResolveConfig fills a Config from a flag value, then an environment
@@ -44,7 +49,7 @@ const (
 // then the default file under <dataDir>/hosting. The default is only taken
 // when the file exists, so a host that never ran the download script keeps
 // the feature off without a warning.
-func ResolveConfig(flagASN, flagCountry, dataDir string) Config {
+func ResolveConfig(flagASN, flagCountry, flagCity, dataDir string) Config {
 	pick := func(flagV, env, file string) string {
 		if flagV != "" {
 			return flagV
@@ -61,6 +66,7 @@ func ResolveConfig(flagASN, flagCountry, dataDir string) Config {
 	return Config{
 		ASNPath:     pick(flagASN, "HOSTING_ASN_DB", DefaultASNFile),
 		CountryPath: pick(flagCountry, "HOSTING_COUNTRY_DB", DefaultCountryFile),
+		CityPath:    pick(flagCity, "HOSTING_CITY_DB", DefaultCityFile),
 	}
 }
 
@@ -82,6 +88,7 @@ type Result struct {
 	Hosts    int
 	Resolved int
 	WithASN  int
+	WithCity int // hosts placed in a city (only with a city file)
 	Cleared  int // rows removed because the feature was turned off
 }
 
@@ -123,12 +130,16 @@ func (r *Refresher) Run(ctx context.Context, now time.Time) (Result, error) {
 	if countryErr != nil && cfg.CountryPath != "" && r.Logf != nil && r.lastKey == "" {
 		r.Logf("hosting: country file: %v; countries fall back to the AS registry's", countryErr)
 	}
+	cityStat, cityErr := statFile(cfg.CityPath)
+	if cityErr != nil && cfg.CityPath != "" && r.Logf != nil && r.lastKey == "" {
+		r.Logf("hosting: city file: %v; hosts are placed by country only", cityErr)
+	}
 
 	targets, err := r.targets(ctx, now.Add(-cfg.Lookback))
 	if err != nil {
 		return Result{Enabled: true}, err
 	}
-	key := fingerprint(targets, asnStat, countryStat)
+	key := fingerprint(targets, asnStat, countryStat+"\n"+cityStat)
 	if key == r.lastKey && now.Sub(r.lastRun) < cfg.MaxAge {
 		return Result{Enabled: true, Skipped: true, Hosts: len(targets)}, nil
 	}
@@ -152,6 +163,16 @@ func (r *Refresher) Run(ctx context.Context, now time.Time) (Result, error) {
 			countries, countryStat = nil, ""
 		}
 	}
+	var cities map[netip.Addr]CityRecord
+	if cityStat != "" {
+		if cities, err = LookupCity(cfg.CityPath, all); err != nil {
+			// Optional too: a bad city file costs the city fields only.
+			if r.Logf != nil {
+				r.Logf("hosting: city db: %v; hosts are placed by country only", err)
+			}
+			cities, cityStat = nil, ""
+		}
+	}
 
 	res := Result{Enabled: true, Hosts: len(targets)}
 	tx, err := r.DB.BeginTx(ctx, nil)
@@ -163,21 +184,24 @@ func (r *Refresher) Run(ctx context.Context, now time.Time) (Result, error) {
 		return res, err
 	}
 	for _, t := range targets {
-		row := buildInfo(t, asns, countries)
+		row := buildInfo(t, asns, countries, cities)
 		if row.Status != "unresolved" {
 			res.Resolved++
 		}
 		if row.Status == "ok" {
 			res.WithASN++
 		}
+		if row.City != "" {
+			res.WithCity++
+		}
 		addrs, _ := json.Marshal(row.Addresses)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO endpoint_hosting
 			(validator_address, host, status, ip, asn, as_org, as_country, country, country_basis, provider,
-			 addresses_json, resolved_at, resolved_by, looked_up_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 addresses_json, resolved_at, resolved_by, looked_up_at, city, region, lat, lon)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(validator_address, host) DO NOTHING`,
 			t.addrHex, t.host, row.Status, row.IP, row.ASN, row.ASOrg, asCountryOf(row, asns), row.Country, row.CountryBasis,
-			row.Provider, string(addrs), row.ResolvedAt, row.ResolvedBy, ts(now)); err != nil {
+			row.Provider, string(addrs), row.ResolvedAt, row.ResolvedBy, ts(now), row.City, row.Region, row.Lat, row.Lon); err != nil {
 			return res, err
 		}
 	}
@@ -187,11 +211,17 @@ func (r *Refresher) Run(ctx context.Context, now time.Time) (Result, error) {
 		MetaASNDBModified:   asnStat[strings.LastIndexByte(asnStat, '|')+1:],
 		MetaCountryDB:       "",
 		MetaCountryModified: "",
+		MetaCityDB:          "",
+		MetaCityModified:    "",
 		MetaLookedUpAt:      ts(now),
 	}
 	if countryStat != "" {
 		meta[MetaCountryDB] = filepath.Base(cfg.CountryPath)
 		meta[MetaCountryModified] = countryStat[strings.LastIndexByte(countryStat, '|')+1:]
+	}
+	if cityStat != "" {
+		meta[MetaCityDB] = filepath.Base(cfg.CityPath)
+		meta[MetaCityModified] = cityStat[strings.LastIndexByte(cityStat, '|')+1:]
 	}
 	for k, v := range meta {
 		if err := setMeta(ctx, tx, k, v, now); err != nil {
@@ -216,7 +246,13 @@ func asCountryOf(in Info, asns map[netip.Addr]ASNRecord) string {
 }
 
 // buildInfo turns one target and the lookups into the published row.
-func buildInfo(t target, asns map[netip.Addr]ASNRecord, countries map[netip.Addr]string) Info {
+//
+// Country, first match wins: the country file, then the city file's country
+// (both DB-IP geolocation estimates), then the AS registry's. The city
+// fields are set only when the city file's country is the published
+// country, so a row can never read "Frankfurt, FI" when the two monthly
+// files disagree about a range.
+func buildInfo(t target, asns map[netip.Addr]ASNRecord, countries map[netip.Addr]string, cities map[netip.Addr]CityRecord) Info {
 	in := Info{Host: t.host, ResolvedAt: t.resolvedAt, ResolvedBy: t.resolvedBy, Status: "unresolved", Provider: ProviderUnknown}
 	if len(t.addrs) == 0 {
 		return in
@@ -228,6 +264,9 @@ func buildInfo(t target, asns map[netip.Addr]ASNRecord, countries map[netip.Addr
 	country := func(a netip.Addr) (string, string) {
 		if cc, ok := countries[a]; ok {
 			return cc, "geolocation"
+		}
+		if c, ok := cities[a]; ok {
+			return c.Country, "geolocation"
 		}
 		if rec, ok := asns[a]; ok && rec.ASCountry != "" {
 			return rec.ASCountry, "as_registry"
@@ -243,6 +282,13 @@ func buildInfo(t target, asns map[netip.Addr]ASNRecord, countries map[netip.Addr
 	in.IP = primary.String()
 	rec, ok := asns[primary]
 	in.Country, in.CountryBasis = country(primary)
+	if c, found := cities[primary]; found && in.Country == c.Country {
+		in.City, in.Region = c.City, c.Region
+		if c.HasCoords {
+			lat, lon := c.Lat, c.Lon
+			in.Lat, in.Lon = &lat, &lon
+		}
+	}
 	if !ok {
 		in.Status = "no_asn"
 		return in

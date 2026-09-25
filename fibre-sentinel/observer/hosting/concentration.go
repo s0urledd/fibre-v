@@ -21,6 +21,24 @@ type Bucket struct {
 	StakeShare float64 `json:"stake_share"`
 }
 
+// CityBucket is one city in the summary. Key is "CC/region/city" (stable
+// for a UI to key on); the "" bucket is the hosts without a city, and has
+// no name or coordinates. Lat/Lon are those of the member with the
+// lowest validator address, since DB-IP can give two ranges of one city
+// slightly different points.
+type CityBucket struct {
+	Key        string   `json:"key"`
+	City       string   `json:"city,omitempty"`
+	Region     string   `json:"region,omitempty"`
+	Country    string   `json:"country,omitempty"`
+	Lat        *float64 `json:"lat,omitempty"`
+	Lon        *float64 `json:"lon,omitempty"`
+	Hosts      int      `json:"hosts"`
+	HostShare  float64  `json:"host_share"`
+	Stake      int64    `json:"stake"`
+	StakeShare float64  `json:"stake_share"`
+}
+
 // Nakamoto is the smallest number of entities whose hosts together carry
 // more than one third of the registered hosts' stake: the count of
 // providers, networks or countries whose simultaneous failure would take
@@ -50,7 +68,12 @@ type Summary struct {
 	ByProvider []Bucket `json:"by_provider"`
 	ByCountry  []Bucket `json:"by_country"`
 	ByASN      []Bucket `json:"by_asn"`
-	Nakamoto   struct {
+	// ByCity places the hosts on a map: one bucket per (country, region,
+	// city) with the city's coordinates, shares over every registered host
+	// like the rest, and a final key "" bucket for the hosts no city was
+	// found for. Absent when no host has a city (no city file configured).
+	ByCity   []CityBucket `json:"by_city,omitempty"`
+	Nakamoto struct {
 		Provider Nakamoto `json:"provider"`
 		ASN      Nakamoto `json:"asn"`
 		Country  Nakamoto `json:"country"`
@@ -137,6 +160,7 @@ func Concentrate(members []Member) Summary {
 		return out
 	}
 	s.ByProvider, s.ByCountry, s.ByASN = buckets(prov), buckets(ctry), buckets(asn)
+	s.ByCity = cityBuckets(members, s)
 
 	// Other and Unknown are remainders, not entities: a hundred small
 	// providers failing together is not a scenario, so neither may count
@@ -149,6 +173,68 @@ func Concentrate(members []Member) Summary {
 	s.Nakamoto.Country = nakamoto(s.ByCountry, s.Basis, map[string]bool{"": true},
 		"countries; hosts without a country are not counted")
 	return s
+}
+
+// cityBuckets groups the members by city, nil when none has one.
+func cityBuckets(members []Member, s Summary) []CityBucket {
+	type agg struct {
+		b     CityBucket
+		first string // lowest validator address seen, for the coordinates
+	}
+	m := map[string]*agg{}
+	placed := false
+	for _, mb := range members {
+		st := max(mb.Stake, 0)
+		k := ""
+		var in Info
+		if mb.Info != nil && mb.Info.Status != "unresolved" && mb.Info.City != "" {
+			in = *mb.Info
+			k = in.Country + "/" + in.Region + "/" + in.City
+			placed = true
+		}
+		a := m[k]
+		if a == nil {
+			a = &agg{b: CityBucket{Key: k}}
+			m[k] = a
+		}
+		a.b.Hosts++
+		a.b.Stake += st
+		if k != "" && (a.first == "" || mb.Validator < a.first) {
+			a.first = mb.Validator
+			a.b.City, a.b.Region, a.b.Country, a.b.Lat, a.b.Lon = in.City, in.Region, in.Country, in.Lat, in.Lon
+		}
+	}
+	if !placed {
+		return nil
+	}
+	out := make([]CityBucket, 0, len(m))
+	for _, a := range m {
+		b := a.b
+		if s.Registered > 0 {
+			b.HostShare = float64(b.Hosts) / float64(s.Registered)
+		}
+		if s.TotalStake > 0 {
+			b.StakeShare = float64(b.Stake) / float64(s.TotalStake)
+		}
+		out = append(out, b)
+	}
+	w := func(b CityBucket) float64 {
+		if s.Basis == "hosts" {
+			return b.HostShare
+		}
+		return b.StakeShare
+	}
+	sort.Slice(out, func(i, j int) bool {
+		// the unplaced remainder last, whatever its size: it is not a place
+		if (out[i].Key == "") != (out[j].Key == "") {
+			return out[j].Key == ""
+		}
+		if w(out[i]) != w(out[j]) {
+			return w(out[i]) > w(out[j])
+		}
+		return out[i].Key < out[j].Key
+	})
+	return out
 }
 
 func weight(b Bucket, basis string) float64 {

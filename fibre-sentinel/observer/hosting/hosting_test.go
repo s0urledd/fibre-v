@@ -366,19 +366,20 @@ func TestResolveConfig(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOSTING_ASN_DB", "")
 	t.Setenv("HOSTING_COUNTRY_DB", "")
-	if c := ResolveConfig("", "", dir); c.ASNPath != "" || c.CountryPath != "" {
+	t.Setenv("HOSTING_CITY_DB", "")
+	if c := ResolveConfig("", "", "", dir); c.ASNPath != "" || c.CountryPath != "" || c.CityPath != "" {
 		t.Fatalf("nothing there: %+v", c)
 	}
 	os.MkdirAll(filepath.Join(dir, "hosting"), 0o755)
 	def := writeFile(t, filepath.Join(dir, "hosting"), DefaultASNFile, asnTSV, true)
-	if c := ResolveConfig("", "", dir); c.ASNPath != def {
+	if c := ResolveConfig("", "", "", dir); c.ASNPath != def {
 		t.Fatalf("default file: %+v", c)
 	}
 	t.Setenv("HOSTING_ASN_DB", "/env/asn")
-	if c := ResolveConfig("", "", dir); c.ASNPath != "/env/asn" {
+	if c := ResolveConfig("", "", "", dir); c.ASNPath != "/env/asn" {
 		t.Fatalf("env: %+v", c)
 	}
-	if c := ResolveConfig("/flag/asn", "/flag/c", dir); c.ASNPath != "/flag/asn" || c.CountryPath != "/flag/c" {
+	if c := ResolveConfig("/flag/asn", "/flag/c", "/flag/city", dir); c.ASNPath != "/flag/asn" || c.CountryPath != "/flag/c" || c.CityPath != "/flag/city" {
 		t.Fatalf("flag: %+v", c)
 	}
 }
