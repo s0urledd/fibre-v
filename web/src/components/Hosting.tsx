@@ -1,5 +1,6 @@
 "use client";
 import { useApi, int, ago, utcWord } from "@/lib/api";
+import { Flag, countryName } from "./Flag";
 import { type Hosting, type HostingResponse, type HostingBucket, type Nakamoto, FDP_NAMED, asLabel, hostingTitle } from "@/lib/hosting";
 
 /**
@@ -10,15 +11,15 @@ import { type Hosting, type HostingResponse, type HostingBucket, type Nakamoto, 
  * DB-IP's licence requires.
  */
 
-/** the validators-table cell: provider · country, details in the tooltip */
+/** the validators-table cell: the country's flag and the provider, details in the tooltip */
 export function HostingCell({ h }: { h?: Hosting }) {
   if (!h) return <span className="muted" title="Not looked up: no open endpoint, or the lookup has not reached this host yet.">—</span>;
   if (h.status === "unresolved") return <span className="muted" title={hostingTitle(h)}>unresolved</span>;
   const prov = h.status === "no_asn" ? "no network" : h.provider === "Other" ? (h.as_org ? shortOrg(h.as_org) : "Other") : h.provider;
   return (
     <span className="hosting" title={hostingTitle(h)}>
+      {h.country ? <Flag cc={h.country} label /> : <span className="flag-none" aria-hidden="true" />}
       <span>{prov}</span>
-      {h.country && <span className="cc">{h.country}</span>}
       {h.mixed_networks && <span className="cc" aria-label="resolves into several networks">+</span>}
     </span>
   );
@@ -110,7 +111,7 @@ export function Concentration() {
           <div title={nc.title}><span className="n">{nc.value}</span>countr{nc.value === "1" ? "y" : "ies"}</div>
         </div>
         <p className="blobs ctry">
-          {countries.map((c, i) => <span key={c.key} className={i ? "sepd" : undefined} title={`${int(c.hosts)} host${c.hosts === 1 ? "" : "s"}`}>{c.key} <b>{pct(s.basis === "hosts" ? c.host_share : c.stake_share)}</b></span>)}
+          {countries.map((c, i) => <span key={c.key} className={i ? "sepd" : undefined} title={`${countryName(c.key)}: ${int(c.hosts)} host${c.hosts === 1 ? "" : "s"}`}><Flag cc={c.key} />{countryName(c.key)} <b>{pct(s.basis === "hosts" ? c.host_share : c.stake_share)}</b></span>)}
           {unknownCountry && unknownCountry.hosts > 0 && <span className="sepd soft">unknown {pct(s.basis === "hosts" ? unknownCountry.host_share : unknownCountry.stake_share)}</span>}
         </p>
       </div>
@@ -126,7 +127,7 @@ export function HostingChip({ h }: { h?: Hosting }) {
     <span title={hostingTitle(h)}>
       runs on <b className="word">{h.provider === "Other" || h.status === "no_asn" ? (h.as_org || "unknown network") : h.provider}</b>
       {h.asn ? <span className="soft"> · {asLabel(h)}</span> : null}
-      {h.country && <span className="soft"> · {h.country}</span>}
+      {h.country && <span className="soft"> · <Flag cc={h.country} />{h.city ? `${h.city}, ` : ""}{countryName(h.country)}</span>}
     </span>
   );
 }

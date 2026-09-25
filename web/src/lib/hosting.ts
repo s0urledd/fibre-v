@@ -19,6 +19,11 @@ export type Hosting = {
   country?: string;
   /** geolocation (DB-IP's estimate) | as_registry (where the AS is registered) */
   country_basis?: "geolocation" | "as_registry";
+  /** city-level geolocation, when the collector has a city database: the map places the host here */
+  city?: string;
+  region?: string;
+  lat?: number;
+  lon?: number;
   provider: string;
   addresses?: HostingAddress[];
   mixed_networks?: boolean;
@@ -33,6 +38,9 @@ export type HostingSources = { enabled: boolean; asn_db?: DBSource; country_db?:
 
 export type HostingBucket = { key: string; label?: string; provider?: string; hosts: number; host_share: number; stake: number; stake_share: number };
 
+/** a by_city bucket: key is the city, with where it is */
+export type HostingCityBucket = HostingBucket & { city?: string; region?: string; country?: string; lat?: number; lon?: number };
+
 export type Nakamoto = { count: number | null; entities: string[]; share: number; note: string };
 
 export type HostingSummary = {
@@ -45,6 +53,7 @@ export type HostingSummary = {
   by_provider: HostingBucket[];
   by_country: HostingBucket[];
   by_asn: HostingBucket[];
+  by_city?: HostingCityBucket[];
   nakamoto_third: { provider: Nakamoto; asn: Nakamoto; country: Nakamoto };
   basis: "stake" | "hosts";
 };
