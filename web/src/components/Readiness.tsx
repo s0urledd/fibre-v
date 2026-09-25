@@ -1,5 +1,4 @@
-import Link from "next/link";
-import { type Validator } from "@/lib/api";
+import { type Validator, int } from "@/lib/api";
 
 /**
  * Can Fibre accept a blob at all? A MsgPayForFibre settles only with the
@@ -55,12 +54,8 @@ export function readiness(rows: Validator[]) {
   const regPower = registered.reduce((s, v) => s + (v.voting_power || 0), 0);
   const reachPower = reachable.reduce((s, v) => s + (v.voting_power || 0), 0);
   const quorum = Math.floor((total * 2) / 3);
-  const missing = bonded
-    .filter((v) => !v.host)
-    .sort((a, b) => (b.voting_power || 0) - (a.voting_power || 0))
-    .slice(0, 5);
   const pct = (n: number) => (total > 0 ? `${((100 * n) / total).toFixed(1)}%` : "—");
-  return { bonded, total, registered, reachable, regPower, reachPower, quorum, ready: total > 0 && reachPower >= quorum, missing, pct };
+  return { bonded, total, registered, reachable, regPower, reachPower, quorum, ready: total > 0 && reachPower >= quorum, pct };
 }
 
 /** the answer, the meter with its ⅔ tick, and the key */
@@ -82,25 +77,10 @@ export function ReadyAnswer({ rows, headingId = "readiness-h" }: { rows: Validat
         <span className="tick" style={{ left: w(quorum) }} />
         <span className="tl2" style={{ left: w(quorum) }}>⅔ needed</span>
       </div>
-    </>
-  );
-}
-
-/** the five largest validators with no Fibre host */
-export function ReadyMissing({ rows }: { rows: Validator[] }) {
-  const r = readiness(rows);
-  if (r.total === 0 || r.missing.length === 0) return null;
-  return (
-    <>
-      <h2>Largest validators without a Fibre host</h2>
-      <ol className="ready-missing">
-        {r.missing.map((v) => (
-          <li key={v.address}>
-            <Link href={`/validator/?addr=${encodeURIComponent(v.cons_address || v.address)}`}>{v.moniker || v.operator_address || v.address}</Link>
-            <span className="num">{r.pct(v.voting_power || 0)}</span>
-          </li>
-        ))}
-      </ol>
+      <p className="sub ready-key">
+        <span title="Registered, but not answering, or answering with a certificate a client will not accept"><i className="sw reg" /> registered, not ready {pct(regPower - reachPower)} · {int(r.registered.length - r.reachable.length)}</span>
+        <span><i className="sw p" /> no Fibre host {pct(total - regPower)} · {int(r.bonded.length - r.registered.length)}</span>
+      </p>
     </>
   );
 }
@@ -111,7 +91,6 @@ export default function Readiness({ rows }: { rows: Validator[] }) {
   return (
     <section className="band readiness" aria-labelledby="readiness-h">
       <div><ReadyAnswer rows={rows} /></div>
-      {r.missing.length > 0 && <div><ReadyMissing rows={rows} /></div>}
     </section>
   );
 }
