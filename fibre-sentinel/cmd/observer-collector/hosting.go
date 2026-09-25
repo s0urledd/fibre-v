@@ -37,8 +37,10 @@ var (
 
 // newHostingPass prepares the table and returns the function the collector
 // calls on every endpoint-poll pass. Errors are logged, never fatal: this
-// is an annotation on the record, not part of it.
-func newHostingPass(st *store.Store, dataDir string, logf func(string, ...any)) func(ctx context.Context, now time.Time) {
+// is an annotation on the record, not part of it. vantage is this
+// observer's own: addresses are read from its heartbeats only, since another
+// vantage may resolve a host differently.
+func newHostingPass(st *store.Store, dataDir, vantage string, logf func(string, ...any)) func(ctx context.Context, now time.Time) {
 	if err := hosting.EnsureSchema(st.DB()); err != nil {
 		logf("hosting: create table: %v; lookups disabled", err)
 		return func(context.Context, time.Time) {}
@@ -49,7 +51,7 @@ func newHostingPass(st *store.Store, dataDir string, logf func(string, ...any)) 
 	} else {
 		logf("hosting: asn db %s, country db %q, city db %q", cfg.ASNPath, cfg.CountryPath, cfg.CityPath)
 	}
-	r := &hosting.Refresher{DB: st.DB(), Cfg: cfg, Logf: logf}
+	r := &hosting.Refresher{DB: st.DB(), Cfg: cfg, Vantage: vantage, Logf: logf}
 	return func(ctx context.Context, now time.Time) {
 		// The databases usually arrive after the collector has started
 		// (deploy/hosting-db.sh runs once the new binaries are up), and an

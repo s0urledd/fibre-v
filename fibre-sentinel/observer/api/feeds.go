@@ -278,7 +278,7 @@ func (s *Server) validatorFeed(ctx context.Context, addr, authority string, now 
 	// First completed handshake on record.
 	var first string
 	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MIN(started_at), '') FROM reachability
-		WHERE validator_address = ? AND tcp_ok = 1 AND tls_ok = 1 AND outcome <> 'PROBE_ERROR'`, addr).Scan(&first); err != nil {
+		WHERE validator_address = ? AND tcp_ok = 1 AND tls_ok = 1 AND outcome <> 'PROBE_ERROR' AND +vantage = ?`, addr, s.vantage).Scan(&first); err != nil {
 		return nil, 0, err
 	}
 	if first != "" {
@@ -294,9 +294,11 @@ func (s *Server) validatorFeed(ctx context.Context, addr, authority string, now 
 	// Reachability and identity transitions over the feed's span, with a
 	// day before it as the baseline so the first change in the span is a
 	// change and not the starting state.
+	// This observer's own heartbeats, as the entries say: another vantage's
+	// rows interleaved here would read as flapping.
 	rows, err := db.QueryContext(ctx, `SELECT started_at, validator_host, tcp_ok, tls_ok, identity_ok, identity_reason
-		FROM reachability WHERE validator_address = ? AND started_at >= ? AND outcome <> 'PROBE_ERROR'
-		ORDER BY started_at`, addr, store.TS(now.Add(-feed.MaxAge-24*time.Hour)))
+		FROM reachability WHERE validator_address = ? AND started_at >= ? AND outcome <> 'PROBE_ERROR' AND +vantage = ?
+		ORDER BY started_at`, addr, store.TS(now.Add(-feed.MaxAge-24*time.Hour)), s.vantage)
 	if err != nil {
 		return nil, 0, err
 	}

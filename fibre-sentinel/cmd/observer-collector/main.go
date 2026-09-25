@@ -48,6 +48,7 @@ func main() {
 		statePath = flag.String("state", "", "path to state.json (default <data-dir>/state.json)")
 		measPath  = flag.String("measurements", "", "path to measurements.jsonl (default <data-dir>/measurements.jsonl)")
 		reachPath = flag.String("reachability", "", "path to reachability.jsonl (default <data-dir>/reachability.jsonl)")
+		vantDir   = flag.String("vantages-dir", "", "dir other vantages' heartbeat files are copied to, <name>/reachability.jsonl each (default <data-dir>/vantages)")
 		payPath   = flag.String("payments", "", "path to payments.jsonl (default <data-dir>/payments.jsonl)")
 		regPath   = flag.String("registry", "", "path to registry.jsonl, this collector's own endpoint-history log (default <data-dir>/registry.jsonl)")
 		runsPath  = flag.String("runs", "", "path to runs.jsonl, every component's record of its starts, stops and configuration (default <data-dir>/runs.jsonl)")
@@ -83,6 +84,9 @@ func main() {
 	}
 	if *reachPath == "" {
 		*reachPath = filepath.Join(*dataDir, "reachability.jsonl")
+	}
+	if *vantDir == "" {
+		*vantDir = filepath.Join(*dataDir, ingest.VantagesDir)
 	}
 	if *payPath == "" {
 		*payPath = filepath.Join(*dataDir, "payments.jsonl")
@@ -265,11 +269,11 @@ func main() {
 	}
 	defer corrFile.Close()
 	corr := correct.New(st, corrFile, *pruneTol)
-	hostingPass := newHostingPass(st, *dataDir, log.Printf) // hosting.go
+	hostingPass := newHostingPass(st, *dataDir, *vantage, log.Printf) // hosting.go
 
 	log.Printf("collector up: run=%d vantage=%s db=%s data=%s exports=%s", runID, *vantage, *dbPath, *dataDir, *expDir)
 
-	retention := rollup.Config{RetainRaw: *retainRaw, RetainRawJSON: *retainRJ, RollupAfter: *rollAfter}
+	retention := rollup.Config{RetainRaw: *retainRaw, RetainRawJSON: *retainRJ, RollupAfter: *rollAfter, Vantage: *vantage}
 	var lastRetention time.Time
 	var lastEscrow time.Time
 	pass := func(pollEndpoints bool) {
@@ -337,6 +341,28 @@ func main() {
 			}
 			if r.Skipped > 0 {
 				log.Printf("reachability: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
+			}
+		}
+		// Other vantages' heartbeats, copied in whole by rsync. They confirm
+		// or contradict this observer's own failed checks (the API's
+		// reachabilityNow) and are counted in no published figure. Listed
+		// again every pass, so a vantage that starts sending is picked up
+		// without a restart.
+		if files, err := ingest.VantageFiles(*vantDir); err != nil {
+			fail("vantages", err)
+		} else {
+			for _, f := range files {
+				name := filepath.Base(filepath.Dir(f))
+				if r, err := ingest.VantageReachability(st, f, *vantage, now); err != nil {
+					fail("reachability from "+name, err)
+				} else {
+					if r.Inserted > 0 {
+						log.Printf("reachability from %s: +%d (read %d, line %d)", name, r.Inserted, r.Read, r.Line)
+					}
+					if r.Skipped > 0 {
+						log.Printf("reachability from %s: WARNING skipped %d undecodable line(s); last: %s", name, r.Skipped, r.LastSkipped)
+					}
+				}
 			}
 		}
 		if r, err := ingest.Registry(st, *regPath, now); err != nil {

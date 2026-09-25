@@ -29,7 +29,7 @@ func TestHostingPassPicksUpDatabasesThatArriveAfterStart(t *testing.T) {
 	var mu sync.Mutex
 	var logs []string
 	logf := func(f string, a ...any) { mu.Lock(); logs = append(logs, fmt.Sprintf(f, a...)); mu.Unlock() }
-	pass := newHostingPass(st, dir, logf)
+	pass := newHostingPass(st, dir, "test", logf)
 	pass(context.Background(), time.Now())
 
 	var b bytes.Buffer
@@ -81,7 +81,7 @@ func TestHostingPassPicksUpCityFileLater(t *testing.T) {
 	var mu sync.Mutex
 	var logs []string
 	logf := func(f string, a ...any) { mu.Lock(); logs = append(logs, fmt.Sprintf(f, a...)); mu.Unlock() }
-	pass := newHostingPass(st, dir, logf)
+	pass := newHostingPass(st, dir, "test", logf)
 	pass(context.Background(), time.Now())
 	if err := os.WriteFile(filepath.Join(hd, hosting.DefaultCityFile), gz("1.0.0.0,1.0.0.255,OC,AU,Queensland,\"South Brisbane\",-27.4767,153.017\n"), 0o644); err != nil {
 		t.Fatal(err)

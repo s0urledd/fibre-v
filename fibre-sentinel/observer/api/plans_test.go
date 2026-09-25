@@ -38,12 +38,12 @@ func TestHotQueriesUseIndexes(t *testing.T) {
 		want []string
 	}
 	var cases []c
-	for _, tb := range []struct{ table, ok, idx string }{
-		{"reachability", `outcome <> 'PROBE_ERROR'`, "reachability_latest_answer"},
-		{"probes", `outcome NOT IN ('MISSED','PROBE_ERROR')`, "probes_latest_answer"},
+	for _, tb := range []struct{ table, ok, vantage, idx string }{
+		{"reachability", `outcome <> 'PROBE_ERROR'`, "ut-1", "reachability_latest_answer"},
+		{"probes", `outcome NOT IN ('MISSED','PROBE_ERROR')`, "", "probes_latest_answer"},
 	} {
 		for _, v := range []struct{ only, asOf string }{{"", ""}, {"ab", ""}, {"", hi}, {"ab", hi}} {
-			q, args := latestAnswerSQL(tb.table, tb.ok, "x", v.only, v.asOf)
+			q, args := latestAnswerSQL(tb.table, tb.ok, "x", tb.vantage, v.only, v.asOf)
 			cases = append(cases, c{"latest answer " + tb.table + " only=" + v.only + " asOf=" + v.asOf, q, args,
 				[]string{"USING INDEX " + tb.idx + " (validator_address=?)"}})
 		}
@@ -55,6 +55,11 @@ func TestHotQueriesUseIndexes(t *testing.T) {
 	}
 	cases = append(cases,
 		c{"vantage count", vantageCountSQL, nil, []string{"COVERING INDEX probes_vantage", "COVERING INDEX reachability_vantage"}},
+		c{"recent vantages", recentVantagesSQL, nil, []string{"COVERING INDEX reachability_vantage", "reachability_vantage (vantage=?)"}},
+		c{"other vantage's check", otherVantageSQL, []any{"ab", lo, hi, "ut-1", "h:7980"},
+			[]string{"reachability_validator_time (validator_address=? AND started_at>? AND started_at<?)"}},
+		c{"own heartbeats over a window", `SELECT COUNT(*) FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR' AND +vantage = ?`,
+			[]any{lo, hi, "ut-1"}, []string{"reachability_started (started_at>? AND started_at<?)"}},
 		c{"unassignable", `SELECT COUNT(*) FROM publications WHERE assignment_error != ''`, nil,
 			[]string{"publications_unassignable"}},
 		c{"unassignable recent", `SELECT COUNT(*) FROM publications WHERE settlement_height >= ? AND settlement_time >= ? AND assignment_error != ''`,

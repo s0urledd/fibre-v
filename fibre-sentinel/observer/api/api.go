@@ -580,6 +580,13 @@ type metaResponse struct {
 	VantageCount           int         `json:"vantage_count"`
 	ObservedFromOneVantage bool        `json:"observed_from_one_location"`
 	ChainID                string      `json:"chain_id"`
+
+	// Vantages are the heartbeats whose rows reached this store in the last
+	// hour, this observer's own and any other vantage's copied in beside it,
+	// each with its newest row, in name order. Only this observer's rows are
+	// counted in the figures; another's confirm or contradict a failed check.
+	Vantages []vantageSeen `json:"vantages"`
+
 	// AppVersion is the chain's current application version, and FibreActive
 	// is whether that is high enough for x/fibre and x/valaddr to exist. Below
 	// FibreAppVersion the modules are not there, so an empty registry and an
@@ -810,6 +817,50 @@ const vantageCountSQL = `WITH RECURSIVE
 	         UNION ALL SELECT (SELECT MIN(vantage) FROM reachability WHERE vantage > vr.v) FROM vr WHERE vr.v IS NOT NULL)
 	SELECT COUNT(*) FROM (SELECT v FROM vp WHERE v IS NOT NULL UNION SELECT v FROM vr WHERE v IS NOT NULL)`
 
+// vantageSeen is one heartbeat vantage with recent rows in the store.
+type vantageSeen struct {
+	Name     string `json:"name"`
+	NewestAt string `json:"newest_at"` // started_at of its newest row
+	Primary  bool   `json:"primary"`   // this observer's own: the one the figures count
+}
+
+// vantageRecent is how new a vantage's newest row must be for /v1/meta to
+// list it: twelve heartbeats at five minutes, so one late copy does not
+// drop it.
+const vantageRecent = time.Hour
+
+// recentVantagesSQL lists every vantage in the reachability table with the
+// start of its newest row: the distinct names by the same loose index scan
+// as vantageCountSQL, and each one's newest row as the last entry under its
+// name in reachability_vantage, which keeps them in rowid (ingest) order.
+const recentVantagesSQL = `WITH RECURSIVE
+	vr(v) AS (SELECT (SELECT MIN(vantage) FROM reachability)
+	         UNION ALL SELECT (SELECT MIN(vantage) FROM reachability WHERE vantage > vr.v) FROM vr WHERE vr.v IS NOT NULL)
+	SELECT vr.v, (SELECT q.started_at FROM reachability q WHERE q.vantage = vr.v ORDER BY q.rowid DESC LIMIT 1)
+	FROM vr WHERE vr.v IS NOT NULL`
+
+// recentVantages is the heartbeat vantages whose newest row started within
+// vantageRecent of now, in name order. Never nil, so the field is always a
+// list.
+func (s *Server) recentVantages(ctx context.Context, now time.Time) []vantageSeen {
+	out := []vantageSeen{}
+	rows, err := s.st.DB().QueryContext(ctx, recentVantagesSQL)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	since := store.TS(now.Add(-vantageRecent))
+	for rows.Next() {
+		var name string
+		var at sql.NullString
+		if rows.Scan(&name, &at) != nil || !at.Valid || at.String < since {
+			continue
+		}
+		out = append(out, vantageSeen{Name: name, NewestAt: at.String, Primary: name == s.vantage})
+	}
+	return out
+}
+
 // latestRun is the newest run row for a component, with whether its heartbeat
 // is recent enough to call it alive.
 func (s *Server) latestRun(ctx context.Context, component string, now time.Time) (*runStatus, error) {
@@ -895,7 +946,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		UnassignablePublications: s.unassignablePublications(ctx),
 		APIVersion:               Version, Vantage: s.vantage, VantageInfo: s.info,
 		MethodologyVersion: verdict.MethodologyVersion,
-		VantageCount:       vantages, ObservedFromOneVantage: vantages == 1,
+		VantageCount:       vantages, ObservedFromOneVantage: vantages == 1, Vantages: s.recentVantages(ctx, now),
 		ChainID: meta["chain_id"], LastScannedHeight: meta["last_scanned_height"], EndpointsHeight: meta["endpoints_height"],
 		AppVersion: meta["app_version"], FibreAppVersion: meta["fibre_app_version"], FibreActive: meta["fibre_active"] == "yes",
 		ChainHeight:          meta["chain_height"],
@@ -1821,7 +1872,7 @@ func (s *Server) previousWindow(ctx context.Context, win Window, ex excludeSet) 
 	var beats, beatsUp int64
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*),
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0)
-		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR'`, prev.startArg(), prev.endArg()).Scan(&beats, &beatsUp); err != nil {
+		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR' AND +vantage = ?`, prev.startArg(), prev.endArg(), s.vantage).Scan(&beats, &beatsUp); err != nil {
 		return nil, err
 	}
 	p.Reachability = rate(beatsUp, beats)
@@ -1947,11 +1998,17 @@ func (s *Server) computeNetwork(ctx context.Context, win Window, ex excludeSet, 
 	}
 	resp.Reachability = rate(reachable, census)
 
+	// This observer's own heartbeats only, here and in every other figure
+	// over the table: another vantage's copied rows confirm or contradict a
+	// failed check (reachabilityNow) and are counted in no rate. The unary
+	// plus keeps the vantage term off reachability_vantage, which would
+	// otherwise be chosen for the equality and walk every row this observer
+	// ever wrote instead of the window's span of reachability_started.
 	var beats, beatsUp int64
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*),
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0)
-		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR'`+exv,
-		ex.args(win.startArg(), win.endArg())...).Scan(&beats, &beatsUp); err != nil {
+		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR' AND +vantage = ?`+exv,
+		ex.args(win.startArg(), win.endArg(), s.vantage)...).Scan(&beats, &beatsUp); err != nil {
 		return nil, err
 	}
 	resp.ReachabilityWindow = rate(beatsUp, beats)
@@ -2033,7 +2090,19 @@ type reachState struct {
 	// counts as up, shows amber, and keeps the identity verdict of that
 	// last good check. It is down after two failures in a row.
 	flaky bool
+	// confirmedFrom names the other vantage whose recent check of the same
+	// host completed TCP and TLS while this observer's own checks were
+	// failing: the endpoint is up and the fault is on this observer's path.
+	// reachable is then set, with that check's identity verdict.
+	// alsoFailedFrom names the other vantage whose recent check failed too.
+	// Both empty when no other vantage checked the host recently.
+	confirmedFrom  string
+	alsoFailedFrom string
 }
+
+// confirmWithin is how recent another vantage's check must be to confirm or
+// contradict this observer's failing one: three heartbeats at five minutes.
+const confirmWithin = 15 * time.Minute
 
 // up is the debounced answer: reachable now, or failed only once since.
 func (r reachState) up() bool { return r.reachable || r.flaky }
@@ -2107,11 +2176,14 @@ func (s *Server) reachabilityNow(ctx context.Context, only, asOf string) (map[st
 	// switching to probes_validator_time, which would
 	// hand back every earlier row to sort. TestHotQueriesUseIndexes pins
 	// both plans.
-	for _, t := range []struct{ table, ok, source string }{
-		{"reachability", `outcome <> 'PROBE_ERROR'`, "heartbeat"},
-		{"probes", `outcome NOT IN ('MISSED','PROBE_ERROR')`, "probe"},
+	//
+	// Heartbeats are this observer's own (s.vantage): another vantage's rows
+	// never set the state, they only confirm or contradict a failure below.
+	for _, t := range []struct{ table, ok, source, vantage string }{
+		{"reachability", `outcome <> 'PROBE_ERROR'`, "heartbeat", s.vantage},
+		{"probes", `outcome NOT IN ('MISSED','PROBE_ERROR')`, "probe", ""},
 	} {
-		q, args := latestAnswerSQL(t.table, t.ok, t.source, only, asOf)
+		q, args := latestAnswerSQL(t.table, t.ok, t.source, t.vantage, only, asOf)
 		rows, err := s.st.DB().QueryContext(ctx, q, args...)
 		if err != nil {
 			return nil, err
@@ -2146,8 +2218,8 @@ func (s *Server) reachabilityNow(ctx context.Context, only, asOf string) (map[st
 		var tcp, tls, id int
 		var reason string
 		err := s.st.DB().QueryRowContext(ctx, `SELECT q.tcp_ok, q.tls_ok, q.identity_ok, q.identity_reason FROM reachability q
-			WHERE q.validator_address = ? AND q.outcome <> 'PROBE_ERROR' AND +q.started_at < ? AND q.validator_host = ?
-			ORDER BY q.rowid DESC LIMIT 1`, addr, st.at, st.host).Scan(&tcp, &tls, &id, &reason)
+			WHERE q.validator_address = ? AND q.outcome <> 'PROBE_ERROR' AND +q.started_at < ? AND q.validator_host = ? AND +q.vantage = ?
+			ORDER BY q.rowid DESC LIMIT 1`, addr, st.at, st.host, s.vantage).Scan(&tcp, &tls, &id, &reason)
 		if err != nil {
 			continue // no earlier answer, or unreadable: not flaky
 		}
@@ -2157,7 +2229,67 @@ func (s *Server) reachabilityNow(ctx context.Context, only, asOf string) (map[st
 			out[addr] = st
 		}
 	}
+	if err := s.confirmFromOtherVantages(ctx, out, asOf); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// otherVantageSQL is the newest check of one host by any vantage but this
+// observer's, started inside a bounded span. It seeks
+// reachability_validator_time by address and time and reads the span
+// newest first; outcome is written with a unary plus so the partial
+// reachability_latest_answer, which would hand back every row of the
+// validator in rowid order, is not a candidate. TestHotQueriesUseIndexes
+// pins the plan.
+const otherVantageSQL = `SELECT q.vantage, q.tcp_ok, q.tls_ok, q.identity_ok, q.identity_reason FROM reachability q
+	WHERE q.validator_address = ? AND q.started_at > ? AND q.started_at <= ?
+	  AND +q.outcome <> 'PROBE_ERROR' AND q.vantage <> ? AND q.validator_host = ?
+	ORDER BY q.started_at DESC LIMIT 1`
+
+// confirmFromOtherVantages asks, for every endpoint this observer calls
+// unreachable (not up, so not flaky either), whether another vantage checked
+// the same host within confirmWithin of asOf (of now when unpinned). Its
+// newest such check decides: TCP and TLS completed there, so the endpoint is
+// up and the failure is on this observer's path — reachable, with that
+// check's identity verdict, and confirmedFrom set; or it failed there too,
+// and alsoFailedFrom says so. With no recent check from elsewhere nothing
+// changes. This observer's own failing check stays what lastEndpointCheck
+// reports.
+func (s *Server) confirmFromOtherVantages(ctx context.Context, out map[string]reachState, asOf string) error {
+	ref := time.Now().UTC()
+	hi := store.TS(ref.Add(time.Minute)) // a second clock a little ahead is still recent
+	if asOf != "" {
+		t, err := time.Parse(store.TimeLayout, asOf)
+		if err != nil {
+			return fmt.Errorf("as_of %q: %w", asOf, err)
+		}
+		ref, hi = t, asOf
+	}
+	lo := store.TS(ref.Add(-confirmWithin))
+	for addr, st := range out {
+		if st.up() {
+			continue
+		}
+		var vantage, reason string
+		var tcp, tls, id int
+		err := s.st.DB().QueryRowContext(ctx, otherVantageSQL, addr, lo, hi, s.vantage, st.host).Scan(&vantage, &tcp, &tls, &id, &reason)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if tcp == 1 && tls == 1 {
+			st.reachable, st.tcpOK, st.tlsOK = true, true, true
+			st.identityOK, st.identityReason = id == 1, reason
+			st.confirmedFrom = vantage
+		} else {
+			st.alsoFailedFrom = vantage
+		}
+		out[addr] = st
+	}
+	return nil
 }
 
 // latestAnswerSQL is the query reachabilityNow runs against one table: the
@@ -2165,7 +2297,7 @@ func (s *Server) reachabilityNow(ctx context.Context, only, asOf string) (map[st
 // ok, started no later than asOf when it is set. ok must be spelled exactly
 // as the partial index's WHERE is (probes_latest_answer,
 // reachability_latest_answer), or SQLite cannot use it.
-func latestAnswerSQL(table, ok, source, only, asOf string) (string, []any) {
+func latestAnswerSQL(table, ok, source, vantage, only, asOf string) (string, []any) {
 	var args []any
 	// The validators: one, or every one with a qualifying row, listed by
 	// seeking from each to the next.
@@ -2178,6 +2310,14 @@ func latestAnswerSQL(table, ok, source, only, asOf string) (string, []any) {
 		v = `WITH v(a) AS (SELECT ?)`
 		args = append(args, only)
 	}
+	// One vantage's rows only, when set. The unary plus keeps the term off
+	// every index, so the walk stays on the partial index in rowid order and
+	// steps over the other vantages' entries, which interleave with these.
+	vq := ""
+	if vantage != "" {
+		vq = ` AND +q.vantage = ?`
+		args = append(args, vantage)
+	}
 	pin := ""
 	if asOf != "" {
 		pin = ` AND +q.started_at <= ?`
@@ -2187,7 +2327,7 @@ func latestAnswerSQL(table, ok, source, only, asOf string) (string, []any) {
 		SELECT r.validator_address, r.validator_host, r.started_at, r.tcp_ok, r.tls_ok, r.identity_ok, r.identity_reason, '` + source + `'
 		FROM v JOIN ` + table + ` r ON r.rowid = (
 			SELECT q.rowid FROM ` + table + ` q
-			WHERE q.validator_address = v.a AND q.` + ok + pin + `
+			WHERE q.validator_address = v.a AND q.` + ok + vq + pin + `
 			ORDER BY q.rowid DESC LIMIT 1)`, args
 }
 
@@ -2244,6 +2384,15 @@ type validatorRow struct {
 	EndpointState  string `json:"endpoint_state,omitempty"`
 	IdentityStatus string `json:"identity_status"` // verified | expired | mismatch | unverified | no_tls | unreachable | unknown
 	IdentityReason string `json:"identity_reason,omitempty"`
+	// ConfirmedFrom names another vantage whose check of the same host, in the
+	// last fifteen minutes, completed the handshake while this observer's own
+	// checks failed: EndpointState is then reachable, on that check's word,
+	// and last_endpoint_check still shows what this observer saw.
+	// AlsoFailedFrom names the vantage whose recent check failed too, on a
+	// row that stays unreachable. Both absent when no other vantage checked
+	// it recently.
+	ConfirmedFrom  string `json:"confirmed_from,omitempty"`
+	AlsoFailedFrom string `json:"also_failed_from,omitempty"`
 	// Reachability is how often this observer completed a TLS conversation with the
 	// endpoint over the window, from the reachability heartbeat: every
 	// registered validator, every five minutes, whether or not it was assigned
@@ -2766,8 +2915,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 AND identity_ok = 1 THEN 1 ELSE 0 END), 0),
 			MAX(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN NULL ELSE started_at END),
 			MAX(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN started_at END)
-		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR'`+vfilter("validator_address")+`
-		GROUP BY validator_address`, vargs(win.startArg(), win.endArg())...)
+		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR' AND +vantage = ?`+vfilter("validator_address")+`
+		GROUP BY validator_address`, vargs(win.startArg(), win.endArg(), s.vantage)...)
 	if err != nil {
 		return nil, err
 	}
@@ -2817,6 +2966,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		stc := st
 		v.IdentityStatus = identityStatus(&stc)
 		v.IdentityReason = st.identityReason
+		v.ConfirmedFrom, v.AlsoFailedFrom = st.confirmedFrom, st.alsoFailedFrom
 		if v.LastSeenAt == nil || st.at > *v.LastSeenAt {
 			at := st.at
 			v.LastSeenAt = &at

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
@@ -279,6 +280,47 @@ func Reachability(st *store.Store, path string, now time.Time) (Result, error) {
 		}
 		if m.ValidatorAddress == "" {
 			return false, fmt.Errorf("%w: reachability without validator_address", ErrBadRecord)
+		}
+		return st.InsertReachability(m, raw)
+	}, now)
+}
+
+// VantagesDir is where the reachability files of other vantages are copied
+// to under the data dir: <data-dir>/vantages/<name>/reachability.jsonl.
+const VantagesDir = "vantages"
+
+// VantageFiles lists the reachability files copied in from other vantages
+// under dir, one per subdirectory. It is asked again on every pass, so a
+// vantage whose directory appears is picked up without a restart. A missing
+// dir is no vantages, not an error.
+func VantageFiles(dir string) ([]string, error) {
+	// Glob only fails on a malformed pattern, and returns its matches sorted,
+	// so the files are always tailed in the same order.
+	return filepath.Glob(filepath.Join(filepath.Clean(dir), "*", "reachability.jsonl"))
+}
+
+// VantageReachability ingests a reachability.jsonl copied in from another
+// vantage's heartbeat. It is tailed exactly as the observer's own file is,
+// with its own cursor (cursors are keyed by path), so the copy being
+// replaced by a longer one only reads what is new, and one that ends in a
+// half-copied line leaves that line for the next pass.
+//
+// Rows keep the vantage recorded in them. One that carries this observer's
+// own vantage (own), or none, is stepped over as a bad record: every
+// published figure is counted over own's rows, and a second heartbeat
+// configured with the same name would otherwise be counted as this one, its
+// rows merged into the same keys.
+func VantageReachability(st *store.Store, path, own string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var m probe.Measurement
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return false, fmt.Errorf("%w: decode reachability: %v", ErrBadRecord, err)
+		}
+		if m.ValidatorAddress == "" {
+			return false, fmt.Errorf("%w: reachability without validator_address", ErrBadRecord)
+		}
+		if m.Vantage == "" || m.Vantage == own {
+			return false, fmt.Errorf("%w: reachability from another vantage's file carries vantage %q", ErrBadRecord, m.Vantage)
 		}
 		return st.InsertReachability(m, raw)
 	}, now)
