@@ -164,6 +164,8 @@ export default function Diagnosis({ v, check, decided, provisional, failedShown,
 }) {
   const s = state(v, check, decided);
   const broken = v.obligations?.broken ?? 0;
+  // A healthy endpoint with nothing broken needs no box: the state pills above already say so.
+  if (s.tone === "ok" && broken === 0) return null;
   const tone = broken > 0 && s.tone === "ok" ? "fault" : s.tone;
   return (
     <section className={"diag " + tone} aria-label="Endpoint status">
