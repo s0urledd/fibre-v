@@ -2440,7 +2440,12 @@ type validatorRow struct {
 	Classes      classCounts      `json:"classes"`
 	// Faults is every FAULT of an assigned shard in the window, in any
 	// phase; see networkResponse.Faults.
-	Faults           int64  `json:"faults"`
+	Faults int64 `json:"faults"`
+	// FaultsCleared is how many failed probes of the window a second
+	// vantage cleared: it fetched the same rows within the confirmation
+	// window and they verified, so the row is filed PROBE_ERROR (outside
+	// the rate) with cleared_by. Not in Faults. Absent when none.
+	FaultsCleared    int64  `json:"faults_cleared,omitempty"`
 	AssignedRowsLast int    `json:"assigned_rows_last"`
 	ExpectedLoadBand string `json:"expected_load_band"` // floor | low | mid | high, by assigned rows
 	// Latency is how long this observer waited for a shard it did get: the
@@ -2713,6 +2718,29 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	}
 	frows.Close()
 	if err := frows.Err(); err != nil {
+		return nil, err
+	}
+	// Faults a second vantage cleared (verdict.ConfirmFault). They are no
+	// longer in Faults, which counts the class they now carry; this says
+	// how many were withdrawn that way. Over the raw rows only: a rolled
+	// day keeps its counts, not who cleared what.
+	crows, err = db.QueryContext(ctx, `SELECT validator_address, COUNT(*) FROM probes INDEXED BY probes_cleared
+		WHERE cleared_by IS NOT NULL AND started_at >= ? AND started_at <= ? AND assigned = 1`+sus+vfilter("validator_address")+`
+		GROUP BY validator_address`, vargs(winArgs...)...)
+	if err != nil {
+		return nil, err
+	}
+	for crows.Next() {
+		var addr string
+		var n int64
+		if err := crows.Scan(&addr, &n); err != nil {
+			crows.Close()
+			return nil, err
+		}
+		get(addr).FaultsCleared = n
+	}
+	crows.Close()
+	if err := crows.Err(); err != nil {
 		return nil, err
 	}
 	// classes per validator in window
@@ -4104,6 +4132,13 @@ type probeRow struct {
 	// Provisional marks a FAULT younger than verdict.FaultSettling: it
 	// counts, and it can still be withdrawn (provisional.go).
 	Provisional bool `json:"provisional,omitempty"`
+	// ClearedBy names the vantage that fetched this FAULT's rows again
+	// within the confirmation window and got them verified: the fault is
+	// withdrawn, the row reads PROBE_ERROR and classification_at_probe says
+	// FAULT (verdict.ConfirmFault). ConfirmedBy names the vantage that
+	// tried and did not get them either; the fault stands.
+	ClearedBy   string `json:"cleared_by,omitempty"`
+	ConfirmedBy string `json:"confirmed_by,omitempty"`
 }
 
 func (s *Server) probeRows(ctx context.Context, where string, limit int, args ...any) ([]probeRow, error) {
@@ -4121,7 +4156,8 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 		COALESCE(row_indices, ''), COALESCE(rows_sha256, ''), COALESCE(rpc_code, ''), COALESCE(shadowed_by, ''), COALESCE(observer_build, ''), COALESCE(app_version, 0),
 		COALESCE(shadow_gap, ''), COALESCE(classification_at_probe, ''), COALESCE(amended_at, ''),
 		COALESCE(host_at_settlement, ''), COALESCE(settlement_host_outcome, ''), settlement_host_served,
-		retention_unverified, COALESCE(phase_at_probe, ''), COALESCE(corrected_at, '')
+		retention_unverified, COALESCE(phase_at_probe, ''), COALESCE(corrected_at, ''),
+		COALESCE(cleared_by, ''), COALESCE(confirmed_by, '')
 		FROM probes`
 	if where != "" {
 		q += " WHERE " + where
@@ -4148,7 +4184,7 @@ func (s *Server) probeRows(ctx context.Context, where string, limit int, args ..
 			&p.TotalDurationMS, &tls, &id, &p.RawError, &p.RetryFirstOutcome, &p.ClockOffsetMS,
 			&idxJSON, &p.RowsSHA256, &p.RPCCode, &p.ShadowedBy, &p.ObserverBuild, &p.AppVersion,
 			&p.ShadowGap, &p.ClassificationAtProbe, &p.AmendedAt, &p.HostAtSettlement, &p.SettlementHostOutcome, &served,
-			&held, &p.PhaseAtProbe, &p.CorrectedAt); err != nil {
+			&held, &p.PhaseAtProbe, &p.CorrectedAt, &p.ClearedBy, &p.ConfirmedBy); err != nil {
 			return nil, err
 		}
 		p.RetentionUnverified = held == 1

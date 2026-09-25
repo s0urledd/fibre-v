@@ -65,6 +65,8 @@ function safeSite(raw?: string): string | null {
 const wordOf = (cls: string): [string, string] => WORDS[cls] ?? [cls.toLowerCase().replace(/_/g, " "), "other"];
 /** an unsigned probe is not rated either way; the word says what came back, and nothing more */
 const probeWord = (p: Probe): [string, string] => {
+  // a fault the second location fetched and verified: withdrawn, not counted either way
+  if (p.cleared_by) return ["Cleared", "gone"];
   if (p.classification === "UNATTESTED") return (p.outcome === "SERVED_OK" || p.outcome === "PARTIAL") ? ["Served, unsigned", "unsigned"] : ["Unsigned", "unsigned"];
   return wordOf(p.classification);
 };
@@ -93,6 +95,7 @@ const GROUPS = ["served", "unreachable", "certificate rejected", "no endpoint", 
 type Group = (typeof GROUPS)[number];
 function groupOf(p: Probe, suspect: boolean): Group {
   if (suspect) return "not counted";
+  if (p.cleared_by) return "not counted";
   if (p.classification === "FAULT") return "broken";
   if (p.classification === "HEALTHY" || p.outcome === "SERVED_OK") return "served";
   if (p.classification === "NOT_REGISTERED") return "no endpoint";
@@ -140,6 +143,9 @@ function Page() {
   const bonded = !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED");
   const rw = v.reachability_window;
   const faults = v.faults ?? v.classes?.FAULT ?? 0;
+  // failed probes a second location fetched and verified: withdrawn, in no count
+  const cleared = v.faults_cleared ?? 0;
+  const clearedText = cleared > 0 ? ` · ${int(cleared)} cleared from a second location` : "";
   const self = !!SELF_VALIDATOR && [v.address, v.cons_address, v.operator_address].some((a) => !!a && a.toLowerCase() === SELF_VALIDATOR);
   const suspect = new Map((data.suspect_points ?? []).map((s) => [s.at, s.reason.replace(",", " and ")]));
   const probes = [...data.recent_probes].sort((a, b) => b.started_at.localeCompare(a.started_at));
@@ -219,8 +225,8 @@ function Page() {
           title={notLive ? undefined : refTitle} />
         <Metric label="Broken obligations"
           value={notLive ? "—" : int(o?.broken ?? 0)} tone={notLive ? "absent" : (o?.broken ?? 0) > 0 ? "fault" : !o || o.total === 0 ? "absent" : undefined}
-          help={notLive ? " " : (o?.broken ?? 0) > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}${prov > 0 ? ` · ${int(prov)} provisional` : ""}` : faults > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"} · none broken in this period` : "none in this period"}
-          title={prov > 0 ? `${int(prov)} of these rest only on failed probes younger than ${Math.round((v.provisional_faults?.settling_seconds ?? 1800) / 60)} minutes. They count in the rate now, and become final at ${whenUTC(v.provisional_faults!.until)} unless evidence still arriving withdraws them: the rest of the schedule point's probes, or an x/fibre params change not yet reconciled.` : (o?.broken ?? 0) > 0 ? "One obligation counts once, however many probes of it failed. The probe rows are in the evidence below." : faults > 0 ? "A failed probe of an obligation still inside its retention window is not a verdict yet; the obligation is decided at the end of the window." : undefined} />
+          help={notLive ? " " : (o?.broken ?? 0) > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}${prov > 0 ? ` · ${int(prov)} provisional` : ""}${clearedText}` : faults > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"} · none broken in this period${clearedText}` : `none in this period${clearedText}`}
+          title={prov > 0 ? `${int(prov)} of these rest only on failed probes younger than ${Math.round((v.provisional_faults?.settling_seconds ?? 1800) / 60)} minutes. They count in the rate now, and become final at ${whenUTC(v.provisional_faults!.until)} unless evidence still arriving withdraws them: the rest of the schedule point's probes, an x/fibre params change not yet reconciled, or the same rows fetched and verified from a second location.` : (o?.broken ?? 0) > 0 ? "One obligation counts once, however many probes of it failed. The probe rows are in the evidence below." : faults > 0 ? "A failed probe of an obligation still inside its retention window is not a verdict yet; the obligation is decided at the end of the window." : undefined} />
         <Metric label="Undecided" value={notLive ? "—" : int(und)} tone={notLive || !o || o.total === 0 ? "absent" : undefined} help={notLive ? " " : `${int(o?.pending ?? 0)} pending`} />
         <Metric label="Reachability"
           value={!bonded ? "—" : rw && rw.den > 0 ? int(rw.num) : "—"} den={bonded && rw && rw.den > 0 ? int(rw.den) : undefined}
@@ -317,11 +323,13 @@ function Page() {
                 const provisional = !sus && p.classification === "FAULT" && !!p.provisional;
                 const word = provisional ? `${word0} · provisional` : word0;
                 const notes = [
-                  provisional && "provisional: younger than the settling period, so the rest of this schedule point or a params change not yet reconciled can still withdraw it; counted meanwhile",
+                  provisional && "provisional: younger than the settling period, so the rest of this schedule point, a params change not yet reconciled or a re-check from a second location can still withdraw it; counted meanwhile",
                   p.attested === false && "no signature from this validator on this promise, so the probe is outside the rate",
                   p.retry_first_outcome && `first attempt ${p.retry_first_outcome}, retried once from the same location`,
                   p.host_changed && `the validator re-registered during the window: the upload went to ${p.host_at_settlement}${p.settlement_host_outcome ? `; asked as evidence, the old host answered ${p.settlement_host_outcome}${p.settlement_host_served ? " with the exact rows" : ""}` : ""}`,
-                  p.amended_at && p.classification_at_probe && `filed as ${p.classification_at_probe} at the probe and judged ${p.classification} once every promise that could have answered was on record`,
+                  p.cleared_by && `cleared from a second location: ${p.cleared_by} fetched the same rows minutes later and they verified, so this failure is not counted`,
+                  p.confirmed_by && `confirmed from a second location: ${p.confirmed_by} did not get the rows either`,
+                  !p.cleared_by && p.amended_at && p.classification_at_probe && `filed as ${p.classification_at_probe} at the probe and judged ${p.classification} once every promise that could have answered was on record`,
                   p.rpc_code && `gRPC ${p.rpc_code}`,
                   p.shadowed_by && `answered from promise ${p.shadowed_by.slice(0, 10)}…`,
                   p.observer_build && `observer build ${p.observer_build}`,

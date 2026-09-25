@@ -14,6 +14,9 @@
 //     withhold, and the deadline corrections a verified range produced
 //     (corrections.jsonl) — each redrawn rather than trusted, so a
 //     fabricated correction is a divergence;
+//   - the faults a second vantage cleared or confirmed, from its rows under
+//     vantages/<name>/measurements.jsonl when present, against the
+//     clearing amendments in amendments.jsonl (verdict.ConfirmFault);
 //   - with -sampling, the admission draws of every day whose secret is
 //     revealed (sampling-secrets.jsonl): which publications this observer
 //     should have probed against which ones it did.
@@ -287,6 +290,53 @@ func main() {
 	}
 	fmt.Printf("params| %d x/fibre params range(s) on record, %d closed by a correction pass, %d still withholding verdicts; %d row(s) corrected, %d differ from corrections.jsonl\n",
 		len(ranges), len(correctedRanges), holding, corrected, corrDiffs)
+
+	// ---- faults confirmed or cleared from a second vantage ----
+	//
+	// Redrawn from the other vantages' rows when the record carries them
+	// (vantages/<name>/measurements.jsonl), and compared with the
+	// amendments that withdrew a fault. Without those rows a clearing
+	// amendment cannot be redrawn; it is applied as recorded, so the
+	// obligations below match the API, and counted as unchecked.
+	confirms := loadConfirmations(filepath.Join(*dataDir, "vantages"))
+	var clearedN, confirmedN, clearDiffs, clearUnchecked int
+	for i := range ms {
+		m := ms[i]
+		if m.Classification != probe.ClassFault {
+			continue
+		}
+		a, amended := amendments[m.DedupeKey()]
+		recorded := amended && a.ClearedBy != ""
+		cs, have := confirms[m.PromiseHash+"|"+m.ValidatorAddress+"|"+m.ScheduledAt.UTC().Format(time.RFC3339Nano)]
+		if !have {
+			if recorded {
+				clearUnchecked++
+				ms[i].Classification = verdict.ClearedClass
+			}
+			continue
+		}
+		clearedBy, confirmedBy := verdict.ConfirmFaultBy(m.StartedAt, cs)
+		if confirmedBy != "" && clearedBy == "" {
+			confirmedN++
+		}
+		if clearedBy != "" {
+			clearedN++
+			ms[i].Classification = verdict.ClearedClass
+		}
+		if (clearedBy != "") != recorded {
+			clearDiffs++
+			if printed < *maxDiff {
+				printed++
+				fmt.Printf("confirm| %s %s %s: amendments.jsonl says cleared_by=%q, recomputed cleared_by=%q\n", short(m.PromiseHash), m.ValidatorAddress,
+					m.ScheduledAt.UTC().Format(time.RFC3339), a.ClearedBy, clearedBy)
+			}
+		}
+	}
+	if clearDiffs > 0 {
+		differs = true
+	}
+	fmt.Printf("confirm| %d fault(s) cleared and %d confirmed from another vantage, %d differ from amendments.jsonl, %d clearing(s) applied as recorded without the vantage's rows\n",
+		clearedN, confirmedN, clearDiffs, clearUnchecked)
 
 	// ---- obligations ----
 	rows := make([]verdict.Row, 0, len(ms))
@@ -661,6 +711,37 @@ func loadFrontier(dir string, pubs []scan.Publication) time.Time {
 		}
 	}
 	return out.UTC()
+}
+
+// loadConfirmations reads every other vantage's measurements.jsonl under
+// dir, keyed by the slot each row answers (promise|validator|scheduled_at);
+// a missing dir is none.
+func loadConfirmations(dir string) map[string][]verdict.Confirmation {
+	out := map[string][]verdict.Confirmation{}
+	files, _ := filepath.Glob(filepath.Join(dir, "*", "measurements.jsonl"))
+	for _, path := range files {
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		// Line by line and forgiving, as the collector's tail is: a copy
+		// that ends in half a line (a pull in progress) loses that line only.
+		r := bufio.NewReaderSize(f, 1<<20)
+		for {
+			line, err := r.ReadBytes('\n')
+			if err != nil {
+				break
+			}
+			var m probe.Measurement
+			if json.Unmarshal(line, &m) != nil || m.Vantage == "" || m.PromiseHash == "" {
+				continue
+			}
+			k := m.PromiseHash + "|" + m.ValidatorAddress + "|" + m.ScheduledAt.UTC().Format(time.RFC3339Nano)
+			out[k] = append(out[k], verdict.Confirmation{Vantage: m.Vantage, StartedAt: m.StartedAt, Classification: m.Classification})
+		}
+		f.Close()
+	}
+	return out
 }
 
 // loadAmendments reads amendments.jsonl by probe key; a missing file is

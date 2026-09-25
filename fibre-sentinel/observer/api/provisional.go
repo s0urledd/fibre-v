@@ -60,7 +60,7 @@ type provisionalFaults struct {
 
 const provisionalNote = "Broken obligations whose every failed probe is younger than the settling period. They are counted in broken and in the rate, " +
 	"flagged because evidence still on its way can withdraw them: the rest of the schedule point's probes (the correlated-failure guard), " +
-	"or an x/fibre params change the scanner has not reconciled yet. They become final at `until` unless withdrawn."
+	"an x/fibre params change the scanner has not reconciled yet, or the same rows fetched and verified from a second location. They become final at `until` unless withdrawn."
 
 // provisionalCutoff is the started_at bound above which a FAULT is
 // provisional at now.

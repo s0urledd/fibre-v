@@ -645,6 +645,59 @@ cp deploy/systemd/fibre-vantage-pull@.{service,timer} /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now fibre-vantage-pull@mocha.timer
 ```
 
+### Second vantage: fault confirmation
+
+Every retention `FAULT` is asked once more from the second vantage before it
+counts (docs/verdicts.md, "Faults re-checked from a second location"). Only
+failures are re-checked, never routine probes, so the load is one request per
+fault, capped at 60 an hour on the vantage.
+
+The exchange rides the same timer and sftp account as the pull:
+
+- the prober appends one request per `FAULT` to
+  `<data-dir>/vantage-requests.jsonl` (built in, nothing to configure);
+- `fibre-vantage-pull` pushes the new lines to
+  `vantage/<name>/inbox/requests.jsonl` (sftp `reput`, mode 0640) and pulls
+  `vantage/<name>/measurements.jsonl` back beside the reachability record;
+  `VANTAGE_PUSH=0` in the env file turns the push off;
+- `sentinel-probe -confirm-requests` on the vantage host fetches exactly the
+  failed rows once, with the same checks as the prober, reading the validator
+  set from its own Mocha RPC, and appends its answers to `measurements.jsonl`
+  in its data dir;
+- the collector ingests `<data-dir>/vantages/*/measurements.jsonl` and clears
+  or confirms each fault; a cleared fault is logged in `amendments.jsonl`.
+
+On the vantage host, the inbox is a directory the sftp account writes through
+the group and the confirm service only reads (the unit mounts it read-only):
+
+```
+install -d -o tensile-vantage -g tensile-vantage -m 2770 /srv/tensile-vantage/de-1/inbox
+install -m 0755 sentinel-probe /usr/local/bin/tensile-probe
+cp deploy/systemd/tensile-vantage-confirm@.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now tensile-vantage-confirm@de-1
+# unit: User=tensile-vantage, Group=tensile-vantage, UMask=0027, ProtectSystem=strict,
+#   ReadWritePaths=/srv/tensile-vantage/de-1, ReadOnlyPaths=/srv/tensile-vantage/de-1/inbox
+```
+
+The service writes `measurements.jsonl`, `status/confirm.json` and its lines
+in `runs.jsonl` under `/srv/tensile-vantage/de-1` (0640, group
+`tensile-vantage`, which the sftp account can read). It is never in group
+`tensile-backup`. Change the RPC with a drop-in (`Environment=RPC=...`).
+
+On the observer, install the new `deploy/vantage-pull.sh` over
+`/usr/local/bin/fibre-vantage-pull`; the timer and the env file stay as they
+are. To check the channel end to end:
+
+```
+ls -l /var/lib/fibre-observer/mocha/vantage-requests.jsonl       # appears with the first FAULT
+cat /var/lib/fibre-observer/mocha/vantages/de-1/requests.pushed   # bytes the vantage has
+journalctl -u tensile-vantage-confirm@de-1 | grep CONFIRM          # on the vantage host
+sqlite3 /var/lib/fibre-observer/mocha/observer.db \
+  "SELECT vantage, classification, judged FROM probe_confirmations ORDER BY started_at DESC LIMIT 5"
+```
+
+`deploy/test/vantage-sync.sh` checks the push and pull against a fake sftp.
+
 ## 8. Checks after deploy
 
 Run the smoke test first. It installs nothing and changes nothing: it parses
