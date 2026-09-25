@@ -68,7 +68,7 @@ export function ReadyAnswer({ rows, headingId = "readiness-h" }: { rows: Validat
     <>
       <h2 id={headingId}>Fibre quorum</h2>
       <p className="ready-answer" title="Ready: a registered host that answers TLS with a certificate endorsed by its validator's consensus key. A blob settles with signatures from ⅔ of stake.">
-        <b>{r.ready ? "Reached" : "Not reached"}</b> · {pct(reachPower)} of stake ready, ⅔ needed
+        <b>{r.ready ? "Reached" : "Not reached"}</b> · {pct(reachPower)} of stake ready
       </p>
       <div className="meter ready-meter" role="img"
         aria-label={`${pct(reachPower)} of stake ready, ${pct(regPower)} registered, ${pct(quorum)} needed`}>
