@@ -63,9 +63,11 @@ const SECURITY = {
 // the API is capped: a figure pinned to an arbitrary as_of bypasses the API's
 // caches and costs a second or more of database work, so a loop of them from
 // one address must not starve everyone else. A page load makes about ten
-// requests and then polls one every few seconds, far inside these limits.
-const RATE = { burst: 60, perSec: 6 };          // token bucket per client address
-const INFLIGHT_PER_CLIENT = 6, INFLIGHT_TOTAL = 32;
+// data requests at once and then polls one every few seconds, well inside
+// these limits. Avatars are exempt: the overview asks for one per validator
+// in a burst, and the API serves them from its own cache.
+const RATE = { burst: 120, perSec: 10 };        // token bucket per client address
+const INFLIGHT_PER_CLIENT = 16, INFLIGHT_TOTAL = 48;
 const buckets = new Map();                      // address -> { tokens, at, inflight }
 let inflight = 0;
 setInterval(() => {
@@ -146,7 +148,7 @@ function proxy(req, res, u) {
     res.writeHead(405, { ...SECURITY, allow: "GET, HEAD" });
     return res.end();
   }
-  if (!admit(req, res)) return;
+  if (!u.pathname.startsWith("/api/v1/avatars/") && !admit(req, res)) return;
   const headers = {};
   for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k)) headers[k] = v;
   const up = http.request({ host: API.host, port: API.port, method: req.method, path: u.pathname.slice(4) + u.search, headers, timeout: 60_000 }, (r) => {
