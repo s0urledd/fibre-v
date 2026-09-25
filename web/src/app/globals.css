@@ -623,7 +623,8 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
   .nak { gap: 0 20px; }
 }
 /* the country list wraps between entries, never inside one */
-.hostingband .ctry { display: flex; flex-wrap: wrap; row-gap: 2px; }
+.hostingband .ctry { display: flex; flex-wrap: wrap; row-gap: 2px; column-gap: 16px; }
+.hostingband .ctry .sepd::before { content: none; }
 .hostingband .ctry .soft { margin-left: 0; }
 /* ------------------------------------------------ validator: diagnosis --- */
 /* The status callout at the top of a validator's page (components/

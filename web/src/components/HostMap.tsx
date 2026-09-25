@@ -171,7 +171,6 @@ function useFeedEvents(enabled: boolean): FeedEvent[] {
 }
 
 const EVENT_WORD: Record<string, string> = { registered: "registered its Fibre host", "host-changed": "changed its Fibre host" };
-const DAY = 86400000;
 
 export default function HostMap({ rows, showReadiness }: { rows: Validator[]; showReadiness: boolean }) {
   const r = readiness(rows);
@@ -329,12 +328,10 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
       const v = byAddr.get(e.addr);
       if (v && EVENT_WORD[e.term]) ev.push({ v, host: hostOf.get(e.addr), event: EVENT_WORD[e.term], at: e.at });
     }
-    // State changes from the rows themselves: a host that went dark, or came back within the day.
-    const now = Date.now();
+    // A registered host that stopped answering, dated by its last successful check.
     for (const h of hosts) {
       const v = h.v;
-      if (h.state === "unreachable" && v.last_reachable_at) ev.push({ v, host: h, event: "went unreachable", at: v.last_reachable_at });
-      else if (h.state === "reachable" && v.last_unreachable_at && now - Date.parse(v.last_unreachable_at) < DAY) ev.push({ v, host: h, event: "is reachable again", at: v.last_unreachable_at });
+      if (h.state === "unreachable" && v.last_reachable_at) ev.push({ v, host: h, event: "last reachable", at: v.last_reachable_at });
     }
     ev.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
     const seen = new Set<string>();
