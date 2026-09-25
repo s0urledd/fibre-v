@@ -128,12 +128,15 @@ function NetworkChip({ meta, error }: { meta: Meta | null; error: string | null 
 }
 
 /**
- * The newest block this observer has read, and how old it is, ticking every
- * second: the one thing on the page that moves on its own, so a reader can
- * see at a glance that the observer is following the chain. The dot turns
- * amber when the block is over thirty seconds old (a halted chain, or an
- * observer that stopped reading) and grey when the API does not answer.
- * Until Fibre is live it also counts down to the upgrade that brings it.
+ * The newest block this observer has read, with a dot that beats on each new
+ * one: the one thing on the page that moves on its own, so a reader can see
+ * at a glance that the observer is following the chain. No age is printed:
+ * a block's header time is set when it is proposed, so even the newest block
+ * is already about one block time old when it commits and a counter would
+ * never start at zero. The age is in the tooltip. The dot turns amber when
+ * the block is over thirty seconds old (a halted chain, or an observer that
+ * stopped reading) and grey when the API does not answer. Until Fibre is
+ * live it also counts down to the upgrade that brings it.
  */
 function BlockTicker({ meta }: { meta: Meta | null }) {
   const { data: tip, error, fetchedAt } = useApi<Tip>("/v1/tip", 4000);
@@ -151,11 +154,10 @@ function BlockTicker({ meta }: { meta: Meta | null }) {
   const skew = fetchedAt ? Date.parse(tip.server_time) - Date.parse(fetchedAt) : 0;
   const age = tip.block_time && now ? Math.max(0, (now + skew - Date.parse(tip.block_time)) / 1000) : null;
   const dot = error ? "none" : age === null || age > 30 ? "hold" : "ok";
-  const ageWord = age === null ? "" : age < 90 ? `${Math.round(age)}s` : ago(tip.block_time!);
   const sig = meta?.upgrade_signal;
   const countdown = !tip.fibre_active && sig?.eta_seconds ? span(sig.eta_seconds) : "";
   const title = [
-    `Block #${int(tip.height)}${tip.block_time ? ` · made ${utcWord(tip.block_time)}` : ""}`,
+    `Block #${int(tip.height)}${tip.block_time ? ` · made ${utcWord(tip.block_time)}${age !== null ? `, ${age < 90 ? `${Math.round(age)}s` : ago(tip.block_time)} ago` : ""}` : ""}`,
     error ? `API unreachable (${error}); showing the last reading` : "",
     countdown && sig?.upgrade_height ? `Fibre activates at #${int(sig.upgrade_height)}, about ${countdown} at the chain's recent pace` : "",
   ].filter(Boolean).join(" · ");
@@ -163,7 +165,6 @@ function BlockTicker({ meta }: { meta: Meta | null }) {
     <span className="blocktick" title={title}>
       <i key={tip.height} className={"dot " + dot + (dot === "ok" ? " beat" : "")} />
       <span className="num">#{int(tip.height)}</span>
-      {ageWord && <span className="age">{ageWord}</span>}
       {countdown && <span className="soon">Fibre in {countdown}</span>}
     </span>
   );
