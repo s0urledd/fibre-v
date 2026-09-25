@@ -9,7 +9,7 @@ import OutcomeBar from "@/components/OutcomeBar";
 import VolumeChart from "@/components/VolumeChart";
 import Validators from "@/components/Validators";
 import PreLive from "@/components/PreLive";
-import Readiness from "@/components/Readiness";
+import HostMap from "@/components/HostMap";
 import { Concentration } from "@/components/Hosting";
 
 /**
@@ -63,7 +63,7 @@ function Overview() {
       <PreLive meta={meta} />
       <StatusLine meta={meta} metaError={metaErr} snap={N} client={{ error: net.error, fetchedAt: net.fetchedAt, status: net.status }} measuring={measuring} />
 
-      {meta?.fibre_active && vals.data && <Readiness rows={rows} />}
+      {vals.data && <HostMap rows={rows} showReadiness={!!meta?.fibre_active} />}
 
       <Metrics>
         <Metric label="Service rate"
