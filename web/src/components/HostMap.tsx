@@ -116,11 +116,11 @@ function placeLabel(c: Cluster): string {
   if (c.ccs.length === 2) return c.ccs.map(countryName).join(", ");
   return `${c.ccs.length} countries`;
 }
-/** the short tag beside a badge: one place's name, or how many countries it holds */
+/** the short tag beside a badge: the name of the one place it holds, or nothing */
 function tagText(c: Cluster): string {
-  if (c.locs === 1 && c.hosts[0].city) return c.hosts[0].city;
-  if (c.ccs.length === 1) return countryName(c.ccs[0]);
-  return `${c.ccs.length} countries`;
+  // Only a single place is named; a merged badge shows its count, and its places are in the popover.
+  if (c.locs !== 1) return "";
+  return c.hosts[0].city || (c.ccs.length === 1 ? countryName(c.ccs[0]) : "");
 }
 
 let measureCtx: CanvasRenderingContext2D | null | undefined;
