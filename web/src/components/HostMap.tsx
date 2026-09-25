@@ -498,7 +498,7 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
         <div className="fm-pills">
           {cur && (
             <p className="fm-pill fm-live" key={`${cur.v.address}|${cur.at}|${cur.event ?? ""}`}>
-              <i className="fm-dot" style={{ background: "var(--accent)" }} />
+              <i className="fm-dot" style={{ background: cur.event === "last reachable" ? "var(--hold)" : "var(--accent)" }} />
               <span className="fm-who"><Link href={valLink(cur.v)}>{name(cur.v)}</Link>{cur.event && <> {cur.event}</>}</span>
               {cur.host?.cc && <span><Flag cc={cur.host.cc} />{countryName(cur.host.cc)}</span>}
               {!cur.event && cur.host?.provider && <span>{cur.host.provider}</span>}

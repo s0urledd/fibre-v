@@ -86,7 +86,7 @@
   --tag-bg: rgb(var(--ink) / .08);
   --cat-1: #3987e5; --cat-2: #d95926; --cat-3: #199e70; --cat-4: #c98500; --cat-5: #d55181; --cat-other: rgb(var(--ink) / .28);
 }
-@media (prefers-reduced-motion: reduce) { :root { --dur: 0ms; } }
+@media (prefers-reduced-motion: reduce) { :root, :root[data-theme] { --dur: 0ms; } }
 
 /* ------------------------------------------------------------------ base --- */
 * { box-sizing: border-box; }
@@ -313,7 +313,7 @@ tr.suspect td { color: var(--text-3); }
 .foot span + span { margin-left: 10px; }
 /* the plain separators between footer links (the pin span carries a title) */
 .foot > div > span:not([title]) { margin: 0 6px; }
-.foot a { color: var(--text-3); }
+.foot a { color: var(--text-3); white-space: nowrap; }
 .foot a:hover { color: var(--accent-ink); }
 
 /* ---------------------------------------------------------- detail pages --- */
@@ -430,6 +430,7 @@ input[type=search]:focus { border-color: var(--accent); outline: none; }
 .note ul { margin: 0; padding-left: 1.2em; color: var(--text-2); }
 .coverage { font-size: var(--t-cell); color: var(--text-2); margin: 12px 0 0; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
 .card { padding: 0; }
+.kvcard { margin-bottom: 28px; }
 dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 24px; margin: 0; font-size: var(--t-cell); }
 dl.kv dt { color: var(--text-2); }
 dl.kv dd { margin: 0; word-break: break-all; }
@@ -501,7 +502,8 @@ dl.kv dd { margin: 0; word-break: break-all; }
   .ptcounts { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 720px) {
-  :root { --gutter: 16px; }
+  /* :root[data-theme] too: the light theme block sets --gutter with that specificity */
+  :root, :root[data-theme] { --gutter: 16px; }
   .top .wrap { flex-wrap: wrap; height: auto; gap: 0 16px; padding-top: 8px; }
   .top nav { order: 3; flex-basis: 100%; height: 44px; gap: 22px; }
   .top nav a { height: 44px; }
@@ -550,6 +552,7 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 /* phone width: the pinned identity column gives the figures room */
 @media (max-width: 480px) {
   .blocktick .soon, .blocktick .age { display: none; }
+  .top nav { gap: 16px; }
   .vt .addr { display: none; }
   .vt .col-pin { min-width: 0; max-width: 150px; }
   .vt .col-pin .mon { display: inline-block; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
@@ -795,7 +798,7 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
   font-variant-numeric: tabular-nums lining-nums;
 }
 .fm-pill b { color: var(--text); font-weight: 600; }
-.fm-pill > span + span::before { content: "·"; margin-right: 8px; color: var(--text-3); }
+.fm-pill > span:not(:last-child)::after { content: "·"; margin-left: 8px; color: var(--text-3); }
 .fm-pill .flag { margin-right: 5px; }
 .fm-live { min-width: 0; animation: fm-in .35s ease-out; }
 .fm-live .fm-who { display: inline; color: var(--text-2); }
