@@ -3468,17 +3468,22 @@ type blobRow struct {
 	// SettlementTxIndex is the other half of this route's cursor, published
 	// so a caller paging with before_height/before_tx_index does not have to
 	// guess it.
-	SettlementTxIndex  int          `json:"settlement_tx_index"`
-	SettlementTime     string       `json:"settlement_time"`
-	CreationTimestamp  string       `json:"creation_timestamp"`
-	MustServeUntil     string       `json:"must_serve_until"`
-	ValidatorsWithRows int          `json:"validators_with_rows"`
-	SigmaRows          int          `json:"sigma_rows"`
-	DistinctRows       int          `json:"distinct_rows"`
-	AssignmentError    string       `json:"assignment_error,omitempty"`
-	ProbeCount         int64        `json:"probe_count"`
-	Classes            classCounts  `json:"classes"`
-	Reconstructable    *reconstruct `json:"reconstructable"`
+	SettlementTxIndex  int    `json:"settlement_tx_index"`
+	SettlementTime     string `json:"settlement_time"`
+	CreationTimestamp  string `json:"creation_timestamp"`
+	MustServeUntil     string `json:"must_serve_until"`
+	ValidatorsWithRows int    `json:"validators_with_rows"`
+	SigmaRows          int    `json:"sigma_rows"`
+	DistinctRows       int    `json:"distinct_rows"`
+	AssignmentError    string `json:"assignment_error,omitempty"`
+	// AttestedPower is the voting power whose signature over the promise
+	// verified, over TotalPower, the set's total at the promise height; absent
+	// for a record from before signatures were verified.
+	AttestedPower   *int64       `json:"attested_voting_power,omitempty"`
+	TotalPower      int64        `json:"total_voting_power,omitempty"`
+	ProbeCount      int64        `json:"probe_count"`
+	Classes         classCounts  `json:"classes"`
+	Reconstructable *reconstruct `json:"reconstructable"`
 	// Charge is the fee side of this promise from the payments table: what
 	// the module charged, and whether the promise settled or timed out. Null
 	// for a publication whose payment was not recorded (ingested before the
@@ -3524,7 +3529,7 @@ type reconstruct struct {
 
 func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...any) ([]blobRow, error) {
 	q := `SELECT promise_hash, commitment, namespace, blob_size, signer, settlement_height, settlement_tx_index, settlement_time, creation_timestamp,
-		must_serve_until, validators_with_rows, sigma_rows, distinct_rows, assignment_error FROM publications`
+		must_serve_until, validators_with_rows, sigma_rows, distinct_rows, assignment_error, attested_voting_power, total_voting_power FROM publications`
 	if where != "" {
 		q += " WHERE " + where
 	}
@@ -3539,7 +3544,7 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 	for rows.Next() {
 		var b blobRow
 		if err := rows.Scan(&b.PromiseHash, &b.Commitment, &b.Namespace, &b.BlobSize, &b.Signer, &b.SettlementHeight, &b.SettlementTxIndex, &b.SettlementTime,
-			&b.CreationTimestamp, &b.MustServeUntil, &b.ValidatorsWithRows, &b.SigmaRows, &b.DistinctRows, &b.AssignmentError); err != nil {
+			&b.CreationTimestamp, &b.MustServeUntil, &b.ValidatorsWithRows, &b.SigmaRows, &b.DistinctRows, &b.AssignmentError, &b.AttestedPower, &b.TotalPower); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
