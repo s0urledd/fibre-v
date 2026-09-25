@@ -299,6 +299,10 @@ td a.plain:hover, td a.fault:hover { text-decoration: underline; }
    cell that carries its own title or link sits above the cover. */
 .vt th:nth-child(1) { width: 26%; }
 .vt th:nth-child(2) { width: 13%; }
+/* the four score columns (service rate, broken, undecided, signed): centred, one width, one type size */
+.vt th:nth-last-child(-n+4), .vt td:nth-last-child(-n+4) { text-align: center; width: 10%; }
+.vt td:nth-last-child(-n+4) .den { font-size: inherit; }
+.vt td:nth-last-child(-n+4) .rate + .den { margin-left: 6px; }
 .vt tbody tr { position: relative; }
 .vt tbody tr:not(.empty) { cursor: pointer; }
 .vt .rowcover { position: absolute; inset: 0; z-index: 0; }
@@ -713,7 +717,7 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 .hostmap.solo { grid-template-columns: 1fr; }
 .hostmap .fm-main { position: relative; min-width: 0; }
 .hostmap .fm-side .ready-answer { font-size: var(--t-cell); }
-.hostmap .fm-side .ready-meter { margin-bottom: 26px; }
+.hostmap .fm-side .ready-meter { margin-bottom: 44px; }
 .hostmap .fm-side .ready-key { display: grid; gap: 2px; margin-bottom: 18px; }
 .hostmap .fm-side h2 + .ready-missing { margin-top: 6px; }
 

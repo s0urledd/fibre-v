@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { type Validator, int } from "@/lib/api";
+import { type Validator } from "@/lib/api";
 
 /**
  * Can Fibre accept a blob at all? A MsgPayForFibre settles only with the
@@ -71,11 +71,9 @@ export function ReadyAnswer({ rows, headingId = "readiness-h" }: { rows: Validat
   const w = (n: number) => `${Math.min(100, (100 * n) / total)}%`;
   return (
     <>
-      <h2 id={headingId}>Can Fibre accept blobs?</h2>
-      <p className="ready-answer">
-        {r.ready
-          ? <><b>Yes.</b> Hosts ready to sign hold {pct(reachPower)} of stake, above the ⅔ a blob needs.</>
-          : <><b>Not yet.</b> Hosts ready to sign hold {pct(reachPower)} of stake; a blob needs ⅔ ({pct(quorum)}) to settle.</>}
+      <h2 id={headingId}>Fibre quorum</h2>
+      <p className="ready-answer" title="Ready: a registered host that answers TLS with a certificate endorsed by its validator's consensus key. A blob settles with signatures from ⅔ of stake.">
+        <b>{r.ready ? "Reached" : "Not reached"}</b> · {pct(reachPower)} of stake ready, ⅔ needed
       </p>
       <div className="meter ready-meter" role="img"
         aria-label={`${pct(reachPower)} of stake ready, ${pct(regPower)} registered, ${pct(quorum)} needed`}>
@@ -84,11 +82,6 @@ export function ReadyAnswer({ rows, headingId = "readiness-h" }: { rows: Validat
         <span className="tick" style={{ left: w(quorum) }} />
         <span className="tl2" style={{ left: w(quorum) }}>⅔ needed</span>
       </div>
-      <p className="sub ready-key">
-        <span title="Answers TLS with a certificate endorsed by the validator's consensus key"><i className="sw s" /> ready {pct(reachPower)} · {int(r.reachable.length)} validators</span>
-        <span title="Registered, but not answering, or answering with a certificate a client will not accept"><i className="sw reg" /> registered, not ready {pct(regPower - reachPower)} · {int(r.registered.length - r.reachable.length)}</span>
-        <span><i className="sw p" /> no Fibre host {pct(total - regPower)} · {int(r.bonded.length - r.registered.length)}</span>
-      </p>
     </>
   );
 }
