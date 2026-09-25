@@ -422,7 +422,7 @@ func Run(ctx context.Context, st *store.Store, now time.Time, cfg Config) (Repor
 		for days := 0; days < 3 && !from.After(rolled) && from.Before(cut); days++ {
 			lo, hi := dayRange(from)
 			var n int64
-			for _, table := range []string{"probes", "reachability"} {
+			for _, table := range []string{"probes", "reachability", "probe_confirmations"} {
 				res, err := db.ExecContext(ctx, `DELETE FROM `+table+` WHERE started_at >= ? AND started_at <= ?`, lo, hi)
 				if err != nil {
 					return rep, fmt.Errorf("prune %s %s: %w", table, from.Format(dayLayout), err)

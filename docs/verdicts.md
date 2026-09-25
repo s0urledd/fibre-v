@@ -590,6 +590,7 @@ column:
 | a rate limit instead of the shard | `THROTTLED` | the server declined this request; it said nothing about the shard |
 | an outcome the taxonomy does not recognise | `PROBE_ERROR` | "we have not taught the observer about this" is not evidence |
 | a local socket error, a cancelled probe, a verification that timed out | `PROBE_ERROR` | the packets never left this machine |
+| a fault the second location re-fetched within 20 minutes, rows verified | `PROBE_ERROR`, with `cleared_by` | the shard was there; what failed was this observer's reading of it (see "Faults re-checked from a second location") |
 
 This is why the serve rate moved after the audit. It did not get more
 forgiving; it stopped making claims the evidence did not support.
@@ -717,7 +718,9 @@ what the measurement cannot separate.
 - **One vantage.** Every reachability observation comes from a single network
   path. `/v1/network` publishes the worst schedule point in the window by how
   many validators were unreachable at once, because validators fail
-  independently and one network does not.
+  independently and one network does not. A second location re-checks
+  endpoint failures and retention faults, never routine probes, and adds no
+  reading to any rate (see "Faults re-checked from a second location").
 
 - **Retention and the rollup.** Raw probe and heartbeat rows are kept for
   90 days and their `raw_json` (the bulk of a row) for 30; every typed
@@ -889,6 +892,74 @@ obligation figure that differs from the API's with the same rows and the
 same `as_of` is a bug in one of the two implementations, and is why there
 are two.
 
+## Faults re-checked from a second location
+
+A `FAULT` is the one class held against a validator, and it rests on one
+reading from one place. So every `FAULT` is asked once more from the second
+vantage before it counts, and only a `FAULT`: routine probes are never
+repeated, so the second vantage adds one request per fault and nothing else.
+
+- The prober appends a confirmation request for every row it classifies
+  `FAULT` to `<data-dir>/vantage-requests.jsonl`: the promise, the blob's
+  commitment and code parameters, the validator and the host that failed,
+  the rows it owes, the schedule point, and a deadline (the fault's start
+  plus `ConfirmWindow`, **20 minutes**, or the end of the grace phase if that
+  is sooner). The pull timer copies new lines to the second vantage.
+- The second vantage (`sentinel-probe -confirm-requests`) fetches exactly
+  those rows from that validator once, with the same probe: DNS, TCP, TLS,
+  the consensus-key identity check, `DownloadShard`, and row verification
+  against the commitment and the assignment. It keeps none of the
+  observer's state: the consensus key comes from the validator set at the
+  promise height on its own RPC, and the assignment is recomputed from it
+  with `fibre-assign`; a request the chain does not bear out is refused
+  (`PROBE_ERROR`, no connection made), and an RPC that does not answer is
+  asked again until the deadline. It writes the answer to its own
+  `measurements.jsonl` under its own vantage name and the fault's schedule
+  point, and the observer copies that file back into
+  `<data-dir>/vantages/<name>/measurements.jsonl`.
+- The collector ingests those rows into `probe_confirmations`, never into
+  `probes`, and applies the rule (`verdict.ConfirmFault`), with the window
+  measured between the two probes' own `started_at`:
+
+| the second vantage, started within 20 minutes of the fault | the fault | on the row |
+|---|---|---|
+| got the exact rows back, verified (`HEALTHY`) | **withdrawn**: filed `PROBE_ERROR`, an observer-side failure, outside the rate and never counted as served | `cleared_by`, `classification_at_probe: FAULT`, an amendment in `amendments.jsonl` with `cleared_by` and `confirm_key` |
+| reached a verdict that is not `HEALTHY` (not found, unreachable, an error, rows that do not verify) | stands | `confirmed_by` |
+| could not run the probe (`PROBE_ERROR`, `NOT_PROBED`), started later, or sent nothing | stands, as it did before there was a second vantage | nothing |
+
+**Why a cleared fault is not served.** Every rate is this observer's own
+readings. A second vantage's row adds no obligation, no reading and no
+credit anywhere; it can only take back an accusation this observer made.
+Crediting the second location's fetch as served would let the observer's
+own blind spots be filled in from elsewhere, which is a different rate.
+So a cleared fault leaves `broken` and lands where the obligation's other
+readings put it (usually `end_unobserved`, when the cleared probe was the
+last point).
+
+**Why only `HEALTHY` clears.** It is the one answer that proves the rows were
+there: the exact assigned set, verified against the commitment, from the
+endpoint that proved the validator's consensus key. A shard that answers with
+genuine rows of another promise, or an endpoint the second location cannot
+reach either, says nothing in the validator's favour.
+
+**The window.** Twenty minutes, so an answer that takes a few minutes to come
+back (the vantage's poll, the pull timer each way, the collector's pass)
+still lands inside the 30-minute settling period: a fault that is cleared is
+withdrawn while it is still labelled provisional, and a settled fault stays
+settled. The second vantage caps itself at 60 confirming probes an hour
+(`-confirm-max-per-hour`); a request that waits past its deadline lapses and
+its fault stands.
+
+The rule is one implementation (`observer/verdict/confirm.go`), used by the
+collector over the store and by `sentinel-recompute` over the record: with
+`vantages/<name>/measurements.jsonl` beside the record it redraws every
+clearing and compares it with `amendments.jsonl`; without them it applies the
+recorded clearings and counts them as unchecked.
+
+The API carries `cleared_by` / `confirmed_by` on probe rows and
+`faults_cleared` on each validator row (over the raw rows; a rolled day keeps
+its counts, not who cleared what).
+
 ## Provisional faults
 
 A `FAULT` younger than **30 minutes** (`verdict.FaultSettling`, measured from
@@ -907,11 +978,15 @@ FAULT without a human, and nothing else:
 | correlated-failure guard | the rest of the schedule point's rows can land up to `MaxLatenessFraction` (5%) of the window after it: 12 min on mocha's 4 h `shard_retention` | a point where half the set, and at least three, faulted or were unreachable leaves every count |
 | silent params change | the scanner re-reads `x/fibre` params every 60 blocks (~6 min) | the range withholds its publications' rows (`RETENTION_UNVERIFIED`) in the transaction that records it |
 | ingest | collector tail every 10 s, scanner catch-up in minutes | the row, or the evidence against it, reaches the store |
+| second-vantage re-check | the confirming probe must start within 20 min; its answer is back a few minutes later | verified rows from the second location withdraw the fault (see "Faults re-checked from a second location") |
 
-Twice the longest (12 min), rounded up to the half hour. Deferred shadow
+Twice the longest of the first three (12 min), rounded up to the half hour;
+the re-check's window was then chosen to fit inside it. Deferred shadow
 verdicts (`amendments.jsonl`) never touch a `FAULT` — they re-judge
 `PROBE_ERROR` rows — and a dispute has no time bound, so neither sets the
-period; an amendment is on the record whenever it lands.
+period; an amendment is on the record whenever it lands. The one amendment
+that does touch a `FAULT` is a second-vantage clearing, which is bounded by
+its window.
 
 **Why provisional faults are in the headline.** Three options:
 

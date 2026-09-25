@@ -12,7 +12,7 @@ import (
 
 // apiPartial are partial indexes a plan may walk whole: each holds only the
 // rows its query wants.
-var apiPartial = []string{"publications_unassignable"}
+var apiPartial = []string{"publications_unassignable", "probes_cleared"}
 
 // TestHotQueriesUseIndexes pins the plans of the queries the API runs per
 // request or per snapshot refresh that used to walk a whole table: the
@@ -72,6 +72,8 @@ func TestHotQueriesUseIndexes(t *testing.T) {
 			[]any{lo, hi}, []string{"COVERING INDEX probes_"}},
 		c{"faults per validator", `SELECT validator_address, COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND ` + cls + ` = 'FAULT' GROUP BY validator_address`,
 			[]any{lo, hi}, []string{"COVERING INDEX probes_"}},
+		c{"faults cleared per validator", `SELECT validator_address, COUNT(*) FROM probes INDEXED BY probes_cleared WHERE cleared_by IS NOT NULL AND started_at >= ? AND started_at <= ? AND assigned = 1 GROUP BY validator_address`,
+			[]any{lo, hi}, []string{"probes_cleared"}},
 		c{"one validator's tally", `SELECT ` + cls + `, COUNT(*) FROM probes WHERE validator_address = ? AND assigned = 1 AND phase = 'in_window' AND started_at >= ? AND started_at <= ? GROUP BY 1`,
 			[]any{"ab", lo, hi}, []string{"COVERING INDEX probes_validator_window"}},
 	)

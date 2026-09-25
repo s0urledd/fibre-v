@@ -23,6 +23,11 @@ import "time"
 //     rows it covers (RETENTION_UNVERIFIED) in the same transaction that
 //     records it. A fault drawn against the stale deadline in between is
 //     withdrawn then.
+//   - A second vantage re-checks every FAULT (confirm.go): a confirming
+//     probe counts only if it started within ConfirmWindow (twenty minutes)
+//     of the fault, and its answer reaches the collector within a few
+//     minutes more (the pull timer runs every minute), so a fault it clears
+//     is withdrawn inside this period.
 //   - Ingest itself: the collector tails the files every 10 s, and a scanner
 //     that fell behind the chain catches up in minutes on a healthy node.
 //

@@ -194,6 +194,9 @@ type Prober struct {
 	feed     *pubFeed
 	registry *hostRegistry
 	chainID  string
+	// requests is where a FAULT is queued for a second vantage to confirm
+	// (confirm.go); nil in tests that build a Prober by hand.
+	requests *requestLog
 
 	clockMu     sync.Mutex
 	clockOffset time.Duration // observer clock - latest block time
@@ -240,6 +243,7 @@ func New(cfg Config, log *scan.Logger) (*Prober, error) {
 		store:       st,
 		feed:        newPubFeed(cfg.PublicationsPath),
 		registry:    newHostRegistry(cfg.RegistryPath),
+		requests:    &requestLog{path: ConfirmRequestsPath(cfg.DataDir)},
 		coders:      map[[2]int]*Coder{},
 		complete:    map[string]bool{},
 		skippedPubs: map[string]bool{},
@@ -282,6 +286,9 @@ func (p *Prober) Run(parent context.Context) error {
 		defer cancel()
 	}
 	defer p.store.Close()
+	if p.requests != nil {
+		defer p.requests.close()
+	}
 
 	st := status.New(p.cfg.DataDir, "prober", p.cfg.Vantage, status.BuildRevision())
 	st.RecordRuns(p.cfg.RunConfig)
@@ -1289,6 +1296,8 @@ func (p *Prober) finish(ctx context.Context, it work, in Input, m Measurement, n
 		p.log.Fatalf("append measurement: %v", err)
 	}
 	p.logMeasurement(m)
+	// After the row is on disk, so a request never names a row that is not.
+	p.requestConfirmation(pub, t, m)
 }
 
 // hostChanged reports whether the validator's current host differs from the

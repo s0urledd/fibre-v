@@ -5,7 +5,7 @@ import ProtocolParams from "@/components/ProtocolParams";
 // The rules version, as verdict.MethodologyVersion in the Go code and
 // methodology_version in /v1/meta and every export manifest. Bumped in the
 // same change as any rule that can move a figure.
-const METHODOLOGY_VERSION = "2026-09-25";
+const METHODOLOGY_VERSION = "2026-09-25.2";
 
 export const metadata = { title: "Methodology · Tensile · Celestia Fibre" };
 
@@ -136,7 +136,7 @@ export default function Methodology() {
 
       <h2 id="vantage">Vantage</h2>
       <p>Endpoint checks run from two locations on two continents, each dialling every registered host every five minutes: the observer itself and a second location. A host counts as unreachable only when both fail. When the second location completes the handshake where the observer did not, the host counts as reachable and its page says so. Every rate over a period (reachability, service rate, throughput) is computed from the observer&rsquo;s own checks alone, so the second location only confirms or clears a failure. The locations are listed in <code>/api/v1/meta</code>, and every row carries the name of the location that made it.</p>
-      <p>Retention probes run from the observer alone. A failed probe means it could not fetch the rows at that time; it is not proof the validator is down, and a successful probe is not proof of availability from elsewhere.</p>
+      <p>Retention probes run from the observer. Retention faults are re-checked from the second location before they count: it asks the same validator for the same rows once, within twenty minutes of the failed probe, with the same identity and row checks. If the rows come back and verify, the fault is withdrawn; the probe is filed as a failure on the observer&rsquo;s side, outside the service rate, and is never counted as served. If they do not come back there either, or no answer arrives in time, the fault stands. Only failed probes are re-checked, never routine ones. A successful probe is not proof of availability from elsewhere.</p>
 
       <h2 id="not">What this site does not do</h2>
       <ul>

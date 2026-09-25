@@ -8,6 +8,10 @@
 // publications and the existing measurements every cycle, so a restart resumes
 // exactly. Every wait is bounded — the loop never sleeps more than -max-sleep,
 // and every probe layer (DNS/TCP/TLS/identity/download) has its own timeout.
+//
+// Every FAULT is also queued in <data-dir>/vantage-requests.jsonl for a second
+// vantage to confirm. With -confirm-requests the command is that second
+// vantage instead: it answers those requests (internal/probe/confirm.go).
 package main
 
 import (
@@ -79,6 +83,13 @@ func main() {
 		logLines    = flag.Int("log-ring", 400, "log lines kept in memory for the crash dump")
 		policyPath  = flag.String("policy", "", "probe load policy YAML (observer/policy); \"default\" applies the R4 defaults; empty = no policy (probe everything)")
 		revealAfter = flag.Duration("reveal-after", policy.DefaultRevealAfter, "publish each day's sampling secret this long after the day ends, to <data-dir>/sampling-secrets.jsonl (0 = never)")
+
+		// Confirm mode, on a second vantage: no publications, no schedule,
+		// no policy. It answers the primary's confirmation requests (one
+		// probe per FAULT) and writes <data-dir>/measurements.jsonl.
+		confirmReqs  = flag.String("confirm-requests", "", "confirm mode: answer the confirmation requests in this file (the primary's vantage-requests.jsonl, copied in) instead of probing publications")
+		confirmMax   = flag.Int("confirm-max-per-hour", 60, "confirm mode: confirming probes in any hour at most; requests past it wait, and lapse at their deadline")
+		confirmEvery = flag.Duration("confirm-poll", 20*time.Second, "confirm mode: how often the requests file is read again")
 	)
 	flag.Parse()
 
@@ -87,6 +98,30 @@ func main() {
 	}
 
 	log := scan.NewLogger(*logLines)
+
+	if *confirmReqs != "" {
+		chain, err := scan.NewChain(*rpc, *rpcTO, log)
+		if err != nil {
+			log.Fatalf("rpc client: %v", err)
+		}
+		c, err := probe.NewConfirmer(probe.ConfirmConfig{
+			RequestsPath: *confirmReqs, DataDir: *dataDir, Vantage: *vantage,
+			Timeouts:  probe.StepTimeouts{DNS: *dnsTO, TCP: *tcpTO, TLS: *tlsTO, Download: *dlTO},
+			PollEvery: *confirmEvery, MaxPerHour: *confirmMax, AllowUnroutableHosts: *localHosts,
+			Once: *once, RunConfig: flagConfig(),
+		}, chain, log)
+		if err != nil {
+			log.Fatalf("init: %v", err)
+		}
+		defer c.Close()
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		log.Printf("confirm mode: vantage=%s requests=%s data=%s rpc=%s", *vantage, *confirmReqs, *dataDir, *rpc)
+		if err := c.Run(ctx); err != nil {
+			log.Fatalf("run: %v", err)
+		}
+		return
+	}
 
 	fracs := probe.InWindowFractions(*inWindow)
 

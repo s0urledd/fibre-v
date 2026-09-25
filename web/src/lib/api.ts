@@ -369,6 +369,8 @@ export type Validator = {
   probe_count: number;
   classes: ClassCounts;
   faults?: number; // probes: FAULT of an assigned shard in any phase. obligations.broken is the per-obligation count, and the one shown beside a validator's name
+  /** failed probes of the period a second location cleared: it fetched the same rows and they verified. Not in faults; absent when none */
+  faults_cleared?: number;
   assigned_rows_last: number;
   expected_load_band: string;
   /** this validator's serve rate per schedule point: early vs late retention */
@@ -453,6 +455,10 @@ export type Probe = {
   settlement_host_served?: boolean;
   /** a FAULT younger than the settling period: counted, and still able to be withdrawn */
   provisional?: boolean;
+  /** the second location fetched the same rows within the confirmation window and they verified: the fault is withdrawn (classification PROBE_ERROR, classification_at_probe FAULT) */
+  cleared_by?: string;
+  /** the second location tried the same rows and did not get them either: the fault stands */
+  confirmed_by?: string;
 };
 
 // Below this many rated probes a percentage is noise dressed as a
