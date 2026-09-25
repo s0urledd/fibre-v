@@ -259,3 +259,41 @@ func TestBudgetBucketsAreStampedAtTheirNewestProbe(t *testing.T) {
 		t.Fatalf("startup log: %q", p.startupLog)
 	}
 }
+
+// A process that changes nothing writes nothing: one that could not read the
+// file (and sat out the cool-down) leaves it for the next start to be as
+// wary of, instead of writing a valid empty state that starts it on a fresh
+// budget; one that restored it leaves it exactly as it was.
+func TestAnUnchangedBudgetStateIsNotWritten(t *testing.T) {
+	cfg := Default()
+	cfg.Caps.PerValidator.MinRequestSpacing = 0
+	for name, content := range map[string]string{
+		"unreadable": `{"version":99,"saved_at":"2026-01-01T00:00:00Z","validators":{"aa":{}}}`,
+		"restored":   `{"version":1,"saved_at":"2026-01-01T00:00:00Z","validators":{}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), BudgetStateFile)
+			if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			p := newPersisted(t, cfg, file)
+			pub := pubOf(hexHash(37), time.Now(), 1<<20, 148)
+			if name == "unreadable" {
+				// a probe denied by the cool-down is not a change either
+				p.BeforeProbe(pub, probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148}, time.Now())
+			}
+			if err := p.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			if b, err := os.ReadFile(file); err != nil || string(b) != content {
+				t.Fatalf("the file was rewritten without a change: %s %v", b, err)
+			}
+			if name == "unreadable" {
+				q := newPersisted(t, cfg, file)
+				if allow, _, reason := q.BeforeProbe(pub, probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148}, time.Now()); allow || reason != "budget:state_unknown_cooldown" {
+					t.Fatalf("the next start: allow=%v reason=%s, want the cool-down again", allow, reason)
+				}
+			}
+		})
+	}
+}

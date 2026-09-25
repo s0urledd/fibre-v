@@ -45,7 +45,9 @@ import (
 //     about what was spent, so it is read as "the budget may be spent":
 //     nothing is admitted for UnknownCooldown after the start, instead of
 //     starting fresh. The file is written again at the first change, so a
-//     cool-down is paid once per lost file, not once per restart;
+//     cool-down is paid once per lost file, not once per restart, and a
+//     process that exits without a change writes nothing over the file
+//     it could not read;
 //   - a save that fails closes admission until one succeeds: a prober that
 //     cannot record what it spent cannot promise a restart will respect it.
 
@@ -203,17 +205,29 @@ func (p *Policy) logStartup(format string, args ...any) {
 	p.startupLog = append(p.startupLog, msg)
 }
 
-// markDirty schedules a save. The caller holds p.mu.
+// markDirty records a change and schedules a save. The caller holds p.mu.
 func (p *Policy) markDirty() {
-	if p.stateFile == "" || p.saveTimer != nil {
+	if p.stateFile == "" {
+		return
+	}
+	p.dirty = true
+	if p.saveTimer != nil {
 		return
 	}
 	p.saveTimer = time.AfterFunc(saveEvery, func() { _ = p.Flush() })
 }
 
-// Flush writes the budget state now. sentinel-probe calls it on the way
-// out; the timer calls it after changes. A failure is logged and closes
-// admission until a save succeeds (see stateGuard).
+// Flush writes the budget state now, if anything changed since the last
+// save or the restore. sentinel-probe calls it on the way out; the timer
+// calls it after changes. A failure is logged and closes admission until a
+// save succeeds (see stateGuard).
+//
+// Nothing changed, nothing is written. A process that restored the file
+// and exits before probing has nothing to add to it, and one that could not
+// read it (the cool-down) must leave it alone: a valid empty state written
+// over it lets the next start skip the cool-down on a budget that may be
+// spent, and replaces a file that was unreadable for a moment, or written
+// by a newer build, with nothing.
 func (p *Policy) Flush() error {
 	if p.stateFile == "" {
 		return nil
@@ -225,6 +239,11 @@ func (p *Policy) Flush() error {
 		p.saveTimer.Stop()
 		p.saveTimer = nil
 	}
+	if !p.dirty {
+		p.mu.Unlock()
+		return nil
+	}
+	p.dirty = false
 	b, err := json.Marshal(p.snapshot(time.Now()))
 	p.mu.Unlock()
 	if err == nil {
@@ -237,6 +256,7 @@ func (p *Policy) Flush() error {
 			p.logf("WARNING: probe budget state could not be saved (%v): admission is closed until it can be, so a restart cannot start on a budget already spent", err)
 		}
 		p.saveFailing = true
+		p.dirty = true
 		return err
 	}
 	if p.saveFailing && p.logf != nil {
