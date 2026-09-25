@@ -2146,7 +2146,7 @@ func (s *Server) reachabilityNow(ctx context.Context, only, asOf string) (map[st
 		var tcp, tls, id int
 		var reason string
 		err := s.st.DB().QueryRowContext(ctx, `SELECT q.tcp_ok, q.tls_ok, q.identity_ok, q.identity_reason FROM reachability q
-			WHERE q.validator_address = ? AND q.outcome <> PROBE_ERROR AND +q.started_at < ? AND q.validator_host = ?
+			WHERE q.validator_address = ? AND q.outcome <> 'PROBE_ERROR' AND +q.started_at < ? AND q.validator_host = ?
 			ORDER BY q.rowid DESC LIMIT 1`, addr, st.at, st.host).Scan(&tcp, &tls, &id, &reason)
 		if err != nil {
 			continue // no earlier answer, or unreadable: not flaky
@@ -2237,13 +2237,13 @@ type validatorRow struct {
 	EndpointClosedAt *string `json:"endpoint_closed_at,omitempty"`
 	VotingPower      int64   `json:"voting_power"` // from the latest assignment seen
 	LastSeenAt       *string `json:"last_seen_at"`
-	Reachable        *bool   `json:"reachable"`       // debounced: up at the newest check, or failed only once since the one before; null if never probed
+	Reachable        *bool   `json:"reachable"` // debounced: up at the newest check, or failed only once since the one before; null if never probed
 	// EndpointState says which: reachable | flaky (the newest check failed,
 	// the one before succeeded) | unreachable (two failures in a row, or no
 	// success on record). Empty when never checked.
-	EndpointState string `json:"endpoint_state,omitempty"`
-	IdentityStatus   string  `json:"identity_status"` // verified | expired | mismatch | unverified | no_tls | unreachable | unknown
-	IdentityReason   string  `json:"identity_reason,omitempty"`
+	EndpointState  string `json:"endpoint_state,omitempty"`
+	IdentityStatus string `json:"identity_status"` // verified | expired | mismatch | unverified | no_tls | unreachable | unknown
+	IdentityReason string `json:"identity_reason,omitempty"`
 	// Reachability is how often this observer completed a TLS conversation with the
 	// endpoint over the window, from the reachability heartbeat: every
 	// registered validator, every five minutes, whether or not it was assigned
