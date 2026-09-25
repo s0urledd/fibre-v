@@ -98,7 +98,7 @@ func TestNetworkFeedFirstFault(t *testing.T) {
 		VALUES ('k', 'test', ?, 'h:7980', 1, ?, ?, 1, 1, 10, 0, 20, 0, '', 'TLS_HANDSHAKE_FAIL', '', 30, '{}')`, v4, at, at); err != nil {
 		t.Fatal(err)
 	}
-	resp, err =ts.Client().Get(ts.URL + "/v1/validators/" + v4 + "/feed.atom")
+	resp, err = ts.Client().Get(ts.URL + "/v1/validators/" + v4 + "/feed.atom")
 	if err != nil {
 		t.Fatal(err)
 	}
