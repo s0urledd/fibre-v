@@ -31,7 +31,7 @@ const KIND: Record<Payment["kind"], string> = {
 function Page() {
   const addr = useSearchParams().get("addr") ?? "";
   // 7d like the publishers list this page is opened from, so the figures match the row that was clicked.
-  const [win, setWin] = useWindow("7d");
+  const [win, setWin] = useWindow("24h");
   const pub = useApi<Detail>(addr ? `/v1/publishers/${addr}?window=${win}` : null);
   const { data, error, loading } = pub;
   if (!addr) return <p className="notice err">No publisher address given.</p>;

@@ -20,7 +20,7 @@ import { unit } from "@/components/Unit";
 function Page() {
   // 7d, not the site's 24h: the page's two charts are per UTC day, and a
   // 24h window draws one or two bars, which is not a chart.
-  const [win, setWin] = useWindow("7d");
+  const [win, setWin] = useWindow("24h");
   const { data: meta } = useApi<Meta>("/v1/meta");
   // Before activation every market figure is a zero of a module that does not exist yet: one line says so, the tiles show a dash.
   const pre = notLiveOf(meta);
@@ -111,7 +111,8 @@ function Page() {
       {m?.withdrawal_queue && <WithdrawalQueueCells q={m.withdrawal_queue} win={win} />}
       </>}
 
-      {m && (() => {
+      {/* per-day charts need more than one day to say anything: 7d and longer */}
+      {m && win !== "24h" && (() => {
         const days = calendar(m.window.start.startsWith("0001-") || m.window.name === "all"
           ? new Date((m.daily[0]?.day ?? m.window.end.slice(0, 10)) + "T00:00:00Z") : new Date(m.window.start), new Date(m.window.end));
         const byDay = new Map(m.daily.map((d) => [d.day, d]));

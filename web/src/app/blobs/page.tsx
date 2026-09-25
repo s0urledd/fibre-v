@@ -40,7 +40,7 @@ function Page() {
   const { data, error, loading } = useApi<{ blobs: Blob[] }>(q);
   // Signatures collected per promise over a fixed week, like the volume
   // chart on the overview: this page lists blobs and has no period switch.
-  const sig = useApi<SigningDistribution>("/v1/signing?window=7d");
+  const sig = useApi<SigningDistribution>("/v1/signing?window=24h");
   const { data: meta } = useApi<Meta>("/v1/meta");
   return (
     <>
@@ -53,7 +53,7 @@ function Page() {
       {error && !data && <p className="notice">The observer API is not answering ({error}); the page retries every 30 seconds. This is an observer outage, not a Fibre network outage.</p>}
       {error && data && <p className="sample">Showing the last list received; the API is not answering right now ({error}).</p>}
       {loading && !data && <p className="muted">Loading…</p>}
-      <Panel title="Signatures per promise · 7 days" right={<Link href="/methodology/#signing">what this is</Link>}>
+      <Panel title="Signatures per promise · 24 hours" right={<Link href="/methodology/#signing">what this is</Link>}>
         <p className="sub">Share of stake that signed each settled promise.</p>
         <SigningHistogram data={sig.data} />
       </Panel>
