@@ -54,14 +54,14 @@ function Page() {
         <WindowSwitch value={win} onChange={setWin} />
       </div>
 
-      <section className="card">
+      <section className="card kvcard">
         <dl className="kv">
           <dt>account</dt><dd className="mono">{p.publisher}</dd>
           <dt>escrow</dt><dd className="mono">{p.escrow ? (p.escrow.found ? <>{tia(p.escrow.balance_utia)} <span className="muted">· {tia(p.escrow.available_utia)} available</span></> : <span className="muted">no escrow account on chain</span>) : <span className="muted">not polled yet</span>}</dd>
           <dt>pending withdrawals</dt><dd className="mono">{pendingLine(p.pending_withdrawals)}</dd>
           <dt>first seen</dt><dd className="mono">{utc(p.first_seen_at)} <span className="muted">({ago(p.first_seen_at)})</span></dd>
           <dt>last seen</dt><dd className="mono">{utc(p.last_seen_at)} <span className="muted">({ago(p.last_seen_at)})</span></dd>
-          {p.label && <dt>label</dt>}{p.label && <dd>{p.label}{p.label_source && <span className="muted"> · {p.label_source}; the chain has no name for an account, so this is the operator&rsquo;s word</span>}</dd>}
+          {p.label && <dt>label</dt>}{p.label && <dd>{p.label}{p.label_source && <span className="muted"> · {p.label_source}</span>}</dd>}
         </dl>
       </section>
 

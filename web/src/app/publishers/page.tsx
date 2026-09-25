@@ -146,7 +146,7 @@ function Page() {
         );
       })()}
 
-      <Panel title="Publishers" right={`${pubs.length} with an escrow movement in this window · sorted by fees`}>
+      <Panel title="Publishers" right={`${pubs.length} · by fees`}>
       <div className="tablewrap">
         <table>
           <thead><tr>
