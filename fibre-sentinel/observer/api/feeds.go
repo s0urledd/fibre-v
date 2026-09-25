@@ -356,9 +356,9 @@ func (s *Server) validatorFeed(ctx context.Context, addr, authority string, now 
 	}
 
 	// The first FAULT on record.
-	if fe, ok, err := s.firstFault(ctx, addr); err != nil {
+	if ffs, err := s.firstFaults(ctx, addr, now); err != nil {
 		return nil, 0, err
-	} else if ok {
+	} else if fe, ok := ffs[addr]; ok {
 		fe.ID, fe.Link = id("first-fault"), "/blob/?hash="+fe.Link
 		fe.Title = name + ": " + fe.Title
 		es = append(es, fe)
@@ -554,52 +554,92 @@ func (s *Server) monikers(ctx context.Context) (map[string]string, error) {
 	return out, rows.Err()
 }
 
-// firstFault finds the first FAULT probe of addr on record, skipping any
-// taken at a schedule point the correlated-failure guard sets aside (the
-// same rule every rate applies). The returned entry has no ID; Link holds
-// the promise hash for the caller to turn into a URL.
-func (s *Server) firstFault(ctx context.Context, addr string) (feed.Entry, bool, error) {
+// firstFaults finds each validator's first FAULT probe on record (addr's
+// alone when addr is set), skipping any taken at a schedule point the
+// correlated-failure guard sets aside (the same rule every rate applies).
+// The returned entries have no ID; Link holds the promise hash for the
+// caller to turn into a URL.
+//
+// The entry ID has no time in it, so it must name the same probe for good:
+//
+//   - a FAULT still settling (verdict.FaultSettling) is left out: the rest
+//     of its point's cohort or a params range can still withdraw it;
+//   - every candidate is walked, not the first few: a validator whose early
+//     faults all fell at suspect points still has a first genuine one;
+//   - a tie on started_at goes to the lower promise hash, not to row order;
+//   - a validator with a fault in probe_daily on an earlier day had its
+//     first fault already, pruned from the raw rows since, and gets none.
+//
+// Suspect points are tallied once, over the points that hold a FAULT, not
+// once per candidate.
+func (s *Server) firstFaults(ctx context.Context, addr string, now time.Time) (map[string]feed.Entry, error) {
 	db := s.st.DB()
-	rows, err := db.QueryContext(ctx, `SELECT promise_hash, scheduled_at, started_at, schedule_label FROM probes
-		WHERE validator_address = ? AND assigned = 1 AND `+rollup.EffectiveClass("")+` = 'FAULT'
-		ORDER BY started_at LIMIT 20`, addr)
-	if err != nil {
-		return feed.Entry{}, false, err
+	faultWhere := `assigned = 1 AND ` + rollup.EffectiveClass("") + ` = 'FAULT'`
+	var args []any
+	if addr != "" {
+		faultWhere += ` AND validator_address = ?`
+		args = append(args, addr)
 	}
-	type cand struct{ hash, sched, at, label string }
-	var cs []cand
-	for rows.Next() {
-		var c cand
-		if err := rows.Scan(&c.hash, &c.sched, &c.at, &c.label); err != nil {
-			rows.Close()
-			return feed.Entry{}, false, err
+	pts, err := rollup.SuspectPoints(ctx, db, `scheduled_at IN (SELECT scheduled_at FROM probes WHERE `+faultWhere+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	suspect := map[string]bool{}
+	for _, p := range pts {
+		if p.Reason() != "" {
+			suspect[p.At] = true
 		}
-		cs = append(cs, c)
+	}
+	q := `SELECT validator_address, MIN(day) FROM probe_daily WHERE faults > 0`
+	if addr != "" {
+		q += ` AND validator_address = ?`
+	}
+	rows, err := db.QueryContext(ctx, q+` GROUP BY validator_address`, args...)
+	if err != nil {
+		return nil, err
+	}
+	rolled := map[string]string{}
+	for rows.Next() {
+		var a, d string
+		if err := rows.Scan(&a, &d); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rolled[a] = d
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return feed.Entry{}, false, err
+		return nil, err
 	}
-	for _, c := range cs {
-		pts, err := rollup.SuspectPoints(ctx, db, `scheduled_at = ?`, c.sched)
-		if err != nil {
-			return feed.Entry{}, false, err
+
+	rows, err = db.QueryContext(ctx, `SELECT validator_address, promise_hash, scheduled_at, started_at, schedule_label FROM probes
+		WHERE `+faultWhere+` AND started_at <= ?
+		ORDER BY validator_address, started_at, promise_hash`, append(args, provisionalCutoff(now))...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]feed.Entry{}
+	seen := map[string]bool{}
+	for rows.Next() {
+		var a, hash, sched, at, label string
+		if err := rows.Scan(&a, &hash, &sched, &at, &label); err != nil {
+			return nil, err
 		}
-		suspect := false
-		for _, p := range pts {
-			if p.Reason() != "" {
-				suspect = true
-			}
-		}
-		if suspect {
+		if seen[a] || suspect[sched] {
 			continue
 		}
-		return feed.Entry{Kind: "first-fault", At: parseTS(c.at), Link: c.hash,
+		seen[a] = true
+		t := parseTS(at)
+		if d, ok := rolled[a]; ok && d < t.Format("2006-01-02") {
+			continue
+		}
+		out[a] = feed.Entry{Kind: "first-fault", At: t, Link: hash,
 			Title: "first FAULT probe on record",
 			Summary: fmt.Sprintf("At the %s point (%s) the validator was reached and did not hand over rows of blob %s that it signed for. "+
-				"One probe; an obligation is decided at the end of its retention window.", c.label, c.sched, c.hash)}, true, nil
+				"One probe; an obligation is decided at the end of its retention window.", label, sched, hash)}
 	}
-	return feed.Entry{}, false, nil
+	return out, rows.Err()
 }
 
 // networkFeed builds /v1/feed.atom.
@@ -624,33 +664,17 @@ func (s *Server) networkFeed(ctx context.Context, authority string, now time.Tim
 	}
 	es = append(es, bl...)
 
-	// Each validator's first FAULT, when it falls in the feed's span.
+	// Each validator's first FAULT, when it falls in the feed's span. The
+	// span is applied to the first genuine fault, not to the first raw
+	// one: a validator whose earliest FAULT fell at a suspect point before
+	// the span still has its first fault inside it.
 	cut := store.TS(now.Add(-feed.MaxAge))
-	rows, err := s.st.DB().QueryContext(ctx, `SELECT validator_address FROM probes
-		WHERE assigned = 1 AND `+rollup.EffectiveClass("")+` = 'FAULT'
-		GROUP BY validator_address HAVING MIN(started_at) >= ?`, cut)
+	ffs, err := s.firstFaults(ctx, "", now)
 	if err != nil {
 		return nil, err
 	}
-	var addrs []string
-	for rows.Next() {
-		var a string
-		if err := rows.Scan(&a); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		addrs = append(addrs, a)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for _, a := range addrs {
-		fe, ok, err := s.firstFault(ctx, a)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
+	for a, fe := range ffs {
+		if store.TS(fe.At) < cut {
 			continue
 		}
 		nm := names[a]
