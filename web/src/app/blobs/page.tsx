@@ -13,6 +13,9 @@ import VolumeChart from "@/components/VolumeChart";
 // use, so "degraded" on this page means what "held out" means everywhere else.
 function recon(b: Blob): { word: string; tier: Tier; title: string } {
   const r = b.reconstructable;
+  if (b.sampled_out && (!r || r.status === "unknown")) {
+    return { word: "sampled out", tier: "gap", title: `The load policy drew this blob out of its sample at p=${b.sampled_out.p.toFixed(2)}: not probed at any point, recorded once.` };
+  }
   if (!r || r.status === "unknown") {
     return b.probe_count === 0
       ? { word: "not probed", tier: "gap", title: "No probe has run for this blob." }

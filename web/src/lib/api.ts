@@ -507,6 +507,26 @@ export type Blob = {
   probe_count: number;
   classes: ClassCounts;
   reconstructable: Reconstruct | null;
+  /** set when the load policy drew this blob out of its sample: recorded once, not probed at any point */
+  sampled_out?: SampledOut;
+};
+
+/**
+ * One publication the load policy sampled out: the draw that decided it,
+ * recorded once. It stands for a not-probed row per assigned validator per
+ * point (rows), which probe_count and classes still count.
+ */
+export type SampledOut = {
+  vantage: string;
+  promise_hash: string;
+  decided_at: string;
+  p: number;
+  binding: string;
+  day_commitment: string;
+  reason: string;
+  validators: number;
+  points: number;
+  rows: number;
 };
 
 /**

@@ -30,6 +30,12 @@ import (
 // the row lower bound, then any suspect-point exclusion and caller filter
 // appended to the WHERE.
 //
+// The rows are obligation_rows: the stored probes plus the NOT_PROBED rows a
+// sampled-out publication's one decision stands for (store/sampledout.go),
+// so an assigned, attested validator of a publication drawn out of the
+// sample is an obligation unobserved_not_probed, as it was when the prober
+// wrote those rows out one by one.
+//
 // late_healthy is the count of HEALTHY readings in the tail of the promise's
 // own retention window (verdict.EndSegmentDivisor). Served needs one: an
 // early HEALTHY probe says the shard was there minutes after settlement, not
@@ -74,7 +80,7 @@ const ObligationBuckets = `SELECT validator_address, promise_hash,
 			       pr.scheduled_at, pb.settlement_time,
 			       ROW_NUMBER() OVER (PARTITION BY pr.validator_address, pr.promise_hash
 			                          ORDER BY (pr.classification IN ('NOT_PROBED','PROBE_ERROR')), pr.scheduled_at DESC, pr.started_at DESC) AS rn
-			FROM probes pr JOIN publications pb ON pb.promise_hash = pr.promise_hash
+			FROM obligation_rows pr JOIN publications pb ON pb.promise_hash = pr.promise_hash
 			WHERE pb.settlement_time >= ? AND pb.settlement_time <= ? AND pr.started_at <= ? AND pr.started_at >= ?
 			  AND pr.assigned = 1 AND pr.phase = 'in_window' AND pr.attested = 1`
 
@@ -231,13 +237,19 @@ const DeadlineDerivedSQL = `('HEALTHY','FAULT')`
 // could not be in the numerator whatever happened must not dilute the
 // share (see GuardSilentSQL). Rows counts every row at the point, because the
 // exclusion removes them all. The Go twin is verdict.SuspectPoints.
+//
+// The rows are probe_rows, aliased probes for the callers that bound it
+// by alias: a sampled-out publication's rows are NOT_PROBED, silent by
+// GuardSilentSQL, so they never make a point suspect or keep one from
+// being; they are among the rows the exclusion removes, and Rows counts
+// them as it did when they were stored.
 func SuspectPoints(ctx context.Context, db Querier, where string, args ...any) ([]Point, error) {
 	cls := EffectiveClass("")
 	rows, err := db.QueryContext(ctx, `SELECT scheduled_at, schedule_label,
 			COUNT(DISTINCT CASE WHEN `+cls+` = 'UNREACHABLE' THEN validator_address END),
 			COUNT(DISTINCT CASE WHEN `+cls+` = 'FAULT' THEN validator_address END),
 			COUNT(DISTINCT CASE WHEN `+cls+` NOT IN `+GuardSilentSQL+` THEN validator_address END), COUNT(*)
-		FROM probes
+		FROM probe_rows probes
 		WHERE `+where+` AND assigned = 1 AND phase = 'in_window'
 		GROUP BY scheduled_at HAVING COUNT(DISTINCT CASE WHEN `+cls+` NOT IN `+GuardSilentSQL+` THEN validator_address END) > 1
 		ORDER BY scheduled_at`, args...)
@@ -430,6 +442,15 @@ func Run(ctx context.Context, st *store.Store, now time.Time, cfg Config) (Repor
 				k, _ := res.RowsAffected()
 				n += k
 			}
+			// A sampled-out publication's rows are its decision, started at
+			// decided_at: pruned with the day its rows would have been,
+			// points and all (ON DELETE CASCADE).
+			res, err := db.ExecContext(ctx, `DELETE FROM sampling_decisions WHERE decided_at >= ? AND decided_at <= ?`, lo, hi)
+			if err != nil {
+				return rep, fmt.Errorf("prune sampling_decisions %s: %w", from.Format(dayLayout), err)
+			}
+			k, _ := res.RowsAffected()
+			n += k
 			rep.PrunedRows += n
 			rep.PrunedDays = append(rep.PrunedDays, from.Format(dayLayout))
 			from = from.Add(24 * time.Hour)
@@ -512,6 +533,7 @@ func firstRowDay(ctx context.Context, db *sql.DB) (time.Time, bool, error) {
 	var first sql.NullString
 	if err := db.QueryRowContext(ctx, `SELECT MIN(t) FROM (
 			SELECT MIN(started_at) AS t FROM probes
+			UNION ALL SELECT MIN(decided_at) FROM sampling_decisions
 			UNION ALL SELECT MIN(started_at) FROM reachability
 			UNION ALL SELECT MIN(settlement_time) FROM publications)`).Scan(&first); err != nil {
 		return time.Time{}, false, err
@@ -609,7 +631,7 @@ func rollDay(ctx context.Context, db *sql.DB, d, now time.Time, vantage string) 
 	}
 	rows, err = tx.QueryContext(ctx, `SELECT validator_address, COUNT(*),
 			COALESCE(SUM(classification IN ('NOT_PROBED','PROBE_ERROR')), 0)
-		FROM probes WHERE started_at >= ? AND started_at <= ? GROUP BY validator_address`, lo, hi)
+		FROM probe_rows WHERE started_at >= ? AND started_at <= ? GROUP BY validator_address`, lo, hi)
 	if err != nil {
 		return 0, err
 	}
@@ -640,7 +662,7 @@ func rollDay(ctx context.Context, db *sql.DB, d, now time.Time, vantage string) 
 		get(a).faults = n
 	}
 	rows.Close()
-	rows, err = tx.QueryContext(ctx, `SELECT validator_address, `+EffectiveClass("")+`, COUNT(*) FROM probes
+	rows, err = tx.QueryContext(ctx, `SELECT validator_address, `+EffectiveClass("")+`, COUNT(*) FROM probe_rows
 		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+excl+` GROUP BY validator_address, `+EffectiveClass(""),
 		append([]any{lo, hi}, exclArgs...)...)
 	if err != nil {
@@ -663,7 +685,7 @@ func rollDay(ctx context.Context, db *sql.DB, d, now time.Time, vantage string) 
 			COALESCE(SUM(CASE WHEN attested = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested IS NULL THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+excl+` GROUP BY validator_address`,
+		FROM probe_rows WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+excl+` GROUP BY validator_address`,
 		append([]any{lo, hi}, exclArgs...)...)
 	if err != nil {
 		return 0, err

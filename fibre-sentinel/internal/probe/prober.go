@@ -191,6 +191,11 @@ type Prober struct {
 	scanned  scannedMark
 	resolver *Resolver
 	store    *MeasurementStore
+	// sampled is the record of publications the load policy drew out of
+	// the sample (sampledout.go): one line each instead of a NOT_PROBED row
+	// per validator per point. nil in tests that build a Prober by hand,
+	// which then write the rows as before.
+	sampled  *SampledOutStore
 	feed     *pubFeed
 	registry *hostRegistry
 	chainID  string
@@ -234,7 +239,13 @@ func New(cfg Config, log *scan.Logger) (*Prober, error) {
 	if err != nil {
 		return nil, err
 	}
+	so, err := OpenSampledOutStore(cfg.DataDir)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
 	return &Prober{
+		sampled:     so,
 		observer:    ObserverInfo{Build: status.BuildRevision(), AssignPin: assign.PinnedCelestiaAppCommit},
 		cfg:         cfg,
 		log:         log,
@@ -286,6 +297,9 @@ func (p *Prober) Run(parent context.Context) error {
 		defer cancel()
 	}
 	defer p.store.Close()
+	if p.sampled != nil {
+		defer p.sampled.Close()
+	}
 	if p.requests != nil {
 		defer p.requests.close()
 	}
@@ -359,9 +373,7 @@ func (p *Prober) Run(parent context.Context) error {
 		for _, mj := range missed {
 			p.recordNotProbed(ctx, mj, "scheduled point elapsed before the prober ran it")
 		}
-		for _, d := range dropped {
-			p.recordNotProbed(ctx, d.job, d.reason)
-		}
+		p.recordDropped(ctx, dropped)
 		if len(missed)+len(dropped) > 0 {
 			if err := p.store.Sync(); err != nil {
 				p.log.Fatalf("sync measurements: %v", err)
@@ -748,6 +760,13 @@ func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, miss
 	}
 	for _, pub := range pubs {
 		if !p.probeable(pub) {
+			continue
+		}
+		if p.sampled != nil && p.sampled.Has(p.cfg.Vantage, pub.PromiseHash) {
+			// Drawn out of the sample and recorded so: nothing is left to
+			// write for it, and putting it to the policy again after a
+			// restart would draw against today's load.
+			finished = append(finished, pub.PromiseHash)
 			continue
 		}
 		points := ScheduleFor(pub, p.cfg.Schedule)
@@ -1327,6 +1346,78 @@ func hostChangeNote(t Target, hp *HostProbe) string {
 		return note + "; the host registered at settlement still serves the exact rows, so the data was left behind, not lost"
 	}
 	return note + "; the host registered at settlement answered " + string(hp.Outcome)
+}
+
+// recordDropped records the slots the policy refused. A publication the
+// sampler drew out whole is recorded once, as a SampledOut decision naming
+// its points; the rows it stands for are the ones recordNotProbed would have
+// written, and every reader expands it to them (SampledOut.Expand, the
+// store's sampled_out_rows). Anything else refused, and every refusal when
+// the decision cannot stand for its rows, keeps the per-target rows:
+//   - with IncludeUnassigned the targets include validators with no rows,
+//     which the publication record the decision expands against does not
+//     list;
+//   - a refusal whose reason is not a sampling draw is not a decision
+//     about the whole publication.
+func (p *Prober) recordDropped(ctx context.Context, dropped []skipped) {
+	type group struct {
+		pub    scan.Publication
+		reason string
+		points []SchedulePoint
+	}
+	var order []string
+	byPub := map[string]*group{}
+	for _, d := range dropped {
+		if p.sampled == nil || p.cfg.IncludeUnassigned || !strings.HasPrefix(d.reason, SampledOutReasonPrefix) {
+			p.recordNotProbed(ctx, d.job, d.reason)
+			continue
+		}
+		g, ok := byPub[d.job.pub.PromiseHash]
+		if !ok {
+			g = &group{pub: d.job.pub, reason: d.reason}
+			byPub[d.job.pub.PromiseHash] = g
+			order = append(order, d.job.pub.PromiseHash)
+		}
+		g.points = append(g.points, d.job.point)
+	}
+	for _, h := range order {
+		g := byPub[h]
+		p.recordSampledOut(g.pub, g.points, g.reason)
+	}
+}
+
+// recordSampledOut writes the one decision a sampled-out publication is
+// recorded with, and marks its points complete.
+func (p *Prober) recordSampledOut(pub scan.Publication, points []SchedulePoint, reason string) {
+	d := SampledOut{
+		SchemaVersion: SampledOutSchemaVersion, Kind: SampledOutKind, Vantage: p.cfg.Vantage,
+		PromiseHash: pub.PromiseHash, Commitment: pub.Promise.Commitment, BlobVersion: pub.Promise.BlobVersion,
+		SettlementTime: pub.SettlementTime.UTC(), MustServeUntil: pub.MustServeUntil,
+		ValidatorSetHeight: pub.Assignment.ValidatorSetHeight,
+		DecidedAt:          time.Now().UTC(), Reason: reason,
+	}
+	if p.cfg.Policy != nil {
+		prob, binding, commitment := p.cfg.Policy.SamplingFor(pub)
+		d.Sampling = SamplingDecision{P: prob, Binding: binding, DayCommitment: commitment}
+	}
+	for _, pt := range points {
+		d.Points = append(d.Points, SampledOutPoint{Label: pt.Label, At: pt.At.UTC(), Phase: PhaseAt(pt.At, pub, p.cfg.Schedule)})
+	}
+	for _, v := range pub.Assignment.Validators {
+		if v.RowCount > 0 {
+			d.Validators++
+		}
+	}
+	obs := p.observerInfo()
+	d.Observer = &obs
+	if err := p.sampled.Append(d); err != nil {
+		p.log.Fatalf("append sampling decision: %v", err)
+	}
+	for _, pt := range points {
+		p.complete[pointKey(p.cfg.Vantage, pub.PromiseHash, pt.At)] = true
+	}
+	p.log.Printf("SAMPLED-OUT %s p=%.3f binding=%s: %d points x %d validators recorded as one decision",
+		short(pub.PromiseHash), d.Sampling.P, d.Sampling.Binding, len(d.Points), d.Validators)
 }
 
 // recordNotProbed marks one (publication, point) slot NOT_PROBED for every

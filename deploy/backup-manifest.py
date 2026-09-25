@@ -48,6 +48,9 @@ import time
 # publications.jsonl must already hold once both cuts are taken.
 RECORD_FILES = [
     "measurements.jsonl",
+    # a publication the prober's load policy sampled out, once (it names a
+    # promise, as a measurement does)
+    "sampling_decisions.jsonl",
     "reachability.jsonl",
     "amendments.jsonl",
     "corrections.jsonl",

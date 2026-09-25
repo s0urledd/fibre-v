@@ -171,6 +171,17 @@ func (c *Corrector) sweepStaleRows(ctx context.Context, now time.Time) (int, err
 		}
 		moved++
 	}
+	// Decisions recorded against the withdrawn deadline, the same way.
+	pts, err := c.st.StaleSampledOutPoints(ctx, maxSweep)
+	if err != nil {
+		return moved, err
+	}
+	n, err := c.correctSampledOut(pts, "", time.Time{}, now,
+		" (graded against the deadline this publication carries after its params range was verified; the prober still schedules from the deadline on the append-only record)")
+	moved += n
+	if err != nil {
+		return moved, err
+	}
 	if unreached > 0 {
 		log.Printf("params corrections: %d row(s) arriving against a withdrawn deadline could not be re-derived and stay withheld", unreached)
 	}
@@ -293,5 +304,52 @@ func (c *Corrector) correctRows(ctx context.Context, p store.PublicationInRange,
 		}
 		moved++
 	}
-	return moved, unreached, nil
+	pts, err := c.st.SampledOutPointsOf(ctx, p.PromiseHash)
+	if err != nil {
+		return moved, unreached, err
+	}
+	n, err := c.correctSampledOut(pts, u.ID, corrected, now,
+		" (re-graded against the deadline the params read at every height of "+u.ID+" support)")
+	return moved + n, unreached, err
+}
+
+// correctSampledOut re-grades the points of sampled-out decisions against
+// deadline, as correctRows re-grades stored rows: a decision stands for a
+// NOT_PROBED row per assigned validator at each point, and those rows' phase
+// and deadline move the way a stored row's would. A point already carrying
+// what the deadline gives is left alone, so a pass that finds nothing to do
+// writes nothing.
+func (c *Corrector) correctSampledOut(pts []store.SampledOutPoint, uncertaintyID string, deadline, now time.Time, why string) (int, error) {
+	moved := 0
+	for _, pt := range pts {
+		deadline := deadline
+		id := uncertaintyID
+		if !pt.Deadline.IsZero() {
+			deadline, id = pt.Deadline, pt.UncertaintyID
+		}
+		row := probe.Measurement{SchemaVersion: probe.MeasurementSchemaVersion, Assigned: true,
+			ScheduledAt: pt.ScheduledAt, StartedAt: pt.ScheduledAt, Outcome: probe.OutcomeMissed, Classification: probe.ClassNotProbed}
+		got := row.RecomputeWith(c.pruneTol, deadline)
+		if string(got.Phase) == pt.Phase && pt.MustServeUntil.Equal(deadline) {
+			continue
+		}
+		sc := store.Correction{
+			SchemaVersion: store.CorrectionSchemaVersion, Kind: store.CorrectionSampledOutPoint,
+			UncertaintyID: id, PromiseHash: pt.PromiseHash, Vantage: pt.Vantage, DedupeKey: pt.Key(),
+			ScheduledAt: pt.ScheduledAt, FromPhase: pt.Phase, ToPhase: string(got.Phase),
+			FromClassification: string(probe.ClassNotProbed), ToClassification: string(probe.ClassNotProbed),
+			FromMustServeUntil: pt.MustServeUntil, ToMustServeUntil: deadline,
+			PruneToleranceS: int64(c.pruneTol / time.Second),
+			Reason:          "sampled out: every assigned validator's row at this point" + why,
+			JudgedAt:        now.UTC(),
+		}
+		if err := c.append(sc); err != nil {
+			return moved, err
+		}
+		if _, err := c.st.ApplySampledOutCorrection(sc); err != nil {
+			return moved, err
+		}
+		moved++
+	}
+	return moved, nil
 }

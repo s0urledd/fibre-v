@@ -906,7 +906,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	pr, _ := s.latestRun(ctx, "prober", now)
 	var lastProbe *string
 	var lp sql.NullString
-	if err := s.st.DB().QueryRowContext(ctx, `SELECT MAX(started_at) FROM probes`).Scan(&lp); err == nil && lp.Valid {
+	if err := s.st.DB().QueryRowContext(ctx, `SELECT MAX(t) FROM (SELECT MAX(started_at) AS t FROM probes UNION ALL SELECT MAX(decided_at) FROM sampling_decisions)`).Scan(&lp); err == nil && lp.Valid {
 		lastProbe = &lp.String
 	}
 	var pinned string
@@ -1221,7 +1221,7 @@ func (s *Server) classCountsWhere(ctx context.Context, where string, args ...any
 	// observer cannot vouch for publishes no serve verdict. It is an
 	// override on the same row, so the tally still covers exactly the
 	// population `where` selects and coverage.den is unchanged.
-	rows, err := s.st.DB().QueryContext(ctx, `SELECT `+rollup.EffectiveClass("")+`, COUNT(*) FROM probes WHERE `+where+` GROUP BY `+rollup.EffectiveClass(""), args...)
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT `+rollup.EffectiveClass("")+`, COUNT(*) FROM probe_rows WHERE `+where+` GROUP BY `+rollup.EffectiveClass(""), args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1694,7 +1694,7 @@ func (s *Server) rateByPoint(ctx context.Context, where string, args ...any) ([]
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT schedule_label,
 			COALESCE(SUM(CASE WHEN `+rollup.EffectiveClass("")+` = 'HEALTHY' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN `+rollup.EffectiveClass("")+` = 'FAULT' THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE `+where+` GROUP BY schedule_label ORDER BY schedule_label`, args...)
+		FROM probe_rows WHERE `+where+` GROUP BY schedule_label ORDER BY schedule_label`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1753,7 +1753,7 @@ func (s *Server) attestationWhere(ctx context.Context, where string, args ...any
 			COALESCE(SUM(CASE WHEN attested = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested IS NULL THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE `+where, args...).Scan(&st.Attested, &st.Unattested, &st.Unknown)
+		FROM probe_rows WHERE `+where, args...).Scan(&st.Attested, &st.Unattested, &st.Unknown)
 	if err != nil {
 		return attestationStats{}, err
 	}
@@ -1767,7 +1767,7 @@ func (s *Server) attestationWhere(ctx context.Context, where string, args ...any
 			COALESCE(SUM(CASE WHEN a = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN a IS NULL THEN 1 ELSE 0 END), 0)
 		FROM (
-			SELECT MAX(attested) AS a FROM probes WHERE `+where+`
+			SELECT MAX(attested) AS a FROM probe_rows WHERE `+where+`
 			GROUP BY validator_address, promise_hash
 		)`, args...).Scan(&st.AttestedBlobs, &st.UnattestedBlobs, &st.UnknownBlobs)
 	if err != nil {
@@ -1901,7 +1901,7 @@ func (s *Server) computeNetwork(ctx context.Context, win Window, ex excludeSet, 
 	} else {
 		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM endpoints WHERE closed_at IS NULL`).Scan(&resp.RegisteredEndpoints)
 	}
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT validator_address) FROM probes WHERE started_at >= ? AND started_at <= ?`+exv,
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT validator_address) FROM probe_rows WHERE started_at >= ? AND started_at <= ?`+exv,
 		ex.args(win.startArg(), win.endArg())...).Scan(&resp.ValidatorsProbed)
 
 	// The points this observer does not trust itself at come first: every
@@ -1946,11 +1946,11 @@ func (s *Server) computeNetwork(ctx context.Context, win Window, ex excludeSet, 
 		`started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+ss.clause("scheduled_at")+exv, popArgs...); err != nil {
 		return nil, err
 	}
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ?`+exv, ex.args(win.startArg(), win.endArg())...).Scan(&resp.ProbeCount)
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`+exv, ex.args(win.startArg(), win.endArg())...).Scan(&resp.Gaps)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probe_rows WHERE started_at >= ? AND started_at <= ?`+exv, ex.args(win.startArg(), win.endArg())...).Scan(&resp.ProbeCount)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM probe_rows WHERE started_at >= ? AND started_at <= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`+exv, ex.args(win.startArg(), win.endArg())...).Scan(&resp.Gaps)
 	resp.GapsByOutcome = map[string]int64{}
 	if grows, gerr := db.QueryContext(ctx,
-		`SELECT outcome, COUNT(*) FROM probes WHERE started_at >= ? AND started_at <= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`+exv+` GROUP BY outcome`,
+		`SELECT outcome, COUNT(*) FROM probe_rows WHERE started_at >= ? AND started_at <= ? AND classification IN ('NOT_PROBED','PROBE_ERROR')`+exv+` GROUP BY outcome`,
 		ex.args(win.startArg(), win.endArg())...); gerr == nil {
 		for grows.Next() {
 			var o string
@@ -2057,7 +2057,7 @@ func (s *Server) computeNetwork(ctx context.Context, win Window, ex excludeSet, 
 		for a := range rolled.ProbesByVal {
 			seen[a] = true
 		}
-		if vrows, err := db.QueryContext(ctx, `SELECT DISTINCT validator_address FROM probes WHERE started_at >= ? AND started_at <= ?`+exv, ex.args(win.startArg(), win.endArg())...); err == nil {
+		if vrows, err := db.QueryContext(ctx, `SELECT DISTINCT validator_address FROM probe_rows WHERE started_at >= ? AND started_at <= ?`+exv, ex.args(win.startArg(), win.endArg())...); err == nil {
 			for vrows.Next() {
 				var a string
 				if vrows.Scan(&a) == nil {
@@ -2745,7 +2745,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		return nil, err
 	}
 	// classes per validator in window
-	rows, err = db.QueryContext(ctx, `SELECT validator_address, `+cls+`, COUNT(*) FROM probes
+	rows, err = db.QueryContext(ctx, `SELECT validator_address, `+cls+`, COUNT(*) FROM probe_rows
 		WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address, `+cls, vargs(winArgs...)...)
 	if err != nil {
@@ -2770,7 +2770,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	rows, err = db.QueryContext(ctx, `SELECT validator_address, schedule_label,
 			COALESCE(SUM(CASE WHEN `+cls+` = 'HEALTHY' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN `+cls+` = 'FAULT' THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
+		FROM probe_rows WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address, schedule_label
 		ORDER BY validator_address, schedule_label`, vargs(winArgs...)...)
 	if err != nil {
@@ -2867,7 +2867,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN attested = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN attested IS NULL THEN 1 ELSE 0 END), 0)
-		FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
+		FROM probe_rows WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+sus+vfilter("validator_address")+`
 		GROUP BY validator_address`, vargs(winArgs...)...)
 	if err != nil {
 		return nil, err
@@ -2892,7 +2892,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			COALESCE(SUM(CASE WHEN a IS NULL THEN 1 ELSE 0 END), 0)
 		FROM (
 			SELECT validator_address AS validator_address, MAX(attested) AS a
-			FROM probes WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
+			FROM probe_rows WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'`+vfilter("validator_address")+`
 			GROUP BY validator_address, promise_hash
 		) GROUP BY validator_address`, vargs(win.startArg(), win.endArg())...)
 	if err != nil {
@@ -2913,7 +2913,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = db.QueryContext(ctx, `SELECT validator_address, COUNT(*), MAX(started_at) FROM probes
+	rows, err = db.QueryContext(ctx, `SELECT validator_address, COUNT(*), MAX(started_at) FROM probe_rows
 		WHERE started_at >= ? AND started_at <= ?`+vfilter("validator_address")+` GROUP BY validator_address`, vargs(win.startArg(), win.endArg())...)
 	if err != nil {
 		return nil, err
@@ -3423,6 +3423,19 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 		return 0, nil, err
 	}
 	probes, moreProbes := trim(probes, 50)
+	// The publications assigned to it that the load policy drew out of the
+	// sample: one decision each, where recent_probes used to carry a
+	// NOT_PROBED row per point for every one of them.
+	soWhere, soArgs := `EXISTS (SELECT 1 FROM assignments a WHERE a.promise_hash = d.promise_hash AND a.validator_address = ? AND a.row_count > 0)`, []any{addr}
+	if win.AsOf {
+		soWhere += ` AND d.decided_at <= ?`
+		soArgs = append(soArgs, win.endArg())
+	}
+	sampled, err := s.st.SampledOutDecisions(ctx, soWhere, 51, soArgs...)
+	if err != nil {
+		return 0, nil, err
+	}
+	sampled, moreSampled := trim(sampled, 50)
 	out := map[string]any{
 		"window":                      win,
 		"record_through":              s.recordThrough(ctx),
@@ -3434,6 +3447,7 @@ func (s *Server) validatorDetail(ctx context.Context, addr string, win Window, n
 		"serve_rate_excluded_classes": excludedFromRate,
 		"vantage":                     s.vantage,
 	}
+	out["recent_sampled_out"], out["recent_sampled_out_truncated"] = sampled, moreSampled
 	if win.AsOf {
 		out["as_of_note"] = AsOfNote
 	}
@@ -3484,6 +3498,11 @@ type blobRow struct {
 	ProbeCount      int64        `json:"probe_count"`
 	Classes         classCounts  `json:"classes"`
 	Reconstructable *reconstruct `json:"reconstructable"`
+	// SampledOut is set when the load policy drew this publication out of
+	// the sample: the draw it was decided by, recorded once. probe_count
+	// and classes still count the NOT_PROBED rows it stands for (one per
+	// assigned validator per point), as every figure does.
+	SampledOut *store.SampledOutDecision `json:"sampled_out,omitempty"`
 	// Charge is the fee side of this promise from the payments table: what
 	// the module charged, and whether the promise settled or timed out. Null
 	// for a publication whose payment was not recorded (ingested before the
@@ -3562,6 +3581,13 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 	}
 	for i := range out {
 		out[i].Charge = charges[out[i].PromiseHash]
+	}
+	sampledOut, err := s.sampledOutFor(ctx, hashes)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].SampledOut = sampledOut[out[i].PromiseHash]
 	}
 	// Per blob, deliberately. Batching both of these was tried and measured on
 	// a store with 2,200 publications: the class tally got about 8% slower,
@@ -4011,6 +4037,10 @@ func (s *Server) handleSampling(w http.ResponseWriter, r *http.Request) {
 		}
 		srows.Close()
 	}
+	// A sampled-out publication is one sampling_decisions row, standing for
+	// NOT_PROBED rows that all carry its draw and start at decided_at; it
+	// joins the probe rows here as one row of the same shape, which is all
+	// the per-promise counts below need of it.
 	rows, err := s.st.DB().QueryContext(ctx, `SELECT
 			COALESCE(sampling_commitment, '') AS c,
 			COALESCE(sampling_binding, '') AS b,
@@ -4018,8 +4048,14 @@ func (s *Server) handleSampling(w http.ResponseWriter, r *http.Request) {
 			COUNT(DISTINCT promise_hash),
 			COUNT(DISTINCT CASE WHEN classification != 'NOT_PROBED' THEN promise_hash END),
 			COUNT(DISTINCT CASE WHEN classification = 'NOT_PROBED' AND classification_reason LIKE 'budget:%' THEN promise_hash END)
-		FROM probes WHERE started_at >= ? AND started_at <= ?
-		GROUP BY c, b, p ORDER BY c, p`, win.startArg(), win.endArg())
+		FROM (
+			SELECT sampling_commitment, sampling_binding, sampling_p, promise_hash, classification, classification_reason
+			FROM probes WHERE started_at >= ? AND started_at <= ?
+			UNION ALL
+			SELECT sampling_commitment, sampling_binding, sampling_p, promise_hash, 'NOT_PROBED', reason
+			FROM sampling_decisions WHERE decided_at >= ? AND decided_at <= ?
+		)
+		GROUP BY c, b, p ORDER BY c, p`, win.startArg(), win.endArg(), win.startArg(), win.endArg())
 	if err != nil {
 		s.writeInternal(w, r.URL.Path, err)
 		return
@@ -4052,7 +4088,7 @@ func (s *Server) handleSampling(w http.ResponseWriter, r *http.Request) {
 			"The prober publishes a day's secret " + policyRevealNote + " after the day ends (the row's secret field; " +
 			"the record is sampling-secrets.jsonl, also in the daily export). With it, recompute " +
 			"H(promise_hash || secret) < p * 2^64 for every MsgPayForFibre settled that day: the promise hashes that " +
-			"pass are the ones this observer should have probed, and /v1/probes says which ones it did. " +
+			"pass are the ones this observer should have probed, and /v1/probes says which ones it did (probes) and which it drew out (sampled_out). " +
 			"sentinel-recompute -sampling does this from the export.",
 		"days_listed":      len(days),
 		"secrets_revealed": revealed,
@@ -4222,6 +4258,12 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 	}
 	var conds []string
 	var args []any
+	// The same selection over the sampled-out decisions (store/sampledout.go):
+	// each stands for NOT_PROBED rows, started at decided_at, of every
+	// validator its publication assigned, at each of its points.
+	var dconds []string
+	var dargs []any
+	decisions := true
 	if v := q.Get("validator"); v != "" {
 		addr, err := s.resolveAddr(r.Context(), v)
 		if err != nil {
@@ -4229,9 +4271,12 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		conds, args = append(conds, `validator_address = ?`), append(args, addr)
+		dconds = append(dconds, `EXISTS (SELECT 1 FROM assignments a WHERE a.promise_hash = d.promise_hash AND a.validator_address = ? AND a.row_count > 0)`)
+		dargs = append(dargs, addr)
 	}
 	if b := q.Get("blob"); b != "" {
 		conds, args = append(conds, `promise_hash = ?`), append(args, strings.ToLower(b))
+		dconds, dargs = append(dconds, `d.promise_hash = ?`), append(dargs, strings.ToLower(b))
 	}
 	if since := q.Get("since"); since != "" {
 		t, err := time.Parse(time.RFC3339, since)
@@ -4240,11 +4285,13 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		conds, args = append(conds, `started_at >= ?`), append(args, store.TS(t))
+		dconds, dargs = append(dconds, `d.decided_at >= ?`), append(dargs, store.TS(t))
 	}
 	if c := q.Get("class"); c != "" {
 		// Filtered on the class the rows are published with, so ?class=FAULT
 		// never returns a row that reads RETENTION_UNVERIFIED.
 		conds, args = append(conds, rollup.EffectiveClass("")+` = ?`), append(args, strings.ToUpper(c))
+		decisions = strings.ToUpper(c) == "NOT_PROBED"
 	}
 	// at: one schedule point, exactly as vantage_health.suspect lists it, so
 	// the rows behind an incident are one link away.
@@ -4261,6 +4308,8 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		conds, args = append(conds, `scheduled_at = ?`), append(args, store.TS(t))
+		dconds = append(dconds, `EXISTS (SELECT 1 FROM sampling_decision_points pt WHERE pt.vantage = d.vantage AND pt.promise_hash = d.promise_hash AND pt.scheduled_at = ?)`)
+		dargs = append(dargs, store.TS(t))
 	}
 	// before: the upper bound that makes the list walkable. The order is
 	// started_at DESC and since is a lower bound, so without this there was
@@ -4275,6 +4324,7 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		conds, args = append(conds, `started_at < ?`), append(args, store.TS(t))
+		dconds, dargs = append(dconds, `d.decided_at < ?`), append(dargs, store.TS(t))
 	}
 	rows, err := s.probeRows(r.Context(), strings.Join(conds, " AND "), limit, args...)
 	if err != nil {
@@ -4282,7 +4332,19 @@ func (s *Server) handleProbes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, truncated := trim(rows, limit)
-	out := map[string]any{"vantage": s.vantage, "probes": rows, "limit": limit, "truncated": truncated}
+	sampled := []store.SampledOutDecision{}
+	if decisions {
+		if sampled, err = s.st.SampledOutDecisions(r.Context(), strings.Join(dconds, " AND "), limit+1, dargs...); err != nil {
+			s.writeInternal(w, r.URL.Path, err)
+			return
+		}
+	}
+	sampled, sampledTruncated := trim(sampled, limit)
+	out := map[string]any{"vantage": s.vantage, "probes": rows, "limit": limit, "truncated": truncated,
+		// Publications the load policy drew out of the sample, matching the
+		// same filters: each is one record standing for a NOT_PROBED row per
+		// assigned validator per point (rows), which probes does not repeat.
+		"sampled_out": sampled, "sampled_out_truncated": sampledTruncated}
 	if truncated && len(rows) > 0 {
 		// Where to continue from: everything strictly older than the last row
 		// returned. Paired with the same filters it walks the whole selection.

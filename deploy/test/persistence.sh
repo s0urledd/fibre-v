@@ -54,6 +54,10 @@ PY
 scanned() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("last_scanned_height", 0))' "$DATA_DIR/state.json" 2>/dev/null || echo 0; }
 counts() { sql "$1" "SELECT (SELECT COUNT(*) FROM publications), (SELECT COUNT(*) FROM probes), (SELECT COUNT(*) FROM reachability)"; }
 cursors() { sql "$1" "SELECT file, byte_offset FROM ingest_cursors ORDER BY file"; }
+# recorded <db>: the measurement lines the store holds or stands for. A
+# publication the prober wrote row by row as sampled out is one decision once
+# collapsed (source = 'rows'), standing for points x validators lines.
+recorded() { sql "$1" "SELECT (SELECT COUNT(*) FROM probes) + (SELECT COALESCE(SUM(points * validators), 0) FROM sampling_decisions WHERE source = 'rows')"; }
 distinct_keys() { # distinct_keys <dir> -> "<publications lines> <distinct promises> <dup> <measurement lines> <distinct slots> <dup>"
   python3 - "$1" <<'PY'
 import json, os, sys
@@ -139,7 +143,8 @@ else
 fi
 rc=$(counts "$TMP/observer.db"); IFS=$'\t' read -r rpub rprobe _ <<<"$rc"
 [ "$rpub" = "$pkeys" ] && pass "rebuilt publications ($rpub) == distinct promises in the cut ($pkeys)" || fail "rebuilt publications $rpub != cut $pkeys"
-[ "$rprobe" = "$mkeys" ] && pass "rebuilt probes ($rprobe) == distinct slots in the cut ($mkeys)" || fail "rebuilt probes $rprobe != cut $mkeys"
+rlines=$(recorded "$TMP/observer.db")
+[ "$rlines" = "$mkeys" ] && pass "rebuilt probes ($rprobe, standing for $rlines lines) == distinct slots in the cut ($mkeys)" || fail "rebuilt probes stand for $rlines lines != cut $mkeys"
 echo "  live counts now: $(counts "$DB" | tr '\t' ' ') (a different moment; not compared)"
 
 echo "== 5. recompute from the cut == a second API serving the cut, as of $TAKEN_AT"

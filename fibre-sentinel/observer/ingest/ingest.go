@@ -233,6 +233,22 @@ func Measurements(st *store.Store, path string, now time.Time) (Result, error) {
 	}, now)
 }
 
+// SampledOut ingests sampling_decisions.jsonl: one line per publication the
+// load policy drew out of the sample (probe.SampledOut), which stands for a
+// NOT_PROBED row per assigned validator per point.
+func SampledOut(st *store.Store, path string, now time.Time) (Result, error) {
+	return tail(st, path, func(raw []byte) (bool, error) {
+		var d probe.SampledOut
+		if err := json.Unmarshal(raw, &d); err != nil {
+			return false, fmt.Errorf("%w: decode sampling decision: %v", ErrBadRecord, err)
+		}
+		if d.PromiseHash == "" || d.Vantage == "" || d.DecidedAt.IsZero() || d.Kind != probe.SampledOutKind {
+			return false, fmt.Errorf("%w: sampling decision without promise_hash, vantage, decided_at or kind %q", ErrBadRecord, probe.SampledOutKind)
+		}
+		return st.InsertSampledOut(d, raw)
+	}, now)
+}
+
 // State copies the scanner's state.json (param history, cursor, chain id)
 // into the store. It is small and fully re-read every pass.
 func State(st *store.Store, path string, now time.Time) error {
@@ -504,6 +520,15 @@ func Corrections(st *store.Store, path string, now time.Time) (Result, error) {
 			ok, err := st.ApplyProbeCorrection(c)
 			if errors.Is(err, store.ErrNoSuchRow) {
 				return false, fmt.Errorf("%w: no probe row %s yet", ErrRetryLater, c.DedupeKey)
+			}
+			return ok, err
+		case store.CorrectionSampledOutPoint:
+			if c.Vantage == "" || c.PromiseHash == "" || c.ScheduledAt.IsZero() {
+				return false, fmt.Errorf("%w: sampled-out point correction without a vantage, promise_hash or scheduled_at", ErrBadRecord)
+			}
+			ok, err := st.ApplySampledOutCorrection(c)
+			if errors.Is(err, store.ErrNoSuchRow) {
+				return false, fmt.Errorf("%w: no sampled-out decision %s yet", ErrRetryLater, c.DedupeKey)
 			}
 			return ok, err
 		}

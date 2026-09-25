@@ -771,11 +771,11 @@ pieces needed to re-run that function are published:
 - **The record.** The JSONL files are the record; the daily export at
   `/v1/exports` is one tarball per UTC day holding every record file's
   lines for that day (`publications`, `payments`, `measurements`,
-  `reachability`, `registry`, `runs`, `sampling-secrets`, `amendments`), with a
-  `manifest.json` of line counts, byte ranges and SHA-256 digests, and a
-  `.sha256` sidecar for the tarball. A record is assigned to a day by its
-  own timestamp; one that reached the file after its day's export was
-  built is in the next export, counted as late. Every line of every file
+  `sampling_decisions`, `reachability`, `registry`, `runs`, `sampling-secrets`,
+  `amendments`), with a `manifest.json` of line counts, byte ranges and SHA-256
+  digests, and a `.sha256` sidecar for the tarball. A record is assigned to a
+  day by its own timestamp; one that reached the file after its day's export
+  was built is in the next export, counted as late. Every line of every file
   is in exactly one export.
 - **The code's configuration.** Each component appends its starts and
   stops to `runs.jsonl` with its flags (`status.RunEvent`); the collector
@@ -826,7 +826,9 @@ pieces needed to re-run that function are published:
   first seen. The decision is sticky for the life of the publication's
   schedule: a publication is probed at every point or at none, never at some,
   because a partial schedule would pull the serve rate toward whichever points
-  happened to run.
+  happened to run. A sampled-out publication is recorded once, with its
+  probability (`sampling_decisions.jsonl`), and counts as a NOT_PROBED row
+  for every assigned validator at every point, as before.
 
   Every probe row carries the three things needed to check it — `sampling.p`
   (that publication's own probability, not the process's current one),

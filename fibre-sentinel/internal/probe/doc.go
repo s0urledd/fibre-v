@@ -32,6 +32,9 @@
 // time, every layer's separate duration and result, the identity verdict, the
 // rows returned and their verification results, and the raw error text. No
 // scores — a reliability view is derived from these records later.
+// A publication the load policy samples out is recorded once instead, as a
+// SampledOut line in sampling_decisions.jsonl (sampledout.go), standing for a
+// NOT_PROBED row per assigned validator per point.
 //
 // # Taxonomy
 //

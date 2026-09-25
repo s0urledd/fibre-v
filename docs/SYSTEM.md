@@ -29,7 +29,7 @@ The processes share files, not memory, and only one of them writes SQLite.
 | process | binary | writes | reads |
 |---|---|---|---|
 | scanner | `sentinel-scan` | `publications.jsonl`, `payments.jsonl`, `host_history.jsonl`, `state.json` | chain RPC |
-| prober | `sentinel-probe` | `measurements.jsonl`, `sampling-secrets.jsonl`, `sampling-master.key` | `publications.jsonl`, `state.json`, `registry.jsonl`, chain RPC |
+| prober | `sentinel-probe` | `measurements.jsonl`, `sampling_decisions.jsonl`, `sampling-secrets.jsonl`, `sampling-master.key` | `publications.jsonl`, `state.json`, `registry.jsonl`, chain RPC |
 | heartbeat | `observer-heartbeat` | `reachability.jsonl` | chain RPC (registry) |
 | collector | `observer-collector` | `observer.db`, `registry.jsonl`, `amendments.jsonl`, `exports/` | every `.jsonl`, `state.json`, chain RPC |
 | API | `observer-api` | `snapshots/*.json` | `observer.db` (read-only), status files |
@@ -90,6 +90,7 @@ derived index of them.
 |---|---|---|
 | `publications.jsonl` | settled `MsgPayForFibre` | `settlement_time` |
 | `measurements.jsonl` | probe | `started_at` |
+| `sampling_decisions.jsonl` | publication the load policy sampled out, standing for a NOT_PROBED row per assigned validator per point | `decided_at` |
 | `reachability.jsonl` | heartbeat | `started_at` |
 | `payments.jsonl` | escrow movement | `time` |
 | `registry.jsonl` | endpoint open/close | `at` |
@@ -144,6 +145,7 @@ older *or* newer than the binary expects.
 | 18 | indexes for `/v1/probes?at=` and `/v1/sampling` |
 | 20 | `param_uncertainty.corrected_at`: verifying a range and having applied what it proves are two different facts, and `holds` is derived from both |
 | 19 | params uncertainty: `param_uncertainty`, `publication_corrections`, `probe_corrections`, the `retention_unverified` hold and the `*_at_scan` / `*_at_probe` originals, `obligation_daily.held_param_unverified`, and `publications.must_serve_until_ambiguous` (written to the record since it was added and read by nothing until now) |
+| 24 | `sampling_decisions` and its points: a sampled-out publication stored once; `probe_rows` derives its NOT_PROBED rows for every figure; the rows already stored for one are collapsed into it |
 
 The store is append-only **in its inserts** (`ON CONFLICT DO NOTHING`) but not
 in its verdicts: `ApplyAmendment` updates a row's classification in place when
@@ -264,6 +266,10 @@ against chain time every cycle and stamps the offset on every row;
   `H(promise_hash ‖ day_secret) < p·2^64`, `day_secret = HMAC(master, date)`.
   Every row carries the `p` it was decided at and a commitment to that day's
   secret; the secret is published 7 days later at `/v1/sampling`
+- a sampled-out blob is recorded once (`sampling_decisions.jsonl`), with its
+  `p`, binding and commitment, not as a NOT_PROBED row per validator per
+  point; the store derives those rows for every figure (`probe_rows`,
+  migration 24)
 - backoff only ever **removes** the download step: 3 consecutive transport
   failures → 20 minutes without `DownloadShard`, recorded as a gap, never a
   verdict
