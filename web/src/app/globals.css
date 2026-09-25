@@ -337,7 +337,7 @@ tr.suspect td { color: var(--text-3); }
 .chips > span { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 2px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--wash); white-space: nowrap; }
 .chips > span b, .chips .state { color: var(--text); font-weight: 500; }
 /* the page subject's identifiers and facts: a label over each value, in a grid */
-.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin: 18px 0 4px; padding: 0; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin: 18px 0 4px; padding: 0; }
 .facts > div { min-width: 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: transparent; }
 .facts dt { font-size: var(--t-tiny); color: var(--text-3); margin: 0 0 3px; }
 .facts dd { margin: 0; font-size: var(--t-cell); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -372,7 +372,9 @@ tr.suspect td { color: var(--text-3); }
 .tl .edge.l { left: 0; top: 46px; } .tl .edge.r { right: 0; top: 46px; }
 .tl .cut { position: absolute; top: 18px; width: 1px; height: 26px; background: var(--text-2); }
 .tl .cutlbl { position: absolute; top: 46px; transform: translateX(-50%); font-size: var(--t-tiny); color: var(--text); font-weight: 500; white-space: nowrap; }
-.ptcounts { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 14px; font-size: var(--t-small); color: var(--text-2); }
+.tl .cutlbl.end { transform: translateX(-100%); }
+.ptcounts { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 12px 16px; margin-top: 16px; font-size: var(--t-small); color: var(--text-2); }
+.ptcounts > div > span { display: block; line-height: 1.5; }
 .ptcounts b { display: block; font-size: var(--t-cell); color: var(--text); font-weight: 500; }
 .ptcounts b .soft { font-weight: 400; }
 
@@ -381,7 +383,7 @@ tr.suspect td { color: var(--text-3); }
 .meter i { display: block; height: 100%; background: var(--accent); border-radius: 4px 0 0 4px; }
 .meter .tick { position: absolute; top: -5px; width: 1px; height: 24px; background: var(--text); }
 .meter .tl2 { position: absolute; top: 24px; transform: translateX(-50%); font-size: var(--t-tiny); color: var(--text-2); white-space: nowrap; }
-.mnums { display: flex; justify-content: space-between; font-size: var(--t-small); color: var(--text-2); margin-top: 22px; }
+.mnums { display: flex; justify-content: space-between; font-size: var(--t-small); color: var(--text-2); margin-top: 8px; }
 .mnums b { font-weight: 500; color: var(--text); }
 
 /* evidence marks */
@@ -393,8 +395,8 @@ tr.suspect td { color: var(--text-3); }
 .mk.gone { width: 10px; height: 2px; background: var(--text-3); vertical-align: 3px; }
 .mk.other { background: var(--hold); border-radius: 50%; }
 .mk.none { background: var(--pending); border-radius: 50%; }
-.mklegend { font-size: var(--t-small); color: var(--text-2); margin: 10px 0 0; }
-.mklegend span { margin-right: 16px; white-space: nowrap; }
+.mklegend { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: var(--t-small); color: var(--text-2); margin: 12px 0 0; }
+.mklegend > span { white-space: nowrap; }
 
 /* ============================================================================
    Legacy grammar, restyled to the same system. The blobs, publishers and
@@ -512,7 +514,6 @@ dl.kv dd { margin: 0; word-break: break-all; }
 @media (max-width: 1000px) {
   .metrics { grid-template-columns: repeat(3, 1fr); }
   .cells, .cells.four, .cells.five { grid-template-columns: repeat(3, 1fr); }
-  .ptcounts { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 720px) {
   /* :root[data-theme] too: the light theme block sets --gutter with that specificity */
@@ -538,9 +539,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
   .search { width: 100%; }
   .select { flex: 1; }
   .col-pin { min-width: 180px; }
-  .ptcounts { grid-template-columns: repeat(2, 1fr); }
   .pts { grid-template-columns: auto 1fr 1fr; gap: 6px 10px; }
-  .mklegend span { white-space: normal; display: block; margin: 0 0 4px; }
   .tl .edge.r { display: none; }
   .foot { flex-direction: column; gap: 6px; }
   .charts { grid-template-columns: 1fr; }
