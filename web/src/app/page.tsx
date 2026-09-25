@@ -91,7 +91,8 @@ function Overview() {
           help={!N || notLive ? " " : `${int(N.publications)} publication${N.publications === 1 ? "" : "s"} · ${period}`} />
       </Metrics>
 
-      <section className="band" id="outcomes">
+      {/* Until a blob has settled both panels are empty frames; the readiness band above says why. */}
+      {((o?.total ?? 0) > 0 || (N?.publications ?? 0) > 0 || (market.data?.settlements ?? 0) > 0 || (market.data?.timeouts ?? 0) > 0) && <section className="band" id="outcomes">
         <div>
           <h2>Obligation outcomes</h2>
           <OutcomeBar o={o} absent={!N || notLive} />
@@ -120,7 +121,7 @@ function Overview() {
           <p className="sub">UTC days · last day partial · padded size as charged</p>
           <VolumeChart market={market.data} />
         </div>
-      </section>
+      </section>}
 
       <Concentration />
 

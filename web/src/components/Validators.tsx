@@ -73,6 +73,9 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   // The hosting column only exists while the lookup is on (observer/hosting):
   // a column of dashes would read as "nobody knows", which is not what off means.
   const showHosting = useMemo(() => rows.some((v) => !!v.hosting), [rows]);
+  // Until any blob has settled there is nothing to score: four columns of dashes on every row
+  // read as a broken table. They appear with the first obligation or promise.
+  const showScores = useMemo(() => rows.some((v) => (v.obligations?.total ?? 0) > 0 || (v.signing?.assigned ?? 0) > 0), [rows]);
   const needle = q.trim().toLowerCase();
   const list = useMemo(() => {
     const pool = rows.filter((v) => {
@@ -169,16 +172,16 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               <th title="The newest handshake with the registered endpoint; the chain's own words (jailed, not bonded) come first.">Endpoint now</th>
               {showHosting && <th title="Network provider and country the endpoint resolved into, as resolved from this vantage. Hover a cell for the network (AS) and address.">Hosting</th>}
               <Th k="power" dflt={-1} label="Voting power" title="From the staking module. The default order, and never a performance rank." />
-              <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />
-              <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />
-              <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />
-              <Th k="signed" dflt={-1} label="Signed" title="Share of the settled promises that assigned this validator rows carrying its verified signature. Descriptive: the publisher stops at two thirds of voting power, so an unsigned promise is not a fault." />
+              {showScores && <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />}
+              {showScores && <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />}
+              {showScores && <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />}
+              {showScores && <Th k="signed" dflt={-1} label="Signed" title="Share of the settled promises that assigned this validator rows carrying its verified signature. Descriptive: the publisher stops at two thirds of voting power, so an unsigned promise is not a fault." />}
               <Th k="seen" dflt={-1} label="Last evidence" title="When the observer last had any reading from this endpoint." />
             </tr>
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr className="empty"><td colSpan={showHosting ? 9 : 8}>
+              <tr className="empty"><td colSpan={3 + (showHosting ? 1 : 0) + (showScores ? 4 : 0)}>
                 {loading && rows.length === 0 ? "Loading…"
                   : rows.length === 0 ? "No validators on record yet."
                   : needle ? `Nothing matches “${q}”.`
@@ -211,10 +214,12 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                   <td><Link className="rowcover" href={href(v)} tabIndex={-1} aria-hidden="true" /><span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span></td>
                   {showHosting && <td><HostingCell h={v.hosting} /></td>}
                   <td className="num">{int(v.voting_power)}</td>
-                  <td className="num">{rate(v)}</td>
-                  <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>
-                  <td className="num">{count(v, undecided(o), "undecided")}</td>
-                  <td className="num">{signed(v)}</td>
+                  {showScores && <>
+                    <td className="num">{rate(v)}</td>
+                    <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>
+                    <td className="num">{count(v, undecided(o), "undecided")}</td>
+                    <td className="num">{signed(v)}</td>
+                  </>}
                   <td className="num" title={v.last_seen_at ? utcWord(v.last_seen_at) : "no reading yet"}>{v.last_seen_at ? ago(v.last_seen_at) : <span className="muted">—</span>}</td>
                 </tr>
               );
