@@ -54,7 +54,7 @@ type netFigures struct {
 	} `json:"vantage_health"`
 }
 
-// R0 decision 4: this observer's own operator runs a validator on the network
+// This observer's own operator runs a validator on the network
 // it measures. The answer is not to hide that row but to let a reader
 // recompute the headline figures without it, so `?exclude=` is a filter on
 // the request and never a setting on the deployment.

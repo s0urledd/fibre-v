@@ -1,4 +1,4 @@
-# The observer, as it actually is
+# How the observer works
 
 A map of the running system: what each process owns, how a chain event
 becomes a published number, and where the joints are. Written from the code
@@ -250,7 +250,7 @@ against chain time every cycle and stamps the offset on every row;
 
 ## 8. Load policy and sampling
 
-`observer/policy`, from `R4-probe-etiquette.md`. Live config:
+`observer/policy`. Live config:
 `policy.mocha.yaml`.
 
 - capacity model: a floor validator (148 rows) is assumed to have 53 Mbps of
@@ -316,11 +316,11 @@ restart serves the last figures at once; the warm-up then replaces them.
 429 with `Retry-After`):
 
 - `?as_of=<RFC3339>` — what the observer would have published at that moment
-- `?exclude=<addr>` — the summary without named validators (R0 decision 4)
+- `?exclude=<addr>` — the summary without named validators
 
 Both are `Cache-Control: no-store`. The cache is keyed by window alone, so
 writing either into it would publish one reader's view as everyone's
-headline. That was a real defect once; there are tests for both now.
+headline. Tests hold both paths off the cache.
 
 **The correlated-failure guard.** At any in-window schedule point where ≥3
 validators were probed and ≥50% were unreachable, or ≥50% faulted, the point
@@ -392,23 +392,6 @@ The scanner shares no schema with the store and can be rolled at any point.
 
 Caddy serves the static export from `/var/www/fibre-observer` and proxies
 `/api/*` to the API port.
-
-### The live mocha deployment, as of 19 Sep 2026
-
-- `VANTAGE=ut-1`, `DATA_DIR=/var/lib/fibre-observer/mocha`,
-  `API_LISTEN=127.0.0.1:8081`
-- schema 18 at the time of writing; the collector migrates it to 20 on its
-  first start after this branch. `obligation_daily` empty (rollup runs 14
-  days after a day ends)
-- chain `mocha-5`, app version 9 — **Fibre arrives with version 10**, so
-  there are no publications and no obligations yet; the 79 bonded validators
-  on the site come from the staking module
-- **the static site is not deployed.** `/var/www/fibre-observer` does not
-  exist; the dashboard is `next dev -p 3112` on the node, reached through an
-  SSH tunnel, with `web/.env.local` pointing `NEXT_PUBLIC_API_BASE` at
-  `http://127.0.0.1:8081`. That is a deviation from the Caddy topology above
-  and is fine for pre-activation; it is a dev server, so it recompiles per
-  request and does not cache
 
 ---
 

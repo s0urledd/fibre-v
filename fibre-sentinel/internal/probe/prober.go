@@ -69,8 +69,8 @@ type Config struct {
 	// that produced it. nil records the run without a configuration.
 	RunConfig map[string]any
 
-	// Concurrency is how many probes run at once across all validators (R4
-	// section 3.5: global 8). A single validator never sees more than one
+	// Concurrency is how many probes run at once across all validators
+	// (default 8). A single validator never sees more than one
 	// connection from this vantage at a time, whatever this value is.
 	Concurrency int
 

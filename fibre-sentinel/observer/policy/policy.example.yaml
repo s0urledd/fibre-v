@@ -1,9 +1,9 @@
-# Probe load policy. Defaults are the ones in docs/research/R4-probe-etiquette.md.
+# Probe load policy. Defaults match policy.Default (see docs/SYSTEM.md, "Load policy and sampling").
 # Every per-validator number is PER VANTAGE; run at most three vantages.
 
 capacity_model:
   floor_rows: 148                 # smallest assignment (MinRowsPerValidator)
-  floor_validator_bps: 650000000  # 0.65 Gbps: floor validator ingress at the 2.2 GB/s mainnet November model (Celestia "Fibre requirements" sheet; R4 section 6a). Use policy.mocha.yaml on mocha-5.
+  floor_validator_bps: 650000000  # 0.65 Gbps: floor validator ingress at the 2.2 GB/s mainnet November model (Celestia "Fibre requirements" sheet). Use policy.mocha.yaml on mocha-5.
   scale_with_rows: true           # cap(rows) = cap(148) * rows / 148
 
 caps:

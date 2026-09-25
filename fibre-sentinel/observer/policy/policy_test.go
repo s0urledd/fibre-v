@@ -42,8 +42,8 @@ func pubOf(hash string, settled time.Time, blobSize uint32, rows ...int) scan.Pu
 	return pub
 }
 
-func TestShardBytesMatchesR4(t *testing.T) {
-	// R4 section 1.3: 128 MiB blob, 148 rows -> 4,986,836 B; 4096 rows -> 136,265,732 B.
+func TestShardBytesMatchPolicyTable(t *testing.T) {
+	// 128 MiB blob, 148 rows -> 4,986,836 B; 4096 rows -> 136,265,732 B.
 	if got := ShardBytes(128<<20, 4096, 148); got != 4_986_836 {
 		t.Fatalf("floor shard bytes = %d", got)
 	}
@@ -122,7 +122,7 @@ func TestAdmitSamplesWhenGlobalCapBinds(t *testing.T) {
 	cfg.Caps.Global.BytesPerHour = 50 << 30
 	p := newTest(t, cfg)
 	now := time.Now()
-	// Scenario A from R4: 60 × 128 MiB blobs in the last hour over 100
+	// Stress scenario: 60 × 128 MiB blobs in the last hour over 100
 	// validators (Σ rows ≈ 12,288) needs ~125 GB/h; the 50 GB/h cap binds
 	// at p ≈ 0.4.
 	rows := make([]int, 0, 100)
@@ -214,7 +214,7 @@ func TestBudgetAndBackoff(t *testing.T) {
 }
 
 // The shipped YAML files must load, and the caps they compute must be the
-// numbers their own comments (and R4) promise validators.
+// numbers their own comments promise validators.
 func TestShippedPoliciesLoad(t *testing.T) {
 	cases := []struct {
 		file    string

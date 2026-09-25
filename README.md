@@ -1,140 +1,78 @@
-# fibre
+# Tensile
 
-The source of **Tensile** (https://tensile.huginn.tech), the independent
-observer for Celestia Fibre, and the modules it is built on.
+Tensile is an independent observer for Celestia Fibre, built by Huginn Tech.
+When validators sign for a Fibre blob they take on an obligation to serve
+their assigned rows for a retention window; the chain records the signature
+and nothing after it. Tensile reads those obligations from the chain, checks
+from the outside whether each validator keeps them, and publishes every
+reading with the evidence behind it.
 
-Independent, outside-the-validator tooling for **Celestia Fibre** — the
-low-latency data-availability path where validators sign for a blob and then owe
-a retention window of serving it.
+Live at **https://tensile.huginn.tech**.
 
-Nothing here needs to be run by a validator, and nothing trusts a validator's
-self-report. Each module reads what it needs from the chain and recomputes the
-rest.
+## What it checks
+
+- **Endpoint reachability and TLS identity** of every registered Fibre
+  endpoint, from two locations: DNS, TCP, TLS 1.3 and the validator-endorsed
+  identity signed by its consensus key.
+- **Retention probes** of each validator's assigned rows across the blob's
+  retention window, with the returned rows verified against the on-chain
+  commitment and the recomputed assignment.
+- **Verdicts** per probe and per obligation, from a fixed taxonomy in which
+  only a verified failure to serve counts against a validator
+  ([`docs/verdicts.md`](docs/verdicts.md)).
+- **Signed daily exports** of the full record, so every figure can be
+  recomputed offline ([`docs/exports-signing.md`](docs/exports-signing.md)).
+- **A public API**: read-only JSON at `https://tensile.huginn.tech/api/v1/`, with every rate published
+  beside its numerator and denominator.
+
+## Modules
 
 | module | what it is | dependencies |
 |---|---|---|
-| [**fibre-tlsverify**](fibre-tlsverify/) | verifies the validator-endorsed TLS identity a Fibre server presents (consensus-key signed extension, no CA) | none — stdlib only |
-| [**fibre-assign**](fibre-assign/) | recomputes which validator must serve which blob rows; `ShardMap.Verify` classifies what one actually returned | none — stdlib only (the differential test in `fibre-assign/reftest/` pulls celestia-app) |
-| [**fibre-sentinel**](fibre-sentinel/) | the observer: `sentinel-scan` records every publication from the chain; `sentinel-probe` probes the assigned validators across each blob's window and classifies the result | celestia-app (pinned), + the two above |
-| [**fibre-devnet**](fibre-devnet/) | `multi-node-fibre.sh` — a multi-validator local devnet with retention lowered to the 10-minute protocol floor, so assignment and pruning are observable in minutes | shell + a celestia-app build |
+| [`fibre-tlsverify`](fibre-tlsverify/) | verifies the validator-endorsed TLS identity a Fibre server presents (consensus-key signed extension, no CA) | stdlib only |
+| [`fibre-assign`](fibre-assign/) | recomputes which validator must serve which rows; `ShardMap.Verify` classifies what one returned | stdlib only (the differential test in `reftest/` pulls celestia-app) |
+| [`fibre-sentinel`](fibre-sentinel/) | the observer: chain scanner, prober, heartbeat, collector, store, verdicts, exports and API | celestia-app (pinned) and the two above |
+| [`fibre-devnet`](fibre-devnet/) | a multi-validator local devnet with retention at the 10-minute protocol floor, for end-to-end tests | shell and a celestia-app build |
+| [`web`](web/) | the dashboard: a static Next.js export that reads the API | Node 22 |
 
-## Repository layout
+`fibre-sentinel` and `fibre-assign/reftest` resolve their siblings through
+relative `replace` directives, so build them from a full checkout.
+`fibre-tlsverify` and `fibre-assign` are importable as libraries on their own.
 
-A monorepo of three Go modules plus a script directory:
+How the running system fits together (processes, record files, schema,
+invariants) is in [`docs/SYSTEM.md`](docs/SYSTEM.md).
 
-```
-fibre-tlsverify/         module github.com/plsgiveup/fibre/fibre-tlsverify   (go 1.23)
-fibre-assign/            module github.com/plsgiveup/fibre/fibre-assign      (go 1.23)
-fibre-assign/reftest/    module github.com/plsgiveup/fibre/fibre-assign/reftest (go 1.26.5, differential test)
-fibre-sentinel/          module github.com/plsgiveup/fibre/fibre-sentinel   (go 1.26.5)
-fibre-devnet/            shell scripts, no Go module
-```
-
-`fibre-sentinel` and `fibre-assign/reftest` depend on their siblings through
-in-repo relative `replace` directives — build them from a full checkout of this
-repo, not from the subdirectory alone. `fibre-tlsverify` and `fibre-assign` are
-independently `go get`-able as libraries.
-
-For cross-module local development, drop a `go.work` at the repo root (it is
-git-ignored):
-
-```
-go work init ./fibre-tlsverify ./fibre-assign ./fibre-assign/reftest ./fibre-sentinel
-```
-
-## Verify everything
-
-Each claim is one command, reproducible from a clean checkout. CI
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the three test
-blocks below on every push — with `go vet`, `-race` and `-shuffle=on` where
-the module allows it — alongside `gofmt`, the shell and Python syntax checks,
-`shellcheck` and the web build. The last two blocks are not in CI and are not
-claimed to be: the devnet run needs a `celestia-app` and `fibre` build on
-PATH and about fourteen minutes, and the recompute needs a record or an
-export to read. They are here so that anyone can run them, which is the
-point; `make verify` runs everything CI does.
+## Run and deploy
 
 ```bash
-# fibre-tlsverify — 21 golden vectors (1 valid + 20 typed failures), byte-exact envelope
-cd fibre-tlsverify && go test -race ./...
-
-# fibre-assign — 29 unit tests, then ~890 scenarios bit-identical to celestia-app
-cd fibre-assign         && go test -race ./...
-cd fibre-assign/reftest && go test ./...
-
-# fibre-sentinel — 140+ unit tests, including the verdict taxonomy table and the
-#   full evidence-space product (FAULT only from the named conditions)
-cd fibre-sentinel && go test ./...
-
-# fibre-sentinel — full devnet run with fault injection: 60 measurements, 0 misclassifications
-#   (needs a celestia-app + fibre build on PATH; ~14 min)
-cd fibre-sentinel && ./probe-devtest.sh 4 3
-
-# fibre-sentinel — re-derive every verdict and every obligation figure from a record or an
-#   untarred daily export (/v1/exports), and compare with the API's answer pinned to the same moment
-cd fibre-sentinel && go run ./cmd/sentinel-recompute -data-dir <dir> -window 7d -as-of 2026-09-18T00:00:00Z -api https://<site>
+make verify   # unit tests, script checks and the web build (what CI runs)
+make build    # binaries in fibre-sentinel/bin/ and the site in web/out/
 ```
 
-## The observer (dashboard, API, collector)
+Deployment on one VM with systemd and Caddy, or with docker compose, is in
+[`deploy/README.md`](deploy/README.md).
 
-The product built on the modules above lives in `fibre-sentinel/observer/`,
-`fibre-sentinel/cmd/observer-*` and `web/`:
+The full devnet run with fault injection needs `celestia-app` and `fibre` on
+`PATH` and takes about fourteen minutes:
 
-| piece | what it does |
-|---|---|
-| `observer-collector` | tails `publications.jsonl`, `measurements.jsonl`, `reachability.jsonl` and `state.json` into SQLite (`observer/store`), polls `x/valaddr` into an endpoint history, records its own run span so downtime renders as a gap |
-| `sentinel-probe -policy` | the R4 load policy (`observer/policy`): deterministic per-blob sampling, per-validator and global byte and request caps, backoff that never adds requests |
-| `observer-heartbeat` | dials every registered endpoint every 5 minutes (DNS, TCP, TLS, identity, no download) |
-| `observer-api` | read-only JSON under `/v1/`; every rate carries its numerator and denominator |
-| `web/` | static Next.js export: network overview, validator table and detail, blob list and detail, publishers, methodology |
-| `deploy/` | systemd units, Caddyfile, docker-compose, litestream config |
+```bash
+cd fibre-sentinel && ./probe-devtest.sh 4 3
+```
 
-Run everything on a chain from a clean checkout: see `deploy/README.md`.
-`make verify` runs the unit tests, the syntax checks and the web build, which
-is what CI runs; `make build` produces the binaries and the site.
+To re-derive every verdict and obligation figure from a record or an
+untarred daily export and compare it with the API at the same moment:
 
-## Pinned upstream
+```bash
+cd fibre-sentinel && go run ./cmd/sentinel-recompute -data-dir <dir> -window 7d -as-of <RFC3339> -api https://tensile.huginn.tech/api
+```
 
-celestia-app `v10.2.0-mocha` (commit `3b77dc2f5b00e1a646a2e9dd98b5c024a0d9ad8a`,
-19 September 2026, the build Mocha runs for the v10 upgrade; against
-`v10.1.0-corto` / `v10.1.0-mocha`, `fa5b523b`, it changes the Fibre client,
-the app's blob-tx handling and celestia-core, and none of
-`fibre/protocol_params.go`, `fibre/blob.go`, `fibre/validator`, `x/fibre`,
-`x/valaddr`, `proto` or `specs`), celestia-core `v0.42.1`, cosmos-sdk
-fork `v0.52.11`. TLS golden vectors from celestia-app commit
-`dba155084505a8f6c5d37260a94f70f939fb96de`. `fibre-assign/reftest/go.mod` and
-`fibre-sentinel/go.mod` each carry a verbatim copy of celestia-app's `replace`
-block (Go does not apply a dependency's replaces); refresh the pin and the block
-together.
+## Pinned celestia-app
 
-## Research and design documents
-
-The observer product (store, collector, prober, API, dashboard) is being built
-on top of the modules above. The research that precedes it lives in `docs/`:
-
-| document | what it answers |
-|---|---|
-| `docs/research/R1-fibre-protocol-surface.md` | what Fibre looks like on the wire and on chain at the pinned celestia-app commit, and what changed on main |
-| `docs/research/R2-activation-and-rollout.md` | where Fibre activation on mocha-5 stands, how the server is packaged, what a validator's minimal setup is |
-| `docs/research/R3-prior-art.md` | who else monitors Fibre, and how existing Celestia dashboards present validator data |
-| `docs/research/R4-probe-etiquette.md` | how often and how much the observer may download without looking like an attack |
-| `docs/research/R5-fdp-signals.md` | what the Foundation Delegation Program says it rewards, mapped to our deliverables |
-| `docs/research/R6-hosting-and-cost.md` | what running the observer costs, with the arithmetic |
-| `docs/research/R8-comparable-products-and-durability.md` | how Filecoin Spark, Xatu, Storj, Celenium, ProbeLab and L2BEAT measure and present, and the data-loss prevention patterns the observer adopts |
-| `docs/research/R9-presentation-and-celestia-design.md` | Celestia's visual identity, Celenium conventions, trusted-dashboard patterns, and the dashboard design spec |
-| `docs/research/R7-devnet-reproduction.md` | reproducing the tests and the devnet fault-injection run on a fresh Linux machine |
-| `docs/research/R10-explorer-shaped-dashboard.md` | why the dashboard is shaped like an explorer: what the field does, what Celestia users recognise, and the design direction the site follows |
-| `docs/research/R11-ecosystem-delta-2026-09-18.md` | what changed upstream and in the ecosystem since R3: Mocha release, `DownloadShardStream`, connection caps, object storage, the official metrics, and the changes they force here |
-| `docs/research/R0-open-decisions.md` | decisions only the owners can make |
-| `docs/adr/0001-observer-architecture.md` | the architecture decision for collector, prober, store, API and web |
-| `docs/verdicts.md` | the verdict taxonomy the dashboard is allowed to use |
-| `docs/SYSTEM.md` | the running system: what each process owns, how a block becomes a published number, the schema, the invariants, and what the measurement cannot do |
-
-This repository is Huginn Tech's fork of
-[plsgiveup/fibre](https://github.com/plsgiveup/fibre), which Huginn Tech
-also wrote; the Go module paths keep the upstream name because a module
-path is an identifier, not an attribution. Code changes are meant to flow
-back upstream as pull requests.
+celestia-app `v10.2.0-mocha` (commit `3b77dc2f5b00e1a646a2e9dd98b5c024a0d9ad8a`),
+celestia-core `v0.42.1`, cosmos-sdk fork `v0.52.11`. TLS golden vectors come
+from celestia-app commit `dba155084505a8f6c5d37260a94f70f939fb96de`.
+`fibre-assign/reftest/go.mod` and `fibre-sentinel/go.mod` each carry a copy of
+celestia-app's `replace` block; refresh the pin and the block together.
 
 ## License
 

@@ -27,8 +27,7 @@ port, behind one Caddy with a site per network (see "Two networks").
 
 - A Linux VM with Go 1.23+ (the celestia-app pin needs 1.26.5; `GOTOOLCHAIN=auto` downloads it), Node 22, Caddy 2.
 - A CometBFT RPC endpoint for the chain you observe. Use your own full node
-  (default pruning is fine; no archive node is needed, see
-  `docs/research/R6-hosting-and-cost.md`) with
+  (default pruning is fine; no archive node is needed) with
   `storage.discard_abci_responses = false` in `config.toml`: the scanner
   reads `block_results` for every block, and a node that discards ABCI
   responses answers "node is not persisting finalize block responses"
@@ -88,7 +87,7 @@ only one nothing proves, because geolocating an address is a guess, and
 ## 2. Build
 
 ```bash
-git clone https://github.com/plsgiveup/fibre && cd fibre
+git clone https://github.com/s0urledd/tensile && cd tensile
 make build            # fibre-sentinel/bin/* and web/out/
 ```
 
@@ -286,8 +285,7 @@ Nothing is shared between them but the binaries and the static export; a
 data directory belongs to one chain and the scanner refuses to resume it
 against another. Disk: a mocha instance grows by a few GB a month, a
 mainnet instance by what its publication rate makes it (see "Backups"). Two
-instances double the probe bandwidth budget in
-`docs/research/R6-hosting-and-cost.md`.
+instances double the probe bandwidth budget.
 
 ## 6. docker compose (alternative)
 
@@ -303,7 +301,7 @@ project (it binds 80 and 443); for two networks on one host use systemd.
 ## 7. Backups, retention, rebuild
 
 Budget for disk: one measurement is about 1.5 KB in `measurements.jsonl`
-and about twice that again in the database. At the R4 stress scenario
+and about twice that again in the database. At a stress scenario
 (60 publications an hour, 100 validators, 6 points) that is about 1.3 GB a
 day of JSONL plus the database; at a realistic mocha rate it is a few GB a
 month. The JSONL files are the record and are never rotated by the tools;
@@ -435,7 +433,6 @@ the database aside, restore or delete it, start the collector, and check
   tag, update `PinnedCelestiaAppCommit`, `PinnedCelestiaAppVersion` and the
   `celestia-app` line plus the copied `replace` block in
   `fibre-sentinel/go.mod`, re-run `fibre-assign/reftest`, rebuild, deploy.
-  `docs/research/R1-fibre-protocol-surface.md` has the detail.
 - **A publication with no assignment** (`unassignable_publications` > 0;
   `/v1/health` fails while one settled in the last 24h, then lists it passing):
   a blob version this build does not know. Same bump; the scanner does not
