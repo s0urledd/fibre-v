@@ -50,9 +50,9 @@ function Overview() {
 
   return (
     <>
-      <div className="title">
-        {/* The product is the label and the claim is the headline; the network is already in the header's chip. */}
-        <div><h1>Celestia Fibre</h1></div>
+      <div className="title title-end">
+        {/* No visible headline for now; the page keeps one for screen readers. */}
+        <h1 className="sr-only">Tensile · Celestia Fibre</h1>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
       <PreLive meta={meta} />
@@ -126,5 +126,5 @@ function Overview() {
 }
 
 export default function Page() {
-  return <Suspense fallback={<div className="title"><div><h1>Celestia Fibre</h1></div></div>}><Overview /></Suspense>;
+  return <Suspense fallback={<h1 className="sr-only">Tensile · Celestia Fibre</h1>}><Overview /></Suspense>;
 }
