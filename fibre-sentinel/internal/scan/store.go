@@ -177,6 +177,25 @@ func (g ScanGap) Spans() (from, to time.Time) {
 	return from, to
 }
 
+// DedupeGaps drops every gap whose heights an earlier gap of the same kind
+// (reason and HostEventsRead) already covers, keeping the order. A state
+// written before noteGap refused a height already on record can hold the
+// same range twice; the scanner reads its state through this and so does
+// the collector, so neither the next state.json nor the API repeats it.
+func DedupeGaps(gaps []ScanGap) []ScanGap {
+	out := gaps[:0:0]
+next:
+	for _, g := range gaps {
+		for _, k := range out {
+			if k.From <= g.From && g.To <= k.To && k.Reason == g.Reason && k.HostEventsRead == g.HostEventsRead {
+				continue next
+			}
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
 // OpenStore opens or creates the store in dir.
 func OpenStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {

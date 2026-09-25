@@ -263,7 +263,7 @@ func (s *Scanner) resume(ctx context.Context, tip int64) (int64, error) {
 		s.params = LoadParamHistory(st.ParamHistory)
 		s.fibreInactive = len(st.ParamHistory) == 0
 		s.startHeight = st.StartHeight
-		s.gaps = st.Gaps
+		s.gaps = DedupeGaps(st.Gaps)
 		s.hosts = LoadHostHistory(st.HostHistory, st.HostSeeded, st.HostSeedAt)
 		if !st.HostSeeded {
 			// a data dir from before the host history: seed now, at the
@@ -406,6 +406,15 @@ func (s *Scanner) noteGap(h int64, reason, lastErr string, blockTime time.Time, 
 	if !blockTime.IsZero() {
 		t := blockTime.UTC()
 		bt = &t
+	}
+	// A height already on record as this kind of gap is not added again:
+	// two publications in one block whose validator sets are both pruned
+	// each land here, and the second used to open a second range h-h.
+	for i := range s.gaps {
+		if g := &s.gaps[i]; h >= g.From && h <= g.To && g.Reason == reason && g.HostEventsRead == eventsRead {
+			g.LastError = lastErr
+			return
+		}
 	}
 	if n := len(s.gaps); n > 0 && s.gaps[n-1].To == h-1 && s.gaps[n-1].Reason == reason && s.gaps[n-1].HostEventsRead == eventsRead {
 		s.gaps[n-1].To = h
