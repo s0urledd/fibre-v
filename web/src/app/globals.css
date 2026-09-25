@@ -249,6 +249,8 @@ button.dis:hover, a.dis:hover { text-decoration: underline; }
 .select::after { content: ""; position: absolute; right: 12px; top: 12px; width: 6px; height: 6px; border-right: 1.5px solid var(--text-2); border-bottom: 1.5px solid var(--text-2); transform: rotate(45deg); pointer-events: none; }
 .select select { appearance: none; border: 0; background: transparent; color: inherit; font: inherit; padding: 0; cursor: pointer; }
 .select select:focus { outline: none; }
+/* the open list is drawn by the OS: without its own colours Windows paints it white under the theme's light text */
+.select select option { background: var(--paper); color: var(--text); }
 .select:focus-within { border-color: var(--accent); }
 
 /* ---------------------------------------------------------------- tables --- */
