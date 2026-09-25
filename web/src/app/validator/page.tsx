@@ -50,6 +50,12 @@ const WORDS: Record<string, [string, string]> = {
   SHADOWED_SHARD: ["Shadowed", "other"], UNMATCHED_GENUINE: ["Unmatched genuine rows", "other"], PROBE_ERROR: ["Probe error", "gone"],
   EXPECTED_UNASSIGNED: ["Unassigned", "gone"], SERVING_UNASSIGNED: ["Serving unassigned", "other"],
 };
+/** "Sep 25" this year, "Sep 25, 2025" before it: the facts grid has room for one short date */
+function shortDate(ts: string): string {
+  const d = dateUTC(ts);
+  return d.endsWith(`, ${new Date().getUTCFullYear()}`) ? d.slice(0, d.lastIndexOf(",")) : d;
+}
+
 /**
  * The website a validator put in its staking description, as a link we are
  * willing to render: anyone can write anything there, so only http(s) URLs
@@ -200,7 +206,7 @@ function Page() {
       </div>
       <dl className="facts">
         {v.host
-          ? <div><dt>Endpoint</dt><dd><span className="mono">{v.host}</span>{v.endpoint_since && <span className="soft"> · since {dateUTC(v.endpoint_since)}</span>}</dd></div>
+          ? <div><dt>Endpoint</dt><dd><span className="mono">{v.host}</span>{v.endpoint_since && <span className="soft"> · since {shortDate(v.endpoint_since)}</span>}</dd></div>
           : v.last_host && <div title="The registration stays on chain; the validator left the bonded provider list."><dt>Last endpoint</dt><dd><span className="mono">{v.last_host}</span>{v.endpoint_closed_at && <span className="soft"> · left {dateUTC(v.endpoint_closed_at)}</span>}</dd></div>}
         {v.host && v.hosting && <div><dt>Hosting</dt><dd><HostingFact h={v.hosting} /></dd></div>}
         {v.cons_address && <div><dt>Consensus address</dt><dd title={v.cons_address}><span className="mono">{shortMid(v.cons_address, 18, 6)}</span><Copy text={v.cons_address} label="consensus address" /></dd></div>}

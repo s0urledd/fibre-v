@@ -330,7 +330,7 @@ tr.suspect td { color: var(--text-3); }
 .chips > span { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 2px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--wash); white-space: nowrap; }
 .chips > span b, .chips .state { color: var(--text); font-weight: 500; }
 /* the page subject's identifiers and facts: a label over each value, in a grid */
-.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px 32px; margin: 18px 0 4px; padding: 14px 0; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px 32px; margin: 18px 0 4px; padding: 14px 18px; border: 1px solid var(--line); border-radius: 8px; background: transparent; }
 .facts > div { min-width: 0; }
 .facts dt { font-size: var(--t-tiny); color: var(--text-3); margin: 0 0 3px; }
 .facts dd { margin: 0; font-size: var(--t-cell); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -656,7 +656,6 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 .diag p { margin: 6px 0 0; }
 .diag p.diag-h { margin: 0; font-size: var(--t-h2); font-weight: 500; color: var(--text); }
 .diag p.diag-h .dot { vertical-align: 1px; }
-.diag .diag-do b { color: var(--text); font-weight: 500; }
 .diag .diag-fault { color: var(--text); }
 .diag .diag-fault b { color: var(--fault); font-weight: 500; }
 .diag .diag-fault .mk { vertical-align: 0; }
