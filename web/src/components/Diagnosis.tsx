@@ -93,7 +93,7 @@ function state(v: Validator, c: EndpointCheck | undefined, egress: string[], dec
     const chk = c && c.host === v.host ? c : undefined;
     const at = chk ? <>At {whenUTC(chk.at)}</> : <>At the newest check</>;
     const err = chk?.raw_error ? <> (<code>{chk.raw_error}</code>)</> : null;
-    const notFault = <> Unreachable is not counted as a broken obligation: from one location it cannot be told apart from a problem on this observer’s own network path.{v.last_reachable_at ? <> The last successful handshake was {ago(v.last_reachable_at)}.</> : <> No handshake has succeeded in this period.</>}</>;
+    const notFault = <> Not counted as broken.{v.last_reachable_at ? <> The last successful handshake was {ago(v.last_reachable_at)}.</> : <> No handshake has succeeded in this period.</>}</>;
     const refused = chk && (chk.outcome === "TCP_REFUSED" || /refused/i.test(chk.raw_error ?? ""));
     if (chk && !chk.dns_ok) {
       return {

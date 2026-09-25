@@ -36,8 +36,8 @@ export default function Readiness({ rows }: { rows: Validator[] }) {
         <h2 id="readiness-h">Can Fibre accept blobs?</h2>
         <p className="ready-answer">
           {ready
-            ? <><b>Yes.</b> Validators with a reachable Fibre host hold {pct(reachPower)} of stake, above the two-thirds a blob needs to settle.</>
-            : <><b>Not yet.</b> Validators with a reachable Fibre host hold {pct(reachPower)} of stake; a blob settles only with signatures from two thirds ({pct(quorum)}). Until then no one can publish, which is why the figures below are empty.</>}
+            ? <><b>Yes.</b> Reachable hosts hold {pct(reachPower)} of stake, above the ⅔ a blob needs.</>
+            : <><b>Not yet.</b> Reachable hosts hold {pct(reachPower)} of stake; a blob needs ⅔ ({pct(quorum)}) to settle.</>}
         </p>
         <div className="meter ready-meter" role="img"
           aria-label={`${pct(reachPower)} of stake reachable, ${pct(regPower)} registered, ${pct(quorum)} needed`}>

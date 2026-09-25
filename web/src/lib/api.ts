@@ -324,6 +324,8 @@ export type Validator = {
   voting_power: number;
   last_seen_at: string | null;
   reachable: boolean | null;
+  /** reachable | flaky (last check failed, the one before passed) | unreachable */
+  endpoint_state?: "reachable" | "flaky" | "unreachable";
   identity_status: string;
   identity_reason?: string;
   /**

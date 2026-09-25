@@ -55,7 +55,7 @@ function Page() {
       {error && data && <p className="sample">Showing the last list received; the API is not answering right now ({error}).</p>}
       {loading && !data && <p className="muted">Loading…</p>}
       <Panel title="Signatures per promise · 7 days" right={<Link href="/methodology/#signing">what this is</Link>}>
-        <p className="sub">Share of total voting power whose signature on the settled promise verified. Publishers stop at the ⅔ quorum, so the rest of the set is unsigned, not at fault.</p>
+        <p className="sub">Share of stake that signed each settled promise.</p>
         <SigningHistogram data={sig.data} />
       </Panel>
       {data && (

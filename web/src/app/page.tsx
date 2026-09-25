@@ -25,7 +25,6 @@ function Overview() {
   const vals = useApi<{ validators: Validator[] }>(`/v1/validators?window=${win}`);
   const market = useApi<Market>("/v1/market?window=7d");
   const [disc, setDisc] = useState<"" | "outcomes" | "blobs">("");
-  const [about, setAbout] = useState(false);
 
   const N = net.data;
   const rows = vals.data?.validators ?? [];
@@ -54,10 +53,7 @@ function Overview() {
     <>
       <div className="title">
         {/* The product is the label and the claim is the headline; the network is already in the header's chip. */}
-        <div><p className="eyebrow">Celestia Fibre</p><h1>Independent checks that validators serve the data they signed for.</h1><p className="lede"><button type="button" className="dis" aria-expanded={about} onClick={() => setAbout(!about)}>What is measured?</button></p>
-          <p className="disc about" hidden={!about}>
-            Fibre is Celestia's low-latency data path. Each validator signs for its share of a blob and must keep serving that share until the retention window ends; the chain records the signature, never the serving. Tensile downloads the shares from outside, as any client would, checks every row against the on-chain commitment, and publishes each result with the evidence behind it. An endpoint it cannot reach is never counted as a failure. <Link href="/methodology/">Methodology →</Link>
-          </p></div>
+        <div><h1>Celestia Fibre</h1></div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
       <PreLive meta={meta} />
@@ -133,5 +129,5 @@ function Overview() {
 }
 
 export default function Page() {
-  return <Suspense fallback={<div className="title"><div><p className="eyebrow">Celestia Fibre</p><h1>Independent checks that validators serve the data they signed for.</h1></div></div>}><Overview /></Suspense>;
+  return <Suspense fallback={<div className="title"><div><h1>Celestia Fibre</h1></div></div>}><Overview /></Suspense>;
 }

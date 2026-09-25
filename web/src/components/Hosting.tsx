@@ -89,7 +89,7 @@ export function Concentration() {
     <section className="band hostingband" id="hosting">
       <div>
         <h2>Where Fibre hosts run</h2>
-        <p className="sub">{int(s.registered_hosts)} registered hosts by network provider · share of {basis} · as resolved from this vantage</p>
+        <p className="sub">{int(s.registered_hosts)} registered hosts · share of {basis}</p>
         <StakeBar buckets={s.by_provider} label="Share of stake by provider" />
         <div className="key hkey">
           {provs.map(({ b, color }) => (
@@ -103,7 +103,7 @@ export function Concentration() {
       </div>
       <div>
         <h2>Concentration</h2>
-        <p className="sub">Fewest entities whose hosts carry more than ⅓ of registered {basis}</p>
+        <p className="sub">Fewest entities holding over ⅓ of registered {basis}</p>
         <div className="nak">
           <div title={np.title}><span className="n">{np.value}</span>provider{np.value === "1" ? "" : "s"}</div>
           <div title={na.title}><span className="n">{na.value}</span>network{na.value === "1" ? "" : "s"} (AS)</div>
@@ -112,13 +112,6 @@ export function Concentration() {
         <p className="blobs ctry">
           {countries.map((c, i) => <span key={c.key} className={i ? "sepd" : undefined} title={`${int(c.hosts)} host${c.hosts === 1 ? "" : "s"}`}>{c.key} <b>{pct(s.basis === "hosts" ? c.host_share : c.stake_share)}</b></span>)}
           {unknownCountry && unknownCountry.hosts > 0 && <span className="sepd soft">unknown {pct(s.basis === "hosts" ? unknownCountry.host_share : unknownCountry.stake_share)}</span>}
-        </p>
-        <p className="tnote" title={src.caveat}>
-          As resolved from this vantage; GeoDNS, proxies and anycast can hide where a host runs. {s.unresolved_hosts > 0 && <>{int(s.unresolved_hosts)} unresolved, counted as unknown. </>}
-          Network: <a href={src.asn_db?.url} rel="noopener noreferrer" target="_blank">IPtoASN</a> (public domain){src.country_db
-            ? <> · country: <a href={src.country_db.url} rel="noopener noreferrer" target="_blank">IP Geolocation by DB-IP</a> (<a href={src.country_db.license_url} rel="noopener noreferrer" target="_blank">CC BY 4.0</a>)</>
-            : <> · country: where the network is registered</>}
-          {src.looked_up_at && <> · looked up <span title={utcWord(src.looked_up_at)}>{ago(src.looked_up_at)}</span></>}
         </p>
       </div>
     </section>
@@ -134,7 +127,6 @@ export function HostingChip({ h }: { h?: Hosting }) {
       runs on <b className="word">{h.provider === "Other" || h.status === "no_asn" ? (h.as_org || "unknown network") : h.provider}</b>
       {h.asn ? <span className="soft"> · {asLabel(h)}</span> : null}
       {h.country && <span className="soft"> · {h.country}</span>}
-      <span className="soft"> · as resolved from here</span>
     </span>
   );
 }
