@@ -116,7 +116,12 @@ func TestProviderFor(t *testing.T) {
 		396982: ProviderGCP, 8075: ProviderAzure, 14061: ProviderDigitalOcean, 51167: ProviderContabo,
 		20473: ProviderVultr, 63949: ProviderAkamaiLinode, 13335: ProviderOther, 0: ProviderUnknown,
 		// Amazon's corporate AS is deliberately not AWS
-		7224: ProviderOther}
+		7224: ProviderOther,
+		// the providers Mocha's Fibre hosts actually resolved to after activation
+		16125: ProviderCherry, 59642: ProviderCherry, 201814: ProviderMevspace, 12876: ProviderScaleway,
+		205544: ProviderLeaseweb, 60781: ProviderLeaseweb, 29066: ProviderVelia, 30083: ProviderVelia,
+		63023: ProviderGTHost, 62563: ProviderGTHost, 396356: ProviderLatitude, 20326: ProviderTeraswitch,
+		31034: ProviderAruba}
 	for asn, want := range cases {
 		if got := ProviderFor(asn); got != want {
 			t.Errorf("AS%d: %s, want %s", asn, got, want)

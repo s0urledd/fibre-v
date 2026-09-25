@@ -19,6 +19,15 @@ const (
 	ProviderContabo      = "Contabo"
 	ProviderVultr        = "Vultr"
 	ProviderAkamaiLinode = "Akamai/Linode"
+	ProviderCherry       = "Cherry Servers"
+	ProviderMevspace     = "MEVSPACE"
+	ProviderScaleway     = "Scaleway"
+	ProviderLeaseweb     = "Leaseweb"
+	ProviderVelia        = "velia.net"
+	ProviderGTHost       = "GTHost"
+	ProviderLatitude     = "Latitude.sh"
+	ProviderTeraswitch   = "TeraSwitch"
+	ProviderAruba        = "Aruba"
 	ProviderOther        = "Other"
 	ProviderUnknown      = "Unknown"
 )
@@ -82,6 +91,40 @@ var providerASNs = map[uint32]string{
 	// friends) are not here: a Fibre host behind them would be a proxy, and
 	// calling that Akamai hosting would be a guess.
 	63949: ProviderAkamaiLinode, // AKAMAI-LINODE-AP Akamai Connected Cloud
+
+	// Added 2026-09-25 from what Mocha's Fibre hosts resolved to after
+	// activation. With Hetzner and OVH out of favour (the delegation program
+	// excludes them), stake had moved to providers this list did not name:
+	// 92% of registered hosts read as "Other" while two Cherry Servers ASes
+	// alone carried about a third of registered stake, a concentration the
+	// panel could not show. Same evidence rule as above: every description
+	// is iptoasn's, file of 2026-09-24.
+	16125: ProviderCherry, // CHERRYSERVERS1-AS
+	59642: ProviderCherry, // CHERRYSERVERS2-AS
+
+	201814: ProviderMevspace, // MEVSPACE
+
+	// Online SAS is Scaleway's operating company (formerly Online.net).
+	12876: ProviderScaleway, // Online SAS
+
+	// Leaseweb runs one AS per region.
+	60781:  ProviderLeaseweb, // LEASEWEB-NL-AMS-01 Netherlands
+	28753:  ProviderLeaseweb, // LEASEWEB-DE-FRA-10
+	205544: ProviderLeaseweb, // LEASEWEB-UK-LON-11
+	30633:  ProviderLeaseweb, // LEASEWEB-USA-WDC
+	7203:   ProviderLeaseweb, // LEASEWEB-USA-SFO
+	59253:  ProviderLeaseweb, // LEASEWEB-APAC-SIN-11 LEASEWEB SINGAPORE PTE. LTD.
+
+	29066: ProviderVelia, // VELIANET-AS velia.net Internetdienste GmbH
+	30083: ProviderVelia, // AS-30083-US-VELIA-NET
+
+	// GTHost (Global Telehost) announces from two ASes under one name.
+	63023: ProviderGTHost, // AS-GLOBALTELEHOST
+	62563: ProviderGTHost, // AS-GLOBALTELEHOST
+
+	396356: ProviderLatitude,   // LATITUDE-SH
+	20326:  ProviderTeraswitch, // TERASWITCH
+	31034:  ProviderAruba,      // ARUBA-ASN
 }
 
 // ProviderFor returns the bucket for an origin AS number. 0 (no AS, or not
@@ -102,6 +145,8 @@ func Providers() []string {
 	return []string{
 		ProviderHetzner, ProviderOVH, ProviderAWS, ProviderGCP, ProviderAzure,
 		ProviderDigitalOcean, ProviderContabo, ProviderVultr, ProviderAkamaiLinode,
+		ProviderCherry, ProviderMevspace, ProviderScaleway, ProviderLeaseweb,
+		ProviderVelia, ProviderGTHost, ProviderLatitude, ProviderTeraswitch, ProviderAruba,
 		ProviderOther, ProviderUnknown,
 	}
 }

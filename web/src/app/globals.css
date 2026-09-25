@@ -649,3 +649,24 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
   .diag { padding: 10px 12px; }
   #evidence .seg button { padding: 6px 10px; }
 }
+
+/* ------------------------------------------------ Fibre readiness band --- */
+/* The overview's first question after activation: is enough stake reachable
+   for a blob to settle at all? Reachable is the accent, registered but not
+   answering a lighter accent, no host the pending grey; the ⅔ quorum is the
+   meter's tick. */
+.readiness { grid-template-columns: 3fr 2fr; }
+.ready-answer { margin: 6px 0 0; font-size: var(--t-body, 14px); color: var(--text); max-width: 62ch; }
+.ready-answer b { font-weight: 600; }
+.ready-meter { margin-top: 16px; margin-bottom: 30px; }
+.ready-meter .reg { position: absolute; top: 0; height: 100%; background: var(--accent); opacity: .35; }
+.ready-key { display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.ready-key .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.sw.reg { background: var(--accent); opacity: .35; }
+.ready-missing { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 13px; }
+.ready-missing li { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line-soft); padding: 3px 0; }
+.ready-missing .num { color: var(--text-2); font-variant-numeric: tabular-nums; }
+@media (max-width: 720px) {
+  .readiness { grid-template-columns: 1fr; }
+  .readiness > div + div { border-left: 0; padding: 14px 0 0; }
+}
