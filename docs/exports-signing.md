@@ -152,9 +152,14 @@ meaning, so the test backend reads `<dir>/keyring-test`):
 ```sh
 sentinel-anchor -exports-dir <data-dir>/exports -day 2026-09-10 \
   -keyring-backend test -keyring-dir /etc/fibre-observer/keyring-mocha -key-name tensile-ops \
-  -chain-id mocha-4 -account-number <n> -sequence <s>
-# or, instead of the two numbers, -grpc <node:9090> for one read-only account query
+  -grpc <node:9090>
+# or, offline: -chain-id <chain id> -account-number <n> -sequence <s>
 ```
+
+With `-grpc` the chain id, account number and sequence are read from the
+node (two read-only queries); without it `-chain-id` is required, since
+there is no default to go stale at the next hardspoon, and given both it
+must match the node.
 
 Run it as the unit user (`fibre-observer`), which owns the keyring. It
 prints `dry_run: true`, the signer
