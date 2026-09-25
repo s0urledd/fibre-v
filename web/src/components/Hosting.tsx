@@ -111,7 +111,7 @@ export function Concentration() {
           <div title={nc.title}><span className="n">{nc.value}</span>countr{nc.value === "1" ? "y" : "ies"}</div>
         </div>
         <p className="blobs ctry">
-          {countries.map((c, i) => <span key={c.key} className={i ? "sepd" : undefined} title={`${countryName(c.key)}: ${int(c.hosts)} host${c.hosts === 1 ? "" : "s"}`}><Flag cc={c.key} />{countryName(c.key)} <b>{pct(s.basis === "hosts" ? c.host_share : c.stake_share)}</b></span>)}
+          {countries.map((c, i) => <span key={c.key} className={i ? "sepd" : undefined} title={`${countryName(c.key)}: ${int(c.hosts)} host${c.hosts === 1 ? "" : "s"}`}><Flag cc={c.key} />{c.key} <b>{pct(s.basis === "hosts" ? c.host_share : c.stake_share)}</b></span>)}
           {unknownCountry && unknownCountry.hosts > 0 && <span className="sepd soft">unknown {pct(s.basis === "hosts" ? unknownCountry.host_share : unknownCountry.stake_share)}</span>}
         </p>
       </div>

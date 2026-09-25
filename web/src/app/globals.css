@@ -750,7 +750,6 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
   animation: fm-in .2s ease-out;
 }
 .fm-tag .flag { width: 16px; }
-.fm-tag .fm-more { color: var(--text-3); font-weight: 500; }
 
 .fm-ctl { position: absolute; left: 8px; bottom: 8px; display: flex; gap: 6px; z-index: 25; }
 .fm-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); overflow: hidden; }
