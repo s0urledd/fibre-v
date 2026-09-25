@@ -327,7 +327,6 @@ function Page() {
             </tbody>
           </table>
         </div>
-        <p className="tnote">Verdicts are the observer’s own classification of each probe; this page never re-derives them. A greyed row sits at a point the observer does not trust itself at and counts nowhere. <a href={DISPUTE_URL} rel="noopener noreferrer" target="_blank">How to dispute a verdict</a>.</p>
       </section>
     </>
   );

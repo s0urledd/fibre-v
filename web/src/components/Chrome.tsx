@@ -198,22 +198,14 @@ export function Header() {
  */
 export function Footer() {
   const { data: meta } = useApi<Meta>("/v1/meta", 30000);
-  const pinned = meta?.pinned_celestia_app_commit ? meta.pinned_celestia_app_commit.slice(0, 7) : "";
-  const vi = meta?.vantage_info;
   return (
     <footer className="foot">
-      <div>
-        <Link href="/methodology/#evidence" title="A count of something the chain recorded; nothing measured here.">Chain records</Link><span>·</span>
-        <Link href="/methodology/#evidence" title="Bytes fetched and verified against the on-chain commitment, or a certificate checked against the validator's consensus key.">Verified responses</Link><span>·</span>
-        <Link href="/methodology/#evidence" title="What this observer's own network saw from one location.">Observer measurements</Link>
-      </div>
       <div title={meta?.server_time ? `Observer time ${utcWord(meta.server_time)}${meta.last_probe_at ? ` · newest probe ${ago(meta.last_probe_at)}` : ""}` : undefined}>
-        Tensile · run by <a href="https://huginn.tech" rel="noopener noreferrer" target="_blank">Huginn Tech</a>
-        <span title="Huginn Tech also runs a Mocha validator. It is measured by the same code as every other validator and marked in the table.">, a validator scored here like every other</span>
-        {vi?.location && <><span>·</span><span title={`Every reachability figure is a statement about the network path from here${vi.asn ? ` (${vi.asn})` : ""}.`}>measured from {vi.location}</span></>}
-        {pinned && <span title={`Assignment pinned to celestia-app ${meta!.pinned_celestia_app_commit} · pin ${meta!.pin_status}`}> · pin {pinned}</span>}
+        Tensile by <a href="https://huginn.tech" rel="noopener noreferrer" target="_blank">Huginn Tech</a>
+        <span>·</span><Link href="/methodology/">methodology</Link>
         <span>·</span><a href={SOURCE_URL} rel="noopener noreferrer" target="_blank">source</a>
         <span>·</span><a href={DISPUTE_URL} rel="noopener noreferrer" target="_blank">dispute a verdict</a>
+        <span>·</span><a href="https://db-ip.com" rel="noopener noreferrer" target="_blank">IP geolocation by DB-IP</a>
       </div>
     </footer>
   );

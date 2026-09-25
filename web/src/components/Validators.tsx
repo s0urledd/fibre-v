@@ -35,12 +35,14 @@ export function endpoint(v: Validator): { dot: string; word: string; title: stri
   if (!bonded(v)) return { dot: "none", word: "Not bonded", title: `${v.bond_status!.replace("BOND_STATUS_", "").toLowerCase()} by the chain: out of the bonded provider list, so no handshake is attempted.` };
   if (!v.host) return { dot: "none", word: "No endpoint", title: v.last_host ? `No open Fibre endpoint. Last registered ${v.last_host}; the registration stays on chain.` : "No Fibre endpoint registered in x/valaddr. Not a fault: nothing can be asked of it." };
   if (v.reachable === null) return { dot: "none", word: "Not checked yet", title: `${v.host}: no handshake attempted yet.` };
-  if (v.reachable === false) return { dot: "hold", word: "Unreachable", title: `${v.host} did not complete a TLS handshake at the newest check${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}${v.last_reachable_at ? `; last reachable ${ago(v.last_reachable_at)}` : ""}. From one location this is never counted as broken.`, warn: true };
+  const checked = v.last_seen_at ? ` · checked ${ago(v.last_seen_at)}` : "";
+  if (v.reachable === false) return { dot: "hold", word: "Unreachable", title: `${v.host}: no TLS handshake in the last two checks${v.last_reachable_at ? `; last reachable ${ago(v.last_reachable_at)}` : ""}${checked}`, warn: true };
+  if (v.endpoint_state === "flaky") return { dot: "flaky", word: "Flaky", title: `${v.host}: the last check failed, the one before passed${checked}` };
   if (v.identity_status && v.identity_status !== "verified") {
     const w = v.identity_status === "expired" ? "Certificate expired" : v.identity_status === "mismatch" ? "Wrong certificate" : v.identity_status === "no_tls" ? "No TLS" : "Reachable, unverified";
     return { dot: "hold", word: w, title: v.identity_reason || `${v.host} answered, but its certificate is not one a client would accept. Not a fault.`, warn: true };
   }
-  return { dot: "ok", word: "Reachable", title: `${v.host} completed a TLS handshake with a certificate endorsed by its consensus key at the newest check${v.last_seen_at ? ` (${ago(v.last_seen_at)})` : ""}.` };
+  return { dot: "ok", word: "Reachable", title: `${v.host}: TLS with this validator's key${checked}` };
 }
 
 function sortValue(v: Validator, k: SortKey): number | null {
@@ -176,12 +178,11 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               {showScores && <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />}
               {showScores && <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />}
               {showScores && <Th k="signed" dflt={-1} label="Signed" title="Share of the settled promises that assigned this validator rows carrying its verified signature. Descriptive: the publisher stops at two thirds of voting power, so an unsigned promise is not a fault." />}
-              <Th k="seen" dflt={-1} label="Last evidence" title="When the observer last had any reading from this endpoint." />
             </tr>
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr className="empty"><td colSpan={3 + (showHosting ? 1 : 0) + (showScores ? 4 : 0)}>
+              <tr className="empty"><td colSpan={2 + (showHosting ? 1 : 0) + (showScores ? 4 : 0)}>
                 {loading && rows.length === 0 ? "Loading…"
                   : rows.length === 0 ? "No validators on record yet."
                   : needle ? `Nothing matches “${q}”.`
@@ -220,7 +221,6 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                     <td className="num">{count(v, undecided(o), "undecided")}</td>
                     <td className="num">{signed(v)}</td>
                   </>}
-                  <td className="num" title={v.last_seen_at ? utcWord(v.last_seen_at) : "no reading yet"}>{v.last_seen_at ? ago(v.last_seen_at) : <span className="muted">—</span>}</td>
                 </tr>
               );
             })}

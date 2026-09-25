@@ -89,7 +89,7 @@ export default function StatusLine({ meta, metaError, snap, client }: {
       <p className="notice" key="checks" title={failing.map((c) => `${c.name}: ${c.detail}`).join(" · ")}>
         {chainStopped && impacts.length === 1
           ? <><b>The chain has stopped producing blocks.</b> Nothing new can be settled or measured until it resumes; this is the network, not the observer.</>
-          : <><b>Observer partly down:</b> {impacts.join("; ")}. Figures below may lag. Checks the observer missed are never counted against a validator.</>}{" "}
+          : <><b>Observer partly down:</b> {impacts.join("; ")}. Figures may lag.</>}{" "}
         <Link href="/methodology/#gaps">Why →</Link>
       </p>,
     );
