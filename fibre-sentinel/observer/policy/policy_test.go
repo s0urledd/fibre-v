@@ -42,7 +42,7 @@ func pubOf(hash string, settled time.Time, blobSize uint32, rows ...int) scan.Pu
 	return pub
 }
 
-func TestShardBytesMatchesR4(t *testing.T) {
+func TestShardBytesMatchPolicyTable(t *testing.T) {
 	// 128 MiB blob, 148 rows -> 4,986,836 B; 4096 rows -> 136,265,732 B.
 	if got := ShardBytes(128<<20, 4096, 148); got != 4_986_836 {
 		t.Fatalf("floor shard bytes = %d", got)
