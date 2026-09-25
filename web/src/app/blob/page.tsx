@@ -126,17 +126,17 @@ function Page() {
             <span className="state" title={state[2]}><i className={"dot " + state[0]} />{state[1]}</span>
             <span title={utcWord(b.must_serve_until)}>{over ? <>Window over since <b className="word">{hhmm(b.must_serve_until)}</b></> : <>In window until <b className="word">{hhmm(b.must_serve_until)}</b></>}</span>
             <span title="The padded upload size the module charges for, not the payload.">{bytes(b.blob_size)}</span>
-            <span>publisher <Link className="mono" href={`/publisher/?addr=${b.signer}`} title={b.signer}>{shortMid(b.signer, 14, 6)}</Link></span>
-          </div>
-          <div className="idkv">
-            <span>namespace <span className="mono" title={b.namespace}>{nsDisplay(b.namespace)}</span><Copy text={b.namespace} label="namespace" /></span>
-            <span>commitment <span className="mono" title={b.commitment}>{shortMid(b.commitment, 8, 6)}</span><Copy text={b.commitment} label="commitment" /></span>
-            <span>settled <span className="mono">#{int(b.settlement_height)}</span> · {utcWord(b.settlement_time).slice(0, 16)} UTC</span>
-            <span>created {hhmmss(b.creation_timestamp)}</span>
-            {b.assignment_error && <span className="word">assignment: {b.assignment_error}</span>}
           </div>
         </div>
       </div>
+      <dl className="facts">
+        <div><dt>Publisher</dt><dd title={b.signer}><Link className="mono" href={`/publisher/?addr=${b.signer}`}>{shortMid(b.signer, 14, 6)}</Link></dd></div>
+        <div><dt>Namespace</dt><dd title={b.namespace}><span className="mono">{nsDisplay(b.namespace)}</span><Copy text={b.namespace} label="namespace" /></dd></div>
+        <div><dt>Commitment</dt><dd title={b.commitment}><span className="mono">{shortMid(b.commitment, 8, 6)}</span><Copy text={b.commitment} label="commitment" /></dd></div>
+        <div><dt>Settled</dt><dd><span className="mono">#{int(b.settlement_height)}</span><span className="soft"> · {utcWord(b.settlement_time).slice(0, 16)} UTC</span></dd></div>
+        <div><dt>Created</dt><dd>{hhmmss(b.creation_timestamp)}</dd></div>
+        {b.assignment_error && <div><dt>Assignment</dt><dd className="word">{b.assignment_error}</dd></div>}
+      </dl>
       <StatusLine meta={meta} metaError={metaErr} snap={null} client={{ error: d.error, fetchedAt: d.fetchedAt }} />
 
       <Metrics>

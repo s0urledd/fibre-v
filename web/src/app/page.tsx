@@ -10,7 +10,6 @@ import VolumeChart from "@/components/VolumeChart";
 import Validators from "@/components/Validators";
 import PreLive from "@/components/PreLive";
 import HostMap from "@/components/HostMap";
-import { Concentration } from "@/components/Hosting";
 
 /**
  * The overview: the network's obligations over the selected period, the
@@ -118,8 +117,6 @@ function Overview() {
           <VolumeChart market={market.data} />
         </div>
       </section>}
-
-      <Concentration />
 
       <Validators rows={rows} window={win} notLive={notLive} loading={vals.loading} />
       <p className="tnote"><a href={`${API_BASE}/v1/feed.atom`} type="application/atom+xml">Network events (Atom)</a></p>
