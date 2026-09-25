@@ -145,14 +145,16 @@ signature from the validator on the settled `MsgPayForFibre`, because the
 Fibre server writes the shard to its store **before** it signs
 (celestia-app `fibre/server_upload.go`).
 
-The observer verifies those signatures itself rather than counting them. The
-chain's own check runs in the ante handler and is skipped in
-`ExecModeFinalize` and on a node-local cache hit (`x/fibre/ante/ante.go`),
-and the message server never repeats it, so a settled transaction carries no
-state-machine guarantee that its signature entries are valid. The check
-that does run, in `ProcessProposal`, also stops at the quorum
-(`x/fibre/keeper/msg_server.go`: `if hasEnough { return nil }`), so entries
-after the two-thirds point are never verified by any node. Each entry is
+The observer verifies those signatures itself rather than counting them.
+Honest validators do check them, in `CheckTx` and `ProcessProposal`
+(`x/fibre/ante/ante.go`; `FinalizeBlock` skips the check because a committed
+block has already passed `ProcessProposal`). But the check stops at the
+quorum: `validateValidatorSignatures` (`x/fibre/keeper/msg_server.go`) walks
+the entries in validator-set order and returns as soon as the ones verified
+so far carry two thirds of the stake (`if hasEnough { return nil }`). Entries
+after that point are never verified by any node, so a settled transaction
+proves that a quorum signed, not that every signature entry in it is valid.
+Each entry is
 tried first against the validator at the same position in the set at the
 promise height (the reference implementation builds the list positionally,
 with nil entries for non-signers) and then, if that fails, against every

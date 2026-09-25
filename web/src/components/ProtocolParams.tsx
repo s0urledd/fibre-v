@@ -39,7 +39,7 @@ function since(e: ParamEntry): string {
 
 export default function ProtocolParams() {
   const { data: p, error } = useApi<Params>("/v1/params", 300000);
-  if (!p) return <p className="muted">{error ? `The observer API is not answering (${error}); the values are at /v1/params.` : "Loading…"}</p>;
+  if (!p) return <p className="muted">{error ? `The observer API is not answering (${error}); the values are at /api/v1/params.` : "Loading…"}</p>;
   const c = p.current;
   const k = p.protocol;
   return (

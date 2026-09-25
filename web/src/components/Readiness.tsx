@@ -9,9 +9,11 @@ import { type Validator, int } from "@/lib/api";
  * thirds of stake answer, nobody can publish, and every other figure on the
  * site stays empty for that reason rather than for want of publishers.
  *
- * "Reachable" is this observer's newest handshake with the registered host
- * (TCP, TLS and the validator's key): necessary for signing, not proof of it.
- * The figure is a readiness gauge, not a promise that an upload would pass.
+ * "Ready" is this observer's newest handshake with the registered host: it
+ * answered TLS with a certificate endorsed by the validator's consensus key.
+ * A host that answers with any other certificate is not counted, because a
+ * publisher's client will not upload to it. Necessary for signing, not proof
+ * of it: a readiness gauge, not a promise that an upload would pass.
  */
 
 /** the endpoint's standing, from the API's endpoint_state when it sends one */
@@ -30,10 +32,15 @@ export function endpointState(v: Validator): EndpointState {
   return "unreachable";
 }
 
-/** answering now: what the ⅔ figure counts */
+/** answering now, whatever the certificate */
 export function answering(v: Validator): boolean {
   const s = endpointState(v);
   return s === "reachable" || s === "flaky";
+}
+
+/** answering with the validator's own certificate: what the ⅔ figure counts */
+export function ready(v: Validator): boolean {
+  return answering(v) && v.identity_status === "verified";
 }
 
 export function bondedOf(rows: Validator[]): Validator[] {
@@ -44,7 +51,7 @@ export function readiness(rows: Validator[]) {
   const bonded = bondedOf(rows);
   const total = bonded.reduce((s, v) => s + (v.voting_power || 0), 0);
   const registered = bonded.filter((v) => !!v.host);
-  const reachable = registered.filter(answering);
+  const reachable = registered.filter(ready);
   const regPower = registered.reduce((s, v) => s + (v.voting_power || 0), 0);
   const reachPower = reachable.reduce((s, v) => s + (v.voting_power || 0), 0);
   const quorum = Math.floor((total * 2) / 3);
@@ -67,19 +74,19 @@ export function ReadyAnswer({ rows, headingId = "readiness-h" }: { rows: Validat
       <h2 id={headingId}>Can Fibre accept blobs?</h2>
       <p className="ready-answer">
         {r.ready
-          ? <><b>Yes.</b> Reachable hosts hold {pct(reachPower)} of stake, above the ⅔ a blob needs.</>
-          : <><b>Not yet.</b> Reachable hosts hold {pct(reachPower)} of stake; a blob needs ⅔ ({pct(quorum)}) to settle.</>}
+          ? <><b>Yes.</b> Hosts ready to sign hold {pct(reachPower)} of stake, above the ⅔ a blob needs.</>
+          : <><b>Not yet.</b> Hosts ready to sign hold {pct(reachPower)} of stake; a blob needs ⅔ ({pct(quorum)}) to settle.</>}
       </p>
       <div className="meter ready-meter" role="img"
-        aria-label={`${pct(reachPower)} of stake reachable, ${pct(regPower)} registered, ${pct(quorum)} needed`}>
+        aria-label={`${pct(reachPower)} of stake ready, ${pct(regPower)} registered, ${pct(quorum)} needed`}>
         <i style={{ width: w(reachPower) }} />
         <b className="reg" style={{ left: w(reachPower), width: `calc(${w(regPower)} - ${w(reachPower)})` }} />
         <span className="tick" style={{ left: w(quorum) }} />
         <span className="tl2" style={{ left: w(quorum) }}>⅔ needed</span>
       </div>
       <p className="sub ready-key">
-        <span><i className="sw s" /> reachable {pct(reachPower)} · {int(r.reachable.length)} validators</span>
-        <span><i className="sw reg" /> registered, not answering {pct(regPower - reachPower)} · {int(r.registered.length - r.reachable.length)}</span>
+        <span title="Answers TLS with a certificate endorsed by the validator's consensus key"><i className="sw s" /> ready {pct(reachPower)} · {int(r.reachable.length)} validators</span>
+        <span title="Registered, but not answering, or answering with a certificate a client will not accept"><i className="sw reg" /> registered, not ready {pct(regPower - reachPower)} · {int(r.registered.length - r.reachable.length)}</span>
         <span><i className="sw p" /> no Fibre host {pct(total - regPower)} · {int(r.bonded.length - r.registered.length)}</span>
       </p>
     </>

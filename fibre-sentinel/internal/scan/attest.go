@@ -10,13 +10,15 @@ import (
 // blob's shards, established by verifying the message's signatures rather than
 // by trusting them.
 //
-// Why the observer verifies rather than counts: the chain's own check of
-// MsgPayForFibre's validator signatures runs in the ante handler and is
-// skipped in ExecModeFinalize and on a node-local cache hit
-// (celestia-app x/fibre/ante/ante.go), and the message server never repeats
-// it. A settled transaction therefore carries no state-machine guarantee that
-// its signature entries are valid, so an observer that counted them would be
-// trusting the publisher.
+// Why the observer verifies rather than counts: honest validators check
+// MsgPayForFibre's validator signatures in CheckTx and ProcessProposal
+// (celestia-app x/fibre/ante/ante.go), but the check stops at the quorum.
+// validateValidatorSignatures (x/fibre/keeper/msg_server.go) walks the
+// entries in validator-set order and returns once the verified ones carry
+// two thirds of the stake, so entries after that point are never verified by
+// any node. A settled transaction proves a quorum signed, not that every
+// entry is valid, so an observer that counted them would be trusting the
+// publisher.
 //
 // Why it matters: the signature is a receipt. A Fibre server writes the shard
 // to its store BEFORE it signs (celestia-app fibre/server_upload.go), so a
