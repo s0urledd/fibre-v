@@ -552,6 +552,7 @@ is read from local files.
 | --- | --- | --- |
 | `ip2asn-combined.tsv.gz` (required) | [iptoasn.com](https://iptoasn.com/) — IPv4+IPv6 range → origin AS, AS name, AS registry country | Public Domain, [ODC PDDL v1.0](https://opendatacommons.org/licenses/pddl/1-0/) |
 | `dbip-country-lite.csv.gz` (optional) | [DB-IP IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite) — range → country (geolocation estimate) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); the site prints the required "IP Geolocation by DB-IP" credit |
+| `dbip-city-lite.csv.gz` (optional, ~85 MB) | [DB-IP IP to City Lite](https://db-ip.com/db/download/ip-to-city-lite) — range → city, region, coordinates (adds `city`/`region`/`lat`/`lon` to `hosting` and `by_city` to `/v1/hosting`; absent file = country only; `HOSTING_CITY_DB` / `-hosting-city-db` to move it, `HOSTING_SKIP_CITY=1` to skip it) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), same credit |
 
 Considered and not used: CAIDA's AS-to-Organization dataset (and the
 RouteViews pfx2as files usually paired with it) is under CAIDA's acceptable

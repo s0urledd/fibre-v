@@ -971,3 +971,31 @@ export type NetworkReference = {
   computed_at: string;
   note: string;
 };
+
+/**
+ * City placement from DB-IP's IP to City Lite file (optional on the
+ * observer; every field is absent without it). Extends the types in
+ * ./hosting: a `hosting` object may carry HostingCity's fields, and
+ * /v1/hosting's summary may carry `by_city` and sources `city_db`.
+ * lat/lon are the city's approximate point, not the machine's.
+ */
+export type HostingCity = { city?: string; region?: string; lat?: number; lon?: number };
+
+/** One /v1/hosting summary.by_city entry. key "" = hosts with no city (listed last, no name or point). */
+export type HostingCityBucket = {
+  key: string;
+  city?: string;
+  region?: string;
+  country?: string;
+  lat?: number;
+  lon?: number;
+  hosts: number;
+  host_share: number;
+  stake: number;
+  stake_share: number;
+};
+
+export type HostingCityExtras = {
+  by_city?: HostingCityBucket[];
+  city_db?: import("./hosting").DBSource;
+};

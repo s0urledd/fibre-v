@@ -30,8 +30,13 @@
 //     licence requires the attribution line the site prints ("IP Geolocation
 //     by DB-IP"). Optional: without it the country is the AS registry's
 //     country, and the API says so (country_basis).
+//   - DB-IP's IP to City Lite CSV (dbip-city-lite-YYYY-MM.csv.gz): ranges
+//     to country, state/province, city and the city's approximate
+//     coordinates. Same licence and credit, https://db-ip.com/db/download/ip-to-city-lite.
+//     Optional: without it the hosts are placed by country only and the
+//     city fields are absent.
 //
-// Both are looked up by streaming the file once per lookup pass against the
+// All are looked up by streaming the file once per lookup pass against the
 // handful of addresses in question, so the collector holds no table in
 // memory between passes. A missing ASN file turns the feature off; the pass
 // then clears whatever an earlier configuration stored, so the API never

@@ -46,15 +46,60 @@ const Schema = `CREATE TABLE IF NOT EXISTS endpoint_hosting (
 	resolved_at       TEXT NOT NULL DEFAULT '',  -- when the heartbeat resolved it
 	resolved_by       TEXT NOT NULL DEFAULT '',  -- heartbeat | literal
 	looked_up_at      TEXT NOT NULL,
+	city              TEXT NOT NULL DEFAULT '',  -- DB-IP city estimate, when a city file is configured
+	region            TEXT NOT NULL DEFAULT '',  -- its state / province
+	lat               REAL,                      -- the city's approximate coordinates; NULL when unknown
+	lon               REAL,
 	PRIMARY KEY (validator_address, host)
 )`
 
-// EnsureSchema creates the table when it is not there. Idempotent; the
-// collector calls it once at start whether or not the feature is configured,
-// so the table always exists on a database the current collector has opened.
+// addedColumns are the columns added to endpoint_hosting after it first
+// shipped, with their definitions. A table created by an older collector
+// lacks them; EnsureSchema adds them. Append only.
+var addedColumns = [][2]string{
+	{"city", "TEXT NOT NULL DEFAULT ''"},
+	{"region", "TEXT NOT NULL DEFAULT ''"},
+	{"lat", "REAL"},
+	{"lon", "REAL"},
+}
+
+// EnsureSchema creates the table when it is not there, and adds any column
+// a table created by an older collector is missing (SQLite has no ADD
+// COLUMN IF NOT EXISTS, so it reads the table's columns first). Idempotent;
+// the collector calls it once at start whether or not the feature is
+// configured, so the table always has the current shape on a database the
+// current collector has opened. The added columns start empty and the next
+// lookup pass fills them: the table is rebuilt in full by every pass.
 func EnsureSchema(db *sql.DB) error {
-	_, err := db.Exec(Schema)
-	return err
+	if _, err := db.Exec(Schema); err != nil {
+		return err
+	}
+	rows, err := db.Query(`SELECT name FROM pragma_table_info('endpoint_hosting')`)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return err
+		}
+		have[n] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, c := range addedColumns {
+		if have[c[0]] {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE endpoint_hosting ADD COLUMN ` + c[0] + ` ` + c[1]); err != nil {
+			return fmt.Errorf("add column %s: %w", c[0], err)
+		}
+	}
+	return nil
 }
 
 // Meta keys the lookup pass writes. The API reads them to say which files
@@ -65,6 +110,8 @@ const (
 	MetaASNDBModified   = "hosting_asn_db_modified"
 	MetaCountryDB       = "hosting_country_db"
 	MetaCountryModified = "hosting_country_db_modified"
+	MetaCityDB          = "hosting_city_db"
+	MetaCityModified    = "hosting_city_db_modified"
 	MetaLookedUpAt      = "hosting_looked_up_at"
 )
 
@@ -96,6 +143,14 @@ type Info struct {
 	// which for a multinational cloud is its head office, not the machine.
 	Country      string `json:"country,omitempty"`
 	CountryBasis string `json:"country_basis,omitempty"`
+	// City and Region are DB-IP's IP to City Lite estimate for the primary
+	// address, and Lat/Lon that city's approximate coordinates (a point for
+	// the city, not for the machine). All absent without a city file, or
+	// when the city file's country is not Country.
+	City   string   `json:"city,omitempty"`
+	Region string   `json:"region,omitempty"`
+	Lat    *float64 `json:"lat,omitempty"`
+	Lon    *float64 `json:"lon,omitempty"`
 	// Provider is the normalised bucket for ASN (providers.go).
 	Provider string `json:"provider"`
 	// Addresses is every address the host resolved to, each looked up on
@@ -115,9 +170,18 @@ type Info struct {
 // endpoints (a host change caught between polls) gets the newer resolution.
 // A database without the table answers an empty map, not an error: that is
 // a collector from before this feature, and the feature is simply off.
+//
+// A table from before the city columns (the API opened the database before
+// the new collector's EnsureSchema ran) reads as having no cities.
 func Current(ctx context.Context, db *sql.DB) (map[string]Info, error) {
-	rows, err := db.QueryContext(ctx, `SELECT validator_address, host, status, ip, asn, as_org, country, country_basis,
-		provider, addresses_json, resolved_at, resolved_by, looked_up_at FROM endpoint_hosting`)
+	const base = `SELECT validator_address, host, status, ip, asn, as_org, country, country_basis,
+		provider, addresses_json, resolved_at, resolved_by, looked_up_at`
+	withCity := true
+	rows, err := db.QueryContext(ctx, base+`, city, region, lat, lon FROM endpoint_hosting`)
+	if err != nil && strings.Contains(err.Error(), "no such column") {
+		withCity = false
+		rows, err = db.QueryContext(ctx, base+` FROM endpoint_hosting`)
+	}
 	if err != nil {
 		if isNoTable(err) {
 			return map[string]Info{}, nil
@@ -130,9 +194,17 @@ func Current(ctx context.Context, db *sql.DB) (map[string]Info, error) {
 		var addr, addrs string
 		var in Info
 		var asn int64
-		if err := rows.Scan(&addr, &in.Host, &in.Status, &in.IP, &asn, &in.ASOrg, &in.Country, &in.CountryBasis,
-			&in.Provider, &addrs, &in.ResolvedAt, &in.ResolvedBy, &in.LookedUpAt); err != nil {
+		var lat, lon sql.NullFloat64
+		dest := []any{&addr, &in.Host, &in.Status, &in.IP, &asn, &in.ASOrg, &in.Country, &in.CountryBasis,
+			&in.Provider, &addrs, &in.ResolvedAt, &in.ResolvedBy, &in.LookedUpAt}
+		if withCity {
+			dest = append(dest, &in.City, &in.Region, &lat, &lon)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, err
+		}
+		if lat.Valid && lon.Valid {
+			in.Lat, in.Lon = &lat.Float64, &lon.Float64
 		}
 		in.ASN = uint32(asn)
 		// The bucket is a function of the AS number and of providers.go, not
@@ -176,6 +248,7 @@ type Sources struct {
 	Enabled    bool      `json:"enabled"`
 	ASN        *DBSource `json:"asn_db,omitempty"`
 	Country    *DBSource `json:"country_db,omitempty"`
+	City       *DBSource `json:"city_db,omitempty"`
 	LookedUpAt string    `json:"looked_up_at,omitempty"`
 	// Vantage is the caveat, in words, every hosting figure carries.
 	Caveat string `json:"caveat"`
@@ -229,6 +302,12 @@ func ReadSources(ctx context.Context, db *sql.DB) (Sources, error) {
 	if f := meta[MetaCountryDB]; f != "" {
 		s.Country = &DBSource{File: f, Modified: meta[MetaCountryModified],
 			Name: "DB-IP IP to Country Lite", URL: "https://db-ip.com/db/download/ip-to-country-lite",
+			License: "CC BY 4.0", LicenseURL: "https://creativecommons.org/licenses/by/4.0/",
+			Attribution: "IP Geolocation by DB-IP"}
+	}
+	if f := meta[MetaCityDB]; f != "" {
+		s.City = &DBSource{File: f, Modified: meta[MetaCityModified],
+			Name: "DB-IP IP to City Lite", URL: "https://db-ip.com/db/download/ip-to-city-lite",
 			License: "CC BY 4.0", LicenseURL: "https://creativecommons.org/licenses/by/4.0/",
 			Attribution: "IP Geolocation by DB-IP"}
 	}
