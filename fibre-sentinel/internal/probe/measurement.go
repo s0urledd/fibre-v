@@ -2,14 +2,14 @@ package probe
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/record"
 )
 
 // MeasurementSchemaVersion is bumped when the Measurement JSON shape changes.
@@ -319,7 +319,7 @@ func dedupeKey(vantage, promiseHash, validatorAddr string, scheduledAt time.Time
 // concurrent use.
 type MeasurementStore struct {
 	path string
-	f    *os.File
+	f    *record.Appender
 
 	mu         sync.Mutex
 	seen       map[string]map[string]bool // promise hash -> full dedupe keys
@@ -344,7 +344,7 @@ func OpenMeasurementStore(dir string) (*MeasurementStore, error) {
 	if err := s.loadSeen(); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := record.OpenAppender(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -354,50 +354,11 @@ func OpenMeasurementStore(dir string) (*MeasurementStore, error) {
 
 // TruncateTornTail cuts a trailing partial line (no final newline) off an
 // append-only JSONL file and reports how many bytes were removed. Files that
-// end in a newline, are empty, or do not exist are left alone.
+// end in a newline, are empty, or do not exist are left alone. It holds the
+// file's exclusive lock meanwhile, so an archive run is never copying the
+// bytes it cuts (record.RepairTail).
 func TruncateTornTail(path string) (int64, error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if os.IsNotExist(err) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || info.Size() == 0 {
-		return 0, err
-	}
-	size := info.Size()
-	buf := make([]byte, 1)
-	if _, err := f.ReadAt(buf, size-1); err != nil {
-		return 0, err
-	}
-	if buf[0] == '\n' {
-		return 0, nil
-	}
-	// walk back to the previous newline (bounded chunks)
-	cut := size
-	const chunk = 1 << 16
-	for cut > 0 {
-		start := cut - chunk
-		if start < 0 {
-			start = 0
-		}
-		b := make([]byte, cut-start)
-		if _, err := f.ReadAt(b, start); err != nil && err != io.EOF {
-			return 0, err
-		}
-		if i := bytes.LastIndexByte(b, '\n'); i >= 0 {
-			cut = start + int64(i) + 1
-			break
-		}
-		cut = start
-	}
-	if err := f.Truncate(cut); err != nil {
-		return 0, err
-	}
-	return size - cut, f.Sync()
+	return record.RepairTail(path)
 }
 
 func (s *MeasurementStore) loadSeen() error {
@@ -534,9 +495,10 @@ func (s *MeasurementStore) Close() error {
 // Path returns the measurements file path.
 func (s *MeasurementStore) Path() string { return s.path }
 
-// LoadMeasurements reads a measurements.jsonl (for tooling / tests).
+// LoadMeasurements reads a measurements.jsonl, its archived segments first
+// when it has any: the whole record (for tooling / tests).
 func LoadMeasurements(path string) ([]Measurement, error) {
-	f, err := os.Open(path)
+	f, err := record.OpenAll(path)
 	if err != nil {
 		return nil, err
 	}

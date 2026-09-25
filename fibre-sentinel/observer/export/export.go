@@ -33,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/record"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/verdict"
 )
 
@@ -357,7 +358,12 @@ func addMember(tw *tar.Writer, name string, data []byte, now time.Time) error {
 // A missing file is an empty member.
 func collect(path string, f FileSpec, day string, from int64) (Member, []byte, int64, error) {
 	m := Member{Name: f.Name, TimeField: f.TimeField, From: from, To: from}
-	fh, err := os.Open(path)
+	// Offsets are logical (internal/record): a file whose older lines were
+	// archived keeps every byte at the offset it was written at, so
+	// source_from and source_to name the same bytes before and after a
+	// rotation, and an offset behind the live file's base reads the
+	// archived segments.
+	s, err := record.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		m.SHA256 = emptySHA
 		return m, nil, from, nil
@@ -365,21 +371,18 @@ func collect(path string, f FileSpec, day string, from int64) (Member, []byte, i
 	if err != nil {
 		return m, nil, from, err
 	}
-	defer fh.Close()
-	info, err := fh.Stat()
-	if err != nil {
-		return m, nil, from, err
-	}
-	if info.Size() < from {
+	defer s.Close()
+	if s.End() < from {
 		// The file shrank: it was replaced. Start over; the old bytes are
 		// in earlier exports and the new ones will be counted late.
 		from = 0
 		m.From = 0
 	}
-	if _, err := fh.Seek(from, io.SeekStart); err != nil {
+	src, err := s.ReaderFrom(from)
+	if err != nil {
 		return m, nil, from, err
 	}
-	r := bufio.NewReaderSize(fh, 1<<20)
+	r := bufio.NewReaderSize(src, 1<<20)
 	var out bytes.Buffer
 	pos := from
 	h := sha256.New()

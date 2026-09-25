@@ -27,6 +27,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/record"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 )
@@ -55,7 +56,9 @@ func main() {
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
 		log.Fatalf("mkdir: %v", err)
 	}
-	out, err := os.OpenFile(filepath.Join(*dataDir, "reachability.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// Appended through record.Appender: observer-archive may rotate the file,
+	// and the appender follows it to the new one without losing a line.
+	out, err := record.OpenAppender(filepath.Join(*dataDir, "reachability.jsonl"))
 	if err != nil {
 		log.Fatalf("open output: %v", err)
 	}

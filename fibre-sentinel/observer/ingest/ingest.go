@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/record"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
@@ -73,29 +74,33 @@ func tail(st *store.Store, path string, fn handler, now time.Time) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	f, err := os.Open(path)
+	// The cursor is a logical offset (internal/record): a file whose older
+	// lines were archived keeps every byte at the offset it was written at,
+	// its live copy starting at a base past zero. A cursor at or past the
+	// base reads the live file; one behind it (a rebuild from scratch, a
+	// collector that was down over a rotation) reads the archived segments
+	// first. A file never archived has base 0, which is what every cursor
+	// already meant.
+	s, err := record.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Result{Offset: offset, Line: line}, nil
 	}
 	if err != nil {
 		return Result{}, err
 	}
-	defer f.Close()
+	defer s.Close()
 
-	info, err := f.Stat()
-	if err != nil {
-		return Result{}, err
-	}
-	if info.Size() < offset {
+	if s.End() < offset {
 		// The file was truncated or replaced: start over. Idempotent keys
 		// make this safe; it just re-reads.
 		offset, line = 0, 0
 	}
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+	src, err := s.ReaderFrom(offset)
+	if err != nil {
 		return Result{}, err
 	}
 
-	r := bufio.NewReaderSize(f, 1<<20)
+	r := bufio.NewReaderSize(src, 1<<20)
 	res := Result{Offset: offset, Line: line}
 	// The cursor was written after every line: a second tiny transaction per
 	// record, on top of the insert's own. In WAL mode each of those dirties

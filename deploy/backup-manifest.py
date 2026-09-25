@@ -32,15 +32,32 @@ moment. Anything missing, shorter, different or unparseable fails.
 
 The sampling master key must never be in a copy; `verify` fails if it is.
 
+A file observer-archive has rotated is its archive plus its live file:
+archive/<file>/ holds gzip segments of the older lines and index.json,
+which says where the live file starts in the record (its base) by the
+SHA-256 of its first line. The cut carries, per such file, the base and
+every segment up to it (name, logical range, lines, digests of the lines
+and of the gzip file); `records` stays the live file's own count and
+`archived_records` is the rest. The cut and the copy hold archive/.lock
+shared, so no rotation happens under them; segments never change once
+written. `verify` checks every segment the cut names, whole, and that the
+restored index places the live file at the cut's base.
+
   write    <data-dir> <manifest.json>      cut + manifest, files untouched
   snapshot <data-dir> <dest-dir>           cut + manifest + trimmed copies
   verify   <restored-dir> [manifest.json]  trim, hash, parse, count, state;
                                            exit 1 on any fault
   show     <manifest.json>                 one line per file
+  cat      <data-dir> <file>               the whole record of one file,
+                                           archived lines first, to stdout
+  end      <data-dir> <file>               its logical length (base + live)
 """
+import fcntl
+import gzip
 import hashlib
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -65,8 +82,9 @@ RECORD_FILES = [
 STATE = "state.json"
 FORBIDDEN = ["sampling-master.key"]
 MANIFEST = "manifest.json"
-VERSION = 2
+VERSION = 3
 CHUNK = 1 << 20
+ARCHIVE = "archive"
 
 
 class RecordError(Exception):
@@ -147,9 +165,184 @@ def checkpoint_of(raw):
     }
 
 
+def head_sha(path):
+    """SHA-256 of the file's first line, newline included; "" when it has
+    no complete line. It is how index.json names a live file."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            while True:
+                b = f.read(CHUNK)
+                if not b:
+                    return ""
+                i = b.find(b"\n")
+                if i >= 0:
+                    h.update(b[:i + 1])
+                    return h.hexdigest()
+                h.update(b)
+    except FileNotFoundError:
+        return ""
+
+
+def archive_index(data_dir, name):
+    try:
+        with open(os.path.join(data_dir, ARCHIVE, name, "index.json")) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
+def live_base(data_dir, name, idx=None):
+    """The logical offset the live file starts at: the base of the newest
+    generation whose first line is the live file's, 0 for a file never
+    archived. None when the index has generations and none is this file."""
+    idx = idx if idx is not None else archive_index(data_dir, name)
+    gens = (idx or {}).get("generations") or []
+    if not gens:
+        return 0
+    head = head_sha(os.path.join(data_dir, name))
+    for g in reversed(gens):
+        if head and g.get("head_sha256") == head:
+            return int(g["base"])
+    return None
+
+
+def archive_cut(data_dir, name):
+    """The archived part of one file at the cut: the live file's base and
+    every segment below it, in order, without a gap. None for a file never
+    archived."""
+    idx = archive_index(data_dir, name)
+    if idx is None or not idx.get("generations"):
+        return None
+    base = live_base(data_dir, name, idx)
+    if base is None:
+        raise RecordError(f"{name}: the live file's first line matches no generation in {ARCHIVE}/{name}/index.json")
+    segs, at = [], 0
+    for s in sorted(idx.get("segments") or [], key=lambda s: s["from"]):
+        if s["to"] > base:
+            continue  # written by a run that never swapped; the next run drops it
+        if s["from"] != at:
+            raise RecordError(f"{name}: archive segments leave a gap at logical byte {at}")
+        at = s["to"]
+        segs.append({k: s[k] for k in ("name", "from", "to", "lines", "sha256", "gz_sha256", "gz_bytes")})
+    if at != base:
+        raise RecordError(f"{name}: archive segments end at {at}, the live file starts at {base}")
+    return {"base": base, "segments": segs, "records": sum(s["lines"] for s in segs)}
+
+
+class ArchiveLock:
+    """archive/.lock held shared: observer-archive holds it exclusively for
+    a run, so no rotation happens under a cut or a copy. The directory is
+    made (owned like the data dir) when missing, so a first rotation cannot
+    begin under a cut either."""
+
+    def __init__(self, data_dir):
+        self.data_dir, self.f = data_dir, None
+
+    def __enter__(self):
+        d = os.path.join(self.data_dir, ARCHIVE)
+        if not os.path.isdir(d):
+            try:
+                os.makedirs(d, exist_ok=True)
+                st = os.stat(self.data_dir)
+                if os.geteuid() == 0:
+                    os.chown(d, st.st_uid, st.st_gid)
+            except OSError:
+                return self  # a read-only copy: nothing rotates it
+        p = os.path.join(d, ".lock")
+        try:
+            new = not os.path.exists(p)
+            self.f = open(p, "a")
+            if new and os.geteuid() == 0:
+                st = os.stat(self.data_dir)
+                os.chown(p, st.st_uid, st.st_gid)
+            fcntl.flock(self.f, fcntl.LOCK_SH)
+        except OSError:
+            self.f = None
+        return self
+
+    def __exit__(self, *exc):
+        if self.f:
+            self.f.close()
+
+
+def iter_record(data_dir, name, live_length=None):
+    """The bytes of one file's whole record: its archived segments up to the
+    live file's base, then the live file (its first live_length bytes when
+    given)."""
+    a = archive_cut(data_dir, name)
+    for s in (a or {}).get("segments", []):
+        with gzip.open(os.path.join(data_dir, ARCHIVE, name, s["name"]), "rb") as z:
+            while True:
+                b = z.read(CHUNK)
+                if not b:
+                    break
+                yield b
+    p = os.path.join(data_dir, name)
+    if not os.path.exists(p):
+        return
+    left = live_length
+    with open(p, "rb") as f:
+        while left is None or left > 0:
+            b = f.read(CHUNK if left is None else min(CHUNK, left))
+            if not b:
+                break
+            if left is not None:
+                left -= len(b)
+            yield b
+
+
+def verify_archive(restored, name, info):
+    """Every segment the cut names is in the copy, whole: the gzip file's
+    digest and size, and what it decompresses to (digest, length, lines);
+    and the copy's index places the live file at the cut's base."""
+    a = info.get("archive")
+    if not a:
+        return []
+    problems = []
+    for s in a["segments"]:
+        p = os.path.join(restored, ARCHIVE, name, s["name"])
+        if not os.path.exists(p):
+            problems.append(f"{name}: archive segment {s['name']} missing")
+            continue
+        gh = hashlib.sha256()
+        with open(p, "rb") as f:
+            for b in iter(lambda: f.read(CHUNK), b""):
+                gh.update(b)
+        if gh.hexdigest() != s["gz_sha256"] or os.path.getsize(p) != s["gz_bytes"]:
+            problems.append(f"{name}: archive segment {s['name']} differs from the cut (gzip digest or size)")
+            continue
+        h, n, lines = hashlib.sha256(), 0, 0
+        try:
+            with gzip.open(p, "rb") as z:
+                for b in iter(lambda: z.read(CHUNK), b""):
+                    h.update(b)
+                    n += len(b)
+                    lines += b.count(b"\n")
+        except (OSError, EOFError) as e:
+            problems.append(f"{name}: archive segment {s['name']}: {e}")
+            continue
+        if h.hexdigest() != s["sha256"] or n != s["to"] - s["from"] or lines != s["lines"]:
+            problems.append(f"{name}: archive segment {s['name']} does not decompress to the lines the cut names")
+    if problems:
+        return problems
+    try:
+        base = live_base(restored, name)
+    except (OSError, ValueError) as e:
+        return [f"{name}: {ARCHIVE}/{name}/index.json: {e}"]
+    if base != a["base"]:
+        problems.append(f"{name}: the copy's index places the live file at {base}, the cut at {a['base']}")
+    return problems
+
+
 def cut(data_dir):
     """The consistent cut: state first, then every file's length in order,
     then hashed and parsed. Raises RecordError on a record that is not one."""
+    with ArchiveLock(data_dir):
+        return cut_locked(data_dir)
+
+
+def cut_locked(data_dir):
     state_raw = read_state(os.path.join(data_dir, STATE))
     lengths = []
     for name in RECORD_FILES:
@@ -160,6 +353,10 @@ def cut(data_dir):
     for name, length in lengths:
         digest, records = sha_records(name, os.path.join(data_dir, name), length)
         files[name] = {"bytes": length, "sha256": digest, "records": records}
+        a = archive_cut(data_dir, name)
+        if a:
+            files[name]["archive"] = a
+            files[name]["archived_records"] = a["records"]
     state = None
     if state_raw is not None:
         state = {"bytes": len(state_raw), "sha256": hashlib.sha256(state_raw).hexdigest()}
@@ -195,8 +392,23 @@ def write(data_dir, out):
 
 def snapshot(data_dir, dest):
     os.makedirs(dest, exist_ok=True)
-    m = cut(data_dir)
+    with ArchiveLock(data_dir):
+        m = cut_locked(data_dir)
+        copy_cut(data_dir, dest, m)
+    dump(m, os.path.join(dest, MANIFEST))
+    return m
+
+
+def copy_cut(data_dir, dest, m):
     for name, info in m["files"].items():
+        a = info.get("archive")
+        if a:
+            # segments never change once written: copied whole, with the
+            # index that places the live file at the cut's base
+            os.makedirs(os.path.join(dest, ARCHIVE, name), exist_ok=True)
+            for s in a["segments"]:
+                shutil.copyfile(os.path.join(data_dir, ARCHIVE, name, s["name"]), os.path.join(dest, ARCHIVE, name, s["name"]))
+            shutil.copyfile(os.path.join(data_dir, ARCHIVE, name, "index.json"), os.path.join(dest, ARCHIVE, name, "index.json"))
         src = os.path.join(data_dir, name)
         dst = os.path.join(dest, name)
         with open(src, "rb") as i, open(dst, "wb") as o:
@@ -211,8 +423,6 @@ def snapshot(data_dir, dest):
         # the state as it was at the cut, not as it is now
         with open(os.path.join(dest, STATE), "w") as f:
             f.write(m["state_raw"])
-    dump(m, os.path.join(dest, MANIFEST))
-    return m
 
 
 def verify(restored, manifest_path=None):
@@ -250,6 +460,8 @@ def verify(restored, manifest_path=None):
             problems.append(f"{name}: sha256 differs over the first {info['bytes']} bytes (content changed or not this backup)")
         elif records != info["records"]:
             problems.append(f"{name}: {records} records, manifest says {info['records']}")
+        else:
+            problems.extend(verify_archive(restored, name, info))
     cp = m.get("checkpoint")
     sp = os.path.join(restored, STATE)
     if m.get("state_raw") is not None:
@@ -292,7 +504,11 @@ def show(m):
         carried = f", {st['bytes']} bytes carried" if st else ""
         print(f"  checkpoint: height {m['checkpoint']['last_scanned_height']} ({m['checkpoint'].get('last_scanned_time')}), {m['checkpoint']['gaps']} gap(s){carried}")
     for name, info in sorted(m["files"].items()):
-        print(f"  {name:<24} {info['bytes']:>12} bytes {info['records']:>9} records {info['sha256'][:16]}")
+        archived = ""
+        if info.get("archive"):
+            a = info["archive"]
+            archived = f" + {a['records']} archived in {len(a['segments'])} segment(s) (base {a['base']})"
+        print(f"  {name:<24} {info['bytes']:>12} bytes {info['records']:>9} records {info['sha256'][:16]}{archived}")
 
 
 def main(argv):
@@ -322,6 +538,16 @@ def main(argv):
             print("verify: every file matches the manifest")
         elif cmd == "show":
             show(json.load(open(argv[2])))
+        elif cmd == "cat" and len(argv) > 3:
+            with ArchiveLock(argv[2]):
+                p = os.path.join(argv[2], argv[3])
+                length = complete_length(p) if os.path.exists(p) else None
+                for b in iter_record(argv[2], argv[3], length):
+                    sys.stdout.buffer.write(b)
+        elif cmd == "end" and len(argv) > 3:
+            p = os.path.join(argv[2], argv[3])
+            base = live_base(argv[2], argv[3])
+            print((base or 0) + (os.path.getsize(p) if os.path.exists(p) else 0))
         else:
             print(__doc__.strip(), file=sys.stderr)
             return 2

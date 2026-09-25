@@ -35,6 +35,14 @@ command -v rclone >/dev/null || { echo "fibre-backup: rclone is not installed" >
 
 dest="$remote/$instance"
 echo "fibre-backup[$instance]: $data -> $dest"
+# observer-archive rotates the biggest files daily: their older lines move
+# into archive/<file>/*.jsonl.gz and the live file keeps the rest. It holds
+# archive/.lock exclusively while it does; the cut and the copy below hold
+# it shared, so they never straddle a rotation (the manifest tool takes it
+# shared too, which a shared lock allows).
+mkdir -p "$data/archive"
+exec 9>>"$data/archive/.lock"
+flock -s -w 7200 9 || { echo "fibre-backup[$instance]: observer-archive held archive/.lock for two hours" >&2; exit 1; }
 # One consistent cut of the record before anything is copied: state.json
 # first (read whole and carried in the manifest), then the byte length of
 # every record file up to its last complete line (dependents before what
@@ -60,6 +68,14 @@ fi
 # are read, and rclone would otherwise abort with "source file is being
 # updated". The copy is whatever length the file had when the transfer
 # began, which is at least the manifest's cut.
+#
+# The archive first, in its own pass: a rotated live file is shorter than
+# the copy the remote holds and replaces it there, so the segments holding
+# its older lines must be on the remote before it is. Segments never change
+# once written; copy uploads each once.
+rclone copy "$data/archive" "$dest/archive" \
+  --include '*.jsonl.gz' --include 'index.json' \
+  --transfers 4 --checkers 8 --stats-one-line --stats 0 --log-level NOTICE
 rclone copy "$data" "$dest" \
   --include '*.jsonl' --include 'state.json' --include 'backup-manifest.json' --include 'status/**' --include 'exports/**' \
   --exclude 'sampling-master.key' --exclude 'observer.db*' --exclude 'snapshots/**' \

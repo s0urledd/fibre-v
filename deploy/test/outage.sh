@@ -44,6 +44,8 @@ HEALTH="http://$API_LISTEN/v1/health"
 READERS="fibre-scan@$INSTANCE fibre-probe@$INSTANCE fibre-heartbeat@$INSTANCE fibre-collector@$INSTANCE"
 ALL="$READERS fibre-api@$INSTANCE"
 BAK="$ENVFILE.outage-bak"
+MANIFEST_TOOL="$(dirname "$0")/../backup-manifest.py"
+[ -x "$MANIFEST_TOOL" ] || MANIFEST_TOOL=/usr/local/bin/fibre-backup-manifest
 
 restore_env() {
   if [ -f "$BAK" ]; then
@@ -73,20 +75,24 @@ PY
 }
 tip() { curl -sS -m 15 "$RPC/status" 2>/dev/null | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"]["sync_info"]["latest_block_height"]))' 2>/dev/null || echo 0; }
 dupes() {
-  python3 - "$DATA_DIR" <<'PY'
-import json, os, sys
+  # the whole record of each file, archived segments first (observer-archive)
+  python3 - "$DATA_DIR" "$MANIFEST_TOOL" <<'PY'
+import json, os, subprocess, sys
 d = sys.argv[1]; out = []
 for name, keyf in (("publications.jsonl", lambda r: r.get("promise_hash")),
                    ("measurements.jsonl", lambda r: (r.get("vantage"), r.get("promise_hash"), r.get("validator_address"), r.get("scheduled_at")))):
     path = os.path.join(d, name); seen = set(); dup = 0
     if os.path.exists(path):
-        for line in open(path, "rb"):
+        cat = subprocess.Popen([sys.argv[2], "cat", d, name], stdout=subprocess.PIPE)
+        for line in cat.stdout:
             line = line.strip()
             if not line: continue
             try: k = keyf(json.loads(line))
             except Exception: continue
             if k in seen: dup += 1
             seen.add(k)
+        if cat.wait() != 0:
+            raise SystemExit(f"{name}: the manifest tool could not read the record")
     out.append(str(dup))
 print(" ".join(out))
 PY

@@ -1,0 +1,13 @@
+[Unit]
+Description=Fibre observer (%i): daily archive of the older record lines
+
+[Timer]
+# After the daily export (built from 03:00 UTC by the collector) and the
+# nightly backup (03:17 UTC plus up to 20 min); the two never overlap in any
+# case: the backup holds archive/.lock shared, a run holds it exclusively.
+OnCalendar=*-*-* 04:40:00 UTC
+Persistent=true
+Unit=fibre-archive@%i.service
+
+[Install]
+WantedBy=timers.target

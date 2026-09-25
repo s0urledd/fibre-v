@@ -166,7 +166,7 @@ sudo install -m 0755 deploy/backup-manifest.py /usr/local/bin/fibre-backup-manif
 sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now fibre-scan@mocha fibre-probe@mocha fibre-heartbeat@mocha fibre-collector@mocha fibre-api@mocha
-sudo systemctl enable --now fibre-healthwatch@mocha.timer fibre-backup@mocha.timer
+sudo systemctl enable --now fibre-healthwatch@mocha.timer fibre-backup@mocha.timer fibre-archive@mocha.timer
 ```
 
 The units are templates: the part after `@` is the network, and it selects
@@ -304,10 +304,12 @@ Budget for disk: one measurement is about 1.5 KB in `measurements.jsonl`
 and about twice that again in the database. At a stress scenario
 (60 publications an hour, 100 validators, 6 points) that is about 1.3 GB a
 day of JSONL plus the database; at a realistic mocha rate it is a few GB a
-month. The JSONL files are the record and are never rotated by the tools;
-`/v1/health` fails the `disk` check under 5% free so the alert arrives
-before a write does. When a disk fills, move the oldest JSONL files off the
-box (they are append-only; a copy is complete the moment it is taken) and
+month. The JSONL files are the record; the three biggest are kept bounded
+by moving their older lines into compressed segments under `archive/`
+(below), never by deleting a line. `/v1/health` fails the `disk` check
+under 5% free so the alert arrives before a write does. When a disk fills,
+move the oldest archive segments or the small record files off the box
+(append-only or immutable; a copy is complete the moment it is taken) and
 rebuild the database from the rest if you want it smaller. Nothing here
 deletes a probe row yet: the "all" window is exactly that.
 
@@ -331,7 +333,7 @@ retention pass runs hourly (`-retention-every`); the status file shows
 `rollup_through` and `raw_from`. A warning in the log that obligations
 were still pending at roll means `-rollup-after` is shorter than a
 retention window on this chain: raise it. The
-JSONL files are never rotated by the tools and remain the record; the
+JSONL files (with their `archive/` segments) remain the record; the
 daily export is what a verifier downloads. The collector builds it: one
 tarball per UTC day under `<DATA_DIR>/exports` (`-exports-dir`), once the
 grace hour has passed (`-export-hour`, default 03:00 UTC, so late rows
@@ -369,7 +371,8 @@ master key is never in it.
   continuously, with 72 h of history.
 - **fibre-backup** for the record: `fibre-backup@mocha.timer` runs
   `rclone sync` of every `.jsonl` (the record, `registry.jsonl`,
-  `runs.jsonl`, `sampling_decisions.jsonl`, `sampling-secrets.jsonl`, `amendments.jsonl`), `state.json`, the status files
+  `runs.jsonl`, `sampling_decisions.jsonl`, `sampling-secrets.jsonl`, `amendments.jsonl`), the archived
+  segments under `archive/` (first, see "Archive" below), `state.json`, the status files
   and the daily exports to `BACKUP_REMOTE/<network>` nightly (`deploy/backup.sh`),
   with the rclone remote configured once in `/etc/fibre-observer/rclone.conf`.
   It copies rather than mirrors, so moving old files off a full disk can
@@ -413,6 +416,73 @@ delete any `observer.db-wal` / `-shm` left beside it, start both.
 Test a restore and a rebuild before you need one: stop the collector, move
 the database aside, restore or delete it, start the collector, and check
 `/v1/meta` counts match.
+
+### Archive: bounded live files
+
+`measurements.jsonl` grows about 100 MB a day. `observer-archive`, run daily
+by `fibre-archive@<network>.timer` at 04:40 UTC (after the export and the
+backup), keeps it and the other two biggest files bounded without taking a
+line out of the record:
+
+```
+<DATA_DIR>/measurements.jsonl                         the live file: lines dated in the last -keep (default 7 days)
+<DATA_DIR>/archive/measurements.jsonl/index.json      segments, their digests, where the live file starts
+<DATA_DIR>/archive/measurements.jsonl/000001-2026-10-02.jsonl.gz
+<DATA_DIR>/archive/measurements.jsonl/000002-2026-10-03.jsonl.gz   one per run: the lines dated before that day
+<DATA_DIR>/archive/reachability.jsonl/...
+<DATA_DIR>/archive/sampling_decisions.jsonl/...
+<DATA_DIR>/archive/.lock                              held by a run (exclusive) and the backup (shared)
+```
+
+Every byte keeps its offset. Segment 1 holds bytes `[0, a)` of the file as
+written, segment 2 `[a, b)`, and the live file starts at `b` (its *base*,
+named in `index.json` by the SHA-256 of its first line). The collector's
+ingest cursors and the export's `source_from`/`source_to` are these logical
+offsets, so a rotation neither re-reads nor skips a line, a collector behind
+it (or rebuilding from scratch) reads the segments first, and every export
+is byte for byte what it would have been. `sentinel-recompute`,
+`sentinel-measure-check` and a rebuild read segments then live file.
+
+A run, per file: cut before the first line dated at or after the cutoff
+(the start of the UTC day `-keep` ago; `scheduled_at` for measurements and
+heartbeats, `decided_at` for sampling decisions), never past what the daily
+export has read, always leaving the last line; write the segment, fsync it,
+read it back and match its digest; copy the rest to a temp file; then,
+holding the file's exclusive `flock`, copy what was appended since, write
+the index and rename the copy over the live file. The writers
+(`sentinel-probe`, `observer-heartbeat`) append under a shared `flock` and
+reopen the path when it no longer names the file they hold, so no line is
+lost or written twice. A crash at any step leaves the record readable as
+before; the next run removes the leftovers. A second run the same day moves
+nothing.
+
+`-keep` must exceed the longest retention window in `state.json` plus a day
+(the command refuses less): a restarted prober reads only the live files,
+and treats a publication whose rows may have been archived as finished
+instead of writing its slots again. With the default backfill
+(`-backfill-missed 0`) that means a prober down for longer than `-keep`
+does not write NOT_PROBED rows for slots older than the archive's cutoff.
+
+```sh
+sudo -u fibre-observer observer-archive -data-dir /var/lib/fibre-observer/mocha -dry-run   # what would move
+sudo systemctl start fibre-archive@mocha                                                   # a run now
+sudo -u fibre-observer observer-archive -data-dir /var/lib/fibre-observer/mocha -status    # base, live size, segments
+sudo -u fibre-observer observer-archive -data-dir /var/lib/fibre-observer/mocha -verify    # every segment's digest
+fibre-backup-manifest cat /var/lib/fibre-observer/mocha measurements.jsonl | wc -l         # the whole record
+```
+
+`-keep 336h` in `ARCHIVE_ARGS` in the env file keeps two weeks live. The
+backup copies `archive/` before the live files, and its manifest names every
+segment and the live base; `restore.sh` and `verify` check each segment. The
+small record files (publications, payments, host history, the collector's
+own logs, runs) are not archived: their writers hold them open without the
+lock. Neither are the files under `vantages/`, which `vantage-pull` resumes
+by size; do not run `observer-archive` on a second vantage, whose files the
+observer pulls that way.
+
+Upgrade order: install binaries, restart `fibre-probe` and
+`fibre-heartbeat` (the writers must hold the lock before any rotation) and
+`fibre-collector`, then enable the timer.
 
 ### Runbook
 
