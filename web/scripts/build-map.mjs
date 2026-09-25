@@ -1,160 +1,138 @@
 #!/usr/bin/env node
 /**
- * Builds the two small files the overview's host map draws from. Run once,
- * offline; the output is committed and nothing here runs in the browser.
+ * Builds the one file the overview's host map draws from. Run once, offline;
+ * the output is committed and nothing here runs in the browser.
  *
- *   node web/scripts/build-map.mjs <ne_110m_land.geojson> <ne_50m_admin_0_countries.geojson>
+ *   npm i --no-save d3-geo topojson-server topojson-simplify topojson-client
+ *   node web/scripts/build-map.mjs <ne_50m_admin_0_countries.geojson>
  *
- * Inputs are Natural Earth (public domain), from
+ * Input is Natural Earth 1:50m admin-0 countries (public domain), from
  * https://github.com/nvkelso/natural-earth-vector/tree/master/geojson
+ * The four packages are d3-geo and topojson (ISC); they are needed only here.
  *
- * Output:
- *   web/src/lib/map/world-dots.json   land as a dot grid in the Equal Earth
- *                                     projection, one run list per row
- *   web/src/lib/map/centroids.json    ISO 3166-1 alpha-2 -> [lon, lat], each
- *                                     country's Natural Earth label point
+ * Output: web/src/lib/map/world.json
+ *   w, h        the frame in map units (Equal Earth, Antarctica left out)
+ *   k, tx, ty   the projection: x = tx + k * X, y = ty - k * Y, where X, Y is
+ *               the raw Equal Earth forward (web/src/lib/map/project.ts)
+ *   countries   [code, path][]: every country as one SVG path in map units,
+ *               relative commands on an integer grid. Code is ISO 3166-1
+ *               alpha-2, or "" where Natural Earth has none.
+ *   points      code -> [lon, lat], each country's Natural Earth label point
  *
- * The projection is Equal Earth (Šavrič, Patterson, Jenny 2018): equal-area,
- * so a country's share of dots is its share of land, and it keeps the poles
- * from swelling the way a plate carrée does. The page projects host positions
- * with the same forward formula (web/src/lib/map/project.ts).
+ * The countries share their borders in a topology before simplification, so
+ * neighbours stay seamless; tiny islands are dropped unless they are the
+ * largest piece of their country (Singapore, Malta and Bahrain stay).
  */
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
-const [landPath, countriesPath] = process.argv.slice(2);
-if (!landPath || !countriesPath) {
-  console.error("usage: build-map.mjs <ne_110m_land.geojson> <ne_50m_admin_0_countries.geojson>");
+const require = createRequire(join(process.cwd(), "noop.js"));
+const { geoEqualEarth, geoPath } = require("d3-geo");
+const { topology } = require("topojson-server");
+const { presimplify, simplify, quantile } = require("topojson-simplify");
+const { feature } = require("topojson-client");
+
+const [countriesPath] = process.argv.slice(2);
+if (!countriesPath) {
+  console.error("usage: build-map.mjs <ne_50m_admin_0_countries.geojson>");
   process.exit(2);
 }
 const outDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "map");
 mkdirSync(outDir, { recursive: true });
 
-// ---- grid parameters -------------------------------------------------------
-const COLS = 190;          // dots across the full width of the projection
-const LAT_TOP = 81;        // Greenland loses only its northern rim
-const LAT_BOTTOM = -55.5;  // Cape Horn; Antarctica is left out
-const SUPER = 3;           // 3x3 samples per cell
-const MIN_LAND = 3;        // of 9 samples on land -> a dot (keeps the UK, Japan, NZ)
+const W = 4800;      // frame width in map units; coordinates are whole units
+const KEEP = 0.2;    // share of points kept by simplification (Visvalingam, by triangle area)
+const MIN_RING = 5;  // units²: smaller rings go, unless a country's largest
 
-// ---- Equal Earth -----------------------------------------------------------
-const A1 = 1.340264, A2 = -0.081106, A3 = 0.000893, A4 = 0.003796, M = Math.sqrt(3) / 2;
-function forward(lon, lat) {
-  const l = (lon * Math.PI) / 180, p = (lat * Math.PI) / 180;
-  const t = Math.asin(M * Math.sin(p)), t2 = t * t, t6 = t2 * t2 * t2;
-  return [(l * Math.cos(t)) / (M * (A1 + 3 * A2 * t2 + t6 * (7 * A3 + 9 * A4 * t2))), t * (A1 + A2 * t2 + t6 * (A3 + A4 * t2))];
+const src = JSON.parse(readFileSync(countriesPath, "utf8"));
+const codeOf = (p) => [p.ISO_A2_EH, p.ISO_A2, p.WB_A2].find((v) => typeof v === "string" && /^[A-Z]{2}$/.test(v)) ?? "";
+const feats = src.features.filter((f) => codeOf(f.properties) !== "AQ" && f.properties.ADMIN !== "Antarctica");
+
+// ---- label points ------------------------------------------------------------
+const points = {};
+for (const f of feats) {
+  const p = f.properties, code = codeOf(p);
+  if (!code || points[code]) continue; // the first feature for a code is the sovereign mainland
+  if (typeof p.LABEL_X === "number" && typeof p.LABEL_Y === "number") points[code] = [+p.LABEL_X.toFixed(2), +p.LABEL_Y.toFixed(2)];
 }
-function inverse(x, y) {
-  let t = y;
-  for (let i = 0; i < 20; i++) {
-    const t2 = t * t, t6 = t2 * t2 * t2;
-    const f = t * (A1 + A2 * t2 + t6 * (A3 + A4 * t2)) - y;
-    const d = A1 + 3 * A2 * t2 + t6 * (7 * A3 + 9 * A4 * t2);
-    const dt = f / d;
-    t -= dt;
-    if (Math.abs(dt) < 1e-12) break;
+
+// ---- projection, fitted to the land without Antarctica -----------------------
+const fc = { type: "FeatureCollection", features: feats };
+const proj = geoEqualEarth().precision(0).fitWidth(W, fc);
+const [[, y0], [, y1]] = geoPath(proj).bounds(fc);
+const PAD = 6;
+proj.translate([proj.translate()[0], proj.translate()[1] - y0 + PAD]);
+const H = Math.ceil(y1 - y0 + 2 * PAD);
+
+// ---- shared-border topology, simplified before projecting ----------------------
+const objs = {};
+feats.forEach((f, i) => { objs["f" + i] = { type: "Feature", properties: { code: codeOf(f.properties) }, geometry: f.geometry }; });
+const full = topology(objs, 1e6);
+const pre = presimplify(topology(objs, 1e6));
+const topo = simplify(pre, quantile(pre, KEEP));
+
+// ---- serialise: relative commands on the integer grid ------------------------
+function ringsOf(geom) {
+  const rings = [];
+  let cur = null;
+  const ctx = {
+    moveTo(x, y) { cur = [[x, y]]; rings.push(cur); },
+    lineTo(x, y) { cur.push([x, y]); },
+    closePath() {},
+    arc() {},
+  };
+  geoPath(proj, ctx)(geom);
+  return rings;
+}
+const area = (r) => { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += (r[j][0] + r[i][0]) * (r[j][1] - r[i][1]); return Math.abs(a / 2); };
+function ringPath(r) {
+  const pts = [];
+  for (const [x, y] of r) {
+    const p = [Math.round(x), Math.round(y)];
+    const last = pts[pts.length - 1];
+    if (!last || last[0] !== p[0] || last[1] !== p[1]) pts.push(p);
   }
-  const t2 = t * t, t6 = t2 * t2 * t2;
-  const lon = (M * x * (A1 + 3 * A2 * t2 + t6 * (7 * A3 + 9 * A4 * t2))) / Math.cos(t);
-  const s = Math.sin(t) / M;
-  if (Math.abs(s) > 1 || Math.abs(lon) > Math.PI) return null;
-  return [(lon * 180) / Math.PI, (Math.asin(s) * 180) / Math.PI];
+  if (pts.length > 1 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]) pts.pop();
+  if (pts.length < 3) return null;
+  return pts;
+}
+// Numbers joined the way SVG allows: a minus sign separates on its own.
+const join2 = (ns) => ns.reduce((s, n, i) => s + (i === 0 || n < 0 ? "" : " ") + n, "");
+function ringD(pts, at) {
+  const d = [];
+  for (let i = 1; i < pts.length; i++) d.push(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  return at ? "m" + join2([pts[0][0] - at[0], pts[0][1] - at[1]]) + "l" + join2(d) + "z" : "M" + join2(pts[0]) + "l" + join2(d) + "z";
 }
 
-// ---- land polygons ---------------------------------------------------------
-const land = JSON.parse(readFileSync(landPath, "utf8"));
-const polys = [];
-for (const f of land.features) {
-  const g = f.geometry;
-  const list = g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : [];
-  for (const rings of list) {
-    let minX = 180, maxX = -180, minY = 90, maxY = -90;
-    for (const [x, y] of rings[0]) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
-    polys.push({ rings, minX, maxX, minY, maxY });
-  }
+// A small country can simplify away entirely (an island is one arc, and an
+// arc keeps only its ends); those take their unsimplified outline instead.
+const byCode = new Map();
+for (const [id, g] of Object.entries(topo.objects)) {
+  const f = feature(topo, g);
+  const code = f.properties.code;
+  let rings = ringsOf(f).map(ringPath).filter(Boolean);
+  if (!rings.some((r) => r.length >= 4)) rings = ringsOf(feature(full, full.objects[id])).map(ringPath).filter(Boolean);
+  if (!rings.length) continue;
+  const list = byCode.get(code) ?? [];
+  list.push(...rings);
+  byCode.set(code, list);
 }
-function inRing(ring, x, y) {
-  let c = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const [xi, yi] = ring[i], [xj, yj] = ring[j];
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c;
-  }
-  return c;
+const countries = [];
+let totalPts = 0;
+for (const [code, rings] of byCode) {
+  const big = Math.max(...rings.map(area));
+  const kept = rings.filter((r) => area(r) >= MIN_RING || area(r) === big);
+  // After the first ring, each ring starts relative to the previous ring's start (z returns there).
+  let d = "", at = null;
+  for (const r of kept) { d += ringD(r, at); at = r[0]; totalPts += r.length; }
+  countries.push([code, d]);
 }
-function onLand(lon, lat) {
-  for (const p of polys) {
-    if (lon < p.minX || lon > p.maxX || lat < p.minY || lat > p.maxY) continue;
-    let c = false;
-    for (const r of p.rings) if (inRing(r, lon, lat)) c = !c; // outer ring, holes flip it back
-    if (c) return true;
-  }
-  return false;
-}
+countries.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 
-// ---- the dot grid ----------------------------------------------------------
-const XMAX = forward(180, 0)[0];
-const STEP = (2 * XMAX) / COLS;
-const YTOP = forward(0, LAT_TOP)[1];
-const YBOT = forward(0, LAT_BOTTOM)[1];
-const ROWS = Math.round((YTOP - YBOT) / STEP);
-
-const runs = [];
-let dots = 0;
-for (let r = 0; r < ROWS; r++) {
-  const row = [];
-  let start = -1;
-  for (let c = 0; c <= COLS; c++) {
-    let hit = 0;
-    if (c < COLS) {
-      for (let i = 0; i < SUPER; i++) for (let j = 0; j < SUPER; j++) {
-        const x = -XMAX + (c + (i + 0.5) / SUPER) * STEP;
-        const y = YTOP - (r + (j + 0.5) / SUPER) * STEP;
-        const ll = inverse(x, y);
-        if (ll && onLand(ll[0], ll[1])) hit++;
-      }
-    }
-    const isLand = hit >= MIN_LAND;
-    if (isLand && start < 0) start = c;
-    if (!isLand && start >= 0) { row.push(start, c - start); dots += c - start; start = -1; }
-  }
-  runs.push(row);
-}
-// Trim the empty ocean at both ends: Equal Earth narrows toward the poles,
-// so no land reaches the outer columns. One column of margin either side.
-let c0 = COLS, c1 = 0;
-for (const row of runs) if (row.length) { c0 = Math.min(c0, row[0]); c1 = Math.max(c1, row[row.length - 2] + row[row.length - 1]); }
-c0 = Math.max(0, c0 - 1); c1 = Math.min(COLS, c1 + 1);
-// Delta-encode each row's starts so the JSON stays small: [gap, len, gap, len, ...].
-const packed = runs.map((row) => {
-  const out = [];
-  let at = c0;
-  for (let i = 0; i < row.length; i += 2) { out.push(row[i] - at, row[i + 1]); at = row[i] + row[i + 1]; }
-  return out;
-});
-const round = (n, d = 6) => Number(n.toFixed(d));
-writeFileSync(join(outDir, "world-dots.json"), JSON.stringify({
-  source: "Natural Earth 1:110m land (public domain), Equal Earth projection",
-  cols: c1 - c0, rows: ROWS, step: round(STEP), xmin: round(-XMAX + c0 * STEP), ytop: round(YTOP),
-  runs: packed,
-}) + "\n");
-
-// ---- country label points --------------------------------------------------
-const countries = JSON.parse(readFileSync(countriesPath, "utf8"));
-const cent = {};
-for (const f of countries.features) {
-  const p = f.properties;
-  let code = [p.ISO_A2_EH, p.ISO_A2, p.WB_A2].find((v) => typeof v === "string" && /^[A-Z]{2}$/.test(v));
-  if (!code) continue;
-  if (cent[code]) continue; // the first feature for a code is the sovereign mainland
-  const lon = p.LABEL_X, lat = p.LABEL_Y;
-  if (typeof lon !== "number" || typeof lat !== "number") continue;
-  cent[code] = [round(lon, 2), round(lat, 2)];
-}
-const sorted = Object.fromEntries(Object.keys(cent).sort().map((k) => [k, cent[k]]));
-writeFileSync(join(outDir, "centroids.json"), JSON.stringify({
-  source: "Natural Earth 1:50m admin-0 countries, LABEL_X/LABEL_Y (public domain)",
-  points: sorted,
-}) + "\n");
-
-console.log(`${c1 - c0}x${ROWS} grid, ${dots} land dots; ${Object.keys(sorted).length} country points -> ${outDir}`);
+const [k] = [proj.scale()], [tx, ty] = proj.translate();
+const sortedPoints = Object.fromEntries(Object.keys(points).sort().map((c) => [c, points[c]]));
+const out = JSON.stringify({ w: W, h: H, k: +k.toFixed(4), tx: +tx.toFixed(3), ty: +ty.toFixed(3), countries, points: sortedPoints });
+writeFileSync(join(outDir, "world.json"), out + "\n");
+console.log(`${W}x${H}, ${countries.length} countries, ${totalPts} points, ${(out.length / 1024).toFixed(1)} KB -> ${outDir}/world.json`);
