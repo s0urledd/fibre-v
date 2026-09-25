@@ -48,13 +48,13 @@ function Page() {
       {error && <div className="note hold"><span className="label">Observer</span><p>Cannot reach the observer API: {error}. Nothing below is current.</p></div>}
 
       {pre ? (
-      <Panel title="Market" right={<>from the chain&rsquo;s own records · <Link href="/methodology/#publishers">methodology →</Link></>}>
+      <Panel title="Market">
       <div className="cells three">
         {["Fees settled", "Publishers", "Paid per MiB", "Timed out", "Settlement rate", "Escrow held"].map((l) => <Cell key={l} label={l} value="—" tone="absent" />)}
       </div>
       </Panel>
       ) : <>
-      <Panel title="Market" right={<>from the chain&rsquo;s own records · <Link href="/methodology/#publishers">methodology →</Link></>}>
+      <Panel title="Market">
       <div className="cells three">
         <Cell label="Fees settled" loading={busy}
           value={m ? tia(m.fees_settled_utia, { unit: false }) : "—"} unit={m ? "TIA" : undefined}

@@ -183,7 +183,7 @@ function Page() {
             {v.cons_address && <span title={v.cons_address}><span className="mono">{shortMid(v.cons_address, 22, 6)}</span><Copy text={v.cons_address} label="consensus address" /></span>}
             {v.operator_address && <span title={v.operator_address}><span className="mono">{shortMid(v.operator_address, 22, 6)}</span><Copy text={v.operator_address} label="operator address" /></span>}
             <span title={`consensus address, hex: ${v.address}`}><span className="mono">{shortMid(v.address, 10, 6)}</span><Copy text={v.address} label="hex address" /></span>
-            <span title="An Atom feed of this validator’s endpoint changes: registered or changed host, bonded-list changes, unreachable and recovered, certificate problems, first fault. Paste the link into any feed reader; nothing is stored about you."><a href={`${API_BASE}/v1/validators/${v.address}/feed.atom`} type="application/atom+xml">Subscribe (Atom)</a> <span className="soft">· endpoint changes in any feed reader</span></span>
+            <span title="An Atom feed of this validator’s endpoint changes: registered or changed host, bonded-list changes, unreachable and recovered, certificate problems, first fault. Paste the link into any feed reader; nothing is stored about you."><a href={`${API_BASE}/v1/validators/${v.address}/feed.atom`} type="application/atom+xml">Subscribe (Atom)</a></span>
             {v.website && <span><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a></span>}
           </div>
         </div>

@@ -1,5 +1,4 @@
 "use client";
-import Link from "next/link";
 import { ago, span, tia, utc } from "@/lib/api";
 import { OUTCOME, type PendingSummary, type PublisherWithdrawals, type WithdrawalRow, type WithdrawalQueue as WithdrawalQueueT } from "@/lib/withdrawals";
 import { Panel, Cell } from "./Panel";
@@ -30,7 +29,7 @@ function delay(s: number | undefined): string {
 export function WithdrawalQueue({ w }: { w: PublisherWithdrawals | null }) {
   if (!w) {
     return (
-      <Panel title="Withdrawal queue" right="read from chain state">
+      <Panel title="Withdrawal queue">
         <p className="muted">This account&rsquo;s queue has not been read yet. The collector reads it with the escrow balance, every few minutes, once x/fibre answers.</p>
       </Panel>
     );
@@ -90,7 +89,7 @@ export function WithdrawalQueueCells({ q, win }: { q: WithdrawalQueueT; win: str
   const d = q.payout_delay;
   const other = q.unattributed.count + q.unresolved.count;
   return (
-    <Panel title="Withdrawal queue" right={<>read from chain state{p.read_height != null ? ` at height ${p.read_height.toLocaleString("en-US")}` : ""}{p.read_at ? `, ${ago(p.read_at)}` : ""} · <Link href="/methodology/#withdrawals">methodology →</Link></>}>
+    <Panel title="Withdrawal queue">
       <div className="cells three">
         <Cell label="Queued to withdraw"
           value={tia(p.utia, { unit: false })} unit="TIA"

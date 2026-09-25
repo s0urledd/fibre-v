@@ -1,8 +1,9 @@
 /**
  * Country flags: the country-flag-icons 3x2 SVG set (MIT), vendored under
  * public/flags/ and loaded as plain images, so no flag is in a bundle and a
- * page fetches only the flags it shows. Emoji flags are not used because
- * Windows draws them as two letters.
+ * page fetches only the flags it shows. Eager, not lazy: each is under a
+ * kilobyte, and lazy images in the animated map tags and live pill stayed
+ * blank. Emoji flags are not used because Windows draws them as two letters.
  */
 
 let regionNames: Intl.DisplayNames | null | undefined;
@@ -26,6 +27,6 @@ export function Flag({ cc, label = false, size = 16 }: { cc?: string; label?: bo
   const name = countryName(code);
   return (
     <img className="flag" src={`/flags/${code}.svg`} width={size} height={Math.round((size * 2) / 3)}
-      alt={label ? name : ""} title={label ? name : undefined} loading="lazy" decoding="async" draggable={false} />
+      alt={label ? name : ""} title={label ? name : undefined} decoding="async" draggable={false} />
   );
 }

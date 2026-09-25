@@ -24,7 +24,8 @@ type Cluster = { id: string; hosts: Host[]; ux: number; uy: number; locs: number
 type View = { x: number; y: number; w: number };
 
 const STATE_WORD: Record<EndpointState, string> = { reachable: "reachable", flaky: "flaky", unreachable: "unreachable", none: "no host" };
-const STATE_VAR: Record<EndpointState, string> = { reachable: "var(--accent)", flaky: "var(--hold)", unreachable: "var(--map-down)", none: "var(--pending)" };
+// The table's colours: amber for a host that stopped answering, faded amber for one failed check.
+const STATE_VAR: Record<EndpointState, string> = { reachable: "var(--accent)", flaky: "color-mix(in srgb, var(--hold) 50%, transparent)", unreachable: "var(--hold)", none: "var(--pending)" };
 const ORDER: EndpointState[] = ["reachable", "flaky", "unreachable"];
 
 /** the box's height over its width: the whole frame on a wide screen, a taller crop of it on a phone */
@@ -76,7 +77,8 @@ function cluster(hosts: Host[], pxPerUnit: number, narrow: boolean): Cluster[] {
   const byLoc = new Map<string, Host[]>();
   for (const h of hosts) byLoc.set(h.loc, [...(byLoc.get(h.loc) ?? []), h]);
   type C = { hosts: Host[]; ux: number; uy: number };
-  let cs: C[] = [...byLoc.values()].map((hs) => ({ hosts: hs, ux: hs[0].ux, uy: hs[0].uy }));
+  const mean = (hs: Host[], k: "ux" | "uy") => hs.reduce((s, h) => s + h[k], 0) / hs.length;
+  let cs: C[] = [...byLoc.values()].map((hs) => ({ hosts: hs, ux: mean(hs, "ux"), uy: mean(hs, "uy") }));
   for (;;) {
     let best: [number, number, number] | null = null;
     for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) {
@@ -187,7 +189,8 @@ export default function HostMap({ rows, showReadiness }: { rows: Validator[]; sh
       if (!ll) { un++; continue; }
       const [ux, uy] = project(ll[0], ll[1]);
       const city = hasLL ? (g!.city ?? "") : "";
-      const loc = hasLL ? `${ll[1].toFixed(1)},${ll[0].toFixed(1)}` : `cc:${cc}`;
+      // One place per named city: DB-IP gives districts of one city (and hosts in it) slightly different points.
+      const loc = city ? `${cc}/${city}` : hasLL ? `${ll[1].toFixed(1)},${ll[0].toFixed(1)}` : `cc:${cc}`;
       hs.push({ v, state: endpointState(v), share: total > 0 ? (v.voting_power || 0) / total : 0, cc, city, loc, lon: ll[0], lat: ll[1], ux, uy, provider: providerOf(v.hosting) });
     }
     return { hosts: hs, unplaced: un };

@@ -1,7 +1,7 @@
 "use client";
 import { useApi, int, ago, utcWord } from "@/lib/api";
 import { Flag, countryName } from "./Flag";
-import { type Hosting, type HostingResponse, type HostingBucket, type Nakamoto, FDP_NAMED, asLabel, hostingTitle } from "@/lib/hosting";
+import { type Hosting, type HostingResponse, type HostingBucket, type Nakamoto, FDP_NAMED, hostingTitle } from "@/lib/hosting";
 
 /**
  * Hosting on the site: a compact cell for the validators table and the
@@ -125,8 +125,8 @@ export function HostingChip({ h }: { h?: Hosting }) {
   if (h.status === "unresolved") return <span title={hostingTitle(h)}>network <b className="word">unresolved</b></span>;
   return (
     <span title={hostingTitle(h)}>
-      runs on <b className="word">{h.provider === "Other" || h.status === "no_asn" ? (h.as_org || "unknown network") : h.provider}</b>
-      {h.asn ? <span className="soft"> · {asLabel(h)}</span> : null}
+      runs on <b className="word">{h.provider === "Other" || h.status === "no_asn" ? (h.as_org ? shortOrg(h.as_org) : "unknown network") : h.provider}</b>
+      {h.asn ? <span className="soft"> · AS{h.asn}</span> : null}
       {h.country && <span className="soft"> · <Flag cc={h.country} />{h.city ? `${h.city}, ` : ""}{countryName(h.country)}</span>}
     </span>
   );
