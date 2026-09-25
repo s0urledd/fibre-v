@@ -614,13 +614,20 @@ from any Mocha RPC:
 
 ```
 # on the second host (here the backup server, sftp account tensile-backup)
-useradd --system --no-create-home --shell /usr/sbin/nologin --gid tensile-backup tensile-vantage
-install -d -o tensile-vantage -g tensile-backup -m 0750 /srv/tensile-backup/vantage /srv/tensile-backup/vantage/de-1
+groupadd --system tensile-vantage
+useradd --system --no-create-home --shell /usr/sbin/nologin --gid tensile-vantage tensile-vantage
+usermod -aG tensile-vantage tensile-backup      # the sftp account may read the record
+install -d -o tensile-vantage -g tensile-vantage -m 0750 /srv/tensile-vantage /srv/tensile-vantage/de-1
+ln -s /srv/tensile-vantage /srv/tensile-backup/vantage   # sftp path vantage/de-1/...
 install -m 0755 observer-heartbeat /usr/local/bin/tensile-heartbeat
-# unit: User=tensile-vantage, Group=tensile-backup, UMask=0027, ProtectSystem=strict,
-#   ReadWritePaths=/srv/tensile-backup/vantage/de-1, ExecStart=/usr/local/bin/tensile-heartbeat
-#   -rpc https://<mocha rpc>:443 -data-dir /srv/tensile-backup/vantage/de-1 -vantage de-1 -interval 5m
+# unit: User=tensile-vantage, Group=tensile-vantage, UMask=0027, ProtectSystem=strict,
+#   ReadWritePaths=/srv/tensile-vantage/de-1, ExecStart=/usr/local/bin/tensile-heartbeat
+#   -rpc https://<mocha rpc>:443 -data-dir /srv/tensile-vantage/de-1 -vantage de-1 -interval 5m
 ```
+
+The vantage service has its own group on purpose: it parses TLS answers from
+every registered host, so it must not be able to write the backups kept under
+the same account.
 
 On the observer, `fibre-vantage-pull@<net>.timer` fetches each vantage's
 record once a minute over the backup account's sftp-only key, appending only

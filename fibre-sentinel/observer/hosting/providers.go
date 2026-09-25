@@ -99,8 +99,8 @@ var providerASNs = map[uint32]string{
 	// alone carried about a third of registered stake, a concentration the
 	// panel could not show. Same evidence rule as above: every description
 	// is iptoasn's, file of 2026-09-24.
-	16125: ProviderCherry, // CHERRYSERVERS1-AS
-	59642: ProviderCherry, // CHERRYSERVERS2-AS
+	16125:  ProviderCherry, // CHERRYSERVERS1-AS
+	59642:  ProviderCherry, // CHERRYSERVERS2-AS
 	204770: ProviderCherry, // CHERRYSERVERS3-AS
 	216444: ProviderCherry, // CHERRYSERVERS4-AS
 	214159: ProviderCherry, // CHERRYSERVERS5-AS

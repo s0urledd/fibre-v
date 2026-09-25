@@ -28,6 +28,7 @@
   --line-soft: rgb(var(--ink) / .08);
   --wash: rgb(var(--ink) / .04);
   --accent: #006a74;
+  --nav-on: #006a74;
   --accent-ink: #005a63;
   --accent-tint: rgb(0 106 116 / .10);
   --ok: #3f8a5f;
@@ -74,6 +75,8 @@
   --line-soft: rgb(var(--ink) / .09);
   --wash: rgb(var(--ink) / .05);
   --accent: #33b3bf;
+  /* white on this reads at 4.9:1; the dark theme's accent itself is too light for white text */
+  --nav-on: #0b7a84;
   --accent-ink: #4cc3ce;
   --accent-tint: rgb(51 179 191 / .14);
   --ok: #5fb583;
@@ -127,10 +130,11 @@ button { font: inherit; color: inherit; }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 600; font-size: 16px; letter-spacing: -.01em; white-space: nowrap; }
 .brand:hover { text-decoration: none; }
 .brand .mark-logo { color: var(--accent); flex: none; }
-.top nav { display: flex; gap: 28px; height: 56px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
-.top nav a { color: var(--text-2); font-weight: 500; display: flex; align-items: center; height: 56px; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
-.top nav a.on { color: var(--text); border-bottom-color: var(--accent); }
-.top nav a:hover { text-decoration: none; color: var(--text); }
+/* the current page is a filled turquoise pill with white text; the others turn to a light wash on hover */
+.top nav { display: flex; align-items: center; gap: 4px; height: 56px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.top nav a { color: var(--text-2); font-weight: 500; display: flex; align-items: center; height: 32px; padding: 0 12px; border-radius: 8px; white-space: nowrap; transition: background var(--dur), color var(--dur); }
+.top nav a:hover { text-decoration: none; color: var(--text); background: var(--wash); }
+.top nav a.on, .top nav a.on:hover { color: #fff; background: var(--nav-on); }
 .top .right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 .net { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: var(--t-cell); font-weight: 500; height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--wash); white-space: nowrap; }
 .net .dot { margin-right: 0; }
@@ -513,8 +517,8 @@ dl.kv dd { margin: 0; word-break: break-all; }
   /* :root[data-theme] too: the light theme block sets --gutter with that specificity */
   :root, :root[data-theme] { --gutter: 16px; }
   .top .wrap { flex-wrap: wrap; height: auto; gap: 0 16px; padding-top: 8px; }
-  .top nav { order: 3; flex-basis: 100%; height: 44px; gap: 22px; }
-  .top nav a { height: 44px; }
+  .top nav { order: 3; flex-basis: 100%; height: 48px; gap: 4px; }
+  .top nav a { height: 32px; padding: 0 10px; }
   .top .right { gap: 8px; }
   .head h1 { overflow-wrap: anywhere; }
   .head h1 .mono { font-size: 20px; }
@@ -560,7 +564,8 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 /* phone width: the pinned identity column gives the figures room */
 @media (max-width: 480px) {
   .blocktick .soon { display: none; }
-  .top nav { gap: 16px; }
+  .top nav { gap: 2px; }
+  .top nav a { padding: 0 9px; }
   .vt .addr { display: none; }
   .vt .col-pin { min-width: 0; max-width: 150px; }
   .vt .col-pin .mon { display: inline-block; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
