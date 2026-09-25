@@ -73,9 +73,9 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   // The hosting column only exists while the lookup is on (observer/hosting):
   // a column of dashes would read as "nobody knows", which is not what off means.
   const showHosting = useMemo(() => rows.some((v) => !!v.hosting), [rows]);
-  // Until any blob has settled there is nothing to score: four columns of dashes on every row
-  // read as a broken table. They appear with the first obligation or promise.
-  const showScores = useMemo(() => rows.some((v) => (v.obligations?.total ?? 0) > 0 || (v.signing?.assigned ?? 0) > 0), [rows]);
+  // The score columns are the product: they stay on screen from the first visit, dashes
+  // included, so a reader sees what Tensile measures before the first blob settles.
+  const showScores = true;
   const needle = q.trim().toLowerCase();
   const list = useMemo(() => {
     const pool = rows.filter((v) => {
