@@ -81,7 +81,7 @@ func (s *Server) validatorHeatmap(ctx context.Context, addr string, win Window) 
 			COALESCE(SUM(CASE WHEN `+cls+` = 'HEALTHY' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN `+cls+` = 'FAULT' THEN 1 ELSE 0 END), 0),
 			COUNT(*)
-		FROM probes WHERE validator_address = ? AND started_at >= ? AND started_at <= ?
+		FROM probe_rows WHERE validator_address = ? AND started_at >= ? AND started_at <= ?
 			AND assigned = 1 AND phase = 'in_window'`+ss.clause("scheduled_at")+`
 		GROUP BY day, schedule_label`,
 		append([]any{addr, win.startArg(), win.endArg()}, ss.args...)...)

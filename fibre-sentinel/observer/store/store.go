@@ -37,7 +37,7 @@ var schemaSQL string
 // an upgraded one — baseline, then every migration — so the two end up
 // identical in shape and the migration code is exercised by every test run
 // rather than only on upgrade day.
-const SchemaVersion = 23
+const SchemaVersion = 24
 
 // migration is one numbered step above the baseline. The statements run in a
 // single transaction: SQLite supports transactional DDL, so a failed step
@@ -696,6 +696,9 @@ var migrations = []migration{
 	// confirm.go (confirmMigration): other vantages' answers to this
 	// observer's faults, and what each fault became.
 	confirmMigration,
+	// sampledout.go (sampledOutMigration): a publication the sampler drew
+	// out is one decision, not a NOT_PROBED row per validator per point.
+	sampledOutMigration,
 }
 
 // Store wraps one SQLite database.
@@ -1328,8 +1331,14 @@ func (s *Store) UpsertPublication(p scan.Publication, raw []byte) (inserted bool
 // ---- probes ----
 
 // InsertProbe stores one prober measurement. Re-inserting the same dedupe key
-// is a no-op, so a file can be re-ingested safely.
+// is a no-op, so a file can be re-ingested safely. A sampled-out row whose
+// publication is already stored as a decision is not stored: the decision
+// stands for it (see sampledout.go), and it was deleted when the decision
+// was made from it.
 func (s *Store) InsertProbe(m probe.Measurement, raw []byte) (inserted bool, err error) {
+	if decided, err := s.sampledOutDecided(m); err != nil || decided {
+		return false, err
+	}
 	res, err := s.db.Exec(`INSERT INTO probes
 		(dedupe_key, vantage, promise_hash, commitment, blob_version, must_serve_until, validator_set_height,
 		 validator_address, validator_host, assigned, assigned_row_count, schedule_label, scheduled_at, started_at,

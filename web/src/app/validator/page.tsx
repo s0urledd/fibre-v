@@ -2,7 +2,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
+import { useApi, type Validator, type Probe, type SampledOut, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
@@ -26,6 +26,9 @@ type Detail = {
   windows: Span[];
   recent_probes: Probe[];
   recent_probes_truncated?: boolean;
+  /** blobs assigned to this validator that the load policy sampled out: one record each, not a row per point */
+  recent_sampled_out?: SampledOut[];
+  recent_sampled_out_truncated?: boolean;
   /** set when this window rests partly on the daily rollup (the "all" window past the raw retention) */
   rolled_up?: { raw_from: string; days: number; note: string };
   /** schedule points, over all time, that no rate counts: the observer's own correlated failures */
@@ -119,6 +122,12 @@ function evidenceSummary(rows: { g: Group }[]): string {
   for (const r of rows) n.set(r.g, (n.get(r.g) ?? 0) + 1);
   const parts = GROUPS.filter((g) => g === "broken" || (n.get(g) ?? 0) > 0).map((g) => `${int(n.get(g) ?? 0)} ${g}`);
   return `Newest ${int(rows.length)} probe${rows.length === 1 ? "" : "s"}: ${parts.join(", ")}`;
+}
+/** " · 12 recent blobs sampled out": listed once each, not as a row per point */
+function sampledText(d: Detail): string {
+  const n = d.recent_sampled_out?.length ?? 0;
+  if (n === 0) return "";
+  return ` · ${int(n)}${d.recent_sampled_out_truncated ? "+" : ""} recent blob${n === 1 ? "" : "s"} sampled out, not probed`;
 }
 /** the recent-evidence table's filter: every row, the FAULT rows (broken), or every row whose shard did not come back */
 type EvFilter = "all" | "failed" | "notserved";
@@ -300,7 +309,7 @@ function Page() {
 
       <section id="evidence">
         <div className="vhead">
-          <div><h2>Recent evidence</h2><p className="sub">{probes.length > 0 ? evidenceSummary(grouped) : "No probe rows yet"}{data.recent_probes_truncated ? " · the rest in the API" : ""}</p></div>
+          <div><h2>Recent evidence</h2><p className="sub">{probes.length > 0 ? evidenceSummary(grouped) : "No probe rows yet"}{data.recent_probes_truncated ? " · the rest in the API" : ""}{sampledText(data)}</p></div>
           <div className="tools">
             {probes.length > 0 && (
               <div className="seg" role="group" aria-label="show rows">

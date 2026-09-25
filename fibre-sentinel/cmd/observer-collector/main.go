@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/probe"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/correct"
@@ -49,6 +50,7 @@ func main() {
 		statePath = flag.String("state", "", "path to state.json (default <data-dir>/state.json)")
 		measPath  = flag.String("measurements", "", "path to measurements.jsonl (default <data-dir>/measurements.jsonl)")
 		reachPath = flag.String("reachability", "", "path to reachability.jsonl (default <data-dir>/reachability.jsonl)")
+		soPath    = flag.String("sampling-decisions", "", "path to sampling_decisions.jsonl, the prober's record of publications its load policy sampled out, one line each (default <data-dir>/sampling_decisions.jsonl)")
 		vantDir   = flag.String("vantages-dir", "", "dir other vantages' files are copied to, <name>/reachability.jsonl and <name>/measurements.jsonl each (default <data-dir>/vantages)")
 		payPath   = flag.String("payments", "", "path to payments.jsonl (default <data-dir>/payments.jsonl)")
 		regPath   = flag.String("registry", "", "path to registry.jsonl, this collector's own endpoint-history log (default <data-dir>/registry.jsonl)")
@@ -82,6 +84,9 @@ func main() {
 	}
 	if *measPath == "" {
 		*measPath = filepath.Join(*dataDir, "measurements.jsonl")
+	}
+	if *soPath == "" {
+		*soPath = filepath.Join(*dataDir, probe.SampledOutFile)
 	}
 	if *reachPath == "" {
 		*reachPath = filepath.Join(*dataDir, "reachability.jsonl")
@@ -329,6 +334,10 @@ func main() {
 	retention := rollup.Config{RetainRaw: *retainRaw, RetainRawJSON: *retainRJ, RollupAfter: *rollAfter, Vantage: *vantage}
 	var lastRetention time.Time
 	var lastEscrow time.Time
+	// The first pass gives back whatever the schema migration freed: the
+	// sampled-out collapse (migration 24) deletes most of the probe rows a
+	// store holds, and a DELETE alone never shrinks the file.
+	reclaimPending := true
 	pass := func(pollEndpoints bool) {
 		now := time.Now()
 		if err := ingest.State(st, *statePath, now); err != nil {
@@ -384,6 +393,40 @@ func main() {
 			}
 			if r.Skipped > 0 {
 				log.Printf("measurements: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
+			}
+		}
+		// After the measurements: a decision is not stored beside rows its
+		// vantage already wrote for the promise (store.InsertSampledOut).
+		if r, err := ingest.SampledOut(st, *soPath, now); err != nil {
+			fail("sampling decisions", err)
+		} else {
+			if r.Inserted > 0 {
+				log.Printf("sampling decisions: +%d sampled-out publication(s) (read %d, line %d)", r.Inserted, r.Read, r.Line)
+			}
+			if r.Skipped > 0 {
+				log.Printf("sampling decisions: WARNING skipped %d undecodable line(s); last: %s", r.Skipped, r.LastSkipped)
+			}
+		}
+		// Rows a prober wrote for a sampled-out publication before the
+		// decision had a record of its own become that decision: the
+		// migration did it for the store it found, this does it for rows
+		// read since (a store rebuilt from an older measurements.jsonl).
+		// The pages go back to the filesystem, here and on the first pass
+		// after the migration freed them.
+		if n, rows, err := st.CollapseSampledOut(ctx); err != nil {
+			fail("sampled-out rows", err)
+		} else if n > 0 {
+			log.Printf("sampled-out rows: %d row(s) recorded as %d decision(s)", rows, n)
+			reclaimPending = true
+		}
+		if reclaimPending {
+			if freed, err := st.ReclaimSpace(ctx, 20000); err != nil {
+				log.Printf("reclaim: %v", err)
+				reclaimPending = false
+			} else if freed > 0 {
+				log.Printf("reclaim: %d page(s) returned to the filesystem", freed)
+			} else {
+				reclaimPending = false
 			}
 		}
 		if r, err := ingest.Reachability(st, *reachPath, now); err != nil {

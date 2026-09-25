@@ -369,7 +369,7 @@ master key is never in it.
   continuously, with 72 h of history.
 - **fibre-backup** for the record: `fibre-backup@mocha.timer` runs
   `rclone sync` of every `.jsonl` (the record, `registry.jsonl`,
-  `runs.jsonl`, `sampling-secrets.jsonl`, `amendments.jsonl`), `state.json`, the status files
+  `runs.jsonl`, `sampling_decisions.jsonl`, `sampling-secrets.jsonl`, `amendments.jsonl`), `state.json`, the status files
   and the daily exports to `BACKUP_REMOTE/<network>` nightly (`deploy/backup.sh`),
   with the rclone remote configured once in `/etc/fibre-observer/rclone.conf`.
   It copies rather than mirrors, so moving old files off a full disk can

@@ -55,7 +55,12 @@ counts() {
   python3 - "$1" <<'PY'
 import sqlite3, sys
 con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-print(*con.execute("SELECT (SELECT COUNT(*) FROM publications), (SELECT COUNT(*) FROM probes)").fetchone())
+# probes, and the lines of measurements.jsonl they stand for: a publication
+# the prober recorded row by row as sampled out is one decision in the
+# store once collapsed (source = 'rows'), standing for points x validators
+# of those lines.
+print(*con.execute("""SELECT (SELECT COUNT(*) FROM publications), (SELECT COUNT(*) FROM probes),
+    (SELECT COUNT(*) FROM probes) + (SELECT COALESCE(SUM(points * validators), 0) FROM sampling_decisions WHERE source = 'rows')""").fetchone())
 PY
 }
 
@@ -94,9 +99,9 @@ if timeout 1200 /usr/local/bin/observer-collector -rpc "$RPC" -data-dir "$TMP" -
 else
   fail "rebuild failed: $(tail -3 "$TMP/rebuild.log")"; exit 1
 fi
-read -r rpub rprobe <<<"$(counts "$TMP/observer.db")"
+read -r rpub rprobe rlines <<<"$(counts "$TMP/observer.db")"
 [ "$rpub" = "$want_pub" ] && pass "rebuilt publications ($rpub) == manifest records ($want_pub)" || fail "rebuilt publications $rpub != manifest records $want_pub"
-[ "$rprobe" = "$want_probe" ] && pass "rebuilt probes ($rprobe) == manifest records ($want_probe)" || fail "rebuilt probes $rprobe != manifest records $want_probe"
+[ "$rlines" = "$want_probe" ] && pass "rebuilt probes ($rprobe, standing for $rlines lines) == manifest records ($want_probe)" || fail "rebuilt probes stand for $rlines lines != manifest records $want_probe"
 
 echo "== 4. serve it on :$PORT"
 /usr/local/bin/observer-api -data-dir "$TMP" -listen "127.0.0.1:$PORT" -vantage "$VANTAGE" > "$TMP/api.log" 2>&1 &

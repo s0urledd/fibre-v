@@ -121,5 +121,28 @@ func (s *Server) probeFingerprints(ctx context.Context, where string, limit int,
 			":" + strconv.FormatInt(corrected, 10) + ":" + lastCorrected +
 			":" + strconv.FormatInt(held, 10)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	// A sampled-out publication's rows are its decision (store/sampledout.go),
+	// which adds no probe row: the decision is part of the fingerprint, or
+	// a verdict cached before it landed would outlive it.
+	drows, err := s.st.DB().QueryContext(ctx, blobSel(where, limit)+`
+		SELECT d.promise_hash, COUNT(*), MAX(d.decided_at)
+		FROM sampling_decisions d JOIN sel ON sel.promise_hash = d.promise_hash
+		GROUP BY d.promise_hash`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer drows.Close()
+	for drows.Next() {
+		var hash, last string
+		var n int64
+		if err := drows.Scan(&hash, &n, &last); err != nil {
+			return nil, err
+		}
+		out[hash] += ":sampled_out:" + strconv.FormatInt(n, 10) + ":" + last
+	}
+	return out, drows.Err()
 }

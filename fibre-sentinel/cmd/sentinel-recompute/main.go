@@ -19,7 +19,10 @@
 //     clearing amendments in amendments.jsonl (verdict.ConfirmFault);
 //   - with -sampling, the admission draws of every day whose secret is
 //     revealed (sampling-secrets.jsonl): which publications this observer
-//     should have probed against which ones it did.
+//     should have probed against which ones it did, and which it recorded
+//     as sampled out (sampling_decisions.jsonl, one line per publication,
+//     expanded into the NOT_PROBED rows it stands for before anything
+//     else is computed).
 //
 // Exit status 1 when anything differs, 2 on a usage or read error.
 package main
@@ -91,6 +94,13 @@ func main() {
 	if err != nil {
 		fatal(2, "measurements: %v", err)
 	}
+	// A publication the load policy sampled out is one line of
+	// sampling_decisions.jsonl, standing for a NOT_PROBED row per assigned
+	// validator per point: expanded here into exactly those rows, so every
+	// check and figure below reads them as it read the rows the prober used
+	// to write.
+	decided, soDecisions, soDiffs := expandSampledOut(filepath.Join(*dataDir, probe.SampledOutFile), pubs, *maxDiff)
+	ms = append(ms, decided...)
 	if *vantage != "" {
 		kept := ms[:0]
 		for _, m := range ms {
@@ -104,7 +114,9 @@ func main() {
 	fmt.Printf("recompute| %d publications, %d rows, %d prober runs on record, window=%s as_of=%s\n",
 		len(pubs), len(ms), len(runs), *window, asOf.Format(time.RFC3339))
 
-	differs := false
+	differs := soDiffs > 0
+	fmt.Printf("sampled-out| %d publication(s) recorded as sampled out, standing for %d NOT_PROBED row(s); %d decision(s) differ from the publication record\n",
+		soDecisions, len(decided), soDiffs)
 
 	// ---- rows: phase and classification from the row's own fields ----
 	// A verdict the prober deferred (genuine rows no scanned promise
@@ -254,6 +266,11 @@ func main() {
 	var corrDiffs, corrected int
 	for i := range ms {
 		c, ok := corrections[ms[i].DedupeKey()]
+		if !ok && probe.IsSampledOutRow(ms[i]) {
+			// A sampled-out decision's point is corrected once for every
+			// validator's row at it (store.SampledOutPoint.Key).
+			c, ok = corrections[sampledOutPointKey(ms[i])]
+		}
 		if !ok {
 			continue
 		}
@@ -589,9 +606,10 @@ func loadAPI(base, file, window string, asOf time.Time) (*apiValidators, error) 
 // checkSampling recomputes the admission draw of every publication settled
 // on a day whose secret is revealed and compares it with what the rows
 // say happened: probed (any row past NOT_PROBED) or sampled out (every
-// row NOT_PROBED with a budget reason). The probability is the one the
-// rows carry; a publication with no rows is not checked, and one with
-// rows stamped at p = 1 was never drawn.
+// row NOT_PROBED with a budget reason; a sampled_out decision arrives
+// here as the rows it stands for, see expandSampledOut). The probability
+// is the one the rows carry; a publication with no rows is not checked,
+// and one with rows stamped at p = 1 was never drawn.
 func checkSampling(path string, pubs []scan.Publication, ms []probe.Measurement, maxDiff int) (checked, diffs int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -679,6 +697,55 @@ func checkSampling(path string, pubs []scan.Publication, ms []probe.Measurement,
 		}
 	}
 	return checked, diffs, nil
+}
+
+// expandSampledOut reads sampling_decisions.jsonl and expands every decision
+// into the NOT_PROBED rows it stands for (probe.SampledOut.Expand) against
+// its publication's record. A decision whose publication is not in the
+// record, or whose validator count disagrees with the record's, is a
+// difference: its rows could not be the ones the observer counted. A
+// missing file is no decisions (a record from before the file existed
+// carries the rows themselves).
+func expandSampledOut(path string, pubs []scan.Publication, maxDiff int) (rows []probe.Measurement, decisions, diffs int) {
+	ds, err := probe.LoadSampledOut(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, 0, 0
+		}
+		fatal(2, "sampling decisions: %v", err)
+	}
+	byHash := make(map[string]scan.Publication, len(pubs))
+	for _, p := range pubs {
+		byHash[p.PromiseHash] = p
+	}
+	for _, d := range ds {
+		decisions++
+		p, ok := byHash[d.PromiseHash]
+		if !ok {
+			diffs++
+			if diffs <= maxDiff {
+				fmt.Printf("sampled-out| %s: the decision names a promise that is not in publications.jsonl\n", short(d.PromiseHash))
+			}
+			continue
+		}
+		exp := d.Expand(p)
+		if len(d.Points) > 0 && len(exp)/len(d.Points) != d.Validators {
+			diffs++
+			if diffs <= maxDiff {
+				fmt.Printf("sampled-out| %s: the decision covers %d validators, the publication record assigns %d\n",
+					short(d.PromiseHash), d.Validators, len(exp)/len(d.Points))
+			}
+		}
+		rows = append(rows, exp...)
+	}
+	return rows, decisions, diffs
+}
+
+// sampledOutPointKey is the corrections.jsonl key of the sampled-out point a
+// row stands at (store.SampledOutPoint.Key): its dedupe key without the
+// validator.
+func sampledOutPointKey(m probe.Measurement) string {
+	return m.Vantage + "|" + m.PromiseHash + "|*|" + m.ScheduledAt.UTC().Format(time.RFC3339Nano)
 }
 
 // pubTimeout is the payment promise timeout the publication was settled
@@ -878,7 +945,7 @@ func loadCorrections(path string) (map[string]store.Correction, map[string]bool,
 			}
 			continue
 		}
-		if c.Kind != store.CorrectionProbeVerdict || c.DedupeKey == "" {
+		if (c.Kind != store.CorrectionProbeVerdict && c.Kind != store.CorrectionSampledOutPoint) || c.DedupeKey == "" {
 			continue
 		}
 		if prev, ok := out[c.DedupeKey]; ok && prev.JudgedAt.After(c.JudgedAt) {

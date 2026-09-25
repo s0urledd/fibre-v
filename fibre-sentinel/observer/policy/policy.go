@@ -6,8 +6,10 @@
 // The policy plugs into the prober through probe.Policy. Its counters live
 // in memory and, when a state file is configured, are saved to the data
 // dir so a restart does not start on a fresh budget (budgetstate.go); the
-// durable record of every decision is the NOT_PROBED measurement the prober
-// writes with the policy's reason.
+// durable record of every decision is what the prober writes with the
+// policy's reason: for a publication drawn out of the sample, one
+// probe.SampledOut line in sampling_decisions.jsonl; for a probe a cap or
+// the backoff denied, that probe's NOT_PROBED measurement.
 package policy
 
 import (
@@ -748,7 +750,8 @@ func (p *Policy) reasonFor(pub scan.Publication, d decision) string {
 // with: the probability it was sampled at, the cap that bound that
 // probability, and the commitment to the day secret the draw used.
 //
-// The prober stamps these on every row it writes, admitted or denied, which
+// The prober stamps these on every row it writes for an admitted
+// publication, and on the one decision it records for a denied one, which
 // is what makes the sample auditable at all. Recording them only on denials
 // left the admitted side with no record: the commit-and-reveal audit the
 // methodology page describes could not be carried out against half the

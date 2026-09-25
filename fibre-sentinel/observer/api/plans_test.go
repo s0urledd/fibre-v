@@ -76,6 +76,18 @@ func TestHotQueriesUseIndexes(t *testing.T) {
 			[]any{lo, hi}, []string{"probes_cleared"}},
 		c{"one validator's tally", `SELECT ` + cls + `, COUNT(*) FROM probes WHERE validator_address = ? AND assigned = 1 AND phase = 'in_window' AND started_at >= ? AND started_at <= ? GROUP BY 1`,
 			[]any{"ab", lo, hi}, []string{"COVERING INDEX probes_validator_window"}},
+		// The same tallies over probe_rows, which is what the figures read: the
+		// stored rows keep their covering indexes, and the rows a sampled-out
+		// decision stands for are sought from its points by the same bound,
+		// never by walking every decision or every assignment of a validator.
+		c{"class tally with sampled-out rows", `SELECT ` + cls + `, COUNT(*) FROM probe_rows WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window' GROUP BY 1`,
+			[]any{lo, hi}, []string{"COVERING INDEX probes_", "sampling_decision_points_started (started_at>? AND started_at<?)"}},
+		c{"one validator's tally with sampled-out rows", `SELECT ` + cls + `, COUNT(*) FROM probe_rows WHERE validator_address = ? AND assigned = 1 AND phase = 'in_window' AND started_at >= ? AND started_at <= ? GROUP BY 1`,
+			[]any{"ab", lo, hi}, []string{"COVERING INDEX probes_validator_window", "sampling_decision_points_started (started_at>? AND started_at<?)"}},
+		c{"one blob's rows with sampled-out rows", `SELECT ` + cls + `, COUNT(*) FROM probe_rows WHERE promise_hash = ? GROUP BY 1`,
+			[]any{"ab"}, []string{"probes_promise (promise_hash=?)", "sampling_decision_points_promise (promise_hash=?)"}},
+		c{"one point's rows with sampled-out rows", `SELECT COUNT(*) FROM probe_rows WHERE scheduled_at = ?`,
+			[]any{lo}, []string{"probes_scheduled (scheduled_at=?)", "sampling_decision_points_scheduled (scheduled_at=?)"}},
 	)
 	for _, tc := range cases {
 		plan, err := st.QueryPlan(ctx, tc.q, tc.args...)
@@ -83,7 +95,9 @@ func TestHotQueriesUseIndexes(t *testing.T) {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		joined := strings.Join(plan, "\n")
-		if bad := store.FullScans(plan, []string{"v", "m", "w", "vp", "vr"}, apiPartial); len(bad) > 0 {
+		// probe_rows is the co-routine a UNION ALL view runs as: its arms are
+		// the plan steps above it, and those are what must not walk a table.
+		if bad := store.FullScans(plan, []string{"v", "m", "w", "vp", "vr", "probe_rows"}, apiPartial); len(bad) > 0 {
 			t.Errorf("%s walks a whole table or index: %v\nplan:\n%s", tc.name, bad, joined)
 		}
 		for _, w := range tc.want {

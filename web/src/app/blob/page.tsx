@@ -53,6 +53,9 @@ function Page() {
   const assignments = data.assignments ?? [];
   const suspectAt = new Map((data.suspect_points ?? []).map((sp) => [sp.at, sp.reason.replace(",", " and ")]));
   const rc = b.reconstructable;
+  // drawn out of the sample: one record, with the probability it was drawn at
+  const so = b.sampled_out;
+  const soText = so ? `p=${so.p.toFixed(2)}` : "";
   const judged = !!rc && (rc.status === "yes" || rc.status === "degraded" || rc.status === "no");
   const over = new Date(b.must_serve_until).getTime() <= Date.now();
   const state: [string, string, string] =
@@ -60,6 +63,7 @@ function Page() {
     : rc?.status === "degraded" ? ["hold", "Rebuildable, not fully served", `Enough distinct rows were observed to rebuild the blob, but not every validator proven to hold a shard served at ${rc.point}.`]
     : rc?.status === "no" ? ["hold", "Not rebuildable", `Fewer than the ${int(rc.needed_rows)} rows needed came back at ${rc.point}. Which validators answered is in the table below; unreachable from here is never counted as broken.`]
     : rc?.status === "pending" ? ["none", "Not judged yet", `${int(rc.probed_validators)} of ${int(rc.assigned_validators)} assigned validators have a result at ${rc.point}. A validator without a result is a gap, not a failure.`]
+    : so ? ["none", "Sampled out", `The load policy drew this blob out of its sample (${soText}), so it was not probed at any point. It is recorded once and counts as not probed for each of the ${int(so.validators)} assigned validators at each of its ${int(so.points)} points.`]
     : !over ? ["none", "In window", "The retention window has not ended; nothing is judged before the last in-window point completes."]
     : ["none", "Not judged", b.probe_count === 0 ? "No probe has run for this blob." : "Row lists were not recorded for this publication, or no in-window point was completed."];
 
@@ -160,7 +164,7 @@ function Page() {
         <div>
           <h2>Service window</h2>
           <p className="sub">Settled {hhmm(b.settlement_time)} → deadline {hhmm(b.must_serve_until)} ({winLen})</p>
-          {order.length === 0 ? <p className="errs">No probe has run for this blob yet.</p> : (
+          {order.length === 0 ? <p className="errs">{so ? <>Sampled out ({soText}): not probed at any point.</> : "No probe has run for this blob yet."}</p> : (
             <>
               <div className="tl" role="img" aria-label={`probe points: ${order.join(", ")}`}>
                 <div className="axis" /><div className="win" style={{ left: 0, width: `${winShare}%` }} />
@@ -212,17 +216,19 @@ function Page() {
             <thead><tr>
               <th className="col-pin">Validator</th><th className="num">Voting power</th><th className="num">Rows</th><th>Signed</th><th>Host at settlement</th>
               {order.map((k) => <th key={k} className={"m" + (suspectAt.has(byLabel.get(k)!.at) ? " soft" : "")} title={`${k} · ${utcWord(byLabel.get(k)!.at)}${suspectAt.has(byLabel.get(k)!.at) ? " · not counted: the observer does not trust itself at this point" : ""}`}>{k}</th>)}
+              {so && order.length === 0 && <th title={`The load policy drew this blob out of its sample; decided ${utcWord(so.decided_at)}, ${so.binding}`}>Probe points</th>}
               <th className="go" />
             </tr></thead>
             <tbody>
-              {rows.length === 0 && <tr className="empty"><td colSpan={6 + order.length}>No assignment recorded{b.assignment_error ? `: ${b.assignment_error}` : ""}.</td></tr>}
-              {rows.map((a) => (
+              {rows.length === 0 && <tr className="empty"><td colSpan={6 + order.length + (so && order.length === 0 ? 1 : 0)}>No assignment recorded{b.assignment_error ? `: ${b.assignment_error}` : ""}.</td></tr>}
+              {rows.map((a, i) => (
                 <tr key={a.validator_address}>
                   <td className="id col-pin"><Link className="mon" href={`/validator/?addr=${a.validator_address}`}>{a.moniker || shortMid(a.validator_address, 12, 4)}</Link></td>
                   <td className="num">{int(a.voting_power)}</td>
                   <td className="num">{int(a.row_count)}</td>
                   <td title={a.attested === true ? "Signature verified against the consensus key: proof of storage." : a.attested === false ? "No verified signature on the settled promise: unproven, not absent. The publisher stops collecting at two thirds of voting power." : "Recorded before the observer verified signatures."}>{a.attested === true ? "yes" : a.attested === false ? <span className="soft">no</span> : "—"}</td>
                   <td className="mono soft">{a.host_at_settlement ? a.host_at_settlement : a.host_at_settlement === "" ? <span title="no endpoint registered when the promise settled">—</span> : <span className="sans" title="the registry could not be read at that height">not read</span>}</td>
+                  {so && order.length === 0 && i === 0 && <td rowSpan={rows.length} className="soft">sampled out ({soText})</td>}
                   {order.map((k) => {
                     const p = cell.get(a.validator_address + "|" + k);
                     const sus = suspectAt.has(byLabel.get(k)!.at);

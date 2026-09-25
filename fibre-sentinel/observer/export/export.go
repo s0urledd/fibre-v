@@ -47,6 +47,10 @@ var Files = []FileSpec{
 	{"publications.jsonl", "settlement_time"},
 	{"payments.jsonl", "time"},
 	{"measurements.jsonl", "started_at"},
+	// A publication the prober's load policy sampled out, recorded once and
+	// dated by the decision, which is the started_at of every NOT_PROBED row
+	// it stands for (probe.SampledOut).
+	{"sampling_decisions.jsonl", "decided_at"},
 	{"reachability.jsonl", "started_at"},
 	{"registry.jsonl", "at"},
 	{"runs.jsonl", "at"},

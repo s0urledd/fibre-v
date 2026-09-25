@@ -23,9 +23,14 @@ func testProber(t *testing.T) *Prober {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
+	so, err := OpenSampledOutStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { so.Close() })
 	cfg := Config{Vantage: "v1", DataDir: dir, MaxLateness: 90 * time.Second, BackfillMissed: time.Hour}.withDefaults()
 	return &Prober{
-		cfg: cfg, log: scan.NewLogger(50), store: st, chainID: "chain-1",
+		cfg: cfg, log: scan.NewLogger(50), store: st, sampled: so, chainID: "chain-1",
 		coders: map[[2]int]*Coder{}, complete: map[string]bool{}, skippedPubs: map[string]bool{},
 		valLocks: map[string]*sync.Mutex{},
 	}

@@ -22,7 +22,7 @@ import (
 // today, through its ON DELETE CASCADE.
 type Correction struct {
 	SchemaVersion int    `json:"schema_version"`
-	Kind          string `json:"kind"` // publication_deadline | probe_verdict
+	Kind          string `json:"kind"` // publication_deadline | probe_verdict | sampled_out_point
 	UncertaintyID string `json:"uncertainty_id"`
 	PromiseHash   string `json:"promise_hash"`
 
@@ -33,7 +33,10 @@ type Correction struct {
 	FromBasis string `json:"from_basis,omitempty"`
 	ToBasis   string `json:"to_basis,omitempty"`
 
-	// probe_verdict only
+	// probe_verdict only (and sampled_out_point, which carries no
+	// validator: its DedupeKey is SampledOutPoint.Key, and Vantage says
+	// whose decision it moved)
+	Vantage            string    `json:"vantage,omitempty"`
 	DedupeKey          string    `json:"dedupe_key,omitempty"`
 	ValidatorAddress   string    `json:"validator_address,omitempty"`
 	ScheduledAt        time.Time `json:"scheduled_at,omitempty"`
@@ -51,6 +54,10 @@ type Correction struct {
 const (
 	CorrectionPublicationDeadline = "publication_deadline"
 	CorrectionProbeVerdict        = "probe_verdict"
+	// CorrectionSampledOutPoint re-grades one point of a sampled-out
+	// decision: every NOT_PROBED row the decision stands for at that point,
+	// as probe_verdict re-grades a stored row (store/sampledout.go).
+	CorrectionSampledOutPoint = "sampled_out_point"
 	// CorrectionRangeComplete closes a range: every deadline and verdict it
 	// covers has been re-derived, so it stops withholding. It is a record
 	// line rather than database-only state because a rebuild from the
@@ -426,9 +433,14 @@ func (s *Store) StaleDeadlineRows(ctx context.Context, limit int) ([]StaleRow, e
 
 // HeldCounts is how much is currently withheld, for the disclosure.
 func (s *Store) HeldCounts(ctx context.Context) (publications, probes, ranges int64, err error) {
+	// A held publication that was sampled out has no stored rows to carry
+	// the flag; the rows its decision stands for are counted in with it,
+	// as they were when the prober wrote them.
 	err = s.db.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(*) FROM publications WHERE retention_unverified = 1),
-		(SELECT COUNT(*) FROM probes       WHERE retention_unverified = 1),
+		(SELECT COUNT(*) FROM probes       WHERE retention_unverified = 1)
+		+ (SELECT COUNT(*) FROM sampled_out_rows WHERE promise_hash IN
+			(SELECT promise_hash FROM publications WHERE retention_unverified = 1)),
 		(SELECT COUNT(*) FROM param_uncertainty WHERE holds = 1)`).Scan(&publications, &probes, &ranges)
 	return
 }
