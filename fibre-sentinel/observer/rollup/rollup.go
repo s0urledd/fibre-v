@@ -286,6 +286,11 @@ type Config struct {
 	// Batch bounds the rows one pass strips raw_json from, and the days one
 	// pass prunes.
 	Batch int
+	// Vantage, when set, is the observer's own: the heartbeat counts rolled
+	// into probe_daily are its rows only, as every live reachability figure
+	// is. Other vantages' copied heartbeats are pruned with the rest but
+	// never counted. Empty counts every row.
+	Vantage string
 }
 
 // Default is the retention decision of 2026-09-18: rows 90 days, raw JSON
@@ -370,7 +375,7 @@ func Run(ctx context.Context, st *store.Store, now time.Time, cfg Config) (Repor
 				rep.Waiting, rep.WaitingWhy = d.Format(dayLayout), why
 				break
 			}
-			pending, err := rollDay(ctx, db, d, now)
+			pending, err := rollDay(ctx, db, d, now, cfg.Vantage)
 			if err != nil {
 				return rep, fmt.Errorf("roll %s: %w", d.Format(dayLayout), err)
 			}
@@ -524,7 +529,7 @@ func firstRowDay(ctx context.Context, db *sql.DB) (time.Time, bool, error) {
 // rollDay writes obligation_daily for the promises settled on d and
 // probe_daily for the rows started on d, replacing any earlier rollup of
 // the day. It returns how many obligations were still pending.
-func rollDay(ctx context.Context, db *sql.DB, d, now time.Time) (int64, error) {
+func rollDay(ctx context.Context, db *sql.DB, d, now time.Time, vantage string) (int64, error) {
 	lo, hi := dayRange(d)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -674,10 +679,14 @@ func rollDay(ctx context.Context, db *sql.DB, d, now time.Time) (int64, error) {
 		v.attested, v.unattested, v.unknownAtt = at, un, unk
 	}
 	rows.Close()
+	vq, vargs := "", []any{lo, hi}
+	if vantage != "" {
+		vq, vargs = " AND +vantage = ?", append(vargs, vantage)
+	}
 	rows, err = tx.QueryContext(ctx, `SELECT validator_address, COUNT(*),
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tcp_ok = 1 AND tls_ok = 1 AND identity_ok = 1 THEN 1 ELSE 0 END), 0)
-		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR' GROUP BY validator_address`, lo, hi)
+		FROM reachability WHERE started_at >= ? AND started_at <= ? AND outcome <> 'PROBE_ERROR'`+vq+` GROUP BY validator_address`, vargs...)
 	if err != nil {
 		return 0, err
 	}

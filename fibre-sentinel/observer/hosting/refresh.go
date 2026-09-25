@@ -73,9 +73,14 @@ func ResolveConfig(flagASN, flagCountry, flagCity, dataDir string) Config {
 // Refresher is the collector's lookup pass. It keeps only a fingerprint of
 // its last run between calls: the targets and the files' size and mtime.
 type Refresher struct {
-	DB   *sql.DB
-	Cfg  Config
-	Logf func(string, ...any)
+	DB  *sql.DB
+	Cfg Config
+	// Vantage, when set, is the observer's own: only its heartbeats are
+	// read for addresses. Another vantage's copied heartbeats resolve the
+	// same host from elsewhere, and a geo-steered name can answer there with
+	// addresses this observer never reached. Empty reads every row.
+	Vantage string
+	Logf    func(string, ...any)
 
 	lastKey string
 	lastRun time.Time
@@ -330,10 +335,14 @@ func (r *Refresher) targets(ctx context.Context, since time.Time) ([]target, err
 	// highest rowid is the newest, the same rule the API's reachability
 	// queries use.
 	latest := map[key]target{}
+	vq, vargs := "", []any{ts(since)}
+	if r.Vantage != "" {
+		vq, vargs = " AND +vantage = ?", append(vargs, r.Vantage)
+	}
 	rows, err := r.DB.QueryContext(ctx, `SELECT validator_address, validator_host, started_at, raw_json FROM reachability
 		WHERE rowid IN (SELECT MAX(rowid) FROM reachability
-			WHERE dns_ok = 1 AND raw_json <> '' AND started_at >= ?
-			GROUP BY validator_address, validator_host)`, ts(since))
+			WHERE dns_ok = 1 AND raw_json <> '' AND started_at >= ?`+vq+`
+			GROUP BY validator_address, validator_host)`, vargs...)
 	if err != nil {
 		return nil, err
 	}

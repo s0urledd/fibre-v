@@ -28,14 +28,16 @@ type endpointCheck struct {
 
 // lastEndpointCheck is the newest reachability row for addr up to the
 // window's end (so ?as_of= shows the check as it stood then), nil when the
-// validator was never checked.
+// validator was never checked. It is this observer's own row: when another
+// vantage's check confirms the endpoint up (validatorRow.ConfirmedFrom), this
+// is still what failed from here.
 func (s *Server) lastEndpointCheck(ctx context.Context, addr string, win Window) (*endpointCheck, error) {
 	var c endpointCheck
 	var dns, tcp, tls, id int
 	err := s.st.DB().QueryRowContext(ctx, `SELECT started_at, validator_host, outcome, dns_ok, tcp_ok, tcp_ms, tls_ok, tls_ms,
 			identity_ok, identity_reason, raw_error, vantage
-		FROM reachability WHERE validator_address = ? AND started_at <= ?
-		ORDER BY started_at DESC LIMIT 1`, addr, win.endArg()).
+		FROM reachability WHERE validator_address = ? AND started_at <= ? AND +vantage = ?
+		ORDER BY started_at DESC LIMIT 1`, addr, win.endArg(), s.vantage).
 		Scan(&c.At, &c.Host, &c.Outcome, &dns, &tcp, &c.TCPMS, &tls, &c.TLSMS, &id, &c.IdentityReason, &c.RawError, &c.Vantage)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

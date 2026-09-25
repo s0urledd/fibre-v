@@ -36,6 +36,11 @@ export type Meta = {
   vantage_info: VantageInfo;
   vantage_count: number;
   observed_from_one_location: boolean;
+  /**
+   * Heartbeat vantages whose rows reached the store in the last hour, newest
+   * row of each; primary is this observer's own, the one every figure counts.
+   */
+  vantages?: VantageSeen[];
   chain_id: string;
   /**
    * The chain's application version and whether it is high enough for x/fibre
@@ -105,6 +110,8 @@ export function through(rt: RecordThrough | null | undefined): { text: string; t
     title: `Figures rest on the record through block ${rt.height.toLocaleString("en-US")}${rt.block_time ? `, ${utc(rt.block_time)}` : ""}${lag}.`,
   };
 }
+/** a heartbeat vantage with rows in the last hour (Meta.vantages) */
+export type VantageSeen = { name: string; newest_at: string; primary: boolean };
 /** where this observer watches from; the first three are operator-declared */
 export type VantageInfo = {
   name: string;
@@ -328,6 +335,15 @@ export type Validator = {
   endpoint_state?: "reachable" | "flaky" | "unreachable";
   identity_status: string;
   identity_reason?: string;
+  /**
+   * Another vantage whose check of the same host, in the last fifteen minutes,
+   * completed the handshake while this observer's own checks failed; the
+   * state is then "reachable" on its word, and last_endpoint_check is still
+   * what this observer saw. also_failed_from: the vantage whose recent check
+   * failed too. Absent when no other vantage checked the host recently.
+   */
+  confirmed_from?: string;
+  also_failed_from?: string;
   /**
    * How often this observer completed a TLS conversation with the endpoint
    * over the window, from the five-minute handshake. The one stability figure

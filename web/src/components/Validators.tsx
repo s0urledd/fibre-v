@@ -42,7 +42,7 @@ export function endpoint(v: Validator): { dot: string; word: string; title: stri
     const w = v.identity_status === "expired" ? "Certificate expired" : v.identity_status === "mismatch" ? "Wrong certificate" : v.identity_status === "no_tls" ? "No TLS" : "Reachable, unverified";
     return { dot: "hold", word: w, title: v.identity_reason || `${v.host} answered, but its certificate is not one a client would accept. Not a fault.`, warn: true };
   }
-  return { dot: "ok", word: "Reachable", title: `${v.host}: TLS with this validator's key${checked}` };
+  return { dot: "ok", word: "Reachable", title: `${v.host}: TLS with this validator's key${v.confirmed_from ? ", from a second location" : ""}${checked}` };
 }
 
 function sortValue(v: Validator, k: SortKey): number | null {
@@ -172,7 +172,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
             <tr>
               <th className="col-pin">Validator</th>
               <th title="The newest handshake with the registered endpoint; the chain's own words (jailed, not bonded) come first.">Endpoint now</th>
-              {showHosting && <th title="Network provider and country the endpoint resolved into, as resolved from this vantage. Hover a cell for the network (AS) and address.">Hosting</th>}
+              {showHosting && <th title="Network provider and country of the endpoint. Hover a cell for the network (AS) and address.">Hosting</th>}
               <Th k="power" dflt={-1} label="Voting power" title="From the staking module. The default order, and never a performance rank." />
               {showScores && <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />}
               {showScores && <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />}

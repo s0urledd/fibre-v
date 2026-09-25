@@ -77,7 +77,7 @@ func newHostingFixture(t *testing.T) *hostingFixture {
 		at := f.started.Add(time.Duration(b) * 5 * time.Minute)
 		for i := range 3 {
 			up := !(i == 0 && b >= 10 && b < 14)
-			m := probe.Measurement{Vantage: "t", ValidatorAddress: f.addrs[i], ValidatorHost: f.hosts[i], ScheduledAt: at, StartedAt: at,
+			m := probe.Measurement{Vantage: "test", ValidatorAddress: f.addrs[i], ValidatorHost: f.hosts[i], ScheduledAt: at, StartedAt: at,
 				DNS: probe.StepResult{Attempted: true, OK: true, Detail: ips[i]}, TCP: probe.StepResult{Attempted: true, OK: up}, Outcome: probe.OutcomeReachable}
 			m.TLS.OK, m.Identity.OK = up, up
 			if up {
