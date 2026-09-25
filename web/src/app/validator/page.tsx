@@ -241,7 +241,7 @@ function Page() {
         </div>
         <div>
           <h2>Through the retention window</h2>
-          <p className="sub">Served probes over rated probes at each point of the window</p>
+          <p className="sub">Served share at each probe point</p>
           {points.length === 0 ? <p className="errs">No rated probe in this period.</p> : (
             <div className="pts">
               <div className="h">Point</div><div className="h n">Served</div><div className="h n">Served / rated</div>
@@ -267,13 +267,13 @@ function Page() {
 
       <section className="hm-band" id="calendar">
         <h2>Day by day</h2>
-        <p className="sub">Served over rated probes at each point of the retention window, per UTC day</p>
+        <p className="sub">Served share per probe point, per UTC day</p>
         <Heatmap data={data.heatmap} />
       </section>
 
       <section id="evidence">
         <div className="vhead">
-          <div><h2>Recent evidence</h2><p className="sub">{probes.length > 0 ? evidenceSummary(grouped) : "No probe rows yet"}, as classified by the observer{data.recent_probes_truncated ? " · the rest in the API" : ""}</p></div>
+          <div><h2>Recent evidence</h2><p className="sub">{probes.length > 0 ? evidenceSummary(grouped) : "No probe rows yet"}{data.recent_probes_truncated ? " · the rest in the API" : ""}</p></div>
           <div className="tools">
             {probes.length > 0 && (
               <div className="seg" role="group" aria-label="show rows">

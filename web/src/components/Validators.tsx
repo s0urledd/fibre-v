@@ -152,7 +152,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   return (
     <section>
       <div className="vhead">
-        <div><h2>Validators</h2><p className="sub">{notLive ? "Names and voting power from the staking module." : "Current reachability and service over the selected period."}</p></div>
+        <div><h2>Validators</h2><p className="sub">{notLive ? "Bonded set" : "Reachability and service, selected period"}</p></div>
         <div className="tools">
           <label className="search"><span className="sr-only">Search validators</span><input type="search" placeholder="Search name or address" value={q} onChange={(e) => setQ(e.target.value)} /></label>
           <label className="select"><span className="sr-only">Filter</span>
