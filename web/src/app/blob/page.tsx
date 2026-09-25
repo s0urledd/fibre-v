@@ -94,7 +94,7 @@ function Page() {
       return (
         <div key={k} title={`At this point ${sus} of the validators probed failed at once. From one location that cannot be told from this observer's own network, so nothing at this point counts in any figure.`}>
           <b>{k} <span className="soft">· {hhmm(byLabel.get(k)!.at).replace(" UTC", "")}</span></b>
-          {int(n)} rows · not counted, observer-side
+          <span>{int(n)} rows</span><span>not counted</span>
         </div>
       );
     }
@@ -104,10 +104,10 @@ function Page() {
     return (
       <div key={k}>
         <b>{k} <span className="soft">· {hhmm(byLabel.get(k)!.at).replace(" UTC", "")}</span></b>
-        {post ? `${int(gone)} expected gone` : `${int(served)} served`}
-        {broken > 0 && <> · <span className="word fault">{int(broken)} broken</span></>}
-        {unsigned > 0 && <> · {int(unsigned)} unsigned</>}
-        {other > 0 && <> · {int(other)} other</>}
+        <span>{post ? `${int(gone)} expected gone` : `${int(served)} served`}</span>
+        {broken > 0 && <span className="word fault">{int(broken)} broken</span>}
+        {unsigned > 0 && <span>{int(unsigned)} unsigned</span>}
+        {other > 0 && <span>{int(other)} other</span>}
       </div>
     );
   };
@@ -133,7 +133,7 @@ function Page() {
         <div><dt>Publisher</dt><dd title={b.signer}><Link className="mono" href={`/publisher/?addr=${b.signer}`}>{shortMid(b.signer, 14, 6)}</Link></dd></div>
         <div><dt>Namespace</dt><dd title={b.namespace}><span className="mono">{nsDisplay(b.namespace)}</span><Copy text={b.namespace} label="namespace" /></dd></div>
         <div><dt>Commitment</dt><dd title={b.commitment}><span className="mono">{shortMid(b.commitment, 8, 6)}</span><Copy text={b.commitment} label="commitment" /></dd></div>
-        <div><dt>Settled</dt><dd><span className="mono">#{int(b.settlement_height)}</span><span className="soft"> · {utcWord(b.settlement_time).slice(0, 16)} UTC</span></dd></div>
+        <div><dt>Settled</dt><dd title={utcWord(b.settlement_time)}><span className="mono">#{int(b.settlement_height)}</span><span className="soft"> · {hhmm(b.settlement_time)}</span></dd></div>
         <div><dt>Created</dt><dd>{hhmmss(b.creation_timestamp)}</dd></div>
         {b.assignment_error && <div><dt>Assignment</dt><dd className="word">{b.assignment_error}</dd></div>}
       </dl>
@@ -167,7 +167,7 @@ function Page() {
                 <div className="cut" style={{ left: `${winShare}%` }} />
                 <div className="edge l">settled {hhmm(b.settlement_time).replace(" UTC", "")}</div>
                 {hasPost && <div className="edge r">after the deadline · stretched</div>}
-                <div className="cutlbl" style={{ left: `${winShare}%` }}>deadline {hhmm(b.must_serve_until).replace(" UTC", "")}</div>
+                <div className={"cutlbl" + (winShare > 85 ? " end" : "")} style={{ left: `${winShare}%` }}>deadline {hhmm(b.must_serve_until).replace(" UTC", "")}</div>
                 {order.map((k) => {
                   const at = byLabel.get(k)!.at, t = new Date(at).getTime(), ph = byLabel.get(k)!.phase;
                   return (
@@ -186,17 +186,16 @@ function Page() {
           <h2>Rows observed</h2>
           {rc && rc.total_rows > 0 && (judged || rc.status === "pending") ? (
             <>
-              <p className="sub">At {rc.point} ({hhmm(rc.point_at)}), across {int(rc.served_by_validators)} validator{rc.served_by_validators === 1 ? "" : "s"}</p>
+              <p className="sub">At {rc.point} · {hhmm(rc.point_at)} · from {int(rc.served_by_validators)} validator{rc.served_by_validators === 1 ? "" : "s"}</p>
               <div className="meter" role="img" aria-label={`${int(rc.served_distinct_rows)} of ${int(rc.total_rows)} rows; ${int(rc.needed_rows)} needed`}>
-                <i style={{ width: `${fill.toFixed(1)}%` }} /><div className="tick" style={{ left: `${tick.toFixed(1)}%` }} /><div className="tl2" style={{ left: `${tick.toFixed(1)}%` }}>{int(rc.needed_rows)} needed</div>
+                <i style={{ width: `${fill.toFixed(1)}%` }} /><div className="tick" style={{ left: `${tick.toFixed(1)}%` }} />
               </div>
-              <div className="mnums"><span>0</span><span><b>{int(rc.served_distinct_rows)}</b> distinct rows observed</span><span>{int(rc.total_rows)} total</span></div>
-              <p className="errs">
-                {rc.status === "yes" && <>Enough distinct rows to rebuild the blob were observed, and every one of the {int(rc.attested_validators)} validators proven to hold a shard served at that point, so it is <b>fully served</b>.</>}
-                {rc.status === "degraded" && <>Enough distinct rows to rebuild the blob were observed, but {int(rc.attested_validators - rc.served_by_attested)} of the {int(rc.attested_validators)} validators proven to hold a shard did not serve at that point, so it is <b>rebuildable, not fully served</b>.</>}
-                {rc.status === "no" && <>Fewer distinct rows than the {int(rc.needed_rows)} needed were observed, so the blob is <b>not rebuildable</b> from what came back at that point.</>}
-                {rc.status === "pending" && <>{int(rc.probed_validators)} of {int(rc.assigned_validators)} assigned validators have a result at this point; the verdict waits for the rest.</>}
-                {" "}This is an observation of rows at one point — not an actual rebuild.{rc.attestation_known && <> {int(rc.served_by_attested)} of {int(rc.attested_validators)} signed validators served.</>}
+              <div className="mnums"><span><b>{int(rc.served_distinct_rows)}</b> of {int(rc.total_rows)} rows</span><span>{int(rc.needed_rows)} needed to rebuild</span></div>
+              <p className="errs" title="An observation of the rows that came back at one probe point, not an actual rebuild.">
+                {rc.status === "yes" && <><b>Fully served.</b> Enough rows to rebuild, and all {int(rc.attested_validators)} signed validators served.</>}
+                {rc.status === "degraded" && <><b>Rebuildable, not fully served.</b> {int(rc.attested_validators - rc.served_by_attested)} of {int(rc.attested_validators)} signed validators did not serve.</>}
+                {rc.status === "no" && <><b>Not rebuildable</b> from the rows that came back at this point.</>}
+                {rc.status === "pending" && <>{int(rc.probed_validators)} of {int(rc.assigned_validators)} validators have a result; waiting for the rest.</>}
               </p>
             </>
           ) : <p className="errs">{state[2]}</p>}
@@ -237,8 +236,12 @@ function Page() {
           </table>
         </div>
         <p className="mklegend">
-          <span><span className="mk ok" /> served</span><span><span className="mk fault" /> broken</span><span><span className="mk unsigned" /> unsigned: no verified signature, so not rated either way (two-thirds quorum)</span>
-          <span><span className="mk other" /> other (server error, unreachable, rate limited, certificate)</span><span><span className="mk gone" /> expected gone after the window, not probed, or not counted at an observer-side point: never a fault</span><span><span className="mk none" /> no endpoint</span>
+          <span><span className="mk ok" /> served</span>
+          <span><span className="mk fault" /> broken</span>
+          <span title="No verified signature on the settled promise, so not rated either way: the publisher stops collecting at two thirds of stake."><span className="mk unsigned" /> unsigned</span>
+          <span title="Server error, unreachable, rate limited or a certificate problem. Never a fault."><span className="mk other" /> other</span>
+          <span title="Expected gone after the window, not probed, or at a point where the observer does not trust itself. Never a fault."><span className="mk gone" /> not counted</span>
+          <span><span className="mk none" /> no endpoint</span>
         </p>
       </section>
     </>
