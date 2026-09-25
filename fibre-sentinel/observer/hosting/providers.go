@@ -101,6 +101,10 @@ var providerASNs = map[uint32]string{
 	// is iptoasn's, file of 2026-09-24.
 	16125: ProviderCherry, // CHERRYSERVERS1-AS
 	59642: ProviderCherry, // CHERRYSERVERS2-AS
+	204770: ProviderCherry, // CHERRYSERVERS3-AS
+	216444: ProviderCherry, // CHERRYSERVERS4-AS
+	214159: ProviderCherry, // CHERRYSERVERS5-AS
+	213896: ProviderCherry, // CHERRYSERVERS6-AS
 
 	201814: ProviderMevspace, // MEVSPACE
 

@@ -68,8 +68,11 @@ function nakWord(n: Nakamoto, unit: [string, string]): { value: string; title: s
 }
 
 /**
- * The overview panel. Renders nothing while the lookup is off: an empty
- * panel would read as "nothing concentrated", which is not what off means.
+ * The provider / concentration panel. Not rendered on any page for now (taken
+ * off the overview on 2026-09-25, kept for a later layout); the API figures
+ * behind it (/v1/hosting) are unchanged. Renders nothing while the lookup is
+ * off: an empty panel would read as "nothing concentrated", which is not what
+ * off means.
  */
 export function Concentration() {
   const { data } = useApi<HostingResponse>("/v1/hosting", 120000);
@@ -119,15 +122,15 @@ export function Concentration() {
   );
 }
 
-/** the validator page's hosting chip */
-export function HostingChip({ h }: { h?: Hosting }) {
-  if (!h) return null;
-  if (h.status === "unresolved") return <span title={hostingTitle(h)}>network <b className="word">unresolved</b></span>;
+/** the validator page's hosting fact: provider, network, place */
+export function HostingFact({ h }: { h: Hosting }) {
+  if (h.status === "unresolved") return <span className="soft" title={hostingTitle(h)}>unresolved</span>;
+  const prov = h.provider === "Other" || h.status === "no_asn" ? (h.as_org ? shortOrg(h.as_org) : "unknown network") : h.provider;
   return (
     <span title={hostingTitle(h)}>
-      runs on <b className="word">{h.provider === "Other" || h.status === "no_asn" ? (h.as_org ? shortOrg(h.as_org) : "unknown network") : h.provider}</b>
+      {prov}
       {h.asn ? <span className="soft"> · AS{h.asn}</span> : null}
-      {h.country && <span className="soft"> · <Flag cc={h.country} />{h.city ? `${h.city}, ` : ""}{countryName(h.country)}</span>}
+      {h.country && <span className="soft"> · {h.city ? `${h.city}, ` : ""}{h.country}</span>}
     </span>
   );
 }

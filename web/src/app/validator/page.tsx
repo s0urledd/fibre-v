@@ -9,7 +9,7 @@ import { Metric, Metrics } from "@/components/Metrics";
 import OutcomeBar from "@/components/OutcomeBar";
 import Copy from "@/components/Copy";
 import { endpoint } from "@/components/Validators";
-import { HostingChip } from "@/components/Hosting";
+import { HostingFact } from "@/components/Hosting";
 import { DISPUTE_URL, SELF_VALIDATOR } from "@/lib/site";
 import Heatmap from "@/components/Heatmap";
 import PreLive from "@/components/PreLive";
@@ -171,24 +171,27 @@ function Page() {
           <div className="chips">
             <span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span>
             {v.host && <span title={v.identity_reason || "The consensus-key check on the newest handshake."}>TLS identity <b className="word">{identityWord[v.identity_status] ?? v.identity_status}</b></span>}
-            {v.host && <span><span className="mono">{v.host}</span>{v.endpoint_since && <> · registered since {dateUTC(v.endpoint_since)}</>}</span>}
-            {v.host && <HostingChip h={v.hosting} />}
-            {!v.host && v.last_host && <span title="The registration stays on chain; the validator left the bonded provider list.">last endpoint <span className="mono">{v.last_host}</span>{v.endpoint_closed_at && <> · left the bonded list {dateUTC(v.endpoint_closed_at)}</>}</span>}
             {sig && sig.assigned > 0
               ? <span title={`Settled promises in this period that assigned this validator rows and carry its verified signature, ${pctOf(sig.signed, sig.assigned)}. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.`}>signed <b className="word">{int(sig.signed)} / {int(sig.assigned)}</b> promises<SignedInfo /></span>
               : att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">signed <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs<SignedInfo /></span>}
             {(v.timeouts_enforced ?? 0) > 0 && <span title="MsgPaymentPromiseTimeout submitted by this validator’s operator account in the period: abandoned promises reported so the escrow was charged. The chain pays nothing for it.">{int(v.timeouts_enforced)} timeout{v.timeouts_enforced === 1 ? "" : "s"} enforced</span>}
           </div>
-          <div className="idkv">
-            {v.cons_address && <span title={v.cons_address}><span className="mono">{shortMid(v.cons_address, 22, 6)}</span><Copy text={v.cons_address} label="consensus address" /></span>}
-            {v.operator_address && <span title={v.operator_address}><span className="mono">{shortMid(v.operator_address, 22, 6)}</span><Copy text={v.operator_address} label="operator address" /></span>}
-            <span title={`consensus address, hex: ${v.address}`}><span className="mono">{shortMid(v.address, 10, 6)}</span><Copy text={v.address} label="hex address" /></span>
-            <span title="An Atom feed of this validator’s endpoint changes: registered or changed host, bonded-list changes, unreachable and recovered, certificate problems, first fault. Paste the link into any feed reader; nothing is stored about you."><a href={`${API_BASE}/v1/validators/${v.address}/feed.atom`} type="application/atom+xml">Subscribe (Atom)</a></span>
-            {v.website && <span><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a></span>}
-          </div>
         </div>
         <WindowSwitch value={win} onChange={setWin} />
       </div>
+      <dl className="facts">
+        {v.host
+          ? <div><dt>Endpoint</dt><dd><span className="mono">{v.host}</span>{v.endpoint_since && <span className="soft"> · since {dateUTC(v.endpoint_since)}</span>}</dd></div>
+          : v.last_host && <div title="The registration stays on chain; the validator left the bonded provider list."><dt>Last endpoint</dt><dd><span className="mono">{v.last_host}</span>{v.endpoint_closed_at && <span className="soft"> · left {dateUTC(v.endpoint_closed_at)}</span>}</dd></div>}
+        {v.host && v.hosting && <div><dt>Hosting</dt><dd><HostingFact h={v.hosting} /></dd></div>}
+        {v.cons_address && <div><dt>Consensus address</dt><dd title={v.cons_address}><span className="mono">{shortMid(v.cons_address, 18, 6)}</span><Copy text={v.cons_address} label="consensus address" /></dd></div>}
+        {v.operator_address && <div><dt>Operator address</dt><dd title={v.operator_address}><span className="mono">{shortMid(v.operator_address, 18, 6)}</span><Copy text={v.operator_address} label="operator address" /></dd></div>}
+        <div><dt>Hex address</dt><dd title={v.address}><span className="mono">{shortMid(v.address, 10, 6)}</span><Copy text={v.address} label="hex address" /></dd></div>
+        <div><dt>Links</dt><dd>
+          {v.website && <><a href={v.website} rel="nofollow noopener noreferrer" target="_blank">{v.website.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a><span className="soft"> · </span></>}
+          <a href={`${API_BASE}/v1/validators/${v.address}/feed.atom`} type="application/atom+xml" title="Endpoint changes of this validator, as an Atom feed">Atom feed</a>
+        </dd></div>
+      </dl>
       <PreLive meta={meta} />
       <StatusLine meta={meta} metaError={metaErr} snap={{ record_through: data.record_through, window: data.window }} client={{ error: d.error, fetchedAt: d.fetchedAt, status: d.status }} measuring={measuring} />
       {/* the conclusion before the evidence; before activation there is nothing to conclude, and StatusLine says so */}
