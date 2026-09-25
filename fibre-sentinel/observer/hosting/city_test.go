@@ -60,7 +60,7 @@ func TestLookupCity(t *testing.T) {
 			"51.68.0.0":                           {"FR", "Hauts-de-France", "Roubaix", 50.6942, 3.17456, true},
 			"203.0.113.9":                         {"NL", "North Holland", `Amsterdam "Zuid"`, 52.37, 0, true}, // a zero longitude alone is a real point
 			"198.51.100.1":                        {"NL", "North Holland", "Haarlem", 0, 0, false},             // 0,0 is "no point"
-			"192.0.2.7":                           {"GB", "England", "London", 51.5176, -0.180429, true}, // district dropped
+			"192.0.2.7":                           {"GB", "England", "London", 51.5176, -0.180429, true},       // district dropped
 			"2a01:4f8::":                          {"DE", "Saxony", "Falkenstein", 50.4779, 12.3713, true},
 			"2a01:4f8:0:ffff:ffff:ffff:ffff:ffff": {"DE", "Saxony", "Falkenstein", 50.4779, 12.3713, true},
 			"2a01:4f8:1::":                        {"FI", "Uusimaa", "Helsinki", 60.1699, 24.9384, true},
