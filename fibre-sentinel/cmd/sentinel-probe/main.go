@@ -81,7 +81,7 @@ func main() {
 		tlsTO       = flag.Duration("tls-timeout", 10*time.Second, "")
 		dlTO        = flag.Duration("download-timeout", 25*time.Second, "")
 		logLines    = flag.Int("log-ring", 400, "log lines kept in memory for the crash dump")
-		policyPath  = flag.String("policy", "", "probe load policy YAML (observer/policy); \"default\" applies the R4 defaults; empty = no policy (probe everything)")
+		policyPath  = flag.String("policy", "", "probe load policy YAML (observer/policy); \"default\" applies the built-in defaults; empty = no policy (probe everything)")
 		revealAfter = flag.Duration("reveal-after", policy.DefaultRevealAfter, "publish each day's sampling secret this long after the day ends, to <data-dir>/sampling-secrets.jsonl (0 = never)")
 
 		// Confirm mode, on a second vantage: no publications, no schedule,

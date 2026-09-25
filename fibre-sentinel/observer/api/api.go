@@ -1531,7 +1531,7 @@ func (ss suspectSet) clause(col string) string {
 //
 // This observer's own operator runs a validator on the network it measures,
 // which is a conflict a reader should be able to check rather than take on
-// trust. R0 decision 4 asked for the check to be a query filter: leave the
+// trust. The check is a query filter: leave the
 // validator in the tables, and let anyone recompute the headline figures
 // without it. So nothing is excluded by default, the exclusion is asked for
 // per request rather than configured on the deployment, and what a request

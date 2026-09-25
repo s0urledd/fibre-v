@@ -20,7 +20,7 @@ import (
 // redeploying through an afternoon — could spend the whole hourly byte cap
 // once per restart, send a minute's requests again in the same minute, and
 // forget that a validator's transport had failed three times in a row, on
-// exactly the endpoints R4 promises to be gentlest with. The caps
+// exactly the endpoints the policy promises to be gentlest with. The caps
 // constrain this vantage over wall-clock windows, not per process.
 //
 // So the minimal state behind those checks is written to the data dir and

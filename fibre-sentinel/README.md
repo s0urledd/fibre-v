@@ -1,11 +1,12 @@
 # fibre-sentinel
 
-An **independent observer** for Celestia Fibre. It watches the chain for Fibre
-publications and then, from the outside, checks whether the assigned validators
-actually keep serving each blob for its retention window.
+The measurement core of Tensile. It watches the chain for Fibre publications
+and then, from the outside, checks whether the assigned validators keep serving
+each blob for its retention window. The observer service built on it (store,
+collector, API) lives in `observer/` and `cmd/observer-*`.
 
 ```
-git clone https://github.com/plsgiveup/fibre && cd fibre/fibre-sentinel
+git clone https://github.com/s0urledd/tensile && cd tensile/fibre-sentinel
 go build -o bin/ ./cmd/...
 ```
 
@@ -13,7 +14,7 @@ go build -o bin/ ./cmd/...
 modules via in-repo `replace` directives, so it builds from a repo checkout, not
 via `go install <path>@latest`.)
 
-Two programs:
+Two core programs:
 
 - **`sentinel-scan`** — discovery + recording. Walks the chain over one CometBFT
   RPC endpoint, finds every publication (a transaction whose sole message is
@@ -25,7 +26,7 @@ Two programs:
 
 ---
 
-## Why this tool exists
+## What it checks, and why
 
 **Fibre in one paragraph.** Fibre is Celestia's optional low-latency data
 availability path. When a client pays for a Fibre blob, the validators sign that
@@ -87,12 +88,6 @@ measured lag plus margin (`-prune-tolerance`, default **2m30s**), never from the
 protocol number. This is the line between a monitor operators trust and one they
 mute. Run against a network with a different `shard_retention` or prune cadence,
 re-measure, and set `-prune-tolerance` to match.
-
-The concept behind the tool (a five-layer probe: registry, reachability,
-identity, RPC health, retrievability) is described in
-`celestia_fibre_sentinel_concept_memo.pdf`. This implementation does the
-registry lookup (`x/valaddr`), reachability (L1–L3 below), identity
-(`fibre-tlsverify`), and retrievability (L4).
 
 ---
 
@@ -196,7 +191,8 @@ consensus keys from `/validators` at the promise height. The assignment is
 finished times + lateness, each layer's separate duration and result, the
 identity verdict (with the claimed validity window even on failure), rows
 returned and both verification results, and the raw error text. **No scores** —
-a reliability view is a separate, later derivation from these records.
+the observer derives rates and obligation verdicts from these records
+(`observer/verdict`, `observer/rollup`).
 
 **Transport-timeout retry.** A Fibre server's default connection cap (16) is
 filled by a single 16-signer upload, so a probe that arrives during an upload
@@ -254,7 +250,7 @@ than counting the entries the transaction carries.
 ### Load shape
 
 Probes run on `-concurrency` (8) workers across validators, never more than
-one connection to a validator at a time (R4 section 3.5). `publications.jsonl`
+one connection to a validator at a time. `publications.jsonl`
 is tailed incrementally and a publication is forgotten once every slot of
 its schedule has a row. On a (re)start every elapsed slot without a row gets
 a `NOT_PROBED` row, however old, so an obligation the prober never reached
@@ -304,12 +300,13 @@ multi-vantage coverage.
 
 ---
 
-## How it was verified
+## Tests
 
-**Unit** (`go test ./...`, 14 tests): param-history ordering incl. same-block
-updates, `must_serve_until` derivation, `EventUpdateFibreParams` JSON parse, the
+**Unit** (`go test ./...`): param-history ordering incl. same-block updates,
+`must_serve_until` derivation, `EventUpdateFibreParams` JSON parse, the
 assignment-table builder, store dedupe/resume, schedule shape/ordering/spacing,
-`PhaseAt` boundaries, and the full taxonomy table.
+`PhaseAt` boundaries, the full taxonomy table, and the observer's store,
+rollup, API and export packages.
 
 **End-to-end, scanner** — `./devtest.sh 4 4`: fresh `multi-node-fibre.sh` devnet,
 `sentinel-scan` following, 4 blobs published; every commitment recorded with
@@ -345,10 +342,16 @@ cmd/sentinel-pub           devnet publish helper (fibre.Client.Upload + MsgPayFo
 cmd/sentinel-verify        checks publications.jsonl against expected commitments
 cmd/sentinel-verify-export checks a downloaded daily export offline: sidecar, members vs manifest, ed25519 signature (docs/exports-signing.md)
 cmd/sentinel-anchor        builds and prints (never broadcasts) the PayForBlobs that would anchor an export's manifest digest on Celestia
-internal/uploadprobe       upload-side measurement groundwork: per-validator results from the fibre client's spans (docs/research/R13-upload-probing.md)
 cmd/sentinel-measure-check checks measurements.jsonl against the taxonomy
+cmd/sentinel-recompute     re-derives every verdict and figure from the record or a daily export, optionally against the live API
+cmd/sentinel-synth         writes a synthetic network-scale record for load and correctness tests
+cmd/observer-collector     tails the record files into SQLite and polls the endpoint registry
+cmd/observer-heartbeat     dials every registered endpoint (DNS, TCP, TLS, identity) every few minutes
+cmd/observer-api           the read-only JSON API
 internal/scan              scanner, param history, record schema, store, CometBFT RPC client
 internal/probe             schedule, layered probe, measurement store, classifier, prober loop
+internal/uploadprobe       upload-side measurement groundwork: per-validator results from the fibre client's spans
+observer/                  store, ingest, verdicts, rollups, load policy, exports, API
 sample/                    outputs from a real devtest / probe-devtest run
 ```
 

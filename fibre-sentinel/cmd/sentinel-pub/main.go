@@ -105,8 +105,7 @@ func main() {
 		timeoutF   = flag.String("timeout", "", "broadcast MsgPaymentPromiseTimeout for the promise file(s) written by -abandon (comma-separated)")
 		withdraw   = flag.Int64("withdraw", 0, "broadcast MsgRequestWithdrawal for this many utia and exit")
 		showF      = flag.String("show", "", "print the promise hash of the promise file(s) written by -abandon (comma-separated) and exit")
-		// Upload-side measurement groundwork (docs/research/R13-upload-probing.md),
-		// off by default: when set, every validator's handling of every shard
+		// Upload-side measurement groundwork, off by default: when set, every validator's handling of every shard
 		// this run uploads is recorded from the fibre client's own trace spans
 		// (internal/uploadprobe) and written here as JSONL once the client has
 		// finished its background deliveries.

@@ -1,5 +1,5 @@
-// Package policy implements the probe load policy from
-// docs/research/R4-probe-etiquette.md: deterministic, unpredictable sampling
+// Package policy implements the probe load policy (docs/SYSTEM.md, "Load
+// policy and sampling"): deterministic, unpredictable sampling
 // of publications when the byte or request budget would be exceeded,
 // per-validator and global caps, and a backoff that never adds requests.
 //
@@ -32,8 +32,8 @@ import (
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 )
 
-// Config is the on-disk policy (YAML). Zero values take the defaults from
-// R4 section 3.5.
+// Config is the on-disk policy (YAML). Zero values take the defaults in
+// Default.
 type Config struct {
 	// PointsPerPublication is how many probes one publication costs a
 	// validator: set by the prober from its schedule, not from the file.
@@ -89,7 +89,7 @@ type Config struct {
 	} `yaml:"budget_state"`
 }
 
-// Default returns the R4 defaults.
+// Default returns the built-in policy defaults.
 func Default() Config {
 	var c Config
 	c.Capacity.FloorRows = 148
@@ -819,8 +819,8 @@ func trim(events []event, since time.Time) []event {
 // in several work items at once; with eight workers they all passed here in
 // the same instant (no spacing to wait out, caps nowhere near) and then ran
 // back to back: up to seven shards over the per-validator byte and request
-// caps and no spacing at all, on exactly the endpoints R4 promises to be
-// gentlest with.
+// caps and no spacing at all, on exactly the endpoints the policy promises
+// to be gentlest with.
 func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time) (allow, skipDownload bool, reason string) {
 	// The spacing wait happens outside the lock. It used to run inside the
 	// critical section, which meant one validator's two-second wait blocked
@@ -952,7 +952,7 @@ func (p *Policy) takePending(addr string) {
 // was abandoned, the sweep is stopping), so its reservation is given back.
 // lastRequest stays where the admission put it: at worst the next probe of
 // the validator waits out a spacing for a request that never went out,
-// which errs on the side R4 asks for.
+// which errs on the side of less load.
 func (p *Policy) Release(_ scan.Publication, t probe.Target) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

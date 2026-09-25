@@ -1,6 +1,6 @@
 # Probe load policy for mocha-5 at Fibre launch. Differs from policy.example.yaml
 # (the mainnet November model) only in the capacity model and the hourly
-# fraction; see docs/research/R4-probe-etiquette.md section 6a.
+# fraction.
 # Every per-validator number is PER VANTAGE; run at most three vantages.
 
 capacity_model:

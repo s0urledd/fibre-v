@@ -2,8 +2,7 @@
 
 One `probe-devtest.sh 4 3` run (celestia-app `0b69316`, 4 validators, 3 blobs
 of 256 KiB, node 1's fibre server killed 174 s after the first publish),
-recorded on a fresh Linux machine on 6 September 2026; see
-`docs/research/R7-devnet-reproduction.md`.
+recorded on a fresh Linux machine on 6 September 2026.
 
 | file | rows | notes |
 |---|---|---|

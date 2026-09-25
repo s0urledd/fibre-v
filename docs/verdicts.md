@@ -704,8 +704,7 @@ what the measurement cannot separate.
   client included, can ask for a particular promise's shard. A
   per-promise retention obligation is therefore not checkable inside the
   protocol, not only from this vantage. An optional `promise_hash` on
-  `DownloadShardRequest` would make it so; see
-  `docs/research/R12-download-by-promise-2026-09-18.md`.
+  `DownloadShardRequest` would make it so.
 - **A lost probe row is a gap, an amendment for a missing row waits.** A
   prober outage leaves no row for the slots it slept through; on restart
   it writes a `NOT_PROBED` row for every elapsed slot of every publication

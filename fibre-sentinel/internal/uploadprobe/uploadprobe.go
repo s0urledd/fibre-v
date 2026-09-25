@@ -1,8 +1,7 @@
-// Package uploadprobe is groundwork for measuring the upload side of Fibre
-// (docs/research/R13-upload-probing.md): what each validator did with a
-// shard this observer uploaded as a synthetic publisher. Nothing in the
-// observer runs it; cmd/sentinel-pub uses it only behind -upload-results,
-// which is off by default.
+// Package uploadprobe is groundwork for measuring the upload side of Fibre:
+// what each validator did with a shard this observer uploaded as a
+// synthetic publisher. Nothing in the observer runs it; cmd/sentinel-pub
+// uses it only behind -upload-results, which is off by default.
 //
 // Where per-validator results come from. celestia-app's fibre.Client.Upload
 // returns one thing to its caller: the signed payment promise, whose
@@ -45,8 +44,8 @@ import (
 const SchemaVersion = 1
 
 // Reason is what a delivery came to, in words that describe the exchange and
-// accuse nobody. The R4 etiquette applies: an upload probe adds load to the
-// validator it measures, so a refusal under load is information about
+// accuse nobody. The probe load policy applies: an upload probe adds load
+// to the validator it measures, so a refusal under load is information about
 // capacity, and budget_exceeded in particular is the server doing exactly
 // what x/fibre's storage budget tells it to.
 type Reason string

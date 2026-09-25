@@ -563,8 +563,7 @@ const minRecvMsgSize = celfibre.MaxPaymentPromiseSize + (1 << 20)
 // only the fallback: Input.MaxMessageSize carries the publication's own bound.
 var defaultMaxRecvMsgSize = celfibre.DefaultProtocolParams.MaxMessageSize()
 
-// userAgent identifies this observer on every connection, as R4 section 5
-// requires, so an operator seeing the traffic can tell who it is and stop it.
+// userAgent identifies this observer on every connection, so an operator seeing the traffic can tell who it is and stop it.
 const userAgent = "fibre-sentinel-observer"
 
 // downloadAndVerify runs the L4 step over conn, the connection L2 opened,
@@ -1040,8 +1039,8 @@ func isNoRoute(err error) bool {
 // rows × (row data + 14 proof hashes + framing) plus the row-linear-combination
 // vector (originalRows × 16 bytes) and the response envelope. Framing is 36
 // bytes per row: 14 proof entries × 2 (tag, length), the row data tag and
-// 4-byte length, and the index field. The numbers match the table in
-// docs/research/R4-probe-etiquette.md section 1.3.
+// 4-byte length, and the index field. A 128 MiB blob comes to 4,986,836 B
+// for a 148-row shard and 136,265,732 B for 4096 rows.
 func ShardBytes(blobSize uint32, originalRows, rows int) int64 {
 	if originalRows <= 0 {
 		return 0
