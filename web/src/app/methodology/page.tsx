@@ -38,7 +38,7 @@ export default function Methodology() {
       <Legend />
 
       <h2 id="signing">Signing participation</h2>
-      <p><strong>Signed</strong> is the settled promises carrying a validator&rsquo;s verified signature over the promises that assigned it rows. The Blobs page shows each promise&rsquo;s signed share of stake against the quorum of <code>floor(total &times; 2 / 3)</code>. Neither is a duty: an unsigned promise is unproven, not a fault.</p>
+      <p><strong>In quorum</strong> is the settled promises carrying a validator&rsquo;s verified signature over the promises that assigned it rows: how often it made the two-thirds quorum. The Blobs page shows each promise&rsquo;s signed share of stake against the quorum of <code>floor(total &times; 2 / 3)</code>. Neither is a duty: an unsigned promise is unproven, not a fault.</p>
 
       <h2 id="rates">Rates</h2>
       <ul>
