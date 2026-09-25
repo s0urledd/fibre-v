@@ -46,7 +46,6 @@ function Page() {
     <>
       <div className="section-head">
         <h1>Blobs</h1>
-        <span className="sample">one row per <code>MsgPayForFibre</code>, newest first</span>
         <span className="spacer" />
         <input type="search" placeholder="Filter by namespace (56 hex)" value={ns} onChange={(e) => setNs(e.target.value)} aria-label="namespace filter" />
       </div>
