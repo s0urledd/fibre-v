@@ -227,6 +227,7 @@ func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ..
 	s.mux.HandleFunc("GET /v1/validators", s.handleValidators)
 	s.mux.HandleFunc("GET /v1/validators/{addr}", s.handleValidator)
 	s.mux.HandleFunc("GET /v1/blobs", s.handleBlobs)
+	s.mux.HandleFunc("GET /v1/namespaces", s.handleNamespaces)
 	s.mux.HandleFunc("GET /v1/blobs/{hash}", s.handleBlob)
 	s.mux.HandleFunc("GET /v1/probes", s.handleProbes)
 	s.mux.HandleFunc("GET /v1/runs", s.handleRuns)
