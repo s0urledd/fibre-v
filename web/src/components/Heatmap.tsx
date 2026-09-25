@@ -70,6 +70,8 @@ export default function Heatmap({ data }: { data: HeatmapData | undefined }) {
   const lastDrawn = Math.floor((n - 1) / every) * every;
   const showLabel = (i: number) => i % every === 0 || (i === n - 1 && i - lastDrawn >= every);
   const wide = n > 31;
+  // An all-hatched grid is a page of nothing; say it in one line instead.
+  if (!anyRow) return <div className="hm"><p className="errs">No rated or held-out probe of this validator in this period.</p></div>;
   return (
     <div className="hm">
       <div className="hm-scroll">
@@ -95,7 +97,6 @@ export default function Heatmap({ data }: { data: HeatmapData | undefined }) {
         <span><i className="hm-k noverdict" /> no verdict</span>
         <span><i className="hm-k nodata" /> no data</span>
       </p>
-      {!anyRow && <p className="errs">No rated or held-out probe of this validator in this period.</p>}
       {data.raw_from && data.days.some((d) => d < data.raw_from!) && <p className="rolled">Days before {data.raw_from} come from the daily rollup, which keeps the whole day and not each point.</p>}
     </div>
   );

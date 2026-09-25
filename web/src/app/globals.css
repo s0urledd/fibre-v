@@ -200,7 +200,7 @@ button.dis:hover, a.dis:hover { text-decoration: underline; }
 .metric .value.fault { color: var(--fault); }
 .metric .value.absent { color: var(--text-3); }
 .metric .value.words { font-size: 20px; line-height: 1.3; margin: 10px 0 8px; color: var(--text-2); }
-.metric .help { font-size: var(--t-small); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.metric .help { font-size: var(--t-small); color: var(--text-3); line-height: 1.35; }
 
 /* -------------------------------------------------------------- the band --- */
 .band { display: grid; grid-template-columns: 1fr 1fr; padding: 14px 0 14px; border-bottom: 1px solid var(--line-soft); }

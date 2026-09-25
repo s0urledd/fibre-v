@@ -28,7 +28,7 @@ export default function Readiness({ rows }: { rows: Validator[] }) {
   const missing = bonded
     .filter((v) => !v.host)
     .sort((a, b) => (b.voting_power || 0) - (a.voting_power || 0))
-    .slice(0, 8);
+    .slice(0, 5);
 
   return (
     <section className="band readiness" aria-labelledby="readiness-h">

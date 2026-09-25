@@ -26,7 +26,13 @@ export function HostingCell({ h }: { h?: Hosting }) {
 
 /** "HETZNER-AS" / "EXAMPLE-NET Example B.V." → a short readable handle */
 function shortOrg(org: string): string {
-  const w = org.split(/\s+/)[0] ?? org;
+  // Registry handles are shouted and suffixed ("SERVETHEWORLD-AS", "AS-30083-US-VELIA-NET",
+  // "IS-AS-1"): drop the AS markers and numbers, and bring long all-caps words to a readable
+  // case beside the named providers. Short tokens (RL5, IP, IS) stay as they are. The full
+  // registry name is in the cell's tooltip.
+  let w = (org.split(/\s+/)[0] ?? org).replace(/^AS-/i, "").replace(/-ASN?(-\d+)?$/i, "").replace(/-\d+$/, "");
+  w = w.split("-").map((p) => (p.length <= 3 || p !== p.toUpperCase() ? p : p.charAt(0) + p.slice(1).toLowerCase())).join("-");
+  if (!w) w = org;
   return w.length > 16 ? w.slice(0, 15) + "…" : w;
 }
 
