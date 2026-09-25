@@ -15,7 +15,7 @@ export default function OutcomeBar({ o, absent }: { o: Obligations | null | unde
       <div className="bar" role="img" aria-label={total ? segs.map(([, l, n]) => `${l} ${int(n)}`).join(", ") : "no obligation in this period"}>
         {total > 0 && segs.map(([c, l, n]) => n > 0 && <i key={c} className={c} style={{ width: `${(n / total * 100).toFixed(2)}%` }} title={`${l} ${int(n)}`} />)}
       </div>
-      <div className="key">
+      <div className="key okey">
         {segs.map(([c, l, n]) => <div key={c}><span className={"sw " + c} />{l}<span className="v">{absent ? "—" : int(n)}</span></div>)}
       </div>
     </>
