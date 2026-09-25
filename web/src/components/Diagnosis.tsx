@@ -44,18 +44,11 @@ function split(host: string): [string, string] {
   return m ? [m[1], m[2]] : [host, "7980"];
 }
 
-/** "a", "a or b", "a, b or c": this observer's published source addresses */
-function orList(xs: string[]): string {
-  if (xs.length <= 1) return xs.join("");
-  return `${xs.slice(0, -1).join(", ")} or ${xs[xs.length - 1]}`;
-}
-
 function Docs({ href, children }: { href: string; children: ReactNode }) {
   return <a href={href} rel="noopener noreferrer" target="_blank">{children}</a>;
 }
 
-function state(v: Validator, c: EndpointCheck | undefined, egress: string[], decided: number): State {
-  const ip = egress.length > 0 ? <span className="mono">{orList(egress)}</span> : null;
+function state(v: Validator, c: EndpointCheck | undefined, decided: number): State {
 
   if (v.jailed) {
     return {
@@ -93,7 +86,7 @@ function state(v: Validator, c: EndpointCheck | undefined, egress: string[], dec
     const chk = c && c.host === v.host ? c : undefined;
     const at = chk ? <>At {whenUTC(chk.at)}</> : <>At the newest check</>;
     const err = chk?.raw_error ? <> (<code>{chk.raw_error}</code>)</> : null;
-    const notFault = <> Not counted as broken.{v.last_reachable_at ? <> The last successful handshake was {ago(v.last_reachable_at)}.</> : <> No handshake has succeeded in this period.</>}</>;
+    const notFault = <>{v.also_failed_from && <> A check from a second location failed too.</>} Not counted as broken.{v.last_reachable_at ? <> The last successful handshake was {ago(v.last_reachable_at)}.</> : <> No handshake has succeeded in this period.</>}</>;
     const refused = chk && (chk.outcome === "TCP_REFUSED" || /refused/i.test(chk.raw_error ?? ""));
     if (chk && !chk.dns_ok) {
       return {
@@ -106,14 +99,14 @@ function state(v: Validator, c: EndpointCheck | undefined, egress: string[], dec
       return {
         tone: "hold", title: `Connection refused on port ${port}`,
         body: <>{at}, the address answered but refused the connection on port {port}{err}: nothing was accepting connections there, or a firewall rejected it.{notFault}</>,
-        todo: <>Check that the Fibre server is running, that it listens on port {port} on a public interface rather than only on 127.0.0.1, and that the firewall accepts inbound TCP on {port} from anywhere{ip && <>, which includes this observer’s address {ip}</>}. <Docs href={TROUBLESHOOT_DOCS}>Troubleshoot startup</Docs> in the Celestia docs covers a server that does not come up.</>,
+        todo: <>Check that the Fibre server is running, that it listens on port {port} on a public interface rather than only on 127.0.0.1, and that the firewall accepts inbound TCP on {port} from any address. <Docs href={TROUBLESHOOT_DOCS}>Troubleshoot startup</Docs> in the Celestia docs covers a server that does not come up.</>,
       };
     }
     if (chk && !chk.tcp_ok && (chk.outcome === "TCP_TIMEOUT" || /time(d)? ?out/i.test(chk.raw_error ?? ""))) {
       return {
         tone: "hold", title: `No answer on port ${port}`,
         body: <>{at}, the connection to {host} got no answer{err}: packets were dropped rather than refused.{notFault}</>,
-        todo: <>This is usually a firewall or cloud security group that does not allow inbound TCP on port {port}, or a host that is down. Publishers connect from many places, so the port has to be open to all of them{ip && <>; this observer connects from {ip}</>}.</>,
+        todo: <>This is usually a firewall or cloud security group that does not allow inbound TCP on port {port}, or a host that is down. The port has to be open to any address: publishers connect from anywhere.</>,
       };
     }
     if (chk && !chk.tcp_ok) {
@@ -121,7 +114,7 @@ function state(v: Validator, c: EndpointCheck | undefined, egress: string[], dec
       return {
         tone: "hold", title: `Could not connect on port ${port}`,
         body: <>{at}, the connection to {host} failed before it was accepted{err}.{notFault}</>,
-        todo: <>Check that the host is up and that its address is reachable from the public internet on port {port}{ip && <>, including from this observer’s address {ip}</>}.</>,
+        todo: <>Check that the host is up and that its address is reachable from the public internet on port {port}.</>,
       };
     }
     if (chk && !chk.tls_ok) {
@@ -157,6 +150,13 @@ function state(v: Validator, c: EndpointCheck | undefined, egress: string[], dec
       body: <>{host} completed a TLS handshake {v.last_seen_at && ago(v.last_seen_at)}, but no consensus-key check was recorded on it.</>,
     };
   }
+  if (v.confirmed_from) {
+    return {
+      tone: "hold", title: "Reachable from a second location only",
+      body: <>The newest check from this observer’s main location did not complete a TLS handshake with {host}, but a check from a second location {v.last_seen_at ? ago(v.last_seen_at) : "within the last 15 minutes"} did, with a certificate endorsed by this validator’s consensus key. It counts as reachable.</>,
+      todo: <>If some publishers cannot reach it either, look for firewall rules, geo-blocking or routing that treat source addresses differently: the port has to be open to any address.</>,
+    };
+  }
   const o = v.obligations;
   return {
     tone: "ok", title: "Reachable, and the certificate is this validator’s",
@@ -164,7 +164,7 @@ function state(v: Validator, c: EndpointCheck | undefined, egress: string[], dec
   };
 }
 
-export default function Diagnosis({ v, check, meta, decided, provisional, failedShown, onShowFailed, failedHref }: {
+export default function Diagnosis({ v, check, decided, provisional, failedShown, onShowFailed, failedHref }: {
   v: Validator;
   check?: EndpointCheck;
   meta?: Meta | null;
@@ -179,8 +179,7 @@ export default function Diagnosis({ v, check, meta, decided, provisional, failed
   /** every failed probe row of the period, in the API */
   failedHref: string;
 }) {
-  const egress = meta?.vantage_info?.egress_addresses ?? [];
-  const s = state(v, check, egress, decided);
+  const s = state(v, check, decided);
   const broken = v.obligations?.broken ?? 0;
   const tone = broken > 0 && s.tone === "ok" ? "fault" : s.tone;
   return (
