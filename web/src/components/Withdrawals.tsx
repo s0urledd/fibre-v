@@ -36,7 +36,7 @@ export function WithdrawalQueue({ w }: { w: PublisherWithdrawals | null }) {
     );
   }
   return (
-    <Panel title="Withdrawal queue" right={<>read at height {w.read_height?.toLocaleString("en-US") ?? "—"}{w.read_at ? `, ${ago(w.read_at)}` : ""} · <Link href="/methodology/#withdrawals">how →</Link></>}>
+    <Panel title="Withdrawal queue">
       {w.check && !w.check.consistent && (
         <p className="notice">At height {w.check.height.toLocaleString("en-US")} the escrow says {tia(w.check.balance_minus_available_utia)} is locked (balance minus available) but the queue holds {tia(w.check.pending_utia)}. The module keeps these equal; the two reads disagree and neither is corrected here.</p>
       )}
@@ -75,10 +75,6 @@ export function WithdrawalQueue({ w }: { w: PublisherWithdrawals | null }) {
           </table>
         </div>
       )}
-      <div className="note">
-        <span className="label">What the queue is</span>
-        <ul className="notes">{w.notes.map((n) => <li key={n}>{n}</li>)}</ul>
-      </div>
     </Panel>
   );
 }

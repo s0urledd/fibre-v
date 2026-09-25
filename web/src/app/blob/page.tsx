@@ -159,7 +159,7 @@ function Page() {
       <section className="band">
         <div>
           <h2>Service window</h2>
-          <p className="sub">Settled {hhmm(b.settlement_time)} → deadline {hhmm(b.must_serve_until)} ({winLen}) · probe points are discrete; nothing between them is claimed</p>
+          <p className="sub">Settled {hhmm(b.settlement_time)} → deadline {hhmm(b.must_serve_until)} ({winLen})</p>
           {order.length === 0 ? <p className="errs">No probe has run for this blob yet.</p> : (
             <>
               <div className="tl" role="img" aria-label={`probe points: ${order.join(", ")}`}>
@@ -205,7 +205,7 @@ function Page() {
 
       <section>
         <div className="vhead">
-          <div><h2>Assigned validators</h2><p className="sub">{int(rows.length)} validators assigned rows of this blob · one mark per probe point, as classified by the observer</p></div>
+          <div><h2>Assigned validators</h2><p className="sub">{int(rows.length)} validators assigned rows of this blob</p></div>
           <div className="tools"><a className="dis" href={`${API_BASE}/v1/blobs/${b.promise_hash}`} title="the raw record, probe rows included">Probe rows →</a></div>
         </div>
         <div className="tablewrap">

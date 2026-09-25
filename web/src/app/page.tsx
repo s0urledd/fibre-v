@@ -114,7 +114,7 @@ function Overview() {
         </div>
         <div>
           <h2>Settled volume · 7 days</h2>
-          <p className="sub">UTC days · last day partial · padded size as charged</p>
+          <p className="sub">UTC days · padded size</p>
           <VolumeChart market={market.data} />
         </div>
       </section>}
@@ -122,8 +122,8 @@ function Overview() {
       <Concentration />
 
       <Validators rows={rows} window={win} notLive={notLive} loading={vals.loading} />
-      <p className="tnote"><a href={`${API_BASE}/v1/feed.atom`} type="application/atom+xml">Network events (Atom)</a> · host registrations, bonded-list changes, first faults and observer incidents, for any feed reader. Each validator has its own feed on its page.</p>
-      {notLive && meta && <p className="tnote">Fibre is not live on {meta.chain_id}: the chain runs app v{meta.app_version}{meta.fibre_app_version ? ` and Fibre needs v${meta.fibre_app_version}` : ""}. “Signalled” is x/signal’s word on whether the validator has signalled for the version that brings Fibre.</p>}
+      <p className="tnote"><a href={`${API_BASE}/v1/feed.atom`} type="application/atom+xml">Network events (Atom)</a></p>
+      {notLive && meta && <p className="tnote">Fibre is not live on {meta.chain_id} (app v{meta.app_version}{meta.fibre_app_version ? `, needs v${meta.fibre_app_version}` : ""}).</p>}
     </>
   );
 }

@@ -57,7 +57,7 @@ function Page() {
       <section className="card">
         <dl className="kv">
           <dt>account</dt><dd className="mono">{p.publisher}</dd>
-          <dt>escrow</dt><dd className="mono">{p.escrow ? (p.escrow.found ? <>{tia(p.escrow.balance_utia)} <span className="muted">· {tia(p.escrow.available_utia)} available · read at height {p.escrow.height.toLocaleString("en-US")}, {ago(p.escrow.updated_at)}</span></> : <span className="muted">no escrow account on chain</span>) : <span className="muted">not polled yet</span>}</dd>
+          <dt>escrow</dt><dd className="mono">{p.escrow ? (p.escrow.found ? <>{tia(p.escrow.balance_utia)} <span className="muted">· {tia(p.escrow.available_utia)} available</span></> : <span className="muted">no escrow account on chain</span>) : <span className="muted">not polled yet</span>}</dd>
           <dt>pending withdrawals</dt><dd className="mono">{pendingLine(p.pending_withdrawals)}</dd>
           <dt>first seen</dt><dd className="mono">{utc(p.first_seen_at)} <span className="muted">({ago(p.first_seen_at)})</span></dd>
           <dt>last seen</dt><dd className="mono">{utc(p.last_seen_at)} <span className="muted">({ago(p.last_seen_at)})</span></dd>
@@ -80,7 +80,7 @@ function Page() {
       </div>
       </Panel>
 
-      <Panel title="By window" right={"every window, this publisher"}>
+      <Panel title="By window">
       <div className="tablewrap">
         <table>
           <thead><tr><th>window</th><th className="right">blobs</th><th className="right">bytes</th><th className="right">fees</th><th className="right">per MiB</th><th className="right">timed out</th></tr></thead>
@@ -147,10 +147,6 @@ function Page() {
         </Panel>
       )}
 
-      <div className="note" style={{ marginTop: "var(--s5)" }}>
-        <span className="label">What these numbers are</span>
-        <ul className="notes">{data.notes.map((n) => <li key={n}>{n}</li>)}</ul>
-      </div>
     </>
   );
 }
