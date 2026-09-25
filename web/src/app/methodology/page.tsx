@@ -1,5 +1,5 @@
 import { Legend } from "@/components/Verdict";
-import { DISPUTE_URL, SOURCE_URL } from "@/lib/site";
+import { DISPUTE_URL } from "@/lib/site";
 import ProtocolParams from "@/components/ProtocolParams";
 
 // The rules version, as verdict.MethodologyVersion in the Go code and
@@ -13,7 +13,7 @@ export default function Methodology() {
   return (
     <div className="prose">
       <h1>Methodology</h1>
-      <p className="muted">What Tensile measures and what each word on the site means. Version <b>{METHODOLOGY_VERSION}</b>, published with every figure as <code>methodology_version</code>. The full rules are in <code>docs/verdicts.md</code>; <a href={`${SOURCE_URL}/commits/main/web/src/app/methodology/page.tsx`} rel="noopener noreferrer" target="_blank">change history</a>.</p>
+      <p className="muted">What Tensile measures and what each word on the site means. Version <b>{METHODOLOGY_VERSION}</b>, published with every figure as <code>methodology_version</code>.</p>
 
       <h2 id="why">What Tensile adds to the chain</h2>
       <p>The chain records who registered a Fibre host (<code>x/valaddr</code>), every <code>MsgPayForFibre</code> with its signatures, and the <code>x/fibre</code> parameters. It records nothing about service afterwards: whether an endpoint answers, whether a validator still serves a shard it signed for, or whether it pruned early. There is no serving proof and no slashing for not serving. Tensile checks that from outside, as an ordinary client, and publishes every row it bases a figure on.</p>
