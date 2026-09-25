@@ -258,3 +258,85 @@ func TestAnchorPayload(t *testing.T) {
 		t.Errorf("unsigned anchor = %+v err %v", unsigned, err)
 	}
 }
+
+// pubkeyJSON is /v1/exports/pubkey's key fields over dir's record.
+func pubkeyJSON(t *testing.T, dir string) []byte {
+	t.Helper()
+	keys, err := ReadSigningKeys(dir)
+	if err != nil || len(keys) == 0 {
+		t.Fatalf("keys = %+v err %v", keys, err)
+	}
+	raw, err := json.Marshal(map[string]any{"current": keys[0], "keys": keys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// verifyWith checks the export name in dir against the keys a reader holds,
+// picking the one its .sig names.
+func verifyWith(t *testing.T, dir, name string, pubs []ed25519.PublicKey) error {
+	t.Helper()
+	tarball, _ := os.ReadFile(filepath.Join(dir, name))
+	sigJSON, err := os.ReadFile(filepath.Join(dir, name+".sig"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := ReadArchive(tarball)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var named Signature
+	_ = json.Unmarshal(sigJSON, &named)
+	_, err = a.CheckSignature(sigJSON, KeyFor(pubs, &named))
+	return err
+}
+
+// After a rotation the new key is current from its first export on, and an
+// export the old key signed still verifies against the key record a reader
+// fetched after the rotation.
+func TestARotationKeepsOldExportsVerifiable(t *testing.T) {
+	k1, k2 := newTestSigner(t), newTestSigner(t)
+	dir, old := buildOne(t, k1)
+	data := filepath.Dir(dir)
+	if err := os.WriteFile(filepath.Join(data, "measurements.jsonl"), []byte(line("started_at", "2026-09-11T10:00:00Z", "c")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b := &Builder{DataDir: data, Dir: dir, Vantage: "v", Build: "x", Hour: 3, Signer: k2}
+	built, err := b.Run(time.Date(2026, 9, 12, 3, 0, 0, 0, time.UTC))
+	if err != nil || len(built) != 1 {
+		t.Fatalf("built %v err %v", built, err)
+	}
+	keys, err := ParsePublicKeys(pubkeyJSON(t, dir))
+	if err != nil || len(keys) != 2 || !keys[0].Equal(k2.PublicKey()) {
+		t.Fatalf("keys after the rotation: %d err %v, want the new one first of two", len(keys), err)
+	}
+	if err := verifyWith(t, dir, built[0], keys); err != nil {
+		t.Errorf("the new export: %v", err)
+	}
+	if err := verifyWith(t, dir, old, keys); err != nil {
+		t.Errorf("the export signed before the rotation: %v", err)
+	}
+}
+
+// A new key re-signing a day the old key had signed (a crash before the
+// state was saved, then the rotation) is current at once: the pubkey route
+// must not name the old key beside a .sig and an index entry naming the new.
+func TestARotationOnARebuiltDayMakesTheNewKeyCurrent(t *testing.T) {
+	k1, k2 := newTestSigner(t), newTestSigner(t)
+	dir, name := buildOne(t, k1)
+	if err := os.Remove(filepath.Join(dir, "state.json")); err != nil {
+		t.Fatal(err)
+	}
+	b := &Builder{DataDir: filepath.Dir(dir), Dir: dir, Vantage: "v", Build: "x", Hour: 3, Signer: k2}
+	if built, err := b.Run(time.Date(2026, 9, 11, 3, 0, 0, 0, time.UTC)); err != nil || len(built) != 1 || built[0] != name {
+		t.Fatalf("rebuilt %v err %v", built, err)
+	}
+	cur, err := ParsePublicKey(pubkeyJSON(t, dir))
+	if err != nil || !cur.Equal(k2.PublicKey()) {
+		t.Fatalf("current key is not the one that signed the newest export (err %v)", err)
+	}
+	if err := verifyWith(t, dir, name, []ed25519.PublicKey{cur}); err != nil {
+		t.Errorf("the newest export against the current key: %v", err)
+	}
+}

@@ -24,9 +24,13 @@ import (
 
 // exportVerifyCommand is the whole check with nothing but OpenSSL 3 and
 // standard tools, quoted in both the pubkey answer and the exports list.
+// The key is picked from the list by the fingerprint the .sig names, not
+// taken from "current": after a rotation an older export was signed by a
+// key that is no longer current, and stays verifiable.
 const exportVerifyCommand = `N=tensile-<vantage>-<day>.tar.gz; ` +
 	`curl -sO $API/v1/exports/$N -O $API/v1/exports/$N.sig; ` +
-	`curl -s $API/v1/exports/pubkey | jq -r .current.public_key_pem > tensile-exports.pem; ` +
+	`curl -s $API/v1/exports/pubkey > tensile-exports.json; ` +
+	`jq -r --arg fp "$(jq -r .key_fingerprint $N.sig)" '.keys[] | select(.key_fingerprint == $fp) | .public_key_pem' tensile-exports.json > tensile-exports.pem; ` +
 	`printf '%s' "` + export.SignatureDomain + `$(tar -xzOf $N manifest.json | sha256sum | cut -c1-64)" > msg; ` +
 	`jq -r .signature $N.sig | base64 -d > sig.bin; ` +
 	`openssl pkeyutl -verify -pubin -inkey tensile-exports.pem -rawin -in msg -sigfile sig.bin`

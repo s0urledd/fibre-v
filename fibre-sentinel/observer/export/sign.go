@@ -193,6 +193,60 @@ func PublicKeyPEM(pub ed25519.PublicKey) (string, error) {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
 }
 
+// ParsePublicKeys is ParsePublicKey, except that the JSON /v1/exports/pubkey
+// answers with gives every key it lists, the current one first: after a
+// rotation the exports signed before it are checked against the key that
+// signed them, which is no longer current.
+func ParsePublicKeys(raw []byte) ([]ed25519.PublicKey, error) {
+	s := strings.TrimSpace(string(raw))
+	if !strings.HasPrefix(s, "{") {
+		pub, err := ParsePublicKey(raw)
+		if err != nil {
+			return nil, err
+		}
+		return []ed25519.PublicKey{pub}, nil
+	}
+	var doc struct {
+		Keys []SigningKey `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(s), &doc); err != nil {
+		return nil, err
+	}
+	cur, err := ParsePublicKey(raw)
+	if err != nil {
+		return nil, err
+	}
+	out := []ed25519.PublicKey{cur}
+	for _, k := range doc.Keys {
+		pub, err := ParsePublicKey([]byte(k.PublicKey))
+		if err != nil {
+			return nil, fmt.Errorf("key %s: %w", k.KeyFingerprint, err)
+		}
+		if !pub.Equal(cur) {
+			out = append(out, pub)
+		}
+	}
+	return out, nil
+}
+
+// KeyFor picks the key among pubs whose fingerprint the signature names, or
+// the first when none does (VerifySignature then reports the mismatch). The
+// signature only chooses among keys the caller already trusts; it never
+// supplies one.
+func KeyFor(pubs []ed25519.PublicKey, sig *Signature) ed25519.PublicKey {
+	if len(pubs) == 0 {
+		return nil
+	}
+	if sig != nil {
+		for _, p := range pubs {
+			if Fingerprint(p) == sig.KeyFingerprint {
+				return p
+			}
+		}
+	}
+	return pubs[0]
+}
+
 // ParsePublicKey accepts a PKIX PEM public key, a raw 32-byte key in
 // standard base64 or hex, or the JSON /v1/exports/pubkey answers with (the
 // current key is used).
@@ -323,7 +377,16 @@ func recordSigningKey(dir string, pub ed25519.PublicKey, day string) error {
 		keys = append(keys, SigningKey{Algorithm: "ed25519", KeyFingerprint: fp, PublicKey: base64.StdEncoding.EncodeToString(pub),
 			PublicKeyPEM: pemStr, FirstDay: day, LastDay: day})
 	}
-	sort.SliceStable(keys, func(i, j int) bool { return keys[i].LastDay > keys[j].LastDay })
+	// Newest last day first, and on a tie the key signing now: a rotation
+	// that re-signs a day the old key had signed (a rebuild after a crash
+	// before the state was saved) must make the new key current, since the
+	// .sig and the index about to be written name it.
+	sort.SliceStable(keys, func(i, j int) bool {
+		if keys[i].LastDay != keys[j].LastDay {
+			return keys[i].LastDay > keys[j].LastDay
+		}
+		return keys[i].KeyFingerprint == fp && keys[j].KeyFingerprint != fp
+	})
 	raw, err := json.MarshalIndent(keys, "", "  ")
 	if err != nil {
 		return err
