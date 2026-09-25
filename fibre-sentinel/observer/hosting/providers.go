@@ -10,26 +10,30 @@ import "sort"
 // one entity (the concentration summary treats it that way), and an address
 // with no usable lookup is Unknown.
 const (
-	ProviderHetzner      = "Hetzner"
-	ProviderOVH          = "OVH"
-	ProviderAWS          = "AWS"
-	ProviderGCP          = "Google Cloud"
-	ProviderAzure        = "Azure"
-	ProviderDigitalOcean = "DigitalOcean"
-	ProviderContabo      = "Contabo"
-	ProviderVultr        = "Vultr"
-	ProviderAkamaiLinode = "Akamai/Linode"
-	ProviderCherry       = "Cherry Servers"
-	ProviderMevspace     = "MEVSPACE"
-	ProviderScaleway     = "Scaleway"
-	ProviderLeaseweb     = "Leaseweb"
-	ProviderVelia        = "velia.net"
-	ProviderGTHost       = "GTHost"
-	ProviderLatitude     = "Latitude.sh"
-	ProviderTeraswitch   = "TeraSwitch"
-	ProviderAruba        = "Aruba"
-	ProviderOther        = "Other"
-	ProviderUnknown      = "Unknown"
+	ProviderHetzner       = "Hetzner"
+	ProviderOVH           = "OVH"
+	ProviderAWS           = "AWS"
+	ProviderGCP           = "Google Cloud"
+	ProviderAzure         = "Azure"
+	ProviderDigitalOcean  = "DigitalOcean"
+	ProviderContabo       = "Contabo"
+	ProviderVultr         = "Vultr"
+	ProviderAkamaiLinode  = "Akamai/Linode"
+	ProviderCherry        = "Cherry Servers"
+	ProviderMevspace      = "MEVSPACE"
+	ProviderScaleway      = "Scaleway"
+	ProviderLeaseweb      = "Leaseweb"
+	ProviderVelia         = "velia.net"
+	ProviderGTHost        = "GTHost"
+	ProviderLatitude      = "Latitude.sh"
+	ProviderTeraswitch    = "TeraSwitch"
+	ProviderAruba         = "Aruba"
+	ProviderInterServer   = "InterServer"
+	ProviderWebNX         = "WebNX"
+	ProviderServeTheWorld = "ServeTheWorld"
+	ProviderIPProjects    = "IP-Projects"
+	ProviderOther         = "Other"
+	ProviderUnknown       = "Unknown"
 )
 
 // providerASNs maps origin AS numbers to a bucket.
@@ -129,6 +133,14 @@ var providerASNs = map[uint32]string{
 	396356: ProviderLatitude,   // LATITUDE-SH
 	20326:  ProviderTeraswitch, // TERASWITCH
 	31034:  ProviderAruba,      // ARUBA-ASN
+
+	// Also hosting companies behind Mocha's Fibre hosts, 2026-09-25. AS19318's
+	// iptoasn description is only "IS-AS-1": it is InterServer, Inc.
+	// (bgp.he.net/AS19318), which the page otherwise shortened to "IS".
+	19318: ProviderInterServer,   // IS-AS-1
+	18450: ProviderWebNX,         // WEBNX
+	34989: ProviderServeTheWorld, // SERVETHEWORLD-AS
+	48314: ProviderIPProjects,    // IP-PROJECTS
 }
 
 // ProviderFor returns the bucket for an origin AS number. 0 (no AS, or not
@@ -151,6 +163,7 @@ func Providers() []string {
 		ProviderDigitalOcean, ProviderContabo, ProviderVultr, ProviderAkamaiLinode,
 		ProviderCherry, ProviderMevspace, ProviderScaleway, ProviderLeaseweb,
 		ProviderVelia, ProviderGTHost, ProviderLatitude, ProviderTeraswitch, ProviderAruba,
+		ProviderInterServer, ProviderWebNX, ProviderServeTheWorld, ProviderIPProjects,
 		ProviderOther, ProviderUnknown,
 	}
 }
