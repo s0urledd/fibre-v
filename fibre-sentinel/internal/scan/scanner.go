@@ -1208,9 +1208,10 @@ func (s *Scanner) buildPublication(ctx context.Context, msg *fibretypes.MsgPayFo
 	vals := set.vals
 
 	// Which validators does this promise PROVE stored their shard? The chain
-	// does not answer that: its signature check runs in the ante handler and
-	// is skipped in ExecModeFinalize, so the observer verifies the signatures
-	// itself against the consensus keys at the promise height.
+	// does not answer that: its signature check stops once two thirds of the
+	// stake has verified, leaving later entries unchecked, so the observer
+	// verifies every signature itself against the consensus keys at the
+	// promise height.
 	signBytes, sberr := internal.SignBytes()
 	if sberr != nil {
 		return Publication{}, fmt.Errorf("promise sign bytes: %w", sberr)
