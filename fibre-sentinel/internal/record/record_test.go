@@ -174,6 +174,12 @@ func TestRotationWhileWritersAppend(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "measurements.jsonl")
 	const writers, perWriter = 4, 3000
 	var clock atomic.Int64 // seconds past t0: lines are dated as they are written
+	// Rotations so far. Every writer waits for one more at each checkpoint,
+	// so a fast machine cannot finish the writes before the archiver has
+	// rotated a few times under them: the test used to fail on a quick CI
+	// runner with "only 2 rotations", which proved nothing either way.
+	var rot atomic.Int64
+	const checkpoint = 750
 	var wg sync.WaitGroup
 	errs := make(chan error, writers+1)
 	for w := 0; w < writers; w++ {
@@ -188,6 +194,11 @@ func TestRotationWhileWritersAppend(t *testing.T) {
 			}
 			defer a.Close()
 			for n := 0; n < perWriter; n++ {
+				if n > 0 && n%checkpoint == 0 {
+					for until := time.Now().Add(10 * time.Second); rot.Load() < int64(n/checkpoint) && time.Now().Before(until); {
+						time.Sleep(time.Millisecond)
+					}
+				}
 				at := t0.Add(time.Duration(clock.Add(1)) * time.Second)
 				if _, err := a.Write([]byte(lineAt(at, fmt.Sprint(w), n))); err != nil {
 					errs <- err
@@ -203,7 +214,6 @@ func TestRotationWhileWritersAppend(t *testing.T) {
 		}(w)
 	}
 	done := make(chan struct{})
-	rotations := 0
 	go func() {
 		defer close(done)
 		for {
@@ -215,7 +225,7 @@ func TestRotationWhileWritersAppend(t *testing.T) {
 				return
 			}
 			if res.Skipped == "" {
-				rotations++
+				rot.Add(1)
 			}
 			if clock.Load() >= writers*perWriter {
 				return
@@ -228,6 +238,7 @@ func TestRotationWhileWritersAppend(t *testing.T) {
 	for err := range errs {
 		t.Fatal(err)
 	}
+	rotations := int(rot.Load())
 	if rotations < 3 {
 		t.Fatalf("only %d rotations happened; the test proves nothing", rotations)
 	}
