@@ -1,7 +1,7 @@
 "use client";
 import { Suspense, useState } from "react";
 import Link from "next/link";
-import { API_BASE, useApi, type Network, type Validator, type Meta, type Market, int, pctOf, bytes, undecided, MIN_RATED } from "@/lib/api";
+import { API_BASE, useApi, type Network, type Validator, type Meta, type Market, int, pctOf, bytes, undecided, MIN_RATED, rateTone } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
@@ -89,7 +89,7 @@ function Overview() {
       <Metrics>
         <Metric label="Service rate"
           value={!N || notLive || !o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}
-          tone={!N || notLive || !o || decided === 0 ? "absent" : undefined}
+          tone={!N || notLive || !o || decided === 0 ? "absent" : rateTone(o.served, decided)}
           help={!N || notLive ? " " : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed`} />
         <Metric label="Broken obligations"
           value={!N || notLive ? "—" : int(o?.broken ?? 0)}

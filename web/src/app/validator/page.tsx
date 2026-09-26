@@ -2,7 +2,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type SampledOut, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
+import { useApi, type Validator, type Probe, type SampledOut, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, rateTone, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
@@ -234,7 +234,7 @@ function Page() {
       <Metrics>
         <Metric label="Service rate"
           value={notLive || !o || o.total === 0 || decided === 0 ? "—" : pctOf(o.served, decided)}
-          tone={notLive || !o || decided === 0 ? "absent" : undefined}
+          tone={notLive || !o || decided === 0 ? "absent" : rateTone(o.served, decided)}
           help={notLive ? " " : !o || o.total === 0 ? "no obligation in this period" : decided === 0 ? "awaiting results" : `${int(o.served)} / ${int(decided)} assessed${refText ? ` · ${refText}` : ""}`}
           title={notLive ? undefined : refTitle} />
         <Metric label="Broken obligations"
@@ -265,7 +265,7 @@ function Page() {
                 return (
                   <tr key={name} className={name === win ? "on" : undefined}>
                     <td><button type="button" className="rowlink" aria-pressed={name === win} onClick={() => setWin(name as typeof win)} title={`show the ${windowLabel(name)} period`}>{windowLabel(name)}</button></td>
-                    <td>{notLive || wd === 0 ? "—" : <>{pctOf(wo.served, wd)}<span className="den"> · {int(wo.served)}/{int(wd)}</span></>}</td>
+                    <td>{notLive || wd === 0 ? "—" : <><span className={rateTone(wo.served, wd)}>{pctOf(wo.served, wd)}</span><span className="den"> · {int(wo.served)}/{int(wd)}</span></>}</td>
                     <td>{notLive ? "—" : wo.broken > 0 ? <><span className="word fault">{int(wo.broken)}</span>{provisionalNow(w.provisional_faults) > 0 && <span className="den" title="Counted, and still settling: see the broken obligations figure above."> · {int(provisionalNow(w.provisional_faults))} provisional</span>}</> : "0"}</td>
                     <td>{notLive ? "—" : int(wo.pending)}</td>
                   </tr>

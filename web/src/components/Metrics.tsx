@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { RateTone } from "@/lib/api";
 
 /**
  * One headline figure: the name, the value with its denominator beside it,
@@ -11,7 +12,7 @@ export function Metric({ label, value, den, help, tone, title }: {
   /** printed after the value in the quieter colour: "/ 60" */
   den?: ReactNode;
   help?: ReactNode;
-  tone?: "fault" | "absent" | "words";
+  tone?: "fault" | "absent" | "words" | RateTone;
   title?: string;
 }) {
   return (

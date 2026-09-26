@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATED, provisionalNow } from "@/lib/api";
+import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATED, provisionalNow, rateTone } from "@/lib/api";
 import Avatar from "./Avatar";
 import { HostingCell } from "./Hosting";
 import { SELF_VALIDATOR } from "@/lib/site";
@@ -125,7 +125,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     if (!o || o.total === 0) return <span className="muted" title="No observations: the settled promises prove no serving obligation for this validator in this period.">—</span>;
     const d = o.served + o.broken;
     if (d === 0) return <span className="muted" title={`Awaiting results: ${int(o.total)} obligation${o.total === 1 ? "" : "s"} in this period, none assessed yet (pending or inconclusive).`}>—</span>;
-    return <span title={d < MIN_RATED ? `Fewer than ${MIN_RATED} assessed obligations: shown, not ranked.` : undefined}><span className="rate">{pctOf(o.served, d)}</span><span className="den"> · {int(o.served)}/{int(d)}</span></span>;
+    return <span title={d < MIN_RATED ? `Fewer than ${MIN_RATED} assessed obligations: shown, not ranked.` : undefined}><span className={"rate " + (rateTone(o.served, d) ?? "")}>{pctOf(o.served, d)}</span><span className="den"> · {int(o.served)}/{int(d)}</span></span>;
   };
   // The signing cell, in the service rate's form: share and counts, a dash
   // with its reason when nothing was assigned. Never a fault colour: a
