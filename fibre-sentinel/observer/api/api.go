@@ -2512,6 +2512,10 @@ type validatorRow struct {
 	// settled promises that assigned it rows in the window. Descriptive, never
 	// a fault: see signing.go.
 	Signing signingStats `json:"signing"`
+	// Load is the row data the protocol assigned this validator in the
+	// window, what it holds now, and the same share sized at mainnet scale.
+	// All from the chain: see load.go.
+	Load loadStats `json:"load"`
 	// Hosting is the network (origin AS, provider bucket) and country the
 	// open endpoint's host resolved into, as resolved from this vantage;
 	// absent when the lookup is off or has not reached this host. See
@@ -3137,6 +3141,9 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		}
 	}
 	if err := s.fillSigning(ctx, win, only, byAddr); err != nil {
+		return nil, err
+	}
+	if err := s.fillLoad(ctx, win, only, byAddr); err != nil {
 		return nil, err
 	}
 	out := make([]validatorRow, 0, len(byAddr))
