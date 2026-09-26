@@ -67,7 +67,27 @@ type signingStats struct {
 	// no Fibre host registered: it could not sign them, so they are in
 	// neither side of Rate.
 	NoHost int64 `json:"no_host"`
+	// LastEndorsedAt is the settlement time of the newest promise carrying
+	// this validator's verified signature, whatever the window; null when
+	// none does.
+	LastEndorsedAt *string `json:"last_endorsed_at"`
+	// Recent counts the newest recentEndorsements promises assigned to it
+	// while it had a host and whose signatures were verified, and how many
+	// of them it endorsed, whatever the window. A run of zeros is an
+	// endorsement that stopped, which a rate over a long period hides.
+	Recent recentEndorsement `json:"recent"`
 }
+
+// recentEndorsement is the newest assigned promises, and how many of them
+// carry the validator's endorsement.
+type recentEndorsement struct {
+	Assigned int64 `json:"assigned"`
+	Endorsed int64 `json:"endorsed"`
+}
+
+// recentEndorsements is how many of a validator's newest assigned promises
+// Recent looks at.
+const recentEndorsements = 20
 
 // signingPopulation is the promise population both figures are drawn from:
 // settled in the window, the transaction succeeded, and the assignment was
@@ -107,7 +127,49 @@ func (s *Server) signingByValidator(ctx context.Context, win Window, only string
 		st.Rate = rate(st.Signed, st.Assigned)
 		out[addr] = st
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, s.recentSigning(ctx, only, out)
+}
+
+// recentSigning adds LastEndorsedAt and Recent to every validator in out
+// (and to any validator with an endorsement that out lacks): the newest
+// record, not the window.
+func (s *Server) recentSigning(ctx context.Context, only string, out map[string]signingStats) error {
+	filter, args := "", []any{recentEndorsements}
+	if only != "" {
+		filter = ` AND a.validator_address = ?`
+		args = []any{only, recentEndorsements}
+	}
+	rows, err := s.st.DB().QueryContext(ctx, `SELECT validator_address, COUNT(*), COALESCE(SUM(attested), 0), MAX(last_endorsed)
+		FROM (SELECT a.validator_address AS validator_address, a.attested AS attested,
+				MAX(CASE WHEN a.attested = 1 THEN p.settlement_time END) OVER (PARTITION BY a.validator_address) AS last_endorsed,
+				ROW_NUMBER() OVER (PARTITION BY a.validator_address ORDER BY p.settlement_height DESC, p.settlement_tx_index DESC) AS rn
+			FROM assignments a JOIN publications p ON p.promise_hash = a.promise_hash
+			WHERE p.settlement_tx_code = 0 AND p.assignment_error = '' AND a.row_count > 0
+			  AND a.host_at_settlement IS NOT '' AND a.attested IS NOT NULL`+filter+`)
+		WHERE rn <= ? GROUP BY validator_address`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var addr string
+		var r recentEndorsement
+		var last sql.NullString
+		if err := rows.Scan(&addr, &r.Assigned, &r.Endorsed, &last); err != nil {
+			return err
+		}
+		st := out[addr]
+		st.Recent = r
+		if last.Valid {
+			v := last.String
+			st.LastEndorsedAt = &v
+		}
+		out[addr] = st
+	}
+	return rows.Err()
 }
 
 // fillSigning sets Signing on every row validatorRows built. A validator with
