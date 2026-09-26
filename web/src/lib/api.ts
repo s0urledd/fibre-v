@@ -608,6 +608,8 @@ export type Market = {
   record_through?: RecordThrough;
   source: string;
   settlements: number;
+  /** distinct blobs (BlobID: blob_version || commitment) those settlements paid for, same window */
+  blobs: number;
   fees_settled_utia: number;
   bytes: number;
   publishers_active: number;

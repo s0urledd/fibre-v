@@ -106,6 +106,7 @@ func TestMarketSummary(t *testing.T) {
 	ts, _ := marketServer(t, map[string]api.PublisherLabel{samplePublisher: {Address: samplePublisher, Label: "Sentinel test publisher", Source: "this observer"}})
 	var m struct {
 		Settlements     int64                       `json:"settlements"`
+		Blobs           int64                       `json:"blobs"`
 		Fees            int64                       `json:"fees_settled_utia"`
 		Bytes           int64                       `json:"bytes"`
 		Publishers      int64                       `json:"publishers_active"`
@@ -142,7 +143,8 @@ func TestMarketSummary(t *testing.T) {
 	if code := get(t, ts, "/v1/market?window=24h", &m); code != 200 {
 		t.Fatalf("market: %d", code)
 	}
-	if m.Settlements != 2 || m.Fees != 695_000+830_000 || m.Bytes != 262144+1<<20 || m.Publishers != 2 {
+	// "cafe" has no recorded publication: a blob of its own.
+	if m.Settlements != 2 || m.Blobs != 2 || m.Fees != 695_000+830_000 || m.Bytes != 262144+1<<20 || m.Publishers != 2 {
 		t.Fatalf("settlements: %+v", m)
 	}
 	if m.PerMiB == nil || *m.PerMiB < 1_000_000 || *m.PerMiB > 1_300_000 {
@@ -471,5 +473,59 @@ func TestMarketEscrowTotalIsTheModuleBalance(t *testing.T) {
 	}
 	if after.Held != before.Held {
 		t.Errorf("the known-publisher sum moved (%d -> %d); the total must sit beside it", before.Held, after.Held)
+	}
+}
+
+// Blobs counts what the settlements paid for, by BlobID (blob_version ||
+// commitment): a blob uploaded and paid for twice is one blob and two
+// settlements, and the same commitment under another version is another blob.
+func TestMarketBlobsByCommitment(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "observer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	now := time.Now().UTC().Truncate(time.Second)
+	at := now.Add(-time.Hour)
+	var ps []scan.Payment
+	for i, c := range []struct {
+		hash, commitment string
+		version          uint32
+	}{{"p1", "same", 0}, {"p2", "same", 0}, {"p3", "other", 0}, {"p4", "same", 1}} {
+		pub := scan.Publication{
+			SchemaVersion: scan.AttestationSchemaVersion, PromiseHash: c.hash, SettlementHeight: int64(100 + i), SettlementTime: at,
+			SettlementTxHash: "tx" + c.hash, MustServeUntil: at.Add(time.Hour), RecordedAt: at, Signer: samplePublisher,
+			Promise: scan.PromiseFields{ChainID: "t", Height: int64(99 + i), Commitment: c.commitment, BlobVersion: c.version, CreationTimestamp: at, BlobSize: 262144},
+			Assignment: scan.AssignmentTable{
+				ProtocolParams:     scan.ProtocolParamsSnapshot{OriginalRows: 4096, TotalRows: 16384},
+				ValidatorSetHeight: int64(99 + i), TotalVotingPower: 10, Sigma: 148, Distinct: 148, ValidatorsWithRows: 1,
+				Validators: []scan.ValidatorAssignment{{Address: sampleValidator, VotingPower: 10, RowCount: 148}},
+			},
+		}
+		raw, err := json.Marshal(pub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.UpsertPublication(pub, raw); err != nil {
+			t.Fatal(err)
+		}
+		ps = append(ps, scan.Payment{SchemaVersion: 1, DedupeKey: "tx" + c.hash + ":0", Kind: "settlement", Height: int64(100 + i), Time: at,
+			TxHash: "tx" + c.hash, Publisher: samplePublisher, Processor: samplePublisher, PromiseHash: c.hash, BlobSize: 262144, Denom: "utia", AmountUtia: 695_000})
+	}
+	if r, err := ingest.Payments(st, writePayments(t, dir, ps), now); err != nil || r.Inserted != int64(len(ps)) {
+		t.Fatalf("ingest payments: inserted=%d err=%v", r.Inserted, err)
+	}
+	ts := httptest.NewServer(api.NewWithVantage(st, api.VantageInfo{Name: "test"}, nil))
+	t.Cleanup(ts.Close)
+	var m struct {
+		Settlements int64 `json:"settlements"`
+		Blobs       int64 `json:"blobs"`
+	}
+	if code := get(t, ts, "/v1/market?window=24h", &m); code != 200 {
+		t.Fatalf("market: %d", code)
+	}
+	if m.Settlements != 4 || m.Blobs != 3 {
+		t.Fatalf("settlements %d blobs %d, want 4 and 3", m.Settlements, m.Blobs)
 	}
 }

@@ -81,11 +81,11 @@ function Overview() {
           tone={!vals.data || reg.count === 0 ? "absent" : undefined}
           title="Bonded validators with a Fibre provider registered in x/valaddr, and the share of bonded voting power they hold. Now, whatever the period."
           help={!vals.data ? " " : reg.count === 0 ? (notLive ? " " : "none yet") : `${reg.share} of stake`} />
-        <Metric label="Settlements"
-          value={none ? "—" : int(M.settlements)}
+        <Metric label="Blobs"
+          value={none ? "—" : int(M.blobs)}
           tone={none || M.settlements === 0 ? "absent" : undefined}
-          title="MsgPayForFibre messages in successful transactions: one per payment promise, each settled once. The same blob can be paid for by more than one promise."
-          help={none ? " " : last ? `last ${ago(last.settlement_time)}` : "none yet"} />
+          title="Distinct blobs, by BlobID (blob_version and commitment), whose MsgPayForFibre settled in the period. A blob uploaded and paid for twice is one blob and two settlements."
+          help={none ? " " : M.settlements === 0 ? "none in this period" : `${int(M.settlements)} settlement${M.settlements === 1 ? "" : "s"}`} />
         <Metric label="Upload size"
           value={none ? "—" : bytes(M.bytes)}
           tone={none || M.settlements === 0 ? "absent" : undefined}
