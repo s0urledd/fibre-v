@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { type Validator, int, pctOf, ago, utcWord, shortMid, MIN_RATED, provisionalNow, rateTone } from "@/lib/api";
 import Avatar from "./Avatar";
+import Info from "./Info";
 import { HostingCell } from "./Hosting";
 import { SELF_VALIDATOR } from "@/lib/site";
 import { isOperatorAccount } from "@/lib/addr";
@@ -107,11 +108,17 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   }, [rows, filter, needle, sort]);
 
   const clickSort = (k: SortKey, dflt: 1 | -1) => setSort((s) => (s.key === k ? { key: k, dir: (s.dir * -1) as 1 | -1 } : { key: k, dir: dflt }));
-  const Th = ({ k, dflt, label, title, col }: { k: SortKey; dflt: 1 | -1; label: string; title: string; col: string }) => (
+  // A heading with a definition carries it behind an (i), opened by a click:
+  // nothing appears on hover. The (i) sits outside the label's box so the
+  // label stays centred over its column.
+  const Th = ({ k, dflt, label, title, info, col }: { k: SortKey; dflt: 1 | -1; label: string; title?: string; info?: string; col: string }) => (
     <th className={"num " + col} title={title}>
-      <button type="button" className="sort" aria-pressed={sort.key === k} onClick={() => clickSort(k, dflt)}>
-        {label}{sort.key === k && <span className="arrow" aria-hidden="true">{sort.dir === -1 ? "↓" : "↑"}</span>}
-      </button>
+      <span className="thi">
+        <button type="button" className="sort" aria-pressed={sort.key === k} onClick={() => clickSort(k, dflt)}>
+          {label}{sort.key === k && <span className="arrow" aria-hidden="true">{sort.dir === -1 ? "↓" : "↑"}</span>}
+        </button>
+        {info && <span className="thi-i"><Info label={label}><p>{info}</p></Info></span>}
+      </span>
     </th>
   );
   const href = (v: Validator, hash = "") => `/validator/?addr=${v.address}${win !== "24h" ? `&window=${win}` : ""}${hash}`;
@@ -175,10 +182,10 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               <th className="c-ep" title="The newest handshake with the registered endpoint; the chain's own words (jailed, not bonded) come first.">Endpoint now</th>
               {showHosting && <th className="c-host" title="Network provider and country of the endpoint. Hover a cell for the network (AS) and address.">Hosting</th>}
               <Th col="c-power" k="power" dflt={-1} label="Voting power" title="From the staking module. The default order, and never a performance rank." />
-              {showScores && <Th col="c-rate" k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />}
-              {showScores && <Th col="c-broken" k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />}
-              {showScores && <Th col="c-pend" k="pending" dflt={-1} label="Pending" title="Obligations whose retention window has not ended: no verdict yet." />}
-              {showScores && <Th col="c-end" k="signed" dflt={-1} label="Endorsed ⅔" title="Promises carrying this validator’s endorsement. Publishers stop at ⅔ of stake, so a low rate is normal, not a fault." />}
+              {showScores && <Th col="c-rate" k="kept" dflt={1} label="Service rate" info="Share of assessed obligations kept: the endorsed shard was served and verified near the end of its retention window." />}
+              {showScores && <Th col="c-broken" k="broken" dflt={-1} label="Broken" info="Endorsed shards that were missing or failed verification before their retention window ended." />}
+              {showScores && <Th col="c-pend" k="pending" dflt={-1} label="Pending" info="Obligations whose retention window has not ended yet." />}
+              {showScores && <Th col="c-end" k="signed" dflt={-1} label="Endorsed ⅔" info="Share of assigned promises that carry this validator’s endorsement. A blob settles once ⅔ of stake has endorsed it." />}
             </tr>
           </thead>
           <tbody>

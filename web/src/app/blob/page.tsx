@@ -155,7 +155,7 @@ function Page() {
           help={rc && (judged || rc.status === "pending") ? `at ${rc.point} · ${hhmm(rc.point_at)}${rc.status === "pending" ? ` · ${int(rc.probed_validators)} with a result` : ""}` : "no in-window point completed"} />
         <Metric label="Endorsed" value={signedKnown ? int(signedN) : "—"} den={signedKnown ? int(assignments.length) : undefined}
           tone={signedKnown ? undefined : "absent"}
-          help={signedKnown ? "not endorsed is not a fault" : "signatures not recorded"}
+          help={signedKnown ? "validators endorsed" : "signatures not recorded"}
           title="Assigned validators whose endorsement (signature) on the settled promise verified against their consensus key. The publisher stops collecting at two thirds of voting power, so about a third of the set is not endorsed on any blob." />
         <Metric label="Service window" value={winLen} help={`${hhmm(b.settlement_time).replace(" UTC", "")} → ${hhmm(b.must_serve_until)}${over ? " · over" : ""}`}
           title={`creation + max(payment_promise_timeout ${data.params.payment_promise_timeout_s} s, shard_retention ${data.params.shard_retention_s} s)`} />

@@ -504,7 +504,8 @@ dl.kv dd { margin: 0; word-break: break-all; }
 
 /* the definition mark and its panel */
 .info { appearance: none; border: 1px solid var(--line); background: transparent; color: var(--text-3); font: 500 10px/1 var(--sans); width: 15px; height: 15px; border-radius: 50%; padding: 0; margin-left: 6px; cursor: pointer; vertical-align: 1px; text-transform: none; letter-spacing: 0; }
-.info:hover, .info:focus-visible { color: var(--text); border-color: var(--text-3); }
+.info { color: var(--accent-ink); border-color: var(--accent); }
+.info:hover, .info:focus-visible { color: var(--paper); background: var(--accent); border-color: var(--accent); }
 .info[aria-expanded="true"] { color: var(--paper); background: var(--accent); border-color: var(--accent); }
 .info-pop { position: fixed; z-index: 50; width: 320px; max-width: calc(100vw - 24px); background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; box-shadow: 0 8px 24px rgb(0 0 0 / .14); font-size: var(--t-cell); line-height: 1.5; color: var(--text-2); }
 .info-pop .label { display: block; margin-bottom: 6px; color: var(--text); }
@@ -838,6 +839,8 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 .tablewrap.framed th:last-child, .tablewrap.framed td:last-child { padding-right: 14px; }
 .tablewrap.framed td { padding-top: 10px; padding-bottom: 10px; }
 .tablewrap.framed tbody tr:last-child td { border-bottom: 0; }
+.thi { position: relative; display: inline-block; }
+.thi-i { position: absolute; left: 100%; top: 50%; transform: translateY(-50%); line-height: 1; }
 /* in a frame every cell draws its own rule, so the pinned column needs no second one */
 .tablewrap.framed .vt tbody td.col-pin { box-shadow: none; }
 /* the Blobs page tables: the first column reads left, every other column is
