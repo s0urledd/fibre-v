@@ -199,10 +199,10 @@ button.dis:hover, a.dis:hover { text-decoration: underline; }
 /* --------------------------------------------------------------- metrics --- */
 /* headline figures and the cell grids below them: each figure in its own light frame, like the facts grid */
 .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 16px 0 0; }
-/* the validator page's Load: four figures under their own heading, flush to it */
+/* the validator page's Load: three figures under their own heading, flush to it */
 #load { margin-top: 18px; }
 #load .vhead { padding: 0; }
-#load .metrics { grid-template-columns: repeat(4, 1fr); margin-top: 10px; }
+#load .metrics { grid-template-columns: repeat(3, 1fr); margin-top: 10px; }
 .metric { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
 .metric .label { font-size: var(--t-small); color: var(--text-2); font-weight: 500; }
 .metric .value { font-size: var(--t-kpi); font-weight: 500; letter-spacing: -.02em; line-height: 1.1; margin: 6px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

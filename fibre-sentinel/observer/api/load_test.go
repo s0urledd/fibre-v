@@ -10,15 +10,13 @@ type loadJSON struct {
 	Bytes         int64 `json:"bytes"`
 	StoredBytes   int64 `json:"stored_bytes"`
 	RowsPerBlob   int64 `json:"rows_per_blob"`
-	EstIngressBps int64 `json:"est_ingress_bps"`
-	EstDiskBytes  int64 `json:"est_disk_bytes"`
+	EstIngressBps int64 `json:"est_ingress_bps"` // no longer published
 }
 
 // Load counts the rows every settled promise assigned a validator and their
 // row data (blob_size / original_rows each), leaves out a failed transaction
-// and an assignment made while the validator had no host, and sizes the
-// newest assignment at mainnet scale: 148 rows of a 128 MiB blob at 2.2 GB/s,
-// kept for four hours.
+// and an assignment made while the validator had no host, and reports the
+// rows of the newest assignment. Mocha's own figures only: no mainnet sizing.
 func TestLoadPerValidator(t *testing.T) {
 	ts, _, _ := signingFixture(t)
 	// p1..p4 settled (p4 before signatures were verified still carries an
@@ -42,16 +40,9 @@ func TestLoadPerValidator(t *testing.T) {
 	if l.RowsPerBlob != 148 {
 		t.Errorf("rows per blob = %d, want 148", l.RowsPerBlob)
 	}
-	// 148 rows x 32 KiB = 4,849,664 bytes per 128 MiB blob, at 2.2e9 B/s of blobs
-	perBlob := 148.0 * 32768
-	bps := perBlob * 2.2e9 / float64(128<<20)
-	if want := int64(bps * 8); l.EstIngressBps != want {
-		t.Errorf("ingress estimate = %d bit/s, want %d", l.EstIngressBps, want)
+	if l.EstIngressBps != 0 {
+		t.Errorf("a mainnet estimate is published: %d", l.EstIngressBps)
 	}
-	if want := int64(bps * 4 * 3600); l.EstDiskBytes != want {
-		t.Errorf("disk estimate = %d bytes, want %d", l.EstDiskBytes, want)
-	}
-
 }
 
 // An assignment made while the validator had no host is not load it could

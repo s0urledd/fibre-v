@@ -17,11 +17,6 @@ import (
 //
 // As with endorsement, an assignment that settled while the validator had
 // no Fibre host is left out: it could not have received those rows.
-//
-// The estimate is the same arithmetic as the Fibre team's mainnet sizing
-// tables, applied to this validator's current share: its rows on a 128 MiB
-// blob, at a network publishing loadEstimateNetworkBps of blob data, kept for
-// the retention window. It is a sizing figure, not a measurement.
 type loadStats struct {
 	// Promises and Rows are the settled promises in the window that assigned
 	// this validator rows while it had a host, and the rows they assigned.
@@ -35,21 +30,7 @@ type loadStats struct {
 	// RowsPerBlob is its assignment on the newest settled promise; rows follow
 	// stake, not blob size, so it is the same for every blob of that set.
 	RowsPerBlob int64 `json:"rows_per_blob"`
-	// EstIngressBps and EstDiskBytes size the same share at mainnet scale.
-	EstIngressBps int64 `json:"est_ingress_bps"`
-	EstDiskBytes  int64 `json:"est_disk_bytes"`
 }
-
-const (
-	// loadEstimateNetworkBps is the network-wide rate of blob data the
-	// estimate assumes: 2.2 GB/s, the figure the Fibre team sized mainnet on.
-	loadEstimateNetworkBps = 2.2e9
-	// loadEstimateBlobBytes is the blob size the estimate is drawn on.
-	loadEstimateBlobBytes = 128 << 20
-	// loadEstimateRetention is the retention the disk estimate keeps rows
-	// for when no settled promise says otherwise.
-	loadEstimateRetention = 4 * time.Hour
-)
 
 // rowBytesSQL is the row data one assigned row carries: blob_size over the
 // promise's original rows, as recorded with its assignment.
@@ -115,17 +96,12 @@ func (s *Server) loadByValidator(ctx context.Context, win Window, only string) (
 		return nil, err
 	}
 
-	// rows on the newest settled promise, and the retention it was held to
+	// rows on the newest settled promise
 	var newest string
-	var retention int64
-	if err := db.QueryRowContext(ctx, `SELECT promise_hash, shard_retention_s FROM publications
+	if err := db.QueryRowContext(ctx, `SELECT promise_hash FROM publications
 		WHERE settlement_tx_code = 0 AND assignment_error = ''
-		ORDER BY settlement_height DESC, settlement_tx_index DESC LIMIT 1`).Scan(&newest, &retention); err != nil {
-		return out, nil // nothing settled yet: no share to size
-	}
-	keep := loadEstimateRetention
-	if retention > 0 {
-		keep = time.Duration(retention) * time.Second
+		ORDER BY settlement_height DESC, settlement_tx_index DESC LIMIT 1`).Scan(&newest); err != nil {
+		return out, nil // nothing settled yet
 	}
 	lastArgs := []any{newest}
 	lastFilter := ""
@@ -133,8 +109,7 @@ func (s *Server) loadByValidator(ctx context.Context, win Window, only string) (
 		lastFilter = ` AND a.validator_address = ?`
 		lastArgs = append(lastArgs, only)
 	}
-	rows, err = db.QueryContext(ctx, `SELECT a.validator_address, a.row_count, json_extract(p.raw_json, '$.assignment.protocol_params.original_rows')
-		FROM assignments a JOIN publications p ON p.promise_hash = a.promise_hash
+	rows, err = db.QueryContext(ctx, `SELECT a.validator_address, a.row_count FROM assignments a
 		WHERE a.promise_hash = ? AND a.row_count > 0`+lastFilter, lastArgs...)
 	if err != nil {
 		return nil, err
@@ -142,18 +117,12 @@ func (s *Server) loadByValidator(ctx context.Context, win Window, only string) (
 	defer rows.Close()
 	for rows.Next() {
 		var addr string
-		var n, original int64
-		if err := rows.Scan(&addr, &n, &original); err != nil {
+		var n int64
+		if err := rows.Scan(&addr, &n); err != nil {
 			return nil, err
 		}
 		l := out[addr]
 		l.RowsPerBlob = n
-		if original > 0 {
-			perBlob := float64(n) * float64(loadEstimateBlobBytes) / float64(original)
-			bps := perBlob * loadEstimateNetworkBps / float64(loadEstimateBlobBytes)
-			l.EstIngressBps = int64(bps * 8)
-			l.EstDiskBytes = int64(bps * keep.Seconds())
-		}
 		out[addr] = l
 	}
 	return out, rows.Err()
