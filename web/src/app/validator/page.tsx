@@ -2,7 +2,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type SampledOut, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, rateTone, leftOutText, gbps, tb, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
+import { useApi, type Validator, type Probe, type SampledOut, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, rateTone, leftOutText, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
@@ -264,8 +264,6 @@ function Page() {
               title="Row data the settled blobs of the period assigned this validator, to receive from the publisher and store. Blobs that settled before its Fibre host existed are left out." />
             <Metric label="Held now" value={bytes(v.load.stored_bytes)} help="retention window still running"
               title="Row data this validator must hold at this moment: assignments whose retention window has not ended." />
-            <Metric label="Mainnet sizing" value={gbps(v.load.est_ingress_bps)} help={`${tb(v.load.est_disk_bytes)} of disk`}
-              title="This validator's share of a 128 MiB blob at 2.2 GB/s of blob data, kept for the retention window: the arithmetic of the Fibre team's mainnet sizing tables, on this stake. A sizing figure, not a measurement." />
           </Metrics>
         </section>
       )}
