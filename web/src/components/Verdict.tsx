@@ -46,7 +46,7 @@ const VERDICTS: Record<string, Def> = {
   },
   IDENTITY_MISMATCH: {
     label: "bad certificate", tier: "hold",
-    def: "The certificate is not endorsed by this validator's consensus key, so no client can download from the endpoint. A statement about the endpoint, shown as its status; not about any shard, so outside the serve rate.",
+    def: "The certificate is not signed by this validator's consensus key, so no client can download from the endpoint. A statement about the endpoint, shown as its status; not about any shard, so outside the serve rate.",
   },
   SERVER_ERROR: {
     label: "server error", tier: "hold",
@@ -57,8 +57,8 @@ const VERDICTS: Record<string, Def> = {
     def: "The endpoint was reached and refused the download with a rate limit. That says nothing about the shard, so it is shown beside the rate, not inside it, and the prober backs off from a validator that says so.",
   },
   UNATTESTED: {
-    label: "unattested", tier: "held",
-    def: "The settled promise carries no verified signature from this validator, so nothing on chain proves it ever stored the shard. Whatever the probe found is recorded but kept out of the serve rate, in both directions.",
+    label: "not endorsed", tier: "held",
+    def: "The settled promise carries no verified endorsement (signature) from this validator, so nothing on chain proves it ever stored the shard. Whatever the probe found is recorded but kept out of the serve rate, in both directions.",
   },
   NOT_REGISTERED: {
     label: "not registered", tier: "held",

@@ -62,7 +62,7 @@ function Page() {
               {data.blobs.length >= limit && limit < 500 && <> · <button className="btn" onClick={() => setLimit(Math.min(500, limit * 4))}>show more</button></>}</>}>
         <div className="tablewrap">
           <table>
-            <thead><tr><th>promise</th><th>settled (UTC)</th><th className="right">height</th><th>namespace</th><th className="right">size</th><th className="right">validators</th><th className="right" title="Share of stake whose signature over the promise verified. A blob settles at two thirds.">signed</th><th className="right">probes</th><th>serve until</th><th>availability</th></tr></thead>
+            <thead><tr><th>promise</th><th>settled (UTC)</th><th className="right">height</th><th>namespace</th><th className="right">size</th><th className="right">validators</th><th className="right" title="Share of stake whose signature over the promise verified. A blob settles at two thirds.">endorsed</th><th className="right">probes</th><th>serve until</th><th>availability</th></tr></thead>
             <tbody>
               {data.blobs.length === 0 && <tr><td colSpan={10} className="muted">No publications recorded{ns.trim() ? " in this namespace" : ""}.</td></tr>}
               {data.blobs.map((b) => (

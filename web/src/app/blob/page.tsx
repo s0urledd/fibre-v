@@ -19,7 +19,7 @@ type Detail = {
 
 /** one mark per classification; the word is in the title and the legend */
 const MARK: Record<string, [string, string]> = {
-  HEALTHY: ["ok", "served"], FAULT: ["fault", "broken"], UNATTESTED: ["unsigned", "unsigned"], EXPECTED_GONE: ["gone", "expected gone after the window"],
+  HEALTHY: ["ok", "served"], FAULT: ["fault", "broken"], UNATTESTED: ["unsigned", "not endorsed"], EXPECTED_GONE: ["gone", "expected gone after the window"],
   NOT_REGISTERED: ["none", "no endpoint"], NOT_PROBED: ["gone", "not probed"], SERVER_ERROR: ["other", "server error"], UNREACHABLE: ["other", "unreachable"],
   THROTTLED: ["other", "rate limited"], IDENTITY_EXPIRED: ["other", "certificate expired"], IDENTITY_MISMATCH: ["other", "wrong certificate"],
   TOLERATED: ["gone", "tolerated after the deadline"], UNREACHABLE_POST_WINDOW: ["gone", "unreachable after the window"], SERVED_PAST_WINDOW: ["gone", "served after the window"],
@@ -29,7 +29,7 @@ const MARK: Record<string, [string, string]> = {
 const markOf = (cls: string): [string, string] => MARK[cls] ?? ["other", cls.toLowerCase().replace(/_/g, " ")];
 /** the mark for one probe: an unsigned probe says what came back and is not rated either way */
 const probeMark = (p: Probe): [string, string] => {
-  if (p.classification === "UNATTESTED") return ["unsigned", (p.outcome === "SERVED_OK" || p.outcome === "PARTIAL") ? "served, unsigned" : `unsigned · ${p.outcome.toLowerCase().replace(/_/g, " ")}`];
+  if (p.classification === "UNATTESTED") return ["unsigned", (p.outcome === "SERVED_OK" || p.outcome === "PARTIAL") ? "served, not endorsed" : `not endorsed · ${p.outcome.toLowerCase().replace(/_/g, " ")}`];
   return markOf(p.classification);
 };
 
@@ -113,7 +113,7 @@ function Page() {
         <b>{k} <span className="soft">· {hhmm(byLabel.get(k)!.at).replace(" UTC", "")}</span></b>
         <span>{post ? `${int(gone)} expected gone` : `${int(served)} served`}</span>
         {broken > 0 && <span className="word fault">{int(broken)} broken</span>}
-        {unsigned > 0 && <span>{int(unsigned)} unsigned</span>}
+        {unsigned > 0 && <span>{int(unsigned)} not endorsed</span>}
         {other > 0 && <span>{int(other)} other</span>}
       </div>
     );
@@ -153,10 +153,10 @@ function Page() {
         <Metric label="Validators served" value={rc && (judged || rc.status === "pending") ? int(rc.served_by_validators) : "—"} den={rc && (judged || rc.status === "pending") ? int(rc.assigned_validators) : undefined}
           tone={rc && (judged || rc.status === "pending") ? undefined : "absent"}
           help={rc && (judged || rc.status === "pending") ? `at ${rc.point} · ${hhmm(rc.point_at)}${rc.status === "pending" ? ` · ${int(rc.probed_validators)} with a result` : ""}` : "no in-window point completed"} />
-        <Metric label="Signed" value={signedKnown ? int(signedN) : "—"} den={signedKnown ? int(assignments.length) : undefined}
+        <Metric label="Endorsed" value={signedKnown ? int(signedN) : "—"} den={signedKnown ? int(assignments.length) : undefined}
           tone={signedKnown ? undefined : "absent"}
-          help={signedKnown ? "unsigned is not a fault" : "signatures not recorded"}
-          title="Assigned validators whose signature on the settled promise verified against their consensus key. The publisher stops collecting at two thirds of voting power, so about a third of the set is unsigned on any blob." />
+          help={signedKnown ? "not endorsed is not a fault" : "signatures not recorded"}
+          title="Assigned validators whose endorsement (signature) on the settled promise verified against their consensus key. The publisher stops collecting at two thirds of voting power, so about a third of the set is not endorsed on any blob." />
         <Metric label="Service window" value={winLen} help={`${hhmm(b.settlement_time).replace(" UTC", "")} → ${hhmm(b.must_serve_until)}${over ? " · over" : ""}`}
           title={`creation + max(payment_promise_timeout ${data.params.payment_promise_timeout_s} s, shard_retention ${data.params.shard_retention_s} s)`} />
         <Metric label="Fee" value={b.charge ? tia(b.charge.fee_utia) : "—"} tone={b.charge ? undefined : "absent"}
@@ -199,8 +199,8 @@ function Page() {
               </div>
               <div className="mnums"><span><b>{int(rc.served_distinct_rows)}</b> of {int(rc.total_rows)} rows</span><span>{int(rc.needed_rows)} needed to rebuild</span></div>
               <p className="errs" title="An observation of the rows that came back at one probe point, not an actual rebuild.">
-                {rc.status === "yes" && <><b>Fully served.</b> Enough rows to rebuild, and all {int(rc.attested_validators)} signed validators served.</>}
-                {rc.status === "degraded" && <><b>Rebuildable, not fully served.</b> {int(rc.attested_validators - rc.served_by_attested)} of {int(rc.attested_validators)} signed validators did not serve.</>}
+                {rc.status === "yes" && <><b>Fully served.</b> Enough rows to rebuild, and all {int(rc.attested_validators)} endorsing validators served.</>}
+                {rc.status === "degraded" && <><b>Rebuildable, not fully served.</b> {int(rc.attested_validators - rc.served_by_attested)} of {int(rc.attested_validators)} endorsing validators did not serve.</>}
                 {rc.status === "no" && <><b>Not rebuildable</b> from the rows that came back at this point.</>}
                 {rc.status === "pending" && <>{int(rc.probed_validators)} of {int(rc.assigned_validators)} validators have a result; waiting for the rest.</>}
               </p>
@@ -217,7 +217,7 @@ function Page() {
         <div className="tablewrap">
           <table className={"marks" + (order.length ? "" : " nopts")}>
             <thead><tr>
-              <th className="col-pin">Validator</th><th className="num">Voting power</th><th className="num">Rows</th><th>Signed</th><th>Host at settlement</th>
+              <th className="col-pin">Validator</th><th className="num">Voting power</th><th className="num">Rows</th><th>Endorsed</th><th>Host at settlement</th>
               {order.map((k) => <th key={k} className={"m" + (suspectAt.has(byLabel.get(k)!.at) ? " soft" : "")} title={`${k} · ${utcWord(byLabel.get(k)!.at)}${suspectAt.has(byLabel.get(k)!.at) ? " · not counted: the observer does not trust itself at this point" : ""}`}>{k}</th>)}
               <th className="go" />
             </tr></thead>
@@ -245,7 +245,7 @@ function Page() {
         <p className="mklegend">
           <span><span className="mk ok" /> served</span>
           <span><span className="mk fault" /> broken</span>
-          <span title="No verified signature on the settled promise, so not rated either way: the publisher stops collecting at two thirds of stake."><span className="mk unsigned" /> unsigned</span>
+          <span title="No verified signature on the settled promise, so not rated either way: the publisher stops collecting at two thirds of stake."><span className="mk unsigned" /> not endorsed</span>
           <span title="Server error, unreachable, rate limited or a certificate problem. Never a fault."><span className="mk other" /> other</span>
           <span title="Expected gone after the window, not probed, or at a point where the observer does not trust itself. Never a fault."><span className="mk gone" /> not counted</span>
           <span><span className="mk none" /> no endpoint</span>

@@ -33,12 +33,12 @@ export default function Methodology() {
 
       <h2 id="verdicts">Who is obliged, and what a fault is</h2>
       <p>A validator is obliged only if the settled promise carries its signature, because a Fibre server stores the shard before it signs. Tensile verifies every signature itself against the consensus key. Validators check them in <code>CheckTx</code> and <code>ProcessProposal</code>, but <code>validateValidatorSignatures</code> stops once two thirds of the stake has verified, so later entries are never checked by any node.</p>
-      <p>A missing signature is <em>unproven</em>, never a failure: the publisher stops collecting at two thirds of stake, so on any blob about a third of the set has no signature on chain by design. Those probes are <strong>UNATTESTED</strong> and sit outside the rate in both directions.</p>
+      <p>A missing endorsement is <em>unproven</em>, never a failure: the publisher stops collecting at two thirds of stake, so on any blob about a third of the set has no signature on chain by design. Those probes are <strong>not endorsed</strong> and sit outside the rate in both directions.</p>
       <p><strong>FAULT is the only class that counts against a validator</strong>: from an endpoint with this validator&rsquo;s certificate, a shard it signed for was reported missing, or its bytes did not verify, while the obligation held. Unreachable, server errors, rate limits and certificate problems each have their own class and never count. A fault cannot rule out a power loss on the server; if that is what happened, the <a href={DISPUTE_URL} rel="noopener noreferrer" target="_blank">dispute route</a> puts the correction on the record.</p>
       <Legend />
 
-      <h2 id="signing">Signing participation</h2>
-      <p><strong>Signed ⅔</strong> is the settled promises carrying a validator&rsquo;s verified signature over the promises that assigned it rows: how often it made the two-thirds quorum. The Blobs page shows each promise&rsquo;s signed share of stake against the quorum of <code>floor(total &times; 2 / 3)</code>. Neither is a duty: an unsigned promise is unproven, not a fault.</p>
+      <h2 id="signing">Endorsements</h2>
+      <p>A validator <em>endorses</em> a payment promise by signing it after storing its shard. <strong>Endorsed ⅔</strong> is the settled promises carrying a validator&rsquo;s verified endorsement over the promises that assigned it rows: how often it made the two-thirds quorum. The Blobs page shows each promise&rsquo;s endorsed share of stake against the quorum of <code>floor(total &times; 2 / 3)</code>. Neither is a duty: a missing endorsement is unproven, not a fault.</p>
 
       <h2 id="rates">Rates</h2>
       <ul>
