@@ -255,15 +255,15 @@ function Page() {
 
       {v.load && v.load.rows_per_blob > 0 && (
         <section id="load">
-          <div className="vhead"><div><h2>Load</h2><p className="sub">What the protocol asks of this validator, by stake. From the chain, nothing measured.</p></div></div>
+          <div className="vhead"><div><h2>Load</h2><p className="sub">What this validator committed to store: the rows of the blobs it endorsed. From the chain, nothing measured.</p></div></div>
           <Metrics>
             <Metric label="Rows per blob" value={int(v.load.rows_per_blob)} help="of every settled blob, by stake"
               title="Rows the assignment gives this validator on the newest settled blob. Rows follow stake, not blob size." />
-            <Metric label="Assigned" value={notLive ? "—" : bytes(v.load.bytes)} tone={notLive ? "absent" : undefined}
-              help={`${int(v.load.promises)} settled blobs in the period`}
-              title="Row data the settled blobs of the period assigned this validator, to receive from the publisher and store. Blobs that settled before its Fibre host existed are left out." />
-            <Metric label="Held now" value={bytes(v.load.stored_bytes)} help="retention window still running"
-              title="Row data this validator must hold at this moment: assignments whose retention window has not ended." />
+            <Metric label="Committed" value={notLive ? "—" : bytes(v.load.bytes)} tone={notLive ? "absent" : undefined}
+              help={`${int(v.load.promises)} endorsed blobs in the period`}
+              title="Row data of the settled blobs this validator endorsed in the period: what its signature undertook to store. Blobs it was assigned and did not endorse are no duty." />
+            <Metric label="Held now" value={bytes(v.load.stored_bytes)} help="endorsed, window still running"
+              title="Row data this validator must hold at this moment: endorsed blobs whose retention window has not ended." />
           </Metrics>
         </section>
       )}
