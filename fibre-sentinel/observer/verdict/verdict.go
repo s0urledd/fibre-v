@@ -59,7 +59,7 @@ const (
 // this observer's blindness can now do to an operator is decline to vouch
 // for them, and the figure that says how often that happened is printed
 // beside the rate.
-const EndSegmentDivisor = 4.0
+const EndSegmentDivisor = probe.EndSegmentDivisor
 
 // EndSegment is the first moment of that tail for one promise.
 func EndSegment(settled, mustServeUntil time.Time) time.Time {

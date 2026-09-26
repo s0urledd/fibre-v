@@ -71,8 +71,11 @@ type Config struct {
 	RunConfig map[string]any
 
 	// Concurrency is how many probes run at once across all validators
-	// (default 8). A single validator never sees more than one
-	// connection from this vantage at a time, whatever this value is.
+	// (default 16). A single validator never sees more than one
+	// connection from this vantage at a time, whatever this value is. At 8,
+	// a burst of blobs settled within minutes put their tail points past
+	// the pool's rate: tail probes started a median 20 s late on Mocha and
+	// up to 65 s, which left a timed-out download no room for its retry.
 	Concurrency int
 
 	// AllowUnroutableHosts dials a registered host that resolves to loopback
@@ -107,7 +110,9 @@ type Config struct {
 
 	// RetryTransportTimeout re-runs a probe once when the first attempt fails
 	// with a transport timeout (TCP connect timeout, TLS handshake timeout, or
-	// a gRPC Unavailable whose cause is a timeout). The server's default
+	// a gRPC Unavailable whose cause is a timeout), or with a download that
+	// ran out of time at a point in the tail of the retention window, the
+	// reading the served verdict rests on (shouldRetry). The server's default
 	// connection cap is filled by a 16-signer upload, so a probe arriving
 	// during an upload waits for a slot and can time out without saying
 	// anything about retention. The retry costs one extra request and no
@@ -150,7 +155,7 @@ func (c Config) withDefaults() Config {
 		c.RetryDelay = 20 * time.Second
 	}
 	if c.Concurrency <= 0 {
-		c.Concurrency = 8
+		c.Concurrency = 16
 	}
 	if c.InFlightBytes <= 0 {
 		c.InFlightBytes = defaultInFlightBytes
@@ -1239,7 +1244,7 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 	m := Run(ctx, in, it.coder, p.cfg.Timeouts)
 	// Not while the policy has the validator backed off: the backoff's
 	// promise is that it never adds a request to an endpoint already failing.
-	if p.cfg.RetryTransportTimeout && !skipDL && shouldRetryTransport(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
+	if p.cfg.RetryTransportTimeout && !skipDL && shouldRetry(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
 		// The first attempt is a request the endpoint received and a
 		// failure the backoff must count now, not when the retry is done:
 		// every other probe of this validator in the meantime, and the
@@ -1638,16 +1643,25 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// shouldRetryTransport decides whether a first attempt deserves the one
-// transport-timeout retry: the outcome must be a transport timeout, and the
-// retry, started after delay, must still fall in the same schedule phase as
-// the first attempt (a retry that crossed from in_window into grace would
-// change the verdict, not just the evidence).
-func shouldRetryTransport(m Measurement, pub scan.Publication, sc ScheduleConfig, delay time.Duration, now time.Time) bool {
+// shouldRetry decides whether a first attempt deserves the one retry: the
+// outcome must be a transport timeout, or a download that ran out of time at
+// a point in the tail of the retention window, and the retry, started after
+// delay, must still fall in the same schedule phase as the first attempt (a
+// retry that crossed from in_window into grace would change the verdict, not
+// just the evidence).
+//
+// A download timeout is otherwise left alone: the server answered and the
+// transfer stalled, so running it again early in the window buys nothing a
+// later point will not show. In the tail it is the reading the served verdict
+// rests on. Without a second try one stalled transfer a minute before the
+// deadline leaves an obligation the validator kept, on every earlier point,
+// out of the rate as not observed.
+func shouldRetry(m Measurement, pub scan.Publication, sc ScheduleConfig, delay time.Duration, now time.Time) bool {
 	if m.Retry != nil {
 		return false // already retried
 	}
-	if !m.transportTimeout() {
+	tailDeadline := m.Outcome == OutcomeRPCDeadline && m.Phase == PhaseInWindow && InEndSegment(m.ScheduledAt, pub)
+	if !m.transportTimeout() && !tailDeadline {
 		return false
 	}
 	return PhaseAt(now.Add(delay), pub, sc) == m.Phase
