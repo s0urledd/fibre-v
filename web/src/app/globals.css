@@ -319,8 +319,8 @@ td a.plain:hover, td a.fault:hover { text-decoration: underline; }
   .vt { table-layout: fixed; }
   .vt th:first-child { width: 19%; }
   /* widths follow what the cells hold: the one-digit counts give room to the provider names */
-  .vt .c-ep { width: 11%; } .vt .c-host { width: 14%; } .vt .c-power { width: 11%; } .vt .c-rows { width: 9%; }
-  .vt .c-rate { width: 12%; } .vt .c-broken { width: 7%; } .vt .c-pend { width: 7%; } .vt .c-end { width: 10%; }
+  .vt .c-ep { width: 12%; } .vt .c-host { width: 16%; } .vt .c-power { width: 12%; }
+  .vt .c-rate { width: 13%; } .vt .c-broken { width: 7.5%; } .vt .c-pend { width: 7.5%; } .vt .c-end { width: 13%; }
   .vt td:not(:first-child) { overflow: hidden; text-overflow: ellipsis; }
   .vt .hosting { max-width: 100%; vertical-align: middle; }
   .vt .hosting > span:not(.flag):not(.flag-none):not(.cc) { overflow: hidden; text-overflow: ellipsis; }
@@ -330,6 +330,8 @@ td a.plain:hover, td a.fault:hover { text-decoration: underline; }
 .pair > .den { text-align: left; font-size: inherit; margin: 0; }
 /* the endorsement share describes, it does not rate: regular weight, quieter */
 .pair.endorsed > .rate { font-weight: 400; color: var(--text-2); }
+.rate.share { display: inline-block; min-width: 5ch; text-align: right; }
+.rate.share.endorsed { font-weight: 400; color: var(--text-2); }
 .vt tbody tr { position: relative; }
 .vt tbody tr:not(.empty) { cursor: pointer; }
 .vt .rowcover { position: absolute; inset: 0; z-index: 0; }
@@ -836,6 +838,20 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 .tablewrap.framed th:last-child, .tablewrap.framed td:last-child { padding-right: 14px; }
 .tablewrap.framed td { padding-top: 10px; padding-bottom: 10px; }
 .tablewrap.framed tbody tr:last-child td { border-bottom: 0; }
+/* the Blobs page tables: the first column reads left, every other column is
+   centred under its heading, cells and headings alike, at a width that
+   follows what the cells hold */
+.bt th, .bt td, .bt th.right, .bt td.right { text-align: center; }
+.bt th:first-child, .bt td:first-child { text-align: left; }
+/* figures in the text face with even digits, which keep a column narrow; only the promise hash stays monospaced */
+.bt td.mono:not(:first-child) { font-family: inherit; font-variant-numeric: tabular-nums; }
+@media (min-width: 900px) {
+  .bt { table-layout: fixed; }
+  .bt td { overflow: hidden; text-overflow: ellipsis; }
+  .bt.nss th:nth-child(1) { width: 20%; } .bt.nss th:nth-child(2) { width: 12%; } .bt.nss th:nth-child(3) { width: 9%; }
+  .bt.nss th:nth-child(4) { width: 16%; } .bt.nss th:nth-child(5) { width: 9%; } .bt.nss th:nth-child(6) { width: 17%; } .bt.nss th:nth-child(7) { width: 17%; }
+  .bt.pubs th:nth-child(1) { width: 14%; } .bt.pubs th:nth-child(2) { width: 14%; } .bt.pubs th:nth-child(3) { width: 8%; } .bt.pubs th:nth-child(4) { width: 11%; } .bt.pubs th:nth-child(5) { width: 7%; } .bt.pubs th:nth-child(6) { width: 7%; } .bt.pubs th:nth-child(7) { width: 7%; } .bt.pubs th:nth-child(8) { width: 6%; } .bt.pubs th:nth-child(9) { width: 12%; } .bt.pubs th:nth-child(10) { width: 14%; }
+}
 .fm-key { margin: 0 0 0 auto; display: flex; gap: 14px; font-size: var(--t-tiny); color: var(--text-3); }
 .fm-key i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 0; }
 

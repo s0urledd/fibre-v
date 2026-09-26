@@ -63,7 +63,7 @@ function Page() {
       {nss.data && nss.data.namespaces.length > 0 && (
         <Panel title="Namespaces" right={ns.trim() ? <button className="btn" onClick={() => setNs("")}>show all</button> : undefined}>
           <div className="tablewrap framed">
-            <table>
+            <table className="bt nss">
               <thead><tr><th>namespace</th><th className="right">data</th><th className="right">blobs</th><th className="right">last 24h</th><th className="right">accounts</th><th>first seen</th><th>last blob</th></tr></thead>
               <tbody>
                 {nss.data.namespaces.map((n) => (
@@ -85,15 +85,15 @@ function Page() {
       {data && (
         <Panel title="Publications" right={<>{data.blobs.length} newest{ns.trim() && ` in namespace ${ns.trim()}`}
               {data.blobs.length >= limit && limit < 500 && <> · <button className="btn" onClick={() => setLimit(Math.min(500, limit * 4))}>show more</button></>}</>}>
-        <div className="tablewrap">
-          <table>
+        <div className="tablewrap framed">
+          <table className="bt pubs">
             <thead><tr><th>promise</th><th>settled (UTC)</th><th className="right">height</th><th>namespace</th><th className="right">size</th><th className="right">validators</th><th className="right" title="Share of stake whose signature over the promise verified. A blob settles at two thirds.">endorsed</th><th className="right">probes</th><th>serve until</th><th>availability</th></tr></thead>
             <tbody>
               {data.blobs.length === 0 && <tr><td colSpan={10} className="muted">No publications recorded{ns.trim() ? " in this namespace" : ""}.</td></tr>}
               {data.blobs.map((b) => (
                 <tr key={b.promise_hash}>
-                  <td className="mono"><Link href={`/blob/?hash=${b.promise_hash}`}>{shortHex(b.promise_hash, 6)}</Link></td>
-                  <td className="mono" title={ago(b.settlement_time)}>{utc(b.settlement_time)}</td>
+                  <td className="mono" title={b.promise_hash}><Link href={`/blob/?hash=${b.promise_hash}`}>{b.promise_hash.slice(0, 10)}…</Link></td>
+                  <td className="mono" title={`${utc(b.settlement_time)} · ${ago(b.settlement_time)}`}>{utc(b.settlement_time).slice(5, 16)}</td>
                   <td className="right mono">{b.settlement_height.toLocaleString("en-US")}</td>
                   <td className="mono" title={b.namespace}>{nsDisplay(b.namespace)}</td>
                   <td className="right mono">{unit(bytes(b.blob_size))}</td>

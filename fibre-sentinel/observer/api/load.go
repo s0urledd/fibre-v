@@ -7,25 +7,26 @@ import (
 	"github.com/plsgiveup/fibre/fibre-sentinel/observer/store"
 )
 
-// Load is what the protocol asked of a validator: the rows of every settled
-// blob its stake assigned it, which it has to receive from the publisher and
-// keep for the retention window. Every figure is computed from the chain's
-// own records (MsgPayForFibre and the assignment fibre-assign derives from
-// the validator set at the promise height), nothing measured, so anyone can
-// recompute it. Bytes are row data: a row is blob_size / original_rows,
-// without the proofs and framing that travel with it.
-//
-// As with endorsement, an assignment that settled while the validator had
-// no Fibre host is left out: it could not have received those rows.
+// Load is what a validator committed to store: the rows of every settled blob
+// it endorsed. The protocol assigns rows to every validator in the set, but a
+// publisher stops collecting at two thirds of stake, and only an endorsement
+// says the validator received its shard and undertook to keep it until the
+// retention window ends; rows it was assigned and did not endorse may or may
+// not have reached it, and are no duty. The service rate counts the same
+// population. Every figure is computed from the chain's own records
+// (MsgPayForFibre, its verified signatures, and the assignment fibre-assign
+// derives from the validator set at the promise height), nothing measured, so
+// anyone can recompute it. Bytes are row data: a row is blob_size /
+// original_rows, without the proofs and framing that travel with it.
 type loadStats struct {
-	// Promises and Rows are the settled promises in the window that assigned
-	// this validator rows while it had a host, and the rows they assigned.
+	// Promises and Rows are the settled promises in the window that carry
+	// this validator's verified endorsement, and its rows on them.
 	Promises int64 `json:"promises"`
 	Rows     int64 `json:"rows"`
-	// Bytes is the row data those promises asked it to receive and store.
+	// Bytes is the row data it committed to store for those promises.
 	Bytes int64 `json:"bytes"`
-	// StoredBytes is the row data it has to hold right now: assignments whose
-	// retention window has not ended, whatever the selected period.
+	// StoredBytes is the row data it has to hold right now: endorsed promises
+	// whose retention window has not ended, whatever the selected period.
 	StoredBytes int64 `json:"stored_bytes"`
 	// RowsPerBlob is its assignment on the newest settled promise; rows follow
 	// stake, not blob size, so it is the same for every blob of that set.
@@ -49,7 +50,7 @@ func (s *Server) loadByValidator(ctx context.Context, win Window, only string) (
 	rows, err := db.QueryContext(ctx, `SELECT a.validator_address, COUNT(*), COALESCE(SUM(a.row_count), 0),
 			COALESCE(CAST(SUM(a.row_count * `+rowBytesSQL+`) AS INTEGER), 0)
 		FROM assignments a JOIN publications p ON p.promise_hash = a.promise_hash
-		WHERE `+signingPopulation+` AND a.row_count > 0 AND a.host_at_settlement IS NOT ''`+filter+`
+		WHERE `+signingPopulation+` AND a.row_count > 0 AND a.attested = 1`+filter+`
 		GROUP BY a.validator_address`, args...)
 	if err != nil {
 		return nil, err
@@ -76,7 +77,7 @@ func (s *Server) loadByValidator(ctx context.Context, win Window, only string) (
 			COALESCE(CAST(SUM(a.row_count * `+rowBytesSQL+`) AS INTEGER), 0)
 		FROM assignments a JOIN publications p ON p.promise_hash = a.promise_hash
 		WHERE p.settlement_tx_code = 0 AND p.assignment_error = '' AND p.must_serve_until > ?
-		  AND a.row_count > 0 AND a.host_at_settlement IS NOT ''`+filter+`
+		  AND a.row_count > 0 AND a.attested = 1`+filter+`
 		GROUP BY a.validator_address`, nowArgs...)
 	if err != nil {
 		return nil, err

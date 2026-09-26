@@ -317,3 +317,50 @@ func TestSigningLeavesOutPromisesWithoutAHost(t *testing.T) {
 		t.Fatalf("signing = %+v, want 1/1 with 2 promises without a host", s)
 	}
 }
+
+// The newest endorsement and the newest assigned promises are read from the
+// whole record, whatever the window: a validator that stopped endorsing shows
+// a run of zeros that a rate over a long period would hide. p4 (recorded
+// before signatures were verified) and p5 (a failed transaction) are in
+// neither count.
+func TestSigningRecentAndLastEndorsement(t *testing.T) {
+	ts, st, _ := signingFixture(t)
+	var p2, p3 string
+	if err := st.DB().QueryRow(`SELECT settlement_time FROM publications WHERE promise_hash = 'p2'`).Scan(&p2); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB().QueryRow(`SELECT settlement_time FROM publications WHERE promise_hash = 'p3'`).Scan(&p3); err != nil {
+		t.Fatal(err)
+	}
+	type recentJSON struct {
+		Last   *string `json:"last_endorsed_at"`
+		Recent struct {
+			Assigned int64 `json:"assigned"`
+			Endorsed int64 `json:"endorsed"`
+		} `json:"recent"`
+	}
+	for _, c := range []struct {
+		addr     string
+		endorsed int64
+		last     string
+	}{
+		{sigV1, 3, p3}, // signed p1, p2, p3
+		{sigV3, 1, p2}, // signed p2 only
+	} {
+		var det struct {
+			Validator struct {
+				Signing recentJSON `json:"signing"`
+			} `json:"validator"`
+		}
+		if code := get(t, ts, "/v1/validators/"+c.addr+"?window=24h", &det); code != 200 {
+			t.Fatalf("detail: %d", code)
+		}
+		s := det.Validator.Signing
+		if s.Recent.Assigned != 3 || s.Recent.Endorsed != c.endorsed {
+			t.Errorf("%s recent = %+v, want 3 assigned, %d endorsed", c.addr[:4], s.Recent, c.endorsed)
+		}
+		if s.Last == nil || *s.Last != c.last {
+			t.Errorf("%s last endorsed = %v, want %s", c.addr[:4], s.Last, c.last)
+		}
+	}
+}

@@ -423,7 +423,7 @@ export type Validator = {
   timeouts_enforced?: number;
   /** signing participation over the period: see lib/signing.ts. Descriptive, never a fault. */
   signing?: Signing;
-  /** row data the protocol assigned it in the period and what it holds now (from the chain) */
+  /** row data it committed to store in the period (its endorsed blobs) and what it holds now (from the chain) */
   load?: Load;
   /** network and country the open endpoint resolved into, from this vantage; absent when the lookup is off */
   hosting?: import("./hosting").Hosting;
@@ -910,9 +910,8 @@ export function shortBech(s: string): string {
   return `${s.slice(0, i)} ••• ${s.slice(-4)}`;
 }
 /**
- * What the protocol asked of a validator: the rows its stake was assigned on
- * every settled blob, to receive and keep for the retention window. From the
- * assignment table, nothing measured. Mocha's own figures: the mainnet
+ * What a validator committed to store: the rows of every settled blob it
+ * endorsed, kept for the retention window. From the chain, nothing measured. Mocha's own figures: the mainnet
  * sizing belongs to its own page.
  */
 export type Load = {
@@ -922,11 +921,6 @@ export type Load = {
   stored_bytes: number;
   rows_per_blob: number;
 };
-
-/** the load tooltip, one place so the table and the page say the same thing */
-export function loadTitle(l: Load): string {
-  return `${int(l.rows_per_blob)} rows of every blob, by stake · ${bytes(l.bytes)} received over ${int(l.promises)} settled blobs in the period · ${bytes(l.stored_bytes)} held now`;
-}
 
 export function bytes(n: number): string {
   if (n < 1024) return `${n} B`;
