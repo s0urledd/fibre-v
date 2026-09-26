@@ -113,7 +113,13 @@ type marketResponse struct {
 	// Source says where every number on this response comes from.
 	Source string `json:"source"`
 
-	Settlements      int64    `json:"settlements"`
+	Settlements int64 `json:"settlements"`
+	// Blobs is how many distinct blobs those settlements paid for, over the
+	// same window. A blob is addressed by its BlobID, blob_version ||
+	// commitment, so one uploaded and paid for twice is one blob and two
+	// settlements. A settlement whose publication is not recorded counts as a
+	// blob of its own.
+	Blobs            int64    `json:"blobs"`
 	FeesSettledUtia  int64    `json:"fees_settled_utia"`
 	Bytes            int64    `json:"bytes"`
 	PublishersActive int64    `json:"publishers_active"`
@@ -288,6 +294,11 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 		return nil, fmt.Errorf("settlements: %w", err)
 	}
 	r.PaidPerMiBUtia = perMiB(r.FeesSettledUtia, r.Bytes)
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT COALESCE(pub.blob_version || ':' || pub.commitment, 'promise:' || pay.promise_hash))
+		FROM payments pay LEFT JOIN publications pub ON pub.promise_hash = pay.promise_hash
+		WHERE pay.kind = 'settlement' AND pay.time >= ? AND pay.time <= ?`, start, end).Scan(&r.Blobs); err != nil {
+		return nil, fmt.Errorf("blobs: %w", err)
+	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(amount_utia),0), COUNT(DISTINCT processor)
 		FROM payments WHERE kind = 'timeout' AND time >= ? AND time <= ?`, start, end).
 		Scan(&r.Timeouts, &r.TimedOutUtia, &r.TimeoutProcessors); err != nil {
