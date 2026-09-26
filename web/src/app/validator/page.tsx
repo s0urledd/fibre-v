@@ -378,8 +378,7 @@ function Page() {
 function SignedInfo() {
   return (
     <Info label="Endorsed ⅔">
-      <p>Settled promises in this period that assigned this validator rows and carry its verified endorsement (signature).</p>
-      <p>Publishers stop collecting signatures at two thirds of stake, so roughly a third of validators miss any given promise by design. A low rate is normal; only a sustained 0 with a reachable host is worth a look.</p>
+      <p>Promises carrying this validator&rsquo;s endorsement. Publishers stop at ⅔ of stake, so a low rate is normal, not a fault.</p>
     </Info>
   );
 }
