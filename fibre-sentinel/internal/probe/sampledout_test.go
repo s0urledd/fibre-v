@@ -18,8 +18,8 @@ type denyPolicy struct {
 }
 
 func (d denyPolicy) Admit(scan.Publication, bool) (bool, string) { return false, d.reason }
-func (denyPolicy) BeforeProbe(scan.Publication, Target, time.Time) (bool, bool, string) {
-	return true, false, ""
+func (denyPolicy) BeforeProbe(scan.Publication, Target, time.Time) (bool, string) {
+	return true, ""
 }
 func (denyPolicy) AfterProbe(scan.Publication, Measurement) {}
 func (denyPolicy) Release(scan.Publication, Target)         {}

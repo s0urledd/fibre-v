@@ -38,12 +38,8 @@ sampling:
   projection_lookback: 1h
   always_probe: []                  # promise hashes exempt from sampling, e.g. a blob under dispute
 
-backoff:
-  skip_download_after: 3            # consecutive transport failures before DownloadShard is skipped
-  skip_window: 20m
-
 budget_state:
-  # The budgets and backoff above are saved to <data-dir>/probe-budget.json
+  # The budgets above are saved to <data-dir>/probe-budget.json
   # and read back on start, so a restart does not start every validator on a
   # fresh budget. When that file is missing, corrupt or of another version,
   # what was already spent is unknown: nothing is admitted for this long

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestShouldRetryTransport(t *testing.T) {
+func TestShouldRetry(t *testing.T) {
 	settle := time.Now().UTC()
 	msu := settle.Add(10 * time.Minute)
 	p := pub(settle, msu)
@@ -22,6 +22,11 @@ func TestShouldRetryTransport(t *testing.T) {
 	rpcErrDeadline := Measurement{Outcome: OutcomeRPCError, Phase: PhaseInWindow, Download: DownloadResult{Attempted: true, Error: "rpc error: code = DeadlineExceeded"}}
 	refused := Measurement{Outcome: OutcomeTCPRefused, Phase: PhaseInWindow}
 	notFound := Measurement{Outcome: OutcomeNotFound, Phase: PhaseInWindow}
+	// A download that stalled: early in the window it is left to the later
+	// points; in the tail (the last quarter, msu-2m30s on this 10-minute
+	// window) it is the reading the served verdict rests on, so it is retried.
+	tailDeadline := Measurement{Outcome: OutcomeRPCDeadline, Phase: PhaseInWindow, ScheduledAt: msu.Add(-2 * time.Minute)}
+	earlyDeadline := Measurement{Outcome: OutcomeRPCDeadline, Phase: PhaseInWindow, ScheduledAt: settle.Add(time.Minute)}
 	alreadyRetried := tcpTimeout
 	alreadyRetried.Retry = &RetryInfo{Attempts: 2}
 
@@ -43,10 +48,13 @@ func TestShouldRetryTransport(t *testing.T) {
 		{"already retried", alreadyRetried, now, false},
 		{"retry would cross into grace", tcpTimeout, msu.Add(-delay / 2), false},
 		{"retry stays in window", tcpTimeout, msu.Add(-delay - time.Second), true},
+		{"download deadline in the tail", tailDeadline, msu.Add(-time.Minute), true},
+		{"download deadline early in the window", earlyDeadline, msu.Add(-time.Minute), false},
+		{"tail deadline whose retry would cross into grace", tailDeadline, msu.Add(-delay / 2), false},
 	}
 	for _, c := range cases {
-		if got := shouldRetryTransport(c.m, p, cfg, delay, c.now); got != c.want {
-			t.Errorf("%s: shouldRetryTransport = %v, want %v", c.name, got, c.want)
+		if got := shouldRetry(c.m, p, cfg, delay, c.now); got != c.want {
+			t.Errorf("%s: shouldRetry = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

@@ -292,7 +292,7 @@ export type Obligations = {
   unobserved_reachable: number;
   /** ... and it never completed TLS */
   unobserved_unreachable: number;
-  /** ... and we never attempted the download (backoff, budget, a missed slot) */
+  /** ... and we never attempted the download (budget, sampling, a missed slot) */
   unobserved_not_probed: number;
   /** the retention window has not ended: no verdict yet, outside the rate */
   pending: number;

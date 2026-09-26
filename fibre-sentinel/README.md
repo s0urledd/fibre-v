@@ -203,7 +203,9 @@ prober waits `-retry-delay` (20s) and runs the probe once more; the second
 attempt is the recorded measurement and carries the first in its `retry`
 field. The retry is skipped when it would land in a different schedule phase
 than the first attempt. `-retry-transport-timeout=false` disables it. A
-download that started and then ran out of time is not retried.
+download that started and then ran out of time is retried only at a point in
+the last quarter of the retention window, the reading the served verdict
+rests on; earlier in the window the later points show the same thing.
 
 ### Error-class taxonomy
 
@@ -249,7 +251,7 @@ than counting the entries the transaction carries.
 
 ### Load shape
 
-Probes run on `-concurrency` (8) workers across validators, never more than
+Probes run on `-concurrency` (16) workers across validators, never more than
 one connection to a validator at a time. `publications.jsonl`
 is tailed incrementally and a publication is forgotten once every slot of
 its schedule has a row. On a (re)start every elapsed slot without a row gets

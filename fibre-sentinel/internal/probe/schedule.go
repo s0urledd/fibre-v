@@ -267,3 +267,18 @@ func itoa(i int) string {
 	}
 	return string(b[n:])
 }
+
+// EndSegmentDivisor cuts the tail off a retention window: the final
+// 1/EndSegmentDivisor of it, where a HEALTHY reading has to fall before an
+// obligation counts as served. observer/verdict takes the value from here
+// (its EndSegmentDivisor explains the rule), and the prober uses it to give a
+// download that timed out in that tail its one retry (shouldRetry).
+const EndSegmentDivisor = 4.0
+
+// InEndSegment reports whether a probe scheduled at scheduledAt falls in the
+// tail of pub's retention window, drawn from the promise's own settlement
+// time and must_serve_until exactly as the verdict draws it.
+func InEndSegment(scheduledAt time.Time, pub scan.Publication) bool {
+	msu := pub.MustServeUntil
+	return !scheduledAt.Before(msu.Add(-time.Duration(float64(msu.Sub(pub.SettlementTime)) / EndSegmentDivisor)))
+}
