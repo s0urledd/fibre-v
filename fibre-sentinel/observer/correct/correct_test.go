@@ -24,13 +24,22 @@ const (
 // the last two answering NOT_FOUND.
 func fixture(t *testing.T, n int) (*store.Store, time.Time) {
 	t.Helper()
+	return fixtureAt(t, n, time.Now().UTC())
+}
+
+// fixtureAt is fixture with the clock given, so a test that builds two stores
+// to compare them builds both on the same second: each reading the clock on
+// its own put them a second apart whenever the two calls straddled a second
+// boundary, and every timestamp in the comparison with them.
+func fixtureAt(t *testing.T, n int, clock time.Time) (*store.Store, time.Time) {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "observer.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
 
-	now := time.Now().UTC().Truncate(time.Second)
+	now := clock.UTC().Truncate(time.Second)
 	created := now.Add(-2 * time.Hour)
 	msu := created.Add(window)
 
