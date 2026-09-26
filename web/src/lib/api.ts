@@ -340,6 +340,8 @@ export type Validator = {
   signaled_upgrade?: boolean;
   host: string;
   endpoint_since: string | null;
+  /** when it first appeared in x/valaddr's bonded Fibre provider list, whatever host it had then */
+  provider_since?: string;
   /** for a validator with no open endpoint: what was registered, and when it left the bonded list */
   last_host?: string;
   endpoint_closed_at?: string;
@@ -520,6 +522,8 @@ export type Blob = {
   /** voting power whose signature over the promise verified, over the set's total at the promise height */
   attested_voting_power?: number;
   total_voting_power?: number;
+  /** how many of validators_with_rows endorsed the promise; absent before signatures were verified */
+  attested_with_rows?: number;
   promise_hash: string;
   commitment: string;
   namespace: string;

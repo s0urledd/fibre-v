@@ -1,18 +1,13 @@
 import { type Validator, int } from "@/lib/api";
 
 /**
- * Can Fibre accept a blob at all? A MsgPayForFibre settles only with the
- * signatures of validators holding two thirds of voting power
- * (attested >= floor(total * 2 / 3), x/fibre), and a validator can sign only
- * if its Fibre server is up and registered. So until hosts carrying two
- * thirds of stake answer, nobody can publish, and every other figure on the
- * site stays empty for that reason rather than for want of publishers.
- *
- * "Ready" is this observer's newest handshake with the registered host: it
- * answered TLS with a certificate endorsed by the validator's consensus key.
- * A host that answers with any other certificate is not counted, because a
- * publisher's client will not upload to it. Necessary for signing, not proof
- * of it: a readiness gauge, not a promise that an upload would pass.
+ * How much of the bonded stake has a Fibre provider registered. A
+ * MsgPayForFibre settles only with signatures from validators holding at
+ * least floor(2/3 of total voting power) (x/fibre, keeper/msg_server.go), and
+ * a validator signs only through a Fibre server it has registered in
+ * x/valaddr. Both halves are the chain's own records: the bonded set from
+ * x/staking, the providers from x/valaddr AllBondedFibreProviders. Whether a
+ * host answers is this observer's check, and stays in the table.
  */
 
 /** the endpoint's standing, from the API's endpoint_state when it sends one */
@@ -31,17 +26,6 @@ export function endpointState(v: Validator): EndpointState {
   return "unreachable";
 }
 
-/** answering now, whatever the certificate */
-export function answering(v: Validator): boolean {
-  const s = endpointState(v);
-  return s === "reachable" || s === "flaky";
-}
-
-/** answering with the validator's own certificate: what the ⅔ figure counts */
-export function ready(v: Validator): boolean {
-  return answering(v) && v.identity_status === "verified";
-}
-
 export function bondedOf(rows: Validator[]): Validator[] {
   return rows.filter((v) => !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED"));
 }
@@ -50,36 +34,31 @@ export function readiness(rows: Validator[]) {
   const bonded = bondedOf(rows);
   const total = bonded.reduce((s, v) => s + (v.voting_power || 0), 0);
   const registered = bonded.filter((v) => !!v.host);
-  const reachable = registered.filter(ready);
   const regPower = registered.reduce((s, v) => s + (v.voting_power || 0), 0);
-  const reachPower = reachable.reduce((s, v) => s + (v.voting_power || 0), 0);
   const quorum = Math.floor((total * 2) / 3);
   const pct = (n: number) => (total > 0 ? `${((100 * n) / total).toFixed(1)}%` : "—");
-  return { bonded, total, registered, reachable, regPower, reachPower, quorum, ready: total > 0 && reachPower >= quorum, pct };
+  return { bonded, total, registered, regPower, quorum, pct };
 }
 
-/** the answer, the meter with its ⅔ tick, and the key */
+/** the share, the meter with its ⅔ tick, and the rest */
 export function ReadyAnswer({ rows, headingId = "readiness-h" }: { rows: Validator[]; headingId?: string }) {
   const r = readiness(rows);
   if (r.total === 0) return null;
-  const { pct, reachPower, regPower, quorum, total } = r;
+  const { pct, regPower, quorum, total } = r;
   const w = (n: number) => `${Math.min(100, (100 * n) / total)}%`;
   return (
     <>
-      <h2 id={headingId}>Fibre quorum</h2>
-      <p className="ready-answer" title="Ready: a registered host that answers TLS with a certificate endorsed by its validator's consensus key. A blob settles with signatures from ⅔ of stake.">
-        <b>{r.ready ? "Reached" : "Not reached"}</b> · {pct(reachPower)} of stake ready
+      <h2 id={headingId}>Stake with a Fibre provider</h2>
+      <p className="ready-answer" title="Bonded validators with a Fibre provider registered in x/valaddr, by voting power. MsgPayForFibre needs signatures from validators holding ⅔ of it.">
+        <b>{pct(regPower)}</b> of voting power · {int(r.registered.length)} of {int(r.bonded.length)} validators
       </p>
-      <div className="meter ready-meter" role="img"
-        aria-label={`${pct(reachPower)} of stake ready, ${pct(regPower)} registered, ${pct(quorum)} needed`}>
-        <i style={{ width: w(reachPower) }} />
-        <b className="reg" style={{ left: w(reachPower), width: `calc(${w(regPower)} - ${w(reachPower)})` }} />
+      <div className="meter ready-meter" role="img" aria-label={`${pct(regPower)} of stake with a Fibre provider, ${pct(quorum)} needed`}>
+        <i style={{ width: w(regPower) }} />
         <span className="tick" style={{ left: w(quorum) }} />
         <span className="tl2" style={{ left: w(quorum) }}>⅔ needed</span>
       </div>
       <p className="sub ready-key">
-        <span title="Registered, but not answering, or answering with a certificate a client will not accept"><i className="sw reg" /> registered, not ready {pct(regPower - reachPower)} · {int(r.registered.length - r.reachable.length)}</span>
-        <span><i className="sw p" /> no Fibre host {pct(total - regPower)} · {int(r.bonded.length - r.registered.length)}</span>
+        <span><i className="sw p" /> no Fibre provider {pct(total - regPower)} · {int(r.bonded.length - r.registered.length)}</span>
       </p>
     </>
   );

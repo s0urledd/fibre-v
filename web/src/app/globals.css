@@ -318,9 +318,9 @@ td a.plain:hover, td a.fault:hover { text-decoration: underline; }
 @media (min-width: 900px) {
   .vt { table-layout: fixed; }
   .vt th:first-child { width: 19%; }
-  /* widths follow what the cells hold: the one-digit counts give room to the provider names */
+  /* widths follow what the cells hold */
   .vt .c-ep { width: 12%; } .vt .c-host { width: 16%; } .vt .c-power { width: 12%; }
-  .vt .c-rate { width: 13%; } .vt .c-broken { width: 7.5%; } .vt .c-pend { width: 7.5%; } .vt .c-end { width: 13%; }
+  .vt .c-end { width: 13%; } .vt .c-last { width: 14%; } .vt .c-since { width: 14%; }
   .vt td:not(:first-child) { overflow: hidden; text-overflow: ellipsis; }
   .vt .hosting { max-width: 100%; vertical-align: middle; }
   .vt .hosting > span:not(.flag):not(.flag-none):not(.cc) { overflow: hidden; text-overflow: ellipsis; }
@@ -740,6 +740,11 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 .hostmap .fm-side .ready-answer { font-size: var(--t-cell); }
 .hostmap .fm-side .ready-meter { margin-bottom: 26px; }
 /* the obligation outcomes under the quorum panel */
+/* the newest settlement beside the map: a label and its value on each line */
+.latest { display: grid; margin: 10px 0 0; }
+.latest > div { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line-soft); font-size: var(--t-cell); }
+.latest dt { color: var(--text-2); }
+.latest dd { margin: 0; color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
 .fm-aside { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
 .fm-aside .key.okey { grid-template-columns: repeat(4, auto); justify-content: space-between; gap: 6px 8px; }
 .fm-aside .blobs .soft { display: block; margin: 4px 0 0; }

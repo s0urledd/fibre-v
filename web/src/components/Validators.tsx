@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { type Validator, int, pctOf, ago, utcWord, shortMid, MIN_RATED, provisionalNow, rateTone } from "@/lib/api";
+import { type Validator, int, pctOf, ago, utcWord, shortMid, MIN_RATED } from "@/lib/api";
 import Avatar from "./Avatar";
 import Info from "./Info";
 import { HostingCell } from "./Hosting";
@@ -11,11 +11,10 @@ import { isOperatorAccount } from "@/lib/addr";
 
 /**
  * The validators table: who, whether the endpoint answers right now, how
- * much stake, what happened to the obligations in the selected period, and
- * when the newest evidence is from. Default order is voting power,
- * descending, which is the chain's own order and never a performance rank;
- * the filters are for inspection. Throughput, per-point rates and the raw
- * rows are on the validator's page.
+ * much stake, and what the chain records of its endorsements. Default order
+ * is voting power, descending, which is the chain's own order and never a
+ * performance rank; the filters are for inspection. Serving, throughput and
+ * the raw rows are on the validator's page.
  */
 
 const bonded = (v: Validator) => !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED");
@@ -27,35 +26,52 @@ function isSelf(v: Validator): boolean {
   return [v.address, v.cons_address, v.operator_address].some((a) => !!a && a.toLowerCase() === SELF_VALIDATOR);
 }
 
-type Filter = "all" | "broken" | "unreachable" | "nohost";
-type SortKey = "power" | "kept" | "broken" | "pending" | "signed" | "seen";
+type Filter = "all" | "unreachable" | "nohost";
+type SortKey = "power" | "signed" | "last" | "since";
+
+/**
+ * A rejected certificate, in the words of the Fibre TLS identity spec
+ * (specs/src/fibre_tls_identity.md): the reason a client refuses it. The
+ * verifier splits the spec's outside_validity_window into expired and not yet
+ * valid; no_certificate is a peer that sent none, before the spec's checks.
+ */
+function certificate(reason: string | undefined): { word: string; spec: string } {
+  switch (reason) {
+    case "cert_expired": return { word: "Certificate expired", spec: "outside_validity_window" };
+    case "cert_not_yet_valid": return { word: "Certificate not yet valid", spec: "outside_validity_window" };
+    case "no_certificate": return { word: "No certificate", spec: "" };
+    case undefined: case "": return { word: "Wrong certificate", spec: "" };
+    default: return { word: "Wrong certificate", spec: reason };
+  }
+}
 
 /** the endpoint right now: the chain's own words first, then the newest handshake */
 export function endpoint(v: Validator): { dot: string; word: string; title: string; warn?: boolean } {
   if (v.jailed) return { dot: "none", word: "Jailed", title: "Jailed by the chain: out of the bonded provider list, so no handshake is attempted. Shards it signed for are still owed." };
   if (!bonded(v)) return { dot: "none", word: "Not bonded", title: `${v.bond_status!.replace("BOND_STATUS_", "").toLowerCase()} by the chain: out of the bonded provider list, so no handshake is attempted.` };
-  if (!v.host) return { dot: "none", word: "No endpoint", title: v.last_host ? `No open Fibre endpoint. Last registered ${v.last_host}; the registration stays on chain.` : "No Fibre endpoint registered in x/valaddr. Not a fault: nothing can be asked of it." };
+  if (!v.host) return { dot: "none", word: "No endpoint", title: v.last_host ? `No open Fibre endpoint. Last registered ${v.last_host}; the registration stays on chain.` : "No Fibre provider registered in x/valaddr." };
   if (v.reachable === null) return { dot: "none", word: "Not checked yet", title: `${v.host}: no handshake attempted yet.` };
   const checked = v.last_seen_at ? ` · checked ${ago(v.last_seen_at)}` : "";
   if (v.reachable === false) return { dot: "hold", word: "Unreachable", title: `${v.host}: no TLS handshake in the last two checks${v.last_reachable_at ? `; last reachable ${ago(v.last_reachable_at)}` : ""}${checked}`, warn: true };
   if (v.endpoint_state === "flaky") return { dot: "flaky", word: "Flaky", title: `${v.host}: the last check failed, the one before passed${checked}` };
-  if (v.identity_status && v.identity_status !== "verified") {
-    const w = v.identity_status === "expired" ? "Certificate expired" : v.identity_status === "mismatch" ? "Wrong certificate" : v.identity_status === "no_tls" ? "No TLS" : "Reachable, unverified";
-    return { dot: "hold", word: w, title: v.identity_reason || `${v.host} answered, but its certificate is not one a client would accept. Not a fault.`, warn: true };
+  if (v.identity_status === "no_tls") return { dot: "hold", word: "No TLS", title: `${v.host}: answered TCP, but no TLS handshake completed${checked}`, warn: true };
+  if (v.identity_status === "expired" || v.identity_status === "mismatch") {
+    const c = certificate(v.identity_reason);
+    return { dot: "hold", word: c.word, title: `${v.host}: answered TLS with a certificate a client rejects${c.spec ? ` (${c.spec}, Fibre TLS identity)` : ""}${checked}`, warn: true };
   }
+  if (v.identity_status && v.identity_status !== "verified") return { dot: "hold", word: "Reachable, unverified", title: `${v.host}: answered TLS; no certificate check recorded yet${checked}`, warn: true };
   return { dot: "ok", word: "Reachable", title: `${v.host}: TLS with this validator's key${v.confirmed_from ? ", from a second location" : ""}${checked}` };
 }
 
+const time = (s: string | null | undefined) => (s ? new Date(s).getTime() : null);
+
 function sortValue(v: Validator, k: SortKey): number | null {
-  const o = v.obligations;
   switch (k) {
     case "power": return v.voting_power;
-    case "kept": { const d = o ? o.served + o.broken : 0; return d >= MIN_RATED ? o.served / d : null; }
-    case "broken": return o?.broken ?? 0;
-    case "pending": return o && o.total > 0 ? o.pending : null;
-    // Signing is descriptive, and below the sample floor it is not ranked either.
+    // Below the sample floor a share is shown, not ranked.
     case "signed": { const s = v.signing; return s && s.assigned >= MIN_RATED ? s.signed / s.assigned : null; }
-    case "seen": return v.last_seen_at ? new Date(v.last_seen_at).getTime() : null;
+    case "last": return time(v.signing?.last_endorsed_at);
+    case "since": return time(v.provider_since);
   }
 }
 
@@ -67,7 +83,6 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
 
   const counts = useMemo(() => ({
     all: rows.length,
-    broken: rows.filter((v) => (v.obligations?.broken ?? 0) > 0).length,
     unreachable: rows.filter((v) => bonded(v) && !!v.host && v.reachable === false).length,
     nohost: rows.filter((v) => bonded(v) && !v.host).length,
   }), [rows]);
@@ -75,15 +90,10 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   // The hosting column only exists while the lookup is on (observer/hosting):
   // a column of dashes would read as "nobody knows", which is not what off means.
   const showHosting = useMemo(() => rows.some((v) => !!v.hosting), [rows]);
-  // The score columns are the product: they stay on screen from the first visit, dashes
-  // included, so a reader sees what Tensile measures before the first blob settles.
-  const showScores = true;
   const needle = q.trim().toLowerCase();
   const list = useMemo(() => {
     const pool = rows.filter((v) => {
-      const o = v.obligations;
       switch (filter) {
-        case "broken": return (o?.broken ?? 0) > 0;
         case "unreachable": return bonded(v) && !!v.host && v.reachable === false;
         case "nohost": return bonded(v) && !v.host;
         default: return true;
@@ -121,50 +131,31 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   );
   const href = (v: Validator, hash = "") => `/validator/?addr=${v.address}${win !== "24h" ? `&window=${win}` : ""}${hash}`;
 
-  // The service rate cell, in one form whatever the sample: the share and
-  // the counts behind it, so 100% · 9/9 shows its own size. A dash with the
-  // reason in its title before anything is assessed. The sample floor only
-  // decides ranking (sortValue), never whether the figure is printed.
-  const rate = (v: Validator) => {
-    const o = v.obligations;
-    if (!o || o.total === 0) return <span className="muted" title="No observations: the settled promises prove no serving obligation for this validator in this period.">—</span>;
-    const d = o.served + o.broken;
-    if (d === 0) return <span className="muted" title={`Awaiting results: ${int(o.total)} obligation${o.total === 1 ? "" : "s"} in this period, none assessed yet (pending or inconclusive).`}>—</span>;
-    const counts = `${int(o.served)} of ${int(d)} assessed obligations kept`;
-    return <span className={"rate share " + (rateTone(o.served, d) ?? "")} title={counts}>{pctOf(o.served, d)}</span>;
-  };
-  // The signing cell, in the service rate's form: share and counts, a dash
-  // with its reason when nothing was assigned. Never a fault colour: a
-  // missing signature is the two-thirds quorum closing, not a missed duty.
+  // The endorsement share, with the counts behind it in the title; a dash
+  // with its reason when nothing was assigned. Never a fault colour.
   const signed = (v: Validator) => {
     const s = v.signing;
     if (!s || s.assigned === 0) return <span className="muted" title={s && s.unknown > 0 ? `${int(s.unknown)} assigned promise${s.unknown === 1 ? "" : "s"} recorded before signatures were verified: nothing to say either way.` : "No settled promise assigned this validator rows in this period."}>—</span>;
-    const counts = `${int(s.signed)} of ${int(s.assigned)} promises endorsed`;
-    return <span className="rate share endorsed" title={counts}>{pctOf(s.signed, s.assigned)}</span>;
+    return <span className="rate share endorsed" title={`${int(s.signed)} of ${int(s.assigned)} settled promises endorsed`}>{pctOf(s.signed, s.assigned)}</span>;
   };
-  const count = (v: Validator, n: number, kind: "broken" | "pending") => {
-    const o = v.obligations;
-    if (!o || o.total === 0) return <span className="muted">—</span>;
-    if (n === 0) return <span className="muted">0</span>;
-    if (kind === "broken") {
-      // Counted either way; the badge says how many are still settling.
-      const prov = provisionalNow(v.provisional_faults);
-      return <><Link className="fault" href={href(v, "#evidence")} title={`${int(n)} obligation${n === 1 ? "" : "s"} broken: the validator answered and did not hand over a shard it had signed for. Opens the evidence.`}>{int(n)}</Link>
-        {prov > 0 && <span className="ours" title={`${int(prov)} of these rest only on failed probes younger than the settling period. Counted now; final unless evidence still arriving withdraws them.`}>{prov === n ? "provisional" : `${int(prov)} provisional`}</span>}</>;
-    }
-    return <Link className="plain" href={href(v, "#outcomes")} title={`${int(n)} obligation${n === 1 ? "" : "s"} whose retention window has not ended: no verdict yet.`}>{int(n)}</Link>;
+  const last = (v: Validator) => {
+    const at = v.signing?.last_endorsed_at;
+    return at ? <span title={utcWord(at)}>{ago(at)}</span> : <span className="muted">—</span>;
+  };
+  const since = (v: Validator) => {
+    const at = v.provider_since;
+    return at ? <span title={utcWord(at)}>{new Date(at).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}</span> : <span className="muted">—</span>;
   };
 
   return (
     <section>
       <div className="vhead">
-        <div><h2>Validators</h2><p className="sub">{notLive ? "Bonded set" : "Reachability and service, selected period"}</p></div>
+        <div><h2>Validators</h2><p className="sub">{notLive ? "Bonded set" : "Endorsements over the selected period"}</p></div>
         <div className="tools">
           <label className="search"><span className="sr-only">Search validators</span><input type="search" placeholder="Search name or address" value={q} onChange={(e) => setQ(e.target.value)} /></label>
           <label className="select"><span className="sr-only">Filter</span>
             <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)}>
               <option value="all">All validators · {counts.all}</option>
-              <option value="broken">Broken obligations · {counts.broken}</option>
               <option value="unreachable">Unreachable now · {counts.unreachable}</option>
               <option value="nohost">No endpoint · {counts.nohost}</option>
             </select>
@@ -179,26 +170,23 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               <th className="c-ep" title="The newest handshake with the registered endpoint; the chain's own words (jailed, not bonded) come first.">Endpoint now</th>
               {showHosting && <th className="c-host" title="Network provider and country of the endpoint. Hover a cell for the network (AS) and address.">Hosting</th>}
               <Th col="c-power" k="power" dflt={-1} label="Voting power" title="From the staking module. The default order, and never a performance rank." />
-              {showScores && <Th col="c-rate" k="kept" dflt={1} label="Service rate" info="Share of assessed obligations kept: the endorsed shard was served and verified near the end of its retention window." />}
-              {showScores && <Th col="c-broken" k="broken" dflt={-1} label="Broken" info="Endorsed shards that were missing or failed verification before their retention window ended." />}
-              {showScores && <Th col="c-pend" k="pending" dflt={-1} label="Pending" info="Obligations whose retention window has not ended yet." />}
-              {showScores && <Th col="c-end" k="signed" dflt={-1} label="Endorsed ⅔" info="Share of assigned promises that carry this validator’s endorsement. A blob settles once ⅔ of stake has endorsed it." />}
+              <Th col="c-end" k="signed" dflt={-1} label="Endorsements" info="Share of the settled promises assigned to this validator that carry its signature (validator_signatures in MsgPayForFibre). A promise settles once validators holding ⅔ of voting power have signed it." />
+              <Th col="c-last" k="last" dflt={-1} label="Last endorsement" info="The newest settled promise that carries this validator’s signature, whatever the selected period." />
+              <Th col="c-since" k="since" dflt={1} label="Provider since" info="When this validator first appeared in x/valaddr’s list of bonded Fibre providers, read every minute. A new host or a return to the bonded set does not move it." />
             </tr>
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr className="empty"><td colSpan={2 + (showHosting ? 1 : 0) + (showScores ? 4 : 0)}>
+              <tr className="empty"><td colSpan={5 + (showHosting ? 1 : 0)}>
                 {loading && rows.length === 0 ? "Loading…"
                   : rows.length === 0 ? "No validators on record yet."
                   : needle ? `Nothing matches “${q}”.`
-                  : filter === "broken" ? "No broken obligation in this period."
                   : filter === "unreachable" ? "Every registered endpoint answered its newest check."
-                  : "Every bonded validator has registered a Fibre endpoint."}
+                  : "Every bonded validator has registered a Fibre provider."}
               </td></tr>
             )}
             {list.map((v) => {
               const e = endpoint(v);
-              const o = v.obligations;
               return (
                 // A click that lands on a titled figure (above the cover link) opens the page too; links keep their own target.
                 <tr key={v.address} className={e.warn ? "warn" : undefined}
@@ -219,12 +207,9 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                   <td><Link className="rowcover" href={href(v)} tabIndex={-1} aria-hidden="true" /><span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span></td>
                   {showHosting && <td><HostingCell h={v.hosting} /></td>}
                   <td className="num">{int(v.voting_power)}</td>
-                  {showScores && <>
-                    <td className="num">{rate(v)}</td>
-                    <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>
-                    <td className="num">{count(v, o?.pending ?? 0, "pending")}</td>
-                    <td className="num soft-col">{signed(v)}</td>
-                  </>}
+                  <td className="num soft-col">{signed(v)}</td>
+                  <td className="num">{last(v)}</td>
+                  <td className="num">{since(v)}</td>
                 </tr>
               );
             })}
