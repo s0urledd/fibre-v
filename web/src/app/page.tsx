@@ -31,15 +31,6 @@ function Overview() {
   const o = N?.obligations;
   const decided = o ? o.served + o.broken : 0;
   const measuring = !!N && !notLive && !!o && o.total > 0 && decided < MIN_RATED && o.pending > 0;
-  // Fibre provider registration among the bonded set, by count and by stake.
-  const reg = (() => {
-    const bonded = rows.filter((v) => !v.jailed && (!v.bond_status || v.bond_status === "BOND_STATUS_BONDED"));
-    const withHost = bonded.filter((v) => !!v.host);
-    const power = bonded.reduce((s, v) => s + (v.voting_power || 0), 0);
-    const hosted = withHost.reduce((s, v) => s + (v.voting_power || 0), 0);
-    return { count: withHost.length, of: bonded.length, share: power > 0 ? pctOf(hosted, power) : "—" };
-  })();
-
   // The newest blob, whatever the period: the one whose MsgPayForFibre settled
   // last, as the chain recorded it. It opens the blob page.
   const last = newest.data?.blobs?.[0];
@@ -72,15 +63,9 @@ function Overview() {
 
       {vals.data && <HostMap rows={rows} showReadiness={!!meta?.fibre_active} aside={latest || undefined} />}
 
-      {/* the period drives the figures below it, not the map, the stake or the latest blob */}
+      {/* the period drives every card below it; the map, the stake and the latest blob are now */}
       <div className="period-row"><WindowSwitch value={win} onChange={setWin} /></div>
       <Metrics>
-        <Metric label="Fibre providers"
-          value={!vals.data ? "—" : int(reg.count)}
-          den={vals.data && reg.of > 0 ? int(reg.of) : undefined}
-          tone={!vals.data || reg.count === 0 ? "absent" : undefined}
-          title="Bonded validators with a Fibre provider registered in x/valaddr, and the share of bonded voting power they hold. Now, whatever the period."
-          help={!vals.data ? " " : reg.count === 0 ? (notLive ? " " : "none yet") : `${reg.share} of stake`} />
         <Metric label="Blobs"
           value={none ? "—" : int(M.blobs)}
           tone={none || M.settlements === 0 ? "absent" : undefined}
@@ -95,7 +80,12 @@ function Overview() {
           value={none ? "—" : tia(M.fees_settled_utia)}
           tone={none || M.settlements === 0 ? "absent" : undefined}
           title="Charged to escrow for the settled promises: 650,000 + 45,000 × ⌈blob_size / 256 KiB⌉ utia each (x/fibre)."
-          help={none ? " " : `${int(M.publishers_active)} publisher${M.publishers_active === 1 ? "" : "s"}`} />
+          help={none ? " " : M.paid_per_mib_utia == null ? "none in this period" : `${tia(M.paid_per_mib_utia)} per MiB`} />
+        <Metric label="Publishers"
+          value={none ? "—" : int(M.publishers_active)}
+          tone={none || M.publishers_active === 0 ? "absent" : undefined}
+          title="Distinct escrow owners whose payment promises settled in the period: the account x/fibre charges, derived from the promise's signer public key."
+          help={none ? " " : M.publishers_active === 0 ? "none in this period" : "escrow owners charged"} />
         <Metric label="Payment promise timeouts"
           value={none ? "—" : int(M.timeouts)}
           tone={none ? "absent" : undefined}
