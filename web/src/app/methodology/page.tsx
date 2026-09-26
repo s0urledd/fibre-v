@@ -38,16 +38,17 @@ export default function Methodology() {
       <Legend />
 
       <h2 id="signing">Endorsements</h2>
-      <p>A validator <em>endorses</em> a payment promise by signing it after storing its shard. <strong>Endorsed ⅔</strong> is the settled promises carrying a validator&rsquo;s verified endorsement over the promises that assigned it rows: how often it made the two-thirds quorum. The Blobs page shows each promise&rsquo;s endorsed share of stake against the quorum of <code>floor(total &times; 2 / 3)</code>. Neither is a duty: a missing endorsement is unproven, not a fault.</p>
+      <p>A validator <em>endorses</em> a payment promise by signing it after storing its shard. <strong>Endorsed ⅔</strong> is the settled promises carrying a validator&rsquo;s verified endorsement over the promises that assigned it rows while it had a Fibre host registered (a promise from before its host existed is one it could not endorse, and is left out): how often it made the two-thirds quorum. The Blobs page shows each promise&rsquo;s endorsed share of stake against the quorum of <code>floor(total &times; 2 / 3)</code>. Neither is a duty: a missing endorsement is unproven, not a fault.</p>
 
       <h2 id="rates">Rates</h2>
       <ul>
         <li><strong>Service rate</strong> is counted per obligation (one validator, one shard): <em>kept</em> if no probe faulted and a probe in the last quarter of the window returned the shard, <em>broken</em> if any probe faulted. The rate is kept over kept plus broken, always shown with its counts, and not ranked below twenty obligations.</li>
-        <li><strong>Not in the rate</strong>, counted beside it: unattested, unreachable, no registered host, lapsed or wrong certificate, server errors, rate limits, rows belonging to another promise over the same blob, and obligations whose end of window was not observed.</li>
+        <li><strong>Not in the rate</strong>, counted beside it: not endorsed, unreachable, no registered host, lapsed or wrong certificate, server errors, rate limits, rows belonging to another promise over the same blob, and obligations whose end of window was not observed.</li>
+        <li><strong>Pending</strong> is an obligation whose retention window has not ended. After it ends, an obligation on a blob the load policy drew out of its sample is shown as <strong>sampled out</strong>, and one without a reading near the end of the window as <strong>not observed</strong>; neither counts either way.</li>
         <li><strong>Provisional:</strong> a fault younger than 30 minutes is counted but marked, because it can still be withdrawn (a probe point that turns out to be an observer-wide failure, or the second location clearing it).</li>
         <li><strong>Reachability</strong> is completed handshakes over attempts, one every five minutes per endpoint. <strong>Flaky</strong> means one failed check after a success, still counted as reachable; two in a row is unreachable.</li>
         <li><strong>Blob availability</strong>: at the latest in-window point, do the rows that came back cover the rows needed to rebuild the blob (4096 of 16384 for version 0).</li>
-        <li><strong>Throughput</strong> is the median bytes per second of the download step over healthy probes. No threshold is attached.</li>
+        <li><strong>Throughput</strong> is the median bytes per second of the download step over healthy probes of shards of 2 MiB or more, shown from three of them. A smaller shard&rsquo;s download is mostly round trips and says nothing about bandwidth. No threshold is attached.</li>
         <li>Every rate is a ratio of sums, never an average of rates, and carries a 95% upper bound on the fault rate drawn around the obligation count.</li>
       </ul>
 

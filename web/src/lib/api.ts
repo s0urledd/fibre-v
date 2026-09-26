@@ -303,6 +303,23 @@ export type Obligations = {
 };
 
 /** end-unobserved + never observed + held: the obligations the rate does not speak for, pending aside */
+/**
+ * What is left out of the rate after the window closed, split in the two
+ * reasons a reader needs apart: sampled out by the probe budget (a design
+ * choice, published and checkable) and everything else (not observed).
+ */
+export function leftOut(o: Obligations | null | undefined): { sampled: number; notObserved: number } {
+  if (!o) return { sampled: 0, notObserved: 0 };
+  const sampled = o.unobserved_not_probed ?? 0;
+  return { sampled, notObserved: Math.max(0, undecided(o) - sampled) };
+}
+
+/** "2,023 sampled out · 1 not observed", or "" when nothing is left out */
+export function leftOutText(o: Obligations | null | undefined): string {
+  const { sampled, notObserved } = leftOut(o);
+  return [sampled > 0 ? `${int(sampled)} sampled out` : "", notObserved > 0 ? `${int(notObserved)} not observed` : ""].filter(Boolean).join(" · ");
+}
+
 export function undecided(o: Obligations | null | undefined): number {
   if (!o) return 0;
   return o.end_unobserved + o.unobserved + (o.held_param_unverified ?? 0);
