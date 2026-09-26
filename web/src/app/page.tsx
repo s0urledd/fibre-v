@@ -85,8 +85,7 @@ function Overview() {
           value={none ? "—" : int(M.blobs)}
           tone={none || M.settlements === 0 ? "absent" : undefined}
           title="Distinct blobs, by BlobID (blob_version and commitment), whose MsgPayForFibre settled in the period. A blob uploaded and paid for twice is one blob and two settlements."
-          help={none ? " " : M.settlements === 0 ? "none in this period"
-            : `${int(M.settlements)} settlement${M.settlements === 1 ? "" : "s"}${last ? ` · last ${ago(last.settlement_time)}` : ""}`} />
+          help={none ? " " : M.settlements === 0 ? "none in this period" : `${int(M.settlements)} settlement${M.settlements === 1 ? "" : "s"}`} />
         <Metric label="Upload size"
           value={none ? "—" : bytes(M.bytes)}
           tone={none || M.settlements === 0 ? "absent" : undefined}
