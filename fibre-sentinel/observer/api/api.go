@@ -2610,14 +2610,14 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		v.EndpointSince = &since
 	}
 	// The first time each validator appeared in the list, over every row.
-	frows, err := db.QueryContext(ctx, `SELECT validator_cons_address, MIN(first_seen_at) FROM endpoints GROUP BY validator_cons_address`)
+	prows, err := db.QueryContext(ctx, `SELECT validator_cons_address, MIN(first_seen_at) FROM endpoints GROUP BY validator_cons_address`)
 	if err != nil {
 		return nil, err
 	}
-	for frows.Next() {
+	for prows.Next() {
 		var cons, first string
-		if err := frows.Scan(&cons, &first); err != nil {
-			frows.Close()
+		if err := prows.Scan(&cons, &first); err != nil {
+			prows.Close()
 			return nil, err
 		}
 		hexAddr, err := consHex(cons)
@@ -2630,8 +2630,8 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		}
 		v.ProviderSince = &first
 	}
-	frows.Close()
-	if err := frows.Err(); err != nil {
+	prows.Close()
+	if err := prows.Err(); err != nil {
 		return nil, err
 	}
 	// The newest closed endpoint row, for validators with no open one: what
