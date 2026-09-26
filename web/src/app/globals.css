@@ -330,6 +330,8 @@ td a.plain:hover, td a.fault:hover { text-decoration: underline; }
 .pair > .den { text-align: left; font-size: inherit; margin: 0; }
 /* the endorsement share describes, it does not rate: regular weight, quieter */
 .pair.endorsed > .rate { font-weight: 400; color: var(--text-2); }
+.rate.share { display: inline-block; min-width: 5ch; text-align: right; }
+.rate.share.endorsed { font-weight: 400; color: var(--text-2); }
 .vt tbody tr { position: relative; }
 .vt tbody tr:not(.empty) { cursor: pointer; }
 .vt .rowcover { position: absolute; inset: 0; z-index: 0; }

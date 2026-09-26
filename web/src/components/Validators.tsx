@@ -126,7 +126,8 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     if (!o || o.total === 0) return <span className="muted" title="No observations: the settled promises prove no serving obligation for this validator in this period.">—</span>;
     const d = o.served + o.broken;
     if (d === 0) return <span className="muted" title={`Awaiting results: ${int(o.total)} obligation${o.total === 1 ? "" : "s"} in this period, none assessed yet (pending or inconclusive).`}>—</span>;
-    return <span title={d < MIN_RATED ? `Fewer than ${MIN_RATED} assessed obligations: shown, not ranked.` : undefined}><span className="pair"><span className={"rate " + (rateTone(o.served, d) ?? "")}>{pctOf(o.served, d)}</span><span className="den">{int(o.served)}/{int(d)}</span></span></span>;
+    const counts = `${int(o.served)} of ${int(d)} assessed obligations kept`;
+    return <span className={"rate share " + (rateTone(o.served, d) ?? "")} title={d < MIN_RATED ? `${counts}. Fewer than ${MIN_RATED}: shown, not ranked.` : counts}>{pctOf(o.served, d)}</span>;
   };
   // The signing cell, in the service rate's form: share and counts, a dash
   // with its reason when nothing was assigned. Never a fault colour: a
@@ -135,8 +136,9 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     const s = v.signing;
     if (!s || s.assigned === 0) return <span className="muted" title={s && s.unknown > 0 ? `${int(s.unknown)} assigned promise${s.unknown === 1 ? "" : "s"} recorded before signatures were verified: nothing to say either way.` : "No settled promise assigned this validator rows in this period."}>—</span>;
     const noHost = s.no_host ? ` ${int(s.no_host)} promise${s.no_host === 1 ? "" : "s"} from before its Fibre host was registered are left out: it could not endorse them.` : "";
-    const why = `Endorsed ${int(s.signed)} of ${int(s.assigned)} promises. Publishers stop at ⅔ of stake, so a low rate is normal, not a fault.${noHost}`;
-    return <span title={s.assigned < MIN_RATED ? `${why} Fewer than ${MIN_RATED} promises: shown, not ranked.` : why}><span className="pair endorsed"><span className="rate">{pctOf(s.signed, s.assigned)}</span><span className="den">{int(s.signed)}/{int(s.assigned)}</span></span></span>;
+    const last = s.last_endorsed_at ? ` Last endorsement ${ago(s.last_endorsed_at)}.` : "";
+    const why = `Endorsed ${int(s.signed)} of ${int(s.assigned)} promises.${last} Publishers stop at ⅔ of stake, so a low rate is normal, not a fault.${noHost}`;
+    return <span className="rate share endorsed" title={s.assigned < MIN_RATED ? `${why} Fewer than ${MIN_RATED} promises: shown, not ranked.` : why}>{pctOf(s.signed, s.assigned)}</span>;
   };
   const count = (v: Validator, n: number, kind: "broken" | "pending") => {
     const o = v.obligations;
