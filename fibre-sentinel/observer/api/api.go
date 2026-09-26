@@ -2355,6 +2355,11 @@ type validatorRow struct {
 	SignaledUpgrade *bool   `json:"signaled_upgrade,omitempty"`
 	Host            string  `json:"host"`
 	EndpointSince   *string `json:"endpoint_since"`
+	// ProviderSince is when this validator first appeared in the bonded
+	// Fibre provider list (x/valaddr AllBondedFibreProviders, polled every
+	// minute), whatever host it had then: unlike EndpointSince, a new host or
+	// a return to the bonded set does not move it.
+	ProviderSince *string `json:"provider_since,omitempty"`
 	// LastHost and EndpointClosedAt describe the newest endpoint row that
 	// has closed, for a validator with no open one: the host this observer
 	// last saw registered and when it stopped appearing in the bonded
@@ -2603,6 +2608,31 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		v.ConsAddress, v.Host = e.ValidatorConsAddress, e.Host
 		since := e.FirstSeenAt
 		v.EndpointSince = &since
+	}
+	// The first time each validator appeared in the list, over every row.
+	prows, err := db.QueryContext(ctx, `SELECT validator_cons_address, MIN(first_seen_at) FROM endpoints GROUP BY validator_cons_address`)
+	if err != nil {
+		return nil, err
+	}
+	for prows.Next() {
+		var cons, first string
+		if err := prows.Scan(&cons, &first); err != nil {
+			prows.Close()
+			return nil, err
+		}
+		hexAddr, err := consHex(cons)
+		if err != nil {
+			continue
+		}
+		v := get(hexAddr)
+		if v.ConsAddress == "" {
+			v.ConsAddress = cons
+		}
+		v.ProviderSince = &first
+	}
+	prows.Close()
+	if err := prows.Err(); err != nil {
+		return nil, err
 	}
 	// The newest closed endpoint row, for validators with no open one: what
 	// was registered and when it left the bonded list. Ordered so the newest
@@ -3492,11 +3522,15 @@ type blobRow struct {
 	// AttestedPower is the voting power whose signature over the promise
 	// verified, over TotalPower, the set's total at the promise height; absent
 	// for a record from before signatures were verified.
-	AttestedPower   *int64       `json:"attested_voting_power,omitempty"`
-	TotalPower      int64        `json:"total_voting_power,omitempty"`
-	ProbeCount      int64        `json:"probe_count"`
-	Classes         classCounts  `json:"classes"`
-	Reconstructable *reconstruct `json:"reconstructable"`
+	AttestedPower *int64 `json:"attested_voting_power,omitempty"`
+	TotalPower    int64  `json:"total_voting_power,omitempty"`
+	// AttestedWithRows is how many of ValidatorsWithRows carry a verified
+	// signature over the promise: the endorsements MsgPayForFibre settled
+	// with. Absent, like AttestedPower, before signatures were verified.
+	AttestedWithRows *int         `json:"attested_with_rows,omitempty"`
+	ProbeCount       int64        `json:"probe_count"`
+	Classes          classCounts  `json:"classes"`
+	Reconstructable  *reconstruct `json:"reconstructable"`
 	// SampledOut is set when the load policy drew this publication out of
 	// the sample: the draw it was decided by, recorded once. probe_count
 	// and classes still count the NOT_PROBED rows it stands for (one per
@@ -3547,7 +3581,7 @@ type reconstruct struct {
 
 func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...any) ([]blobRow, error) {
 	q := `SELECT promise_hash, commitment, namespace, blob_size, signer, settlement_height, settlement_tx_index, settlement_time, creation_timestamp,
-		must_serve_until, validators_with_rows, sigma_rows, distinct_rows, assignment_error, attested_voting_power, total_voting_power FROM publications`
+		must_serve_until, validators_with_rows, sigma_rows, distinct_rows, assignment_error, attested_voting_power, total_voting_power, attested_with_rows FROM publications`
 	if where != "" {
 		q += " WHERE " + where
 	}
@@ -3562,7 +3596,7 @@ func (s *Server) blobRows(ctx context.Context, where string, limit int, args ...
 	for rows.Next() {
 		var b blobRow
 		if err := rows.Scan(&b.PromiseHash, &b.Commitment, &b.Namespace, &b.BlobSize, &b.Signer, &b.SettlementHeight, &b.SettlementTxIndex, &b.SettlementTime,
-			&b.CreationTimestamp, &b.MustServeUntil, &b.ValidatorsWithRows, &b.SigmaRows, &b.DistinctRows, &b.AssignmentError, &b.AttestedPower, &b.TotalPower); err != nil {
+			&b.CreationTimestamp, &b.MustServeUntil, &b.ValidatorsWithRows, &b.SigmaRows, &b.DistinctRows, &b.AssignmentError, &b.AttestedPower, &b.TotalPower, &b.AttestedWithRows); err != nil {
 			return nil, err
 		}
 		out = append(out, b)

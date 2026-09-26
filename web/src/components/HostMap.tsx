@@ -165,9 +165,9 @@ function useFeedEvents(enabled: boolean): FeedEvent[] {
   return events;
 }
 
-const EVENT_WORD: Record<string, string> = { registered: "registered its Fibre host", "host-changed": "changed its Fibre host" };
+const EVENT_WORD: Record<string, string> = { registered: "registered as a Fibre provider", "host-changed": "changed its Fibre host" };
 
-export default function HostMap({ rows, showReadiness, aside }: { rows: Validator[]; showReadiness: boolean; /** shown under the quorum panel */ aside?: React.ReactNode }) {
+export default function HostMap({ rows, showReadiness, aside }: { rows: Validator[]; showReadiness: boolean; /** shown under the stake panel */ aside?: React.ReactNode }) {
   const r = readiness(rows);
   const total = r.total;
 
@@ -388,11 +388,11 @@ export default function HostMap({ rows, showReadiness, aside }: { rows: Validato
     <section className={`band hostmap${showReadiness ? "" : " solo"}`} aria-labelledby="hostmap-h">
       <div className="fm-main">
         <div className="fm-head">
-          <h2 id="hostmap-h">Fibre hosts</h2>
+          <h2 id="hostmap-h">Fibre providers</h2>
           <p className="fm-pill fm-stats">
-            <span><b>{hosts.length + unplaced}</b> hosts</span>
+            <span><b>{hosts.length + unplaced}</b> Fibre providers</span>
             <span><b>{countries}</b> countries</span>
-            <span><b>{providers}</b> providers</span>
+            <span><b>{providers}</b> hosting providers</span>
           </p>
         </div>
         <div className={`fm-box${zoomed ? " zoomed" : ""}`} ref={box}
@@ -403,7 +403,7 @@ export default function HostMap({ rows, showReadiness, aside }: { rows: Validato
               {land}
             </svg>
           </div>
-          <ul className="fm-clusters" aria-label="Fibre hosts by location">
+          <ul className="fm-clusters" aria-label="Fibre providers by location">
             {placed.map(({ c, x, y, d }) => {
               const isOpen = open === c.id;
               const fault = c.hosts.some((h) => (h.v.obligations?.broken ?? 0) > 0);
@@ -421,7 +421,7 @@ export default function HostMap({ rows, showReadiness, aside }: { rows: Validato
                   style={{ left: x, top: y, zIndex: isOpen ? 30 : undefined }}
                   onMouseEnter={() => openNow(c.id)} onMouseLeave={closeSoon}>
                   <button type="button" className="fm-b" aria-expanded={split ? undefined : isOpen}
-                    aria-label={`${place}: ${c.hosts.length} host${c.hosts.length === 1 ? "" : "s"}, ${counts.map(([s, n]) => `${n} ${STATE_WORD[s]}`).join(", ")}${split ? ". Zoom in" : ""}`}
+                    aria-label={`${place}: ${c.hosts.length} Fibre provider${c.hosts.length === 1 ? "" : "s"}, ${counts.map(([s, n]) => `${n} ${STATE_WORD[s]}`).join(", ")}${split ? ". Zoom in" : ""}`}
                     style={{ width: d, height: d, background: ring(c.hosts) }}
                     onFocus={() => openNow(c.id)} onClick={() => activate(c)}>
                     <span>{c.hosts.length}</span>
@@ -436,7 +436,7 @@ export default function HostMap({ rows, showReadiness, aside }: { rows: Validato
                     <div className="fm-pop" style={pop} role="group" aria-label={place}>
                       <p className="fm-pop-h">
                         <b>{place}</b>
-                        <span>{c.hosts.length} host{c.hosts.length === 1 ? "" : "s"}</span>
+                        <span>{c.hosts.length} provider{c.hosts.length === 1 ? "" : "s"}</span>
                       </p>
                       <ul>
                         {c.hosts.map((h) => (
