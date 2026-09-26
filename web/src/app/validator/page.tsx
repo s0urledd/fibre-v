@@ -2,7 +2,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type SampledOut, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, rateTone, leftOutText, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
+import { useApi, type Validator, type Probe, type SampledOut, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, rateTone, leftOutText, gbps, tb, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
@@ -252,6 +252,23 @@ function Page() {
           help={v.serve_bytes_per_second == null ? (v.serve_throughput_sample > 0 ? `${int(v.serve_throughput_sample)} of 3 large-shard downloads` : "no large-shard download yet") : `${int(v.serve_throughput_sample)} shards ≥ 2 MiB · one location`}
           title="Median transfer rate of the download step, over shards of 2 MiB or more: a small shard's time is mostly round trips, so it says nothing about bandwidth. Shown from 3 such downloads." />
       </Metrics>
+
+      {v.load && v.load.rows_per_blob > 0 && (
+        <section id="load">
+          <div className="vhead"><div><h2>Load</h2><p className="sub">What the protocol asks of this validator, by stake. From the chain, nothing measured.</p></div></div>
+          <Metrics>
+            <Metric label="Rows per blob" value={int(v.load.rows_per_blob)} help="of every settled blob, by stake"
+              title="Rows the assignment gives this validator on the newest settled blob. Rows follow stake, not blob size." />
+            <Metric label="Assigned" value={notLive ? "—" : bytes(v.load.bytes)} tone={notLive ? "absent" : undefined}
+              help={`${int(v.load.promises)} settled blobs in the period`}
+              title="Row data the settled blobs of the period assigned this validator, to receive from the publisher and store. Blobs that settled before its Fibre host existed are left out." />
+            <Metric label="Held now" value={bytes(v.load.stored_bytes)} help="retention window still running"
+              title="Row data this validator must hold at this moment: assignments whose retention window has not ended." />
+            <Metric label="Mainnet sizing" value={gbps(v.load.est_ingress_bps)} help={`${tb(v.load.est_disk_bytes)} of disk`}
+              title="This validator's share of a 128 MiB blob at 2.2 GB/s of blob data, kept for the retention window: the arithmetic of the Fibre team's mainnet sizing tables, on this stake. A sizing figure, not a measurement." />
+          </Metrics>
+        </section>
+      )}
 
       <section className="band" id="outcomes">
         <div>

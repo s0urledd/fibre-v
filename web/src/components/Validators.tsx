@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { type Validator, int, pctOf, ago, utcWord, shortMid, MIN_RATED, provisionalNow, rateTone } from "@/lib/api";
+import { type Validator, int, pctOf, ago, utcWord, shortMid, MIN_RATED, provisionalNow, rateTone, bytes, loadTitle } from "@/lib/api";
 import Avatar from "./Avatar";
 import { HostingCell } from "./Hosting";
 import { SELF_VALIDATOR } from "@/lib/site";
@@ -27,7 +27,7 @@ function isSelf(v: Validator): boolean {
 }
 
 type Filter = "all" | "broken" | "unreachable" | "collecting" | "nohost";
-type SortKey = "power" | "kept" | "broken" | "pending" | "signed" | "seen";
+type SortKey = "power" | "load" | "kept" | "broken" | "pending" | "signed" | "seen";
 
 /** the endpoint right now: the chain's own words first, then the newest handshake */
 export function endpoint(v: Validator): { dot: string; word: string; title: string; warn?: boolean } {
@@ -53,6 +53,7 @@ function sortValue(v: Validator, k: SortKey): number | null {
     case "broken": return o?.broken ?? 0;
     case "pending": return o && o.total > 0 ? o.pending : null;
     // Signing is descriptive, and below the sample floor it is not ranked either.
+    case "load": return v.load && v.load.promises > 0 ? v.load.bytes : null;
     case "signed": { const s = v.signing; return s && s.assigned >= MIN_RATED ? s.signed / s.assigned : null; }
     case "seen": return v.last_seen_at ? new Date(v.last_seen_at).getTime() : null;
   }
@@ -175,6 +176,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               <th title="The newest handshake with the registered endpoint; the chain's own words (jailed, not bonded) come first.">Endpoint now</th>
               {showHosting && <th title="Network provider and country of the endpoint. Hover a cell for the network (AS) and address.">Hosting</th>}
               <Th k="power" dflt={-1} label="Voting power" title="From the staking module. The default order, and never a performance rank." />
+              <Th k="load" dflt={-1} label="Load" title="Row data the protocol assigned this validator in the period, by stake, to receive and store for the retention window. From the chain, nothing measured." />
               {showScores && <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />}
               {showScores && <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />}
               {showScores && <Th k="pending" dflt={-1} label="Pending" title="Obligations whose retention window has not ended: no verdict yet." />}
@@ -183,7 +185,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr className="empty"><td colSpan={2 + (showHosting ? 1 : 0) + (showScores ? 4 : 0)}>
+              <tr className="empty"><td colSpan={3 + (showHosting ? 1 : 0) + (showScores ? 4 : 0)}>
                 {loading && rows.length === 0 ? "Loading…"
                   : rows.length === 0 ? "No validators on record yet."
                   : needle ? `Nothing matches “${q}”.`
@@ -216,6 +218,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                   <td><Link className="rowcover" href={href(v)} tabIndex={-1} aria-hidden="true" /><span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span></td>
                   {showHosting && <td><HostingCell h={v.hosting} /></td>}
                   <td className="num">{int(v.voting_power)}</td>
+                  <td className="num">{v.load && v.load.promises > 0 ? <span title={loadTitle(v.load)}>{bytes(v.load.bytes)}</span> : <span className="muted" title="No settled blob assigned it rows while it had a Fibre host in this period.">—</span>}</td>
                   {showScores && <>
                     <td className="num">{rate(v)}</td>
                     <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>

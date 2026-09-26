@@ -423,6 +423,8 @@ export type Validator = {
   timeouts_enforced?: number;
   /** signing participation over the period: see lib/signing.ts. Descriptive, never a fault. */
   signing?: Signing;
+  /** row data the protocol assigned it in the period, what it holds now, and that share at mainnet scale (all from the chain) */
+  load?: Load;
   /** network and country the open endpoint resolved into, from this vantage; absent when the lookup is off */
   hosting?: import("./hosting").Hosting;
 };
@@ -905,6 +907,37 @@ export function shortBech(s: string): string {
   if (i < 0 || s.length < i + 5) return s;
   return `${s.slice(0, i)} ••• ${s.slice(-4)}`;
 }
+/**
+ * What the protocol asked of a validator: the rows its stake was assigned on
+ * every settled blob, to receive and keep for the retention window. From the
+ * assignment table, nothing measured. The estimate sizes the same share of a
+ * 128 MiB blob at 2.2 GB/s of blob data, the Fibre team's mainnet sizing.
+ */
+export type Load = {
+  promises: number;
+  rows: number;
+  bytes: number;
+  stored_bytes: number;
+  rows_per_blob: number;
+  est_ingress_bps: number;
+  est_disk_bytes: number;
+};
+
+/** "6.29 Gbps" from bits per second */
+export function gbps(bits: number): string {
+  return bits >= 1e9 ? `${(bits / 1e9).toFixed(2)} Gbps` : `${Math.round(bits / 1e6)} Mbps`;
+}
+
+/** "11.3 TB" from bytes, in the decimal units sizing tables use */
+export function tb(n: number): string {
+  return n >= 1e12 ? `${(n / 1e12).toFixed(n >= 1e13 ? 1 : 2)} TB` : `${Math.round(n / 1e9)} GB`;
+}
+
+/** the load tooltip, one place so the table and the page say the same thing */
+export function loadTitle(l: Load): string {
+  return `${int(l.rows_per_blob)} rows of every blob, by stake: ${int(l.promises)} settled blobs in the period, ${bytes(l.bytes)} of row data to receive and store. Mainnet sizing at 2.2 GB/s: ${gbps(l.est_ingress_bps)} and ${tb(l.est_disk_bytes)}.`;
+}
+
 export function bytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
