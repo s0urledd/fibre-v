@@ -205,6 +205,10 @@ button.dis:hover, a.dis:hover { text-decoration: underline; }
 .metric .value .den { color: var(--text-3); font-weight: 400; font-size: var(--t-h2); letter-spacing: 0; }
 .metric .value.fault { color: var(--fault); }
 .metric .value.absent { color: var(--text-3); }
+/* service rate colour (rateTone): green from 98%, amber from 90%, red below */
+.r-good, .metric .value.r-good { color: var(--accent-ink); }
+.r-warn, .metric .value.r-warn { color: var(--hold); }
+.r-bad, .metric .value.r-bad { color: var(--fault); }
 .metric .value.words { font-size: 20px; line-height: 1.3; margin: 10px 0 8px; color: var(--text-2); }
 .metric .help { font-size: var(--t-small); color: var(--text-3); line-height: 1.35; }
 
