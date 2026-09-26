@@ -2338,7 +2338,7 @@ func latestAnswerSQL(table, ok, source, vantage, only, asOf string) (string, []a
 // to decide the download time, and is not published from fewer of them.
 const (
 	throughputMinBytes  = 2 << 20
-	throughputMinSample = 5
+	throughputMinSample = 3
 )
 
 type validatorRow struct {

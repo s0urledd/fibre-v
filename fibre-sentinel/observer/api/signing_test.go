@@ -292,3 +292,28 @@ func TestValidatorHeatmap(t *testing.T) {
 		t.Fatalf("cells = %v, want exactly five (no cell for a day or point without rows)", cells)
 	}
 }
+
+// A promise that settled while the validator had no Fibre host is one it
+// could not sign: it is counted apart, in neither side of the rate, so a
+// validator that registered late is rated on the promises it could reach.
+// A host the registry could not read (NULL) stays in.
+func TestSigningLeavesOutPromisesWithoutAHost(t *testing.T) {
+	ts, st, _ := signingFixture(t)
+	if _, err := st.DB().Exec(`UPDATE assignments SET host_at_settlement = '' WHERE validator_address = ? AND promise_hash IN ('p1', 'p3')`, sigV3); err != nil {
+		t.Fatal(err)
+	}
+	var det struct {
+		Validator struct {
+			Signing struct {
+				signingJSON
+				NoHost int64 `json:"no_host"`
+			} `json:"signing"`
+		} `json:"validator"`
+	}
+	if code := get(t, ts, "/v1/validators/"+sigV3+"?window=all", &det); code != 200 {
+		t.Fatalf("detail: %d", code)
+	}
+	if s := det.Validator.Signing; s.Assigned != 1 || s.Signed != 1 || s.NoHost != 2 || s.Rate.Den != 1 {
+		t.Fatalf("signing = %+v, want 1/1 with 2 promises without a host", s)
+	}
+}
