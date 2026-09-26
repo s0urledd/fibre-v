@@ -215,7 +215,7 @@ function Page() {
           <div className="tools"><a className="dis" href={`${API_BASE}/v1/blobs/${b.promise_hash}`} title="the raw record, probe rows included">Probe rows →</a></div>
         </div>
         <div className="tablewrap">
-          <table className="marks">
+          <table className={"marks" + (order.length ? "" : " nopts")}>
             <thead><tr>
               <th className="col-pin">Validator</th><th className="num">Voting power</th><th className="num">Rows</th><th>Signed</th><th>Host at settlement</th>
               {order.map((k) => <th key={k} className={"m" + (suspectAt.has(byLabel.get(k)!.at) ? " soft" : "")} title={`${k} · ${utcWord(byLabel.get(k)!.at)}${suspectAt.has(byLabel.get(k)!.at) ? " · not counted: the observer does not trust itself at this point" : ""}`}>{k}</th>)}
