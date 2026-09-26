@@ -41,26 +41,14 @@ const Version = "0.1.0"
 // VantageInfo describes where this observer watches from.
 //
 // Every reachability observation on the site is a statement about a network
-// path, and half that path is ours. A reader cannot judge an UNREACHABLE
-// without knowing where it was measured from, and a validator operator cannot
-// check our traffic against their own logs without knowing which addresses to
-// look for.
+// path, and half that path is ours, so a reader cannot judge an UNREACHABLE
+// without knowing roughly where it was measured from: the place and the
+// hosting company. Both are the operator's word, and the response says so.
 //
-// These fields are not equally trustworthy, and the response says so rather
-// than presenting them as one thing:
-//
-//   - EgressAddresses is the anchor. An operator who sees connections from
-//     these addresses on their Fibre port can match them against this record,
-//     and one who sees connections from anywhere else knows they are not this
-//     observer.
-//   - ASN is checkable from those addresses by anyone, through public routing
-//     data (RIPEstat, whois, bgp.tools). It identifies the network our
-//     traffic is routed through, not a place: one provider can hold several
-//     autonomous systems, and one autonomous system can span countries.
-//   - Provider usually follows from the ASN, so it is checkable in the same
-//     way, just less precisely.
-//   - Location is the only genuinely unverifiable field. Geolocating an
-//     address is a guess, so this is the operator's word and nothing more.
+// The observer's own addresses and autonomous system are not published. They
+// used to be, as an anchor an operator could match against their logs, but a
+// public API is the wrong place for them: the site's diagnosis box names the
+// address where an operator is told to allow it.
 type VantageInfo struct {
 	// Name is the short label every response already carries.
 	Name string `json:"name"`
@@ -69,12 +57,6 @@ type VantageInfo struct {
 	Location string `json:"location,omitempty"`
 	// Provider is the hosting company, e.g. "Hetzner".
 	Provider string `json:"provider,omitempty"`
-	// ASN is the autonomous system our traffic is routed through, e.g.
-	// "AS24940". Anyone can check it against EgressAddresses.
-	ASN string `json:"asn,omitempty"`
-	// EgressAddresses are the source addresses probes leave from, and the
-	// thing everything else here is checked against.
-	EgressAddresses []string `json:"egress_addresses,omitempty"`
 	// Verifiability says, per field, what a reader can check and how, so the
 	// page rendering these cannot present a guess as a fact.
 	Verifiability map[string]string `json:"verifiability"`
@@ -151,12 +133,10 @@ func NewWithLogger(st *store.Store, vantage string, log *scan.Logger) *Server {
 // named.
 func NewWithVantage(st *store.Store, info VantageInfo, log *scan.Logger, opts ...Option) *Server {
 	info.Verifiability = map[string]string{
-		"egress_addresses": "the anchor: match these against the source addresses hitting your Fibre port",
-		"asn":              "check it against egress_addresses through public routing data (whois, RIPEstat, bgp.tools); it names the network, not a place",
-		"provider":         "usually follows from the asn, so checkable the same way",
-		"location":         "the operator's word: geolocating an address is a guess, so nothing here proves it",
+		"provider": "the operator's word: the hosting company",
+		"location": "the operator's word: geolocating an address is a guess, so nothing here proves it",
 	}
-	info.Complete = info.Location != "" && info.Provider != "" && info.ASN != "" && len(info.EgressAddresses) > 0
+	info.Complete = info.Location != "" && info.Provider != ""
 	s := &Server{st: st, vantage: info.Name, info: info, mux: http.NewServeMux(), log: log, blobs: newBlobCache(), labels: map[string]PublisherLabel{}}
 	for _, o := range opts {
 		o(s)

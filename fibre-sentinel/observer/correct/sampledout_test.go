@@ -76,8 +76,9 @@ func sampledRows(t *testing.T, st *store.Store) string {
 // decision, the moves are on the record, and a store rebuilt from that
 // record reaches the same state.
 func TestACorrectionReGradesASampledOutDecisionAsItsRows(t *testing.T) {
+	clock := time.Now().UTC() // one clock for both stores, or a second boundary between them fails the comparison
 	build := func(asRows bool) (*store.Store, time.Time, probe.SampledOut) {
-		st, created := fixture(t, 2)
+		st, created := fixtureAt(t, 2, clock)
 		pub, d := sampledPub(created)
 		raw, _ := json.Marshal(pub)
 		if _, err := st.UpsertPublication(pub, raw); err != nil {

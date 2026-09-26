@@ -17,7 +17,7 @@ make build                                   # needs observer-collector
 python3 web/test/fixture.py /tmp/fx/observer.db
 fibre-sentinel/bin/observer-api -db /tmp/fx/observer.db -listen 127.0.0.1:8099 \
   -vantage eu1 -vantage-location "Helsinki, Finland" \
-  -vantage-provider Hetzner -vantage-asn AS24940 -vantage-egress 203.0.113.10
+  -vantage-provider Hetzner
 ```
 
 It creates the schema by running `observer-collector -once`, so it can never
