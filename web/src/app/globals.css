@@ -330,7 +330,7 @@ td a.plain:hover, td a.fault:hover { text-decoration: underline; }
 .pair > .den { text-align: left; font-size: inherit; margin: 0; }
 /* the endorsement share describes, it does not rate: regular weight, quieter */
 .pair.endorsed > .rate { font-weight: 400; color: var(--text-2); }
-.rate.share { display: inline-block; min-width: 5ch; text-align: right; }
+.rate.share { display: inline; }
 .rate.share.endorsed { font-weight: 400; color: var(--text-2); }
 .vt tbody tr { position: relative; }
 .vt tbody tr:not(.empty) { cursor: pointer; }
@@ -838,6 +838,8 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 .tablewrap.framed th:last-child, .tablewrap.framed td:last-child { padding-right: 14px; }
 .tablewrap.framed td { padding-top: 10px; padding-bottom: 10px; }
 .tablewrap.framed tbody tr:last-child td { border-bottom: 0; }
+/* in a frame every cell draws its own rule, so the pinned column needs no second one */
+.tablewrap.framed .vt tbody td.col-pin { box-shadow: none; }
 /* the Blobs page tables: the first column reads left, every other column is
    centred under its heading, cells and headings alike, at a width that
    follows what the cells hold */

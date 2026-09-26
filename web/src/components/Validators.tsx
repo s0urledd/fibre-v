@@ -134,10 +134,8 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   const signed = (v: Validator) => {
     const s = v.signing;
     if (!s || s.assigned === 0) return <span className="muted" title={s && s.unknown > 0 ? `${int(s.unknown)} assigned promise${s.unknown === 1 ? "" : "s"} recorded before signatures were verified: nothing to say either way.` : "No settled promise assigned this validator rows in this period."}>—</span>;
-    const noHost = s.no_host ? ` ${int(s.no_host)} promise${s.no_host === 1 ? "" : "s"} from before its Fibre host was registered are left out: it could not endorse them.` : "";
-    const last = s.last_endorsed_at ? ` Last endorsement ${ago(s.last_endorsed_at)}.` : "";
-    const why = `Endorsed ${int(s.signed)} of ${int(s.assigned)} promises.${last} Publishers stop at ⅔ of stake, so a low rate is normal, not a fault.${noHost}`;
-    return <span className="rate share endorsed" title={s.assigned < MIN_RATED ? `${why} Fewer than ${MIN_RATED} promises: shown, not ranked.` : why}>{pctOf(s.signed, s.assigned)}</span>;
+    const counts = `${int(s.signed)} of ${int(s.assigned)} promises endorsed`;
+    return <span className="rate share endorsed" title={s.assigned < MIN_RATED ? `${counts}. Fewer than ${MIN_RATED}: shown, not ranked.` : counts}>{pctOf(s.signed, s.assigned)}</span>;
   };
   const count = (v: Validator, n: number, kind: "broken" | "pending") => {
     const o = v.obligations;
@@ -169,7 +167,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
           </label>
         </div>
       </div>
-      <div className="tablewrap">
+      <div className="tablewrap framed">
         <table className="vt">
           <thead>
             <tr>
