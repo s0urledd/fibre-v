@@ -2,7 +2,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useApi, type Validator, type Probe, type SampledOut, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, rateTone, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
+import { useApi, type Validator, type Probe, type SampledOut, type Window, type Rate, type RecordThrough, type Obligations, type ClassCounts, type Meta, type EndpointCheck, int, pctOf, bytes, ago, utcWord, hhmmss, dateUTC, whenUTC, shortMid, undecided, notFound, rateTone, leftOutText, badRequest, MIN_RATED, API_BASE, provisionalNow, type ProvisionalFaults, type NetworkReference } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
@@ -241,7 +241,7 @@ function Page() {
           value={notLive ? "—" : int(o?.broken ?? 0)} tone={notLive ? "absent" : (o?.broken ?? 0) > 0 ? "fault" : !o || o.total === 0 ? "absent" : undefined}
           help={notLive ? " " : (o?.broken ?? 0) > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"}${prov > 0 ? ` · ${int(prov)} provisional` : ""}${clearedText}` : faults > 0 ? `${int(faults)} failed probe row${faults === 1 ? "" : "s"} · none broken in this period${clearedText}` : `none in this period${clearedText}`}
           title={prov > 0 ? `${int(prov)} of these rest only on failed probes younger than ${Math.round((v.provisional_faults?.settling_seconds ?? 1800) / 60)} minutes. They count in the rate now, and become final at ${whenUTC(v.provisional_faults!.until)} unless evidence still arriving withdraws them: the rest of the schedule point's probes, an x/fibre params change not yet reconciled, or the same rows fetched and verified from a second location.` : (o?.broken ?? 0) > 0 ? "One obligation counts once, however many probes of it failed. The probe rows are in the evidence below." : faults > 0 ? "A failed probe of an obligation still inside its retention window is not a verdict yet; the obligation is decided at the end of the window." : undefined} />
-        <Metric label="Undecided" value={notLive ? "—" : int(und)} tone={notLive || !o || o.total === 0 ? "absent" : undefined} help={notLive ? " " : `${int(o?.pending ?? 0)} pending`} />
+        <Metric label="Pending" value={notLive ? "—" : int(o?.pending ?? 0)} tone={notLive || !o || o.total === 0 ? "absent" : undefined} help={notLive ? " " : (leftOutText(o) || "window still open")} title="Obligations whose retention window has not ended: no verdict yet. Sampled out: blobs the probe budget drew out of its sample, committed in advance and never counted either way." />
         <Metric label="Reachability"
           value={!bonded ? "—" : rw && rw.den > 0 ? int(rw.num) : "—"} den={bonded && rw && rw.den > 0 ? int(rw.den) : undefined}
           tone={!bonded || !rw || rw.den === 0 ? "absent" : undefined}
@@ -249,7 +249,8 @@ function Page() {
           title="TLS handshakes completed over handshakes attempted with the registered endpoint in the period, from one location. Not signing uptime." />
         <Metric label="Throughput"
           value={v.serve_bytes_per_second == null ? "—" : `${bytes(v.serve_bytes_per_second)}/s`} tone={v.serve_bytes_per_second == null ? "absent" : undefined}
-          help={v.serve_bytes_per_second == null ? "no download yet" : `${int(v.serve_throughput_sample)} download${v.serve_throughput_sample === 1 ? "" : "s"} · one location`} />
+          help={v.serve_bytes_per_second == null ? (v.serve_throughput_sample > 0 ? `${int(v.serve_throughput_sample)} of 3 large-shard downloads` : "no large-shard download yet") : `${int(v.serve_throughput_sample)} shards ≥ 2 MiB · one location`}
+          title="Median transfer rate of the download step, over shards of 2 MiB or more: a small shard's time is mostly round trips, so it says nothing about bandwidth. Shown from 3 such downloads." />
       </Metrics>
 
       <section className="band" id="outcomes">

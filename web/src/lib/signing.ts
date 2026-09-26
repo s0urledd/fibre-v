@@ -11,7 +11,8 @@ import type { Rate, Window } from "./api";
  * power, so an unsigned promise is unproven, never a fault, and this figure
  * ranks nobody below MIN_RATED and accuses nobody at all.
  */
-export type Signing = { assigned: number; signed: number; rate: Rate; unknown: number };
+/** no_host: assigned promises that settled while the validator had no Fibre host, outside both sides of the rate */
+export type Signing = { assigned: number; signed: number; rate: Rate; unknown: number; no_host?: number };
 
 /** One bar of /v1/signing: promises whose verified signatures cover [from, to) of total voting power. */
 export type SigningBucket = { key: string; label: string; from: number; to: number; above_threshold: boolean; count: number };

@@ -20,10 +20,14 @@ import (
 // fibre-assign over the validator set at the promise height, so a validator is
 // ASSIGNED a promise exactly when that table gives it rows (row_count > 0):
 // the minimum-rows floor gives every member of the set rows, so in practice
-// that is "every validator in the set at the promise height". It is not
-// conditioned on a registered Fibre host: the protocol assigns rows to
-// validators, not to hosts, and a validator without one is assigned all the
-// same (it simply cannot receive the upload, so it cannot sign). A validator
+// that is "every validator in the set at the promise height". The protocol
+// assigns rows to validators, not to hosts, so a validator with no Fibre host
+// registered when the promise settled is assigned all the same, but it cannot
+// receive the upload and so cannot sign. Those assignments are left out of
+// the rate and counted apart (NoHost), the same exclusion NOT_REGISTERED gets
+// everywhere else: counting them made a validator that registered late look
+// as if it missed every promise from before it existed. An assignment whose
+// host could not be read at settlement (NULL) stays in. A validator
 // SIGNED a promise when its signature over the promise verified against its
 // consensus key (internal/scan/attest.go): the observer checks every entry
 // itself, it never counts them.
@@ -49,7 +53,8 @@ import (
 // signingStats is one validator's signing participation over a window.
 type signingStats struct {
 	// Assigned is how many settled promises in the window gave this validator
-	// rows and whose signatures were verified: the rate's denominator.
+	// rows while it had a Fibre host registered, and whose signatures were
+	// verified: the rate's denominator.
 	Assigned int64 `json:"assigned"`
 	// Signed is how many of those carry this validator's verified signature.
 	Signed int64 `json:"signed"`
@@ -58,6 +63,10 @@ type signingStats struct {
 	// Unknown counts assigned promises recorded before signatures were
 	// verified, which are in neither side of Rate.
 	Unknown int64 `json:"unknown"`
+	// NoHost counts assigned promises that settled while this validator had
+	// no Fibre host registered: it could not sign them, so they are in
+	// neither side of Rate.
+	NoHost int64 `json:"no_host"`
 }
 
 // signingPopulation is the promise population both figures are drawn from:
@@ -69,10 +78,13 @@ const signingPopulation = `p.settlement_time >= ? AND p.settlement_time <= ?
 // signingByValidator counts signing participation per validator over win,
 // only for one validator when only is set.
 func (s *Server) signingByValidator(ctx context.Context, win Window, only string) (map[string]signingStats, error) {
+	// host_at_settlement is '' when no host was registered, NULL when the
+	// registry could not be read at that height.
 	q := `SELECT a.validator_address,
-			COALESCE(SUM(CASE WHEN a.attested IS NOT NULL THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.attested = 1 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.attested IS NULL THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN a.attested IS NOT NULL AND a.host_at_settlement IS NOT '' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.attested = 1 AND a.host_at_settlement IS NOT '' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.attested IS NULL AND a.host_at_settlement IS NOT '' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.host_at_settlement = '' THEN 1 ELSE 0 END), 0)
 		FROM assignments a JOIN publications p ON p.promise_hash = a.promise_hash
 		WHERE ` + signingPopulation + ` AND a.row_count > 0`
 	args := []any{win.startArg(), win.endArg()}
@@ -89,7 +101,7 @@ func (s *Server) signingByValidator(ctx context.Context, win Window, only string
 	for rows.Next() {
 		var addr string
 		var st signingStats
-		if err := rows.Scan(&addr, &st.Assigned, &st.Signed, &st.Unknown); err != nil {
+		if err := rows.Scan(&addr, &st.Assigned, &st.Signed, &st.Unknown, &st.NoHost); err != nil {
 			return nil, err
 		}
 		st.Rate = rate(st.Signed, st.Assigned)

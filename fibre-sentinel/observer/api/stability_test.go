@@ -358,7 +358,7 @@ func latencyFixture(t *testing.T) *httptest.Server {
 	now := time.Now().UTC().Truncate(time.Second)
 	created, msu := now.Add(-time.Hour), now.Add(time.Hour)
 	const hash = "lat1"
-	rowsOf := map[string]int{"v1": 400, "v2": 100, "v3": 100}
+	rowsOf := map[string]int{"v1": 400, "v2": 100, "v3": 100, "v4": 4}
 	// Durations chosen so v1 and v2 land on the same transfer rate over the
 	// download step and v3 on a quarter of it. Half of every probe is the
 	// download; the other half is dial, handshake and identity check, the
@@ -368,6 +368,9 @@ func latencyFixture(t *testing.T) *httptest.Server {
 		"v1": {400, 400, 400, 1200},
 		"v2": {100, 100, 100, 300},
 		"v3": {400, 400, 400, 1200},
+		// v4 carries shards too small for bandwidth to decide the time: it
+		// has service times but no throughput figure.
+		"v4": {100, 100, 100, 300},
 	}
 
 	pub := scan.Publication{
@@ -379,12 +382,13 @@ func latencyFixture(t *testing.T) *httptest.Server {
 		Assignment: scan.AssignmentTable{
 			ProtocolParams:     scan.ProtocolParamsSnapshot{OriginalRows: 600, TotalRows: 2400},
 			ValidatorSetHeight: 99, TotalVotingPower: 30, Sigma: 600, Distinct: 600,
-			ValidatorsWithRows: 3, AttestedWithRows: 3, SignatureEntries: 3, SignaturesVerified: 3,
+			ValidatorsWithRows: 4, AttestedWithRows: 4, SignatureEntries: 4, SignaturesVerified: 4,
 			AttestedVotingPower: 30,
 			Validators: []scan.ValidatorAssignment{
 				{Address: "v1", VotingPower: 10, RowCount: 400, Rows: []int{0}, Attested: true},
 				{Address: "v2", VotingPower: 10, RowCount: 100, Rows: []int{1}, Attested: true},
 				{Address: "v3", VotingPower: 10, RowCount: 100, Rows: []int{2}, Attested: true},
+				{Address: "v4", VotingPower: 10, RowCount: 4, Rows: []int{3}, Attested: true},
 			},
 		},
 	}
@@ -416,11 +420,12 @@ func latencyFixture(t *testing.T) *httptest.Server {
 			m.Download.OK, m.Download.RowsReturned, m.Download.RowsExpected = true, rowsOf[addr], rowsOf[addr]
 			m.Download.CommitmentVerified, m.Download.AssignmentVerified = true, true
 			m.Download.DurationMS = ms / 2
-			// 512 bytes a row. One of v3's records predates the byte count,
+			// 32 KiB a row, so v1-v3 carry shards of at least 2 MiB and v4
+			// one of 128 KiB. One of v3's records predates the byte count,
 			// as every record on a store from before schema 8 does: it must
 			// fall out of the throughput sample and not read as zero bytes.
 			if !(addr == "v3" && i == 0) {
-				m.Download.BytesReturned = int64(rowsOf[addr]) * 512
+				m.Download.BytesReturned = int64(rowsOf[addr]) * 32768
 			}
 			raw, err := json.Marshal(m)
 			if err != nil {
@@ -486,7 +491,7 @@ func TestLatencyIsServiceTimeAndSizeNormalised(t *testing.T) {
 		by[v.Address] = v
 	}
 
-	for _, addr := range []string{"v1", "v2", "v3"} {
+	for _, addr := range []string{"v1", "v2", "v3", "v4"} {
 		if by[addr].Sample != 4 {
 			t.Errorf("%s latency sample = %d, want 4: the failed probe is not a service time",
 				addr, by[addr].Sample)
@@ -509,6 +514,9 @@ func TestLatencyIsServiceTimeAndSizeNormalised(t *testing.T) {
 			t.Fatalf("%s has no latency figures: %+v", v.Address, v)
 		}
 	}
+	if v4 := by["v4"]; v4.P50 == nil || v4.BytesSec != nil || v4.TSample != 0 {
+		t.Errorf("v4 = %+v: a small shard's time is round trips, so it has a latency but no throughput figure", v4)
+	}
 	if v1.TSample != 4 || v3.TSample != 3 {
 		t.Errorf("throughput sample = v1 %d, v3 %d, want 4 and 3: a record without a byte count is outside the sample",
 			v1.TSample, v3.TSample)
@@ -526,7 +534,7 @@ func TestLatencyIsServiceTimeAndSizeNormalised(t *testing.T) {
 			*v3.BytesSec, *v2.BytesSec)
 	}
 	// Over the download step, not the whole probe: 400 rows × 512 B in 200 ms.
-	if want := int64(400*512) * 1000 / 200; *v1.BytesSec != want {
+	if want := int64(400*32768) * 1000 / 200; *v1.BytesSec != want {
 		t.Errorf("v1 bytes/s = %d, want %d over the download step alone", *v1.BytesSec, want)
 	}
 
@@ -539,8 +547,8 @@ func TestLatencyIsServiceTimeAndSizeNormalised(t *testing.T) {
 	if code := get(t, ts, "/v1/network?window=all", &net); code != 200 {
 		t.Fatalf("network: %d", code)
 	}
-	if net.Sample != 12 {
-		t.Errorf("network latency sample = %d, want 12 successful probes", net.Sample)
+	if net.Sample != 16 {
+		t.Errorf("network latency sample = %d, want 16 successful probes", net.Sample)
 	}
 	if net.P95 == nil || *net.P95 >= 60000 {
 		t.Errorf("network p95 = %v, want a success rather than the 60s failures", net.P95)

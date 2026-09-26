@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { type Validator, int, pctOf, ago, utcWord, shortMid, undecided, MIN_RATED, provisionalNow, rateTone } from "@/lib/api";
+import { type Validator, int, pctOf, ago, utcWord, shortMid, MIN_RATED, provisionalNow, rateTone } from "@/lib/api";
 import Avatar from "./Avatar";
 import { HostingCell } from "./Hosting";
 import { SELF_VALIDATOR } from "@/lib/site";
@@ -27,7 +27,7 @@ function isSelf(v: Validator): boolean {
 }
 
 type Filter = "all" | "broken" | "unreachable" | "collecting" | "nohost";
-type SortKey = "power" | "kept" | "broken" | "undecided" | "signed" | "seen";
+type SortKey = "power" | "kept" | "broken" | "pending" | "signed" | "seen";
 
 /** the endpoint right now: the chain's own words first, then the newest handshake */
 export function endpoint(v: Validator): { dot: string; word: string; title: string; warn?: boolean } {
@@ -51,7 +51,7 @@ function sortValue(v: Validator, k: SortKey): number | null {
     case "power": return v.voting_power;
     case "kept": { const d = o ? o.served + o.broken : 0; return d >= MIN_RATED ? o.served / d : null; }
     case "broken": return o?.broken ?? 0;
-    case "undecided": return o && o.total > 0 ? undecided(o) : null;
+    case "pending": return o && o.total > 0 ? o.pending : null;
     // Signing is descriptive, and below the sample floor it is not ranked either.
     case "signed": { const s = v.signing; return s && s.assigned >= MIN_RATED ? s.signed / s.assigned : null; }
     case "seen": return v.last_seen_at ? new Date(v.last_seen_at).getTime() : null;
@@ -125,7 +125,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     if (!o || o.total === 0) return <span className="muted" title="No observations: the settled promises prove no serving obligation for this validator in this period.">—</span>;
     const d = o.served + o.broken;
     if (d === 0) return <span className="muted" title={`Awaiting results: ${int(o.total)} obligation${o.total === 1 ? "" : "s"} in this period, none assessed yet (pending or inconclusive).`}>—</span>;
-    return <span title={d < MIN_RATED ? `Fewer than ${MIN_RATED} assessed obligations: shown, not ranked.` : undefined}><span className={"rate " + (rateTone(o.served, d) ?? "")}>{pctOf(o.served, d)}</span><span className="den"> · {int(o.served)}/{int(d)}</span></span>;
+    return <span title={d < MIN_RATED ? `Fewer than ${MIN_RATED} assessed obligations: shown, not ranked.` : undefined}><span className="pair"><span className={"rate " + (rateTone(o.served, d) ?? "")}>{pctOf(o.served, d)}</span><span className="den">{int(o.served)}/{int(d)}</span></span></span>;
   };
   // The signing cell, in the service rate's form: share and counts, a dash
   // with its reason when nothing was assigned. Never a fault colour: a
@@ -133,10 +133,11 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   const signed = (v: Validator) => {
     const s = v.signing;
     if (!s || s.assigned === 0) return <span className="muted" title={s && s.unknown > 0 ? `${int(s.unknown)} assigned promise${s.unknown === 1 ? "" : "s"} recorded before signatures were verified: nothing to say either way.` : "No settled promise assigned this validator rows in this period."}>—</span>;
-    const why = `Endorsed ${int(s.signed)} of ${int(s.assigned)} promises. Publishers stop at ⅔ of stake, so a low rate is normal, not a fault.`;
-    return <span title={s.assigned < MIN_RATED ? `${why} Fewer than ${MIN_RATED} promises: shown, not ranked.` : why}><span className="rate">{pctOf(s.signed, s.assigned)}</span><span className="den"> · {int(s.signed)}/{int(s.assigned)}</span></span>;
+    const noHost = s.no_host ? ` ${int(s.no_host)} promise${s.no_host === 1 ? "" : "s"} from before its Fibre host was registered are left out: it could not endorse them.` : "";
+    const why = `Endorsed ${int(s.signed)} of ${int(s.assigned)} promises. Publishers stop at ⅔ of stake, so a low rate is normal, not a fault.${noHost}`;
+    return <span title={s.assigned < MIN_RATED ? `${why} Fewer than ${MIN_RATED} promises: shown, not ranked.` : why}><span className="pair endorsed"><span className="rate">{pctOf(s.signed, s.assigned)}</span><span className="den">{int(s.signed)}/{int(s.assigned)}</span></span></span>;
   };
-  const count = (v: Validator, n: number, kind: "broken" | "undecided") => {
+  const count = (v: Validator, n: number, kind: "broken" | "pending") => {
     const o = v.obligations;
     if (!o || o.total === 0) return <span className="muted">—</span>;
     if (n === 0) return <span className="muted">0</span>;
@@ -146,7 +147,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
       return <><Link className="fault" href={href(v, "#evidence")} title={`${int(n)} obligation${n === 1 ? "" : "s"} broken: the validator answered and did not hand over a shard it had signed for. Opens the evidence.`}>{int(n)}</Link>
         {prov > 0 && <span className="ours" title={`${int(prov)} of these rest only on failed probes younger than the settling period. Counted now; final unless evidence still arriving withdraws them.`}>{prov === n ? "provisional" : `${int(prov)} provisional`}</span>}</>;
     }
-    return <Link className="plain" href={href(v, "#outcomes")} title={`${int(n)} obligation${n === 1 ? "" : "s"} the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault.`}>{int(n)}</Link>;
+    return <Link className="plain" href={href(v, "#outcomes")} title={`${int(n)} obligation${n === 1 ? "" : "s"} whose retention window has not ended: no verdict yet.`}>{int(n)}</Link>;
   };
 
   return (
@@ -176,7 +177,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               <Th k="power" dflt={-1} label="Voting power" title="From the staking module. The default order, and never a performance rank." />
               {showScores && <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />}
               {showScores && <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />}
-              {showScores && <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />}
+              {showScores && <Th k="pending" dflt={-1} label="Pending" title="Obligations whose retention window has not ended: no verdict yet." />}
               {showScores && <Th k="signed" dflt={-1} label="Endorsed ⅔" title="Promises carrying this validator’s endorsement. Publishers stop at ⅔ of stake, so a low rate is normal, not a fault." />}
             </tr>
           </thead>
@@ -218,8 +219,8 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                   {showScores && <>
                     <td className="num">{rate(v)}</td>
                     <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>
-                    <td className="num">{count(v, undecided(o), "undecided")}</td>
-                    <td className="num">{signed(v)}</td>
+                    <td className="num">{count(v, o?.pending ?? 0, "pending")}</td>
+                    <td className="num soft-col">{signed(v)}</td>
                   </>}
                 </tr>
               );

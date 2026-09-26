@@ -1,7 +1,7 @@
 "use client";
 import { Suspense, useState } from "react";
 import Link from "next/link";
-import { API_BASE, useApi, type Network, type Validator, type Meta, type Market, int, pctOf, bytes, undecided, MIN_RATED, rateTone } from "@/lib/api";
+import { API_BASE, useApi, type Network, type Validator, type Meta, type Market, int, pctOf, bytes, undecided, MIN_RATED, rateTone, leftOutText } from "@/lib/api";
 import { useWindow, WindowSwitch, windowLabel } from "@/lib/window";
 import StatusLine from "@/components/StatusLine";
 import { Metric, Metrics } from "@/components/Metrics";
@@ -95,10 +95,11 @@ function Overview() {
           value={!N || notLive ? "—" : int(o?.broken ?? 0)}
           tone={!N || notLive ? "absent" : (o?.broken ?? 0) > 0 ? "fault" : undefined}
           help={!N || notLive ? " " : (o?.broken ?? 0) > 0 ? `on ${int(brokenOn)} validator${brokenOn === 1 ? "" : "s"}` : "none in this period"} />
-        <Metric label="Undecided"
-          value={!N || notLive ? "—" : int(und)}
+        <Metric label="Pending"
+          value={!N || notLive ? "—" : int(o?.pending ?? 0)}
           tone={!N || notLive ? "absent" : undefined}
-          help={!N || notLive ? " " : `${int(o?.pending ?? 0)} pending`} />
+          help={!N || notLive ? " " : (leftOutText(o) || "window still open")}
+          title="Obligations whose retention window has not ended: no verdict yet. Sampled out: blobs the probe budget drew out of its sample, committed in advance and never counted either way." />
         <Metric label="Hosts registered"
           value={!vals.data ? "—" : int(reg.count)}
           den={vals.data && reg.of > 0 ? int(reg.of) : undefined}

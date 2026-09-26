@@ -220,14 +220,16 @@ button.dis:hover, a.dis:hover { text-decoration: underline; }
 .bar { display: flex; height: 14px; border-radius: 4px; overflow: hidden; margin: 12px 0 10px; background: var(--pending); border: 1px solid var(--line-soft); }
 .bar i { display: block; height: 100%; }
 .bar i + i { border-left: 2px solid var(--paper); }
-.bar .s { background: var(--accent); } .bar .b { background: var(--fault); } .bar .u { background: var(--neutral); } .bar .p { background: var(--pending); }
+.bar .s { background: var(--accent); } .bar .b { background: var(--fault); } .bar .u { background: var(--neutral); } .bar .n { background: var(--neutral); opacity: .55; } .bar .p { background: var(--pending); }
 .key { display: grid; grid-template-columns: repeat(4, auto); justify-content: start; gap: 6px 34px; }
 .key div { font-size: var(--t-cell); color: var(--text-2); }
 .key .v { display: block; font-size: var(--t-h2); color: var(--text); font-weight: 500; margin-top: 2px; padding-left: 16px; } /* under the word, not the swatch */
 .key .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; }
 /* the outcome key spans its bar: four equal columns under it */
 .key.okey { grid-template-columns: repeat(4, 1fr); justify-content: stretch; gap: 6px 12px; }
-.sw.s { background: var(--accent); } .sw.b { background: var(--fault); } .sw.u { background: var(--neutral); } .sw.p { background: var(--pending); box-shadow: inset 0 0 0 1px var(--line); }
+.key.okey > div { white-space: nowrap; }
+.okey-note { margin: 6px 0 0; font-size: var(--t-small); color: var(--text-3); }
+.sw.s { background: var(--accent); } .sw.b { background: var(--fault); } .sw.u { background: var(--neutral); } .sw.n { background: var(--neutral); opacity: .55; } .sw.p { background: var(--pending); box-shadow: inset 0 0 0 1px var(--line); }
 .blobs { margin: 10px 0 0; font-size: var(--t-cell); color: var(--text-2); }
 .blobs b { font-weight: 500; color: var(--text); }
 .blobs .soft { margin-left: 10px; }
@@ -298,19 +300,29 @@ a.mon:hover { color: var(--accent-ink); text-decoration: none; }
 td .fault, td a.fault { color: var(--fault); font-weight: 500; }
 td a.plain { color: var(--text); }
 td a.plain:hover, td a.fault:hover { text-decoration: underline; }
-/* The validators table: the identity column reads left, every measured
-   column is right-aligned under its heading (as in every other table) so
-   digits line up by place; the counts behind a rate and any unit sit in
-   --text-3. The whole row opens the validator: the name is the real link,
-   and a cover link (.rowcover, out of the tab order and hidden from
-   assistive tech) stretches over the row for the pointer. Anything in a
-   cell that carries its own title or link sits above the cover. */
-.vt th:nth-child(1) { width: 26%; }
-.vt th:nth-child(2) { width: 13%; }
-/* the four score columns (service rate, broken, undecided, signed): centred, one width, one type size */
-.vt th:nth-last-child(-n+4), .vt td:nth-last-child(-n+4) { text-align: center; width: 10%; }
-.vt td:nth-last-child(-n+4) .den { font-size: inherit; }
-.vt td:nth-last-child(-n+4) .rate + .den { margin-left: 6px; }
+/* The validators table. The identity column reads left; every other column
+   has one width and is centred under its heading, cells and headings alike,
+   so the table reads as an even grid. A rate is a pair — share right-aligned
+   in a fixed box, counts left-aligned in the next — centred as one block,
+   so the per cent signs sit in one line whatever the counts are. The whole
+   row opens the validator: the name is the real link, and a cover link
+   (.rowcover, out of the tab order and hidden from assistive tech) stretches
+   over the row for the pointer. Anything in a cell that carries its own
+   title or link sits above the cover. */
+.vt { font-variant-numeric: tabular-nums; }
+.vt th:not(:first-child), .vt td:not(:first-child) { text-align: center; padding-left: 8px; padding-right: 8px; }
+@media (min-width: 900px) {
+  .vt { table-layout: fixed; }
+  .vt th:first-child { width: 20%; }
+  .vt td:not(:first-child) { overflow: hidden; text-overflow: ellipsis; }
+  .vt .hosting { max-width: 100%; vertical-align: middle; }
+  .vt .hosting > span:not(.flag):not(.flag-none):not(.cc) { overflow: hidden; text-overflow: ellipsis; }
+}
+.pair { display: inline-grid; grid-template-columns: 6ch minmax(7ch, auto); column-gap: 8px; align-items: baseline; }
+.pair > .rate { text-align: right; }
+.pair > .den { text-align: left; font-size: inherit; margin: 0; }
+/* the endorsement share describes, it does not rate: regular weight, quieter */
+.pair.endorsed > .rate { font-weight: 400; color: var(--text-2); }
 .vt tbody tr { position: relative; }
 .vt tbody tr:not(.empty) { cursor: pointer; }
 .vt .rowcover { position: absolute; inset: 0; z-index: 0; }

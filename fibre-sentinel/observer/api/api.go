@@ -2334,6 +2334,13 @@ func latestAnswerSQL(table, ok, source, vantage, only, asOf string) (string, []a
 
 // ---- validators ----
 
+// Throughput counts only shards large enough for bandwidth, not round trips,
+// to decide the download time, and is not published from fewer of them.
+const (
+	throughputMinBytes  = 2 << 20
+	throughputMinSample = 3
+)
+
 type validatorRow struct {
 	Address     string `json:"address"`      // 20-byte consensus address, hex
 	ConsAddress string `json:"cons_address"` // celestiavalcons1...: from the registry when registered, else derived from the hex address
@@ -2467,9 +2474,10 @@ type validatorRow struct {
 	// duration is not comparable between validators, and neither was rows
 	// per second over the whole probe: the dial, handshake and identity
 	// check cost the same for a small shard as for a large one, so the old
-	// figure rose with stake by construction. ThroughputSample is how many
-	// healthy probes carried a byte count; records from before the count
-	// existed are left out.
+	// figure rose with stake by construction. Only shards of at least
+	// throughputMinBytes are counted, and the figure is null under
+	// throughputMinSample of them. ThroughputSample is how many healthy
+	// probes of such a shard carried a byte count.
 	LatencyP50       *int64 `json:"serve_latency_p50_ms"`
 	LatencyP95       *int64 `json:"serve_latency_p95_ms"`
 	LatencySample    int64  `json:"serve_latency_sample"`
@@ -2804,8 +2812,12 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 	//
 	// Throughput is over the download step alone, bytes over download_ms,
 	// and ranked on its own (rb): the probe with the median duration can
-	// carry the highest transfer rate of the set. Records without a byte
-	// count sort last and are outside the throughput sample (cb).
+	// carry the highest transfer rate of the set. Only shards of at least
+	// throughputMinBytes count (cb): a small shard's download is almost all
+	// round trips, so pooling it with large ones made the median say which
+	// blobs a validator happened to be probed on (the same server read
+	// 110 KB/s on 130 KB shards and 8.7 MB/s on 27 MB ones). Smaller or
+	// uncounted records sort last and are outside the sample.
 	rows, err = db.QueryContext(ctx, `SELECT validator_address,
 			MAX(CASE WHEN rn = (c + 1) / 2          THEN ms END),
 			MAX(CASE WHEN rn = (c * 95 + 99) / 100  THEN ms END),
@@ -2815,17 +2827,17 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 		FROM (
 			SELECT validator_address AS validator_address,
 			       total_duration_ms AS ms,
-			       CASE WHEN bytes_returned > 0 AND download_ms > 0 THEN bytes_returned * 1000 / download_ms END AS bps,
+			       CASE WHEN bytes_returned >= ? AND download_ms > 0 THEN bytes_returned * 1000 / download_ms END AS bps,
 			       ROW_NUMBER() OVER (PARTITION BY validator_address ORDER BY total_duration_ms) AS rn,
 			       COUNT(*)     OVER (PARTITION BY validator_address)                            AS c,
 			       ROW_NUMBER() OVER (PARTITION BY validator_address
-			                          ORDER BY (bytes_returned IS NULL OR download_ms <= 0), bytes_returned * 1000.0 / NULLIF(download_ms, 0)) AS rb,
-			       SUM(CASE WHEN bytes_returned > 0 AND download_ms > 0 THEN 1 ELSE 0 END)
+			                          ORDER BY (bytes_returned IS NULL OR bytes_returned < ? OR download_ms <= 0), bytes_returned * 1000.0 / NULLIF(download_ms, 0)) AS rb,
+			       SUM(CASE WHEN bytes_returned >= ? AND download_ms > 0 THEN 1 ELSE 0 END)
 			                    OVER (PARTITION BY validator_address)                            AS cb
 			FROM probes
 			WHERE started_at >= ? AND started_at <= ? AND assigned = 1 AND phase = 'in_window'
 			  AND classification = 'HEALTHY' AND total_duration_ms > 0`+vfilter("validator_address")+`
-		) GROUP BY validator_address`, vargs(win.startArg(), win.endArg())...)
+		) GROUP BY validator_address`, vargs(throughputMinBytes, throughputMinBytes, throughputMinBytes, win.startArg(), win.endArg())...)
 	if err != nil {
 		return nil, err
 	}
@@ -2848,7 +2860,7 @@ func (s *Server) validatorRows(ctx context.Context, win Window, only string) ([]
 			v.LatencyP95 = &x
 		}
 		v.ThroughputSample = nb
-		if bps.Valid && nb > 0 {
+		if bps.Valid && nb >= throughputMinSample {
 			x := bps.Int64
 			v.BytesPerSecond = &x
 		}
