@@ -1,0 +1,415 @@
+package record
+
+import (
+	"bufio"
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+var t0 = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+func lineAt(at time.Time, who string, n int) string {
+	return fmt.Sprintf(`{"scheduled_at":%q,"w":%q,"n":%d}`+"\n", at.UTC().Format(time.RFC3339Nano), who, n)
+}
+
+func readAll(t *testing.T, path string) []byte {
+	t.Helper()
+	r, err := OpenAll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func appendLines(t *testing.T, path string, lines ...string) {
+	t.Helper()
+	a, err := OpenAppender(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	for _, l := range lines {
+		if _, err := a.Write([]byte(l)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func archiveAt(t *testing.T, path string, cutoff time.Time) Result {
+	t.Helper()
+	res, err := Archive(path, Options{Cutoff: cutoff, TimeField: "scheduled_at", Limit: -1, Now: cutoff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func skipUnsupported(t *testing.T) {
+	if !rotationSupported {
+		t.Skip("rotation needs flock")
+	}
+}
+
+// Archiving moves the old lines into a segment and leaves the rest live;
+// read through the archive, the file is byte for byte what was written,
+// from any logical offset, and a second run with the same cutoff moves
+// nothing.
+func TestArchiveKeepsEveryByteAtItsOffset(t *testing.T) {
+	skipUnsupported(t)
+	path := filepath.Join(t.TempDir(), "measurements.jsonl")
+	var want bytes.Buffer
+	for d := 0; d < 10; d++ {
+		for i := 0; i < 3; i++ {
+			l := lineAt(t0.Add(time.Duration(d)*24*time.Hour+time.Duration(i)*time.Hour), "a", d*3+i)
+			want.WriteString(l)
+			appendLines(t, path, l)
+		}
+	}
+	res := archiveAt(t, path, t0.Add(4*24*time.Hour))
+	if res.Lines != 12 || res.Skipped != "" {
+		t.Fatalf("first run: %+v", res)
+	}
+	res = archiveAt(t, path, t0.Add(7*24*time.Hour))
+	if res.Lines != 9 || res.Base == 0 {
+		t.Fatalf("second run: %+v", res)
+	}
+	if again := archiveAt(t, path, t0.Add(7*24*time.Hour)); again.Skipped == "" {
+		t.Fatalf("a repeated run moved something: %+v", again)
+	}
+	if got := readAll(t, path); !bytes.Equal(got, want.Bytes()) {
+		t.Fatalf("record changed:\n%s\nwant\n%s", got, want.Bytes())
+	}
+	live, _ := os.ReadFile(path)
+	if strings.Count(string(live), "\n") != 9 {
+		t.Fatalf("live file keeps %d lines, want 9", strings.Count(string(live), "\n"))
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if s.End() != int64(want.Len()) || s.Base() != int64(want.Len()-len(live)) {
+		t.Fatalf("base %d end %d, want %d %d", s.Base(), s.End(), want.Len()-len(live), want.Len())
+	}
+	for _, off := range []int64{0, 1, 57, s.Base() - 1, s.Base(), s.Base() + 3, s.End()} {
+		r, err := s.ReaderFrom(off)
+		if err != nil {
+			t.Fatalf("offset %d: %v", off, err)
+		}
+		got, _ := io.ReadAll(r)
+		if !bytes.Equal(got, want.Bytes()[off:]) {
+			t.Fatalf("offset %d reads %q", off, got)
+		}
+	}
+	if n, err := Verify(path); err != nil || n != 2 {
+		t.Fatalf("verify: %d %v", n, err)
+	}
+	if since := LiveSince(path); !since.Equal(t0.Add(7 * 24 * time.Hour)) {
+		t.Fatalf("live since %s", since)
+	}
+}
+
+// The cut stops at the first line dated at or after the cutoff, or not
+// dated at all, never passes the limit, and always leaves the last line.
+func TestArchiveCutRules(t *testing.T) {
+	skipUnsupported(t)
+	dir := t.TempDir()
+	old := func(n int) string { return lineAt(t0, "a", n) }
+
+	p := filepath.Join(dir, "undated.jsonl")
+	appendLines(t, p, old(1), old(2), `{"n":3}`+"\n", old(4), lineAt(t0.Add(48*time.Hour), "a", 5))
+	if res := archiveAt(t, p, t0.Add(24*time.Hour)); res.Lines != 2 {
+		t.Fatalf("an undated line must stop the cut: %+v", res)
+	}
+
+	p = filepath.Join(dir, "allold.jsonl")
+	appendLines(t, p, old(1), old(2), old(3))
+	if res := archiveAt(t, p, t0.Add(24*time.Hour)); res.Lines != 2 {
+		t.Fatalf("the last line must stay live: %+v", res)
+	}
+
+	p = filepath.Join(dir, "limit.jsonl")
+	appendLines(t, p, old(1), old(2), old(3), old(4))
+	res, err := Archive(p, Options{Cutoff: t0.Add(24 * time.Hour), TimeField: "scheduled_at", Limit: int64(len(old(1)) * 2), Now: t0})
+	if err != nil || res.Lines != 2 {
+		t.Fatalf("limit: %+v %v", res, err)
+	}
+	res, err = Archive(p, Options{Cutoff: t0.Add(24 * time.Hour), TimeField: "scheduled_at", Limit: int64(len(old(1)) * 2), Now: t0})
+	if err != nil || res.Skipped == "" {
+		t.Fatalf("nothing past the limit may move: %+v %v", res, err)
+	}
+
+	p = filepath.Join(dir, "dry.jsonl")
+	appendLines(t, p, old(1), old(2), old(3))
+	before, _ := os.ReadFile(p)
+	res, err = Archive(p, Options{Cutoff: t0.Add(24 * time.Hour), TimeField: "scheduled_at", Limit: -1, DryRun: true})
+	after, _ := os.ReadFile(p)
+	if err != nil || res.Lines != 2 || !bytes.Equal(before, after) {
+		t.Fatalf("dry run: %+v %v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(ArchiveDir(p), IndexFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a dry run wrote an index")
+	}
+}
+
+// Writers append while the archiver rotates, over and over: every line
+// written is in the record exactly once, in each writer's own order, and
+// the live file never loses a line to the swap.
+func TestRotationWhileWritersAppend(t *testing.T) {
+	skipUnsupported(t)
+	path := filepath.Join(t.TempDir(), "measurements.jsonl")
+	const writers, perWriter = 4, 3000
+	var clock atomic.Int64 // seconds past t0: lines are dated as they are written
+	var wg sync.WaitGroup
+	errs := make(chan error, writers+1)
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			// one Appender per writer: its own open file, as a process has
+			a, err := OpenAppender(path)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer a.Close()
+			for n := 0; n < perWriter; n++ {
+				at := t0.Add(time.Duration(clock.Add(1)) * time.Second)
+				if _, err := a.Write([]byte(lineAt(at, fmt.Sprint(w), n))); err != nil {
+					errs <- err
+					return
+				}
+				if n%50 == 0 {
+					if err := a.Sync(); err != nil {
+						errs <- err
+						return
+					}
+				}
+			}
+		}(w)
+	}
+	done := make(chan struct{})
+	rotations := 0
+	go func() {
+		defer close(done)
+		for {
+			time.Sleep(2 * time.Millisecond)
+			cut := t0.Add(time.Duration(clock.Load()-200) * time.Second)
+			res, err := Archive(path, Options{Cutoff: cut, TimeField: "scheduled_at", Limit: -1, Now: cut})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if res.Skipped == "" {
+				rotations++
+			}
+			if clock.Load() >= writers*perWriter {
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	<-done
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if rotations < 3 {
+		t.Fatalf("only %d rotations happened; the test proves nothing", rotations)
+	}
+	last := map[string]int{}
+	count := 0
+	sc := bufio.NewScanner(bytes.NewReader(readAll(t, path)))
+	for sc.Scan() {
+		var w string
+		var n int
+		l := sc.Text()
+		i := strings.Index(l, `"w":"`)
+		if _, err := fmt.Sscanf(l[i:], `"w":%q,"n":%d}`, &w, &n); err != nil {
+			t.Fatalf("line %q: %v", l, err)
+		}
+		if prev, ok := last[w]; ok && n != prev+1 {
+			t.Fatalf("writer %s: line %d after %d (lost or doubled)", w, n, prev)
+		} else if !ok && n != 0 {
+			t.Fatalf("writer %s starts at %d", w, n)
+		}
+		last[w] = n
+		count++
+	}
+	if count != writers*perWriter {
+		t.Fatalf("%d lines in the record, want %d", count, writers*perWriter)
+	}
+	if n, err := Verify(path); err != nil || n != rotations {
+		t.Fatalf("verify: %d segments (%d rotations) %v", n, rotations, err)
+	}
+	t.Logf("%d rotations under %d writers", rotations, writers)
+}
+
+// A run that stops after any step leaves a record that reads exactly as
+// before, and the next run finishes the job and removes the leftovers.
+func TestArchiveCrashBetweenSteps(t *testing.T) {
+	skipUnsupported(t)
+	for _, stop := range []string{"start", "segment", "tail", "index"} {
+		t.Run(stop, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "measurements.jsonl")
+			var want bytes.Buffer
+			add := func(l string) { want.WriteString(l); appendLines(t, path, l) }
+			for d := 0; d < 6; d++ {
+				add(lineAt(t0.Add(time.Duration(d)*24*time.Hour), "a", d))
+			}
+			archiveAt(t, path, t0.Add(2*24*time.Hour)) // an earlier generation, so recovery has one to keep
+			crash := errors.New("crash")
+			_, err := Archive(path, Options{Cutoff: t0.Add(4 * 24 * time.Hour), TimeField: "scheduled_at", Limit: -1, Now: t0,
+				hook: func(s string) error {
+					if s == stop {
+						return crash
+					}
+					return nil
+				}})
+			if !errors.Is(err, crash) {
+				t.Fatalf("err = %v", err)
+			}
+			if stop == "index" {
+				// the tail copy a real crash would leave behind
+				os.WriteFile(path+".rotate.tmp", []byte("partial"), 0o644)
+			}
+			// readers and writers carry on across the half-done run
+			if got := readAll(t, path); !bytes.Equal(got, want.Bytes()) {
+				t.Fatalf("after a crash at %s the record reads %q", stop, got)
+			}
+			add(lineAt(t0.Add(6*24*time.Hour), "a", 6))
+			if got := readAll(t, path); !bytes.Equal(got, want.Bytes()) {
+				t.Fatalf("append after a crash at %s: %q", stop, got)
+			}
+			res := archiveAt(t, path, t0.Add(4*24*time.Hour))
+			if res.Lines != 2 {
+				t.Fatalf("recovery run: %+v", res)
+			}
+			if got := readAll(t, path); !bytes.Equal(got, want.Bytes()) {
+				t.Fatalf("after recovery: %q", got)
+			}
+			if n, err := Verify(path); err != nil || n != 2 {
+				t.Fatalf("verify: %d %v", n, err)
+			}
+			ents, _ := os.ReadDir(ArchiveDir(path))
+			var names []string
+			for _, e := range ents {
+				names = append(names, e.Name())
+			}
+			if len(names) != 3 { // two segments and the index
+				t.Fatalf("archive dir holds %v", names)
+			}
+			if _, err := os.Stat(path + ".rotate.tmp"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the tail copy was left behind")
+			}
+		})
+	}
+}
+
+// A live file replaced outside the archiver is not cut, and reads as a file
+// of its own (base 0) rather than at an offset that is not its own.
+func TestReplacedLiveFileIsRefused(t *testing.T) {
+	skipUnsupported(t)
+	path := filepath.Join(t.TempDir(), "measurements.jsonl")
+	for d := 0; d < 4; d++ {
+		appendLines(t, path, lineAt(t0.Add(time.Duration(d)*24*time.Hour), "a", d))
+	}
+	archiveAt(t, path, t0.Add(2*24*time.Hour))
+	os.WriteFile(path, []byte(lineAt(t0, "other", 0)+lineAt(t0, "other", 1)), 0o644)
+	if _, err := Archive(path, Options{Cutoff: t0.Add(3 * 24 * time.Hour), TimeField: "scheduled_at", Limit: -1}); err == nil {
+		t.Fatal("a replaced file was cut")
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if s.Base() != 0 {
+		t.Fatalf("base %d", s.Base())
+	}
+	if _, err := Verify(path); err == nil {
+		t.Fatal("verify passed a live file the index does not describe")
+	}
+}
+
+// A damaged segment fails verification and a read that needs it.
+func TestDamagedSegmentFails(t *testing.T) {
+	skipUnsupported(t)
+	path := filepath.Join(t.TempDir(), "measurements.jsonl")
+	for d := 0; d < 4; d++ {
+		appendLines(t, path, lineAt(t0.Add(time.Duration(d)*24*time.Hour), "a", d))
+	}
+	res := archiveAt(t, path, t0.Add(2*24*time.Hour))
+	seg := filepath.Join(ArchiveDir(path), res.Segment)
+	os.WriteFile(seg, []byte("not gzip"), 0o644)
+	if _, err := Verify(path); err == nil {
+		t.Fatal("verify passed a damaged segment")
+	}
+	if _, err := OpenAll(path); err == nil {
+		t.Fatal("a read over a damaged segment succeeded")
+	}
+}
+
+// RepairTail cuts a torn tail under the lock and leaves a whole file alone.
+func TestRepairTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "m.jsonl")
+	os.WriteFile(path, []byte(lineAt(t0, "a", 0)+`{"scheduled_at":"20`), 0o644)
+	if n, err := RepairTail(path); err != nil || n != int64(len(`{"scheduled_at":"20`)) {
+		t.Fatalf("cut %d %v", n, err)
+	}
+	if n, err := RepairTail(path); err != nil || n != 0 {
+		t.Fatalf("second cut %d %v", n, err)
+	}
+	if n, err := RepairTail(filepath.Join(t.TempDir(), "none")); err != nil || n != 0 {
+		t.Fatalf("missing file: %d %v", n, err)
+	}
+}
+
+// A writer holding its file across a rotation follows it through the
+// Appender; one that writes to a plain O_APPEND descriptor would write into
+// the file the rotation replaced, which is why every writer of an archived
+// file goes through Appender.
+func TestHeldAppenderFollowsRotation(t *testing.T) {
+	skipUnsupported(t)
+	path := filepath.Join(t.TempDir(), "measurements.jsonl")
+	for d := 0; d < 3; d++ {
+		appendLines(t, path, lineAt(t0.Add(time.Duration(d)*24*time.Hour), "a", d))
+	}
+	held, err := OpenAppender(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	plain, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	archiveAt(t, path, t0.Add(2*24*time.Hour))
+	if _, err := held.Write([]byte(lineAt(t0.Add(72*time.Hour), "held", 0))); err != nil {
+		t.Fatal(err)
+	}
+	plain.WriteString(lineAt(t0.Add(72*time.Hour), "plain", 0))
+	got := string(readAll(t, path))
+	if !strings.Contains(got, `"w":"held"`) {
+		t.Fatalf("the held Appender's line is not in the record:\n%s", got)
+	}
+	if strings.Contains(got, `"w":"plain"`) {
+		t.Fatal("a plain descriptor's line reached the new file; the test no longer shows why the protocol is needed")
+	}
+}

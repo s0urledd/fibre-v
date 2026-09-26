@@ -20,6 +20,12 @@
 #                   the cut ends on a line boundary while a writer is
 #                   mid-line; a cut that ends inside a line fails verify; a
 #                   line that is not a JSON record is refused at the cut
+#   manifest over   the cut names the archived segments and the live base
+#   an archive      and counts both; cat reads the whole record in order;
+#                   a snapshot carries the segments and verifies; a missing
+#                   or altered segment fails; an index that places the live
+#                   file elsewhere fails; a live file no generation
+#                   describes is refused at the cut
 #   rpc-check       app version 9 + fibre code 6 passes; 10 + 6 fails; 10 + 0
 #                   passes; no block_results fails; a second RPC that does
 #                   not answer fails; two nodes disagreeing on a hash fails;
@@ -190,6 +196,54 @@ check python3 "$MANIFEST" verify "$T/snap" >/dev/null
 printf 'not a record\n' >> "$D/measurements.jsonl"
 check not python3 "$MANIFEST" write "$D" "$T/manifest3.json"
 check test ! -e "$T/manifest3.json"
+
+echo "== backup manifest over an archive"
+# A file observer-archive rotated: three lines in a gzip segment, two live,
+# index.json placing the live file at the segment's end by its first line.
+A="$T/adata"; mkdir -p "$A/archive/measurements.jsonl"
+python3 - "$A" <<'PY'
+import gzip, hashlib, json, os, sys
+d = sys.argv[1]
+lines = [('{"vantage":"t","promise_hash":"p1","validator_address":"v%d","scheduled_at":"2026-09-1%dT00:00:00Z"}\n' % (i, i)).encode() for i in range(5)]
+old, live = b"".join(lines[:3]), b"".join(lines[3:])
+seg = os.path.join(d, "archive", "measurements.jsonl", "000001-2026-09-13.jsonl.gz")
+with gzip.open(seg, "wb") as z:
+    z.write(old)
+gz = open(seg, "rb").read()
+open(os.path.join(d, "measurements.jsonl"), "wb").write(live)
+sha = lambda b: hashlib.sha256(b).hexdigest()
+idx = {"version": 1, "file": "measurements.jsonl", "time_field": "scheduled_at", "live_since": "2026-09-13T00:00:00Z",
+       "segments": [{"name": os.path.basename(seg), "from": 0, "to": len(old), "lines": 3, "sha256": sha(old), "gz_sha256": sha(gz), "gz_bytes": len(gz)}],
+       "generations": [{"base": 0, "head_sha256": sha(lines[0])}, {"base": len(old), "head_sha256": sha(lines[3])}]}
+json.dump(idx, open(os.path.join(d, "archive", "measurements.jsonl", "index.json"), "w"))
+open(os.path.join(d, "state.json"), "w").write('{"last_scanned_height":7}\n')
+PY
+check python3 "$MANIFEST" write "$A" "$T/am.json" >/dev/null
+check eq "$(python3 -c 'import json,sys; f=json.load(open(sys.argv[1]))["files"]["measurements.jsonl"]; print(f["records"], f["archived_records"], f["archive"]["base"], len(f["archive"]["segments"]))' "$T/am.json")" "2 3 $(gzip -dc "$A"/archive/measurements.jsonl/*.gz | wc -c | tr -d ' ') 1"
+# the whole record reads archived lines first, and its logical end is base + live
+check eq "$(python3 "$MANIFEST" cat "$A" measurements.jsonl | grep -o '"validator_address":"v[0-9]"' | tr -d '\n')" '"validator_address":"v0""validator_address":"v1""validator_address":"v2""validator_address":"v3""validator_address":"v4"'
+check eq "$(python3 "$MANIFEST" end "$A" measurements.jsonl)" "$(python3 "$MANIFEST" cat "$A" measurements.jsonl | wc -c | tr -d ' ')"
+# a snapshot carries the segments and the index, and verifies
+rm -rf "$T/asnap"; check python3 "$MANIFEST" snapshot "$A" "$T/asnap" >/dev/null
+check test -f "$T/asnap/archive/measurements.jsonl/index.json"
+check python3 "$MANIFEST" verify "$T/asnap" >/dev/null
+# a copy missing a segment, or with one altered, fails
+acopy() { rm -rf "$T/acopy"; cp -r "$T/asnap" "$T/acopy"; }
+acopy; rm "$T/acopy/archive/measurements.jsonl/"*.gz
+check not python3 "$MANIFEST" verify "$T/acopy"
+acopy; printf 'x' >> "$T/acopy/archive/measurements.jsonl/000001-2026-09-13.jsonl.gz"
+check not python3 "$MANIFEST" verify "$T/acopy"
+# an index that places the live file elsewhere fails
+acopy; python3 - "$T/acopy/archive/measurements.jsonl/index.json" <<'PY'
+import json, sys
+i = json.load(open(sys.argv[1])); i["generations"][-1]["base"] += 1; json.dump(i, open(sys.argv[1], "w"))
+PY
+check not python3 "$MANIFEST" verify "$T/acopy"
+# a live file the index does not describe is refused at the cut
+printf '{"promise_hash":"stranger"}\n' > "$T/stranger.jsonl"; cp "$A/measurements.jsonl" "$T/live.bak"
+cp "$T/stranger.jsonl" "$A/measurements.jsonl"
+check not python3 "$MANIFEST" write "$A" "$T/am2.json"
+cp "$T/live.bak" "$A/measurements.jsonl"
 
 echo "== rpc-check"
 RC="$HERE/rpc-check.sh"

@@ -111,11 +111,20 @@ meta_counts() { curl -sS -m 10 "http://$API_LISTEN/v1/meta" 2>/dev/null | python
 compute_ms() { curl -sS -m 30 "http://$API_LISTEN/v1/network?window=24h" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("compute_ms", 0))' 2>/dev/null || echo 0; }
 ingest_lag() {
   python3 - "$DB" "$DATA_DIR/measurements.jsonl" <<'PY' 2>/dev/null || echo 0
-import os, sqlite3, sys
+import hashlib, json, os, sqlite3, sys
 try:
     size = os.path.getsize(sys.argv[2])
 except OSError:
     print(0); sys.exit()
+# The cursor is a logical offset: a file observer-archive rotated starts at
+# the base its archive index gives for its first line.
+try:
+    idx = json.load(open(os.path.join(os.path.dirname(sys.argv[2]), "archive", "measurements.jsonl", "index.json")))
+    head = open(sys.argv[2], "rb").readline()
+    h = hashlib.sha256(head).hexdigest() if head.endswith(b"\n") else ""
+    size += next((g["base"] for g in reversed(idx.get("generations") or []) if g.get("head_sha256") == h), 0)
+except (OSError, ValueError):
+    pass
 con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
 row = con.execute("SELECT byte_offset FROM ingest_cursors WHERE file LIKE '%measurements.jsonl'").fetchone()
 print(max(size - (row[0] if row else 0), 0))

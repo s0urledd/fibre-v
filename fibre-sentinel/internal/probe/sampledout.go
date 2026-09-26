@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/record"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 )
 
@@ -142,7 +143,7 @@ func (d SampledOut) Expand(pub scan.Publication) []Measurement {
 // was sampled out. Safe for concurrent use.
 type SampledOutStore struct {
 	path string
-	f    *os.File
+	f    *record.Appender
 
 	mu   sync.Mutex
 	seen map[string]bool // Key()
@@ -168,7 +169,7 @@ func OpenSampledOutStore(dir string) (*SampledOutStore, error) {
 	for _, d := range ds {
 		s.seen[d.Key()] = true
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := record.OpenAppender(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -217,11 +218,14 @@ func (s *SampledOutStore) Close() error {
 // Path returns the file path.
 func (s *SampledOutStore) Path() string { return s.path }
 
-// LoadSampledOut reads a sampling_decisions.jsonl. A later line for a key
-// already read is dropped: the file is append-only and the first decision is
-// the one the record stands on.
+// LoadSampledOut reads a sampling_decisions.jsonl, its archived segments
+// first when it has any. A later line for a key already read is dropped:
+// the file is append-only and the first decision is the one the record
+// stands on. The decisions are one line per publication, so reading the
+// whole record at the prober's start stays small; the archived ones make
+// Has true for publications long finished, which is what they are.
 func LoadSampledOut(path string) ([]SampledOut, error) {
-	f, err := os.Open(path)
+	f, err := record.OpenAll(path)
 	if err != nil {
 		return nil, err
 	}

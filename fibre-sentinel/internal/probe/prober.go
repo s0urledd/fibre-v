@@ -17,6 +17,7 @@ import (
 	"time"
 
 	celfibre "github.com/celestiaorg/celestia-app/v10/fibre"
+	"github.com/plsgiveup/fibre/fibre-sentinel/internal/record"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/scan"
 	"github.com/plsgiveup/fibre/fibre-sentinel/internal/status"
 )
@@ -99,7 +100,9 @@ type Config struct {
 	// obligation total, where it should be counted as unobserved. A
 	// positive value is for a fresh prober pointed at a data directory
 	// with days of history, which would otherwise spend its first minutes
-	// writing markers; slots behind it are left without a row.
+	// writing markers; slots behind it are left without a row. Either way a
+	// publication whose rows may have been archived (observer-archive,
+	// days after its schedule ended) is not planned again (archivedFrom).
 	BackfillMissed time.Duration
 
 	// RetryTransportTimeout re-runs a probe once when the first attempt fails
@@ -211,6 +214,11 @@ type Prober struct {
 	// complete marks (vantage, promise, point) slots every target of which
 	// has a row; plan skips them without resolving targets again.
 	complete map[string]bool
+	// liveSince is the newest time from which the prober's own files are
+	// whole in their live copies: lines dated earlier may have moved to
+	// archive/ (internal/record), where the restart index does not read.
+	// Zero when nothing was ever archived. Read at the top of every cycle.
+	liveSince time.Time
 	// sweep counts runDue calls, and rotates the order work is dispatched in
 	// so a sweep that runs out of time does not drop the same validators each
 	// cycle.
@@ -367,6 +375,7 @@ func (p *Prober) Run(parent context.Context) error {
 			p.log.Printf("publications: +%d (%d live)", added, len(p.feed.pubs))
 		}
 
+		p.liveSince = p.recordLiveSince()
 		now := time.Now()
 		due, future, missed, dropped, finished := p.plan(p.feed.all(), now)
 
@@ -770,6 +779,14 @@ func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, miss
 			continue
 		}
 		points := ScheduleFor(pub, p.cfg.Schedule)
+		if archivedFrom(pub, points, p.liveSince) {
+			// Some of its rows may be in the archive, which the restart
+			// index does not read: planning it would write a second row
+			// for a slot that has one. The archive keeps days more than
+			// any schedule is long, so its schedule ended long ago.
+			finished = append(finished, pub.PromiseHash)
+			continue
+		}
 		late := p.latenessFor(pub)
 		var pending []SchedulePoint
 		started := false
@@ -821,6 +838,43 @@ func (p *Prober) plan(pubs []scan.Publication, now time.Time) (due, future, miss
 	sort.SliceStable(future, func(i, j int) bool { return future[i].point.At.Before(future[j].point.At) })
 	sort.SliceStable(due, func(i, j int) bool { return due[i].point.At.Before(due[j].point.At) })
 	return due, future, missed, dropped, finished
+}
+
+// archiveSkew is how far a row's own date may sit before the publication's
+// settlement time: a sampling decision is dated by the prober's clock, the
+// settlement by the block's.
+const archiveSkew = time.Hour
+
+// archivedFrom reports whether a row of pub may be dated before liveSince,
+// and so may be in the archive rather than the live file. Every row the
+// prober writes for pub is dated at one of its schedule points (a
+// measurement's scheduled_at) or after its settlement (a sampling
+// decision's decided_at, less the clock skew). When the earlier of the two
+// is at or after liveSince, every one of them is live: the archiver cuts
+// before the first line dated at or after its cutoff, and never past it.
+func archivedFrom(pub scan.Publication, points []SchedulePoint, liveSince time.Time) bool {
+	if liveSince.IsZero() {
+		return false
+	}
+	earliest := pub.SettlementTime
+	for _, pt := range points {
+		if earliest.IsZero() || pt.At.Before(earliest) {
+			earliest = pt.At
+		}
+	}
+	return earliest.Add(-archiveSkew).Before(liveSince)
+}
+
+// recordLiveSince is the newer of the live-since times of the files the
+// restart index reads: both are whole in their live copies from then on.
+func (p *Prober) recordLiveSince() time.Time {
+	t := record.LiveSince(p.store.Path())
+	if p.sampled != nil {
+		if s := record.LiveSince(p.sampled.Path()); s.After(t) {
+			t = s
+		}
+	}
+	return t
 }
 
 // latenessFor is how long past its scheduled time a slot of pub may still

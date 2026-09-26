@@ -296,6 +296,8 @@ multi-vantage coverage.
 
 ```
 <data-dir>/measurements.jsonl   one raw Measurement per line, append-only + fsync
+<data-dir>/archive/measurements.jsonl/   its older lines, gzip, once observer-archive has run
+                                (internal/record; readers see one file at the same offsets)
 ```
 
 ---

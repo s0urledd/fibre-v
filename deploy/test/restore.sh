@@ -90,7 +90,8 @@ if [ -n "$newest" ]; then
   echo "  the copy's newest record file is $((age / 3600))h $(( (age % 3600) / 60 ))m old; manifest taken $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["taken_at"])' "$TMP/backup-manifest.json")"
 fi
 want_pub=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["files"].get("publications.jsonl",{}).get("records",0))' "$TMP/backup-manifest.json")
-want_probe=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["files"].get("measurements.jsonl",{}).get("records",0))' "$TMP/backup-manifest.json")
+# the live lines and the archived ones: the rebuild reads both (archive/)
+want_probe=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); f=m["files"].get("measurements.jsonl",{}); print(f.get("records",0) + f.get("archived_records",0))' "$TMP/backup-manifest.json")
 
 echo "== 3. rebuild the database from the verified cut"
 if timeout 1200 /usr/local/bin/observer-collector -rpc "$RPC" -data-dir "$TMP" -vantage "$VANTAGE" -once \

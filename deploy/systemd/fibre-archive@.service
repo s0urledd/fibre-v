@@ -1,0 +1,21 @@
+[Unit]
+Description=Fibre observer (%i): move the older lines of the biggest record files into archive/
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=fibre-observer
+EnvironmentFile=/etc/fibre-observer/%i.env
+# ARCHIVE_ARGS (optional, in the env file): e.g. "-keep 336h". Unbraced so
+# an empty value adds no argument. observer-archive refuses a -keep shorter
+# than the longest retention window in state.json plus a day.
+ExecStart=/usr/local/bin/observer-archive -data-dir ${DATA_DIR} $ARCHIVE_ARGS
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateNetwork=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/fibre-observer/%i

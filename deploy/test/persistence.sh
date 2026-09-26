@@ -59,15 +59,17 @@ cursors() { sql "$1" "SELECT file, byte_offset FROM ingest_cursors ORDER BY file
 # collapsed (source = 'rows'), standing for points x validators lines.
 recorded() { sql "$1" "SELECT (SELECT COUNT(*) FROM probes) + (SELECT COALESCE(SUM(points * validators), 0) FROM sampling_decisions WHERE source = 'rows')"; }
 distinct_keys() { # distinct_keys <dir> -> "<publications lines> <distinct promises> <dup> <measurement lines> <distinct slots> <dup>"
-  python3 - "$1" <<'PY'
-import json, os, sys
+  # the whole record of each file: archived segments first, then the live file
+  python3 - "$1" "$MANIFEST_TOOL" <<'PY'
+import json, os, subprocess, sys
 d = sys.argv[1]
 def scan(name, keyf):
     path = os.path.join(d, name)
     if not os.path.exists(path):
         return (0, 0, 0)
     seen, dup, n = set(), 0, 0
-    for line in open(path, "rb"):
+    cat = subprocess.Popen([sys.argv[2], "cat", d, name], stdout=subprocess.PIPE)
+    for line in cat.stdout:
         line = line.strip()
         if not line: continue
         n += 1
@@ -76,6 +78,8 @@ def scan(name, keyf):
         if k is None: continue
         if k in seen: dup += 1
         seen.add(k)
+    if cat.wait() != 0:
+        raise SystemExit(f"{name}: the manifest tool could not read the record")
     return (n, len(seen), dup)
 p = scan("publications.jsonl", lambda r: r.get("promise_hash"))
 m = scan("measurements.jsonl", lambda r: None if not all(k in r for k in ("vantage","promise_hash","validator_address","scheduled_at")) else (r["vantage"], r["promise_hash"], r["validator_address"], r["scheduled_at"]))
