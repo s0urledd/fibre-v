@@ -133,7 +133,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
   const signed = (v: Validator) => {
     const s = v.signing;
     if (!s || s.assigned === 0) return <span className="muted" title={s && s.unknown > 0 ? `${int(s.unknown)} assigned promise${s.unknown === 1 ? "" : "s"} recorded before signatures were verified: nothing to say either way.` : "No settled promise assigned this validator rows in this period."}>—</span>;
-    const why = `Verified signature on ${int(s.signed)} of the ${int(s.assigned)} settled promises that assigned it rows. Publishers stop collecting at two thirds of voting power, so 100% is not expected and an unsigned promise is not a fault.`;
+    const why = `Verified signature on ${int(s.signed)} of the ${int(s.assigned)} settled promises that assigned it rows. Publishers stop collecting at two thirds of voting power, so 100% is not expected and a missing endorsement is not a fault.`;
     return <span title={s.assigned < MIN_RATED ? `${why} Fewer than ${MIN_RATED} promises: shown, not ranked.` : why}><span className="rate">{pctOf(s.signed, s.assigned)}</span><span className="den"> · {int(s.signed)}/{int(s.assigned)}</span></span>;
   };
   const count = (v: Validator, n: number, kind: "broken" | "undecided") => {
@@ -177,7 +177,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               {showScores && <Th k="kept" dflt={1} label="Service rate" title="Share of assessed obligations fulfilled in the selected period." />}
               {showScores && <Th k="broken" dflt={-1} label="Broken" title="Obligations the validator was reached for and did not keep. The only count held against a validator." />}
               {showScores && <Th k="undecided" dflt={-1} label="Undecided" title="Obligations the rate does not speak for: never observed serving, or no reading at the end of the window. Not a fault." />}
-              {showScores && <Th k="signed" dflt={-1} label="Signed ⅔" title="Share of the settled promises that assigned this validator rows where its verified signature made the two-thirds quorum. Descriptive: the publisher stops at two thirds of voting power, so a promise outside the quorum is not a fault." />}
+              {showScores && <Th k="signed" dflt={-1} label="Endorsed ⅔" title="Share of the settled promises that assigned this validator rows where its verified signature made the two-thirds quorum. Descriptive: the publisher stops at two thirds of voting power, so a promise outside the quorum is not a fault." />}
             </tr>
           </thead>
           <tbody>

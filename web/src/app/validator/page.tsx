@@ -46,7 +46,7 @@ const pctFrac = (f: number) => (f >= 1 ? "100%" : `${(f * 100).toFixed(1)}%`);
 
 /** the verdict as a word and a mark; the classification is the observer's, never re-derived here */
 const WORDS: Record<string, [string, string]> = {
-  HEALTHY: ["Served", "ok"], FAULT: ["Broken", "fault"], UNATTESTED: ["Unsigned", "unsigned"], NOT_PROBED: ["Not probed", "gone"],
+  HEALTHY: ["Served", "ok"], FAULT: ["Broken", "fault"], UNATTESTED: ["Not endorsed", "unsigned"], NOT_PROBED: ["Not probed", "gone"],
   EXPECTED_GONE: ["Expected gone", "gone"], UNREACHABLE: ["Unreachable", "other"], NOT_REGISTERED: ["No endpoint", "none"],
   IDENTITY_EXPIRED: ["Certificate expired", "other"], IDENTITY_MISMATCH: ["Wrong certificate", "other"], THROTTLED: ["Rate limited", "other"],
   SERVER_ERROR: ["Server error", "other"], RETENTION_UNVERIFIED: ["Deadline unverified", "gone"], TOLERATED: ["Tolerated", "other"],
@@ -77,7 +77,7 @@ const wordOf = (cls: string): [string, string] => WORDS[cls] ?? [cls.toLowerCase
 const probeWord = (p: Probe): [string, string] => {
   // a fault the second location fetched and verified: withdrawn, not counted either way
   if (p.cleared_by) return ["Cleared", "gone"];
-  if (p.classification === "UNATTESTED") return (p.outcome === "SERVED_OK" || p.outcome === "PARTIAL") ? ["Served, unsigned", "unsigned"] : ["Unsigned", "unsigned"];
+  if (p.classification === "UNATTESTED") return (p.outcome === "SERVED_OK" || p.outcome === "PARTIAL") ? ["Served, not endorsed", "unsigned"] : ["Not endorsed", "unsigned"];
   return wordOf(p.classification);
 };
 const PHASE: Record<string, string> = { in_window: "in window", grace: "grace", post: "after window" };
@@ -101,7 +101,7 @@ const identityWord: Record<string, string> = { verified: "verified", expired: "e
  * that is a fault is always in the same place.
  */
 const REACH_FAIL = new Set(["DNS_FAIL", "TCP_REFUSED", "TCP_TIMEOUT", "TCP_UNREACHABLE", "TLS_HANDSHAKE_FAIL", "RPC_UNAVAILABLE", "RPC_ERROR"]);
-const GROUPS = ["served", "unreachable", "certificate rejected", "no endpoint", "pruned after the window", "not found, unsigned", "answered with an error", "not counted", "other", "broken"] as const;
+const GROUPS = ["served", "unreachable", "certificate rejected", "no endpoint", "pruned after the window", "not found, not endorsed", "answered with an error", "not counted", "other", "broken"] as const;
 type Group = (typeof GROUPS)[number];
 function groupOf(p: Probe, suspect: boolean): Group {
   if (suspect) return "not counted";
@@ -112,7 +112,7 @@ function groupOf(p: Probe, suspect: boolean): Group {
   if (p.classification.startsWith("IDENTITY_")) return "certificate rejected";
   if (REACH_FAIL.has(p.outcome)) return "unreachable";
   if (p.outcome === "NOT_FOUND" && p.phase !== "in_window") return "pruned after the window";
-  if (p.outcome === "NOT_FOUND" && p.classification === "UNATTESTED") return "not found, unsigned";
+  if (p.outcome === "NOT_FOUND" && p.classification === "UNATTESTED") return "not found, not endorsed";
   if (p.classification === "SERVER_ERROR" || p.classification === "THROTTLED") return "answered with an error";
   return "other";
 }
@@ -207,8 +207,8 @@ function Page() {
             <span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span>
             {v.host && <span title={v.identity_reason || "The consensus-key check on the newest handshake."}>TLS identity <b className="word">{identityWord[v.identity_status] ?? v.identity_status}</b></span>}
             {sig && sig.assigned > 0
-              ? <span title={`Settled promises in this period that assigned this validator rows and carry its verified signature, ${pctOf(sig.signed, sig.assigned)}. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.`}>signed ⅔ <b className="word">{int(sig.signed)} / {int(sig.assigned)}</b> promises<SignedInfo /></span>
-              : att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing signature is not a fault.">signed ⅔ <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs<SignedInfo /></span>}
+              ? <span title={`Settled promises in this period that assigned this validator rows and carry its verified endorsement (signature), ${pctOf(sig.signed, sig.assigned)}. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing endorsement is not a fault.`}>endorsed ⅔ <b className="word">{int(sig.signed)} / {int(sig.assigned)}</b> promises<SignedInfo /></span>
+              : att && att.blob_coverage.den > 0 && <span title="Assigned blobs in this period whose settled promise carries this validator’s verified signature. Publishers stop collecting signatures at two thirds of stake, so 100% is not expected and a missing endorsement is not a fault.">endorsed ⅔ <b className="word">{int(att.attested_blobs)} / {int(att.blob_coverage.den)}</b> blobs<SignedInfo /></span>}
             {(v.timeouts_enforced ?? 0) > 0 && <span title="MsgPaymentPromiseTimeout submitted by this validator’s operator account in the period: abandoned promises reported so the escrow was charged. The chain pays nothing for it.">{int(v.timeouts_enforced)} timeout{v.timeouts_enforced === 1 ? "" : "s"} enforced</span>}
           </div>
         </div>
@@ -355,7 +355,7 @@ function Page() {
                     <td><Link className="mono" href={`/blob/?hash=${p.promise_hash}`}>{p.promise_hash.slice(0, 10)}…</Link></td>
                     <td>{p.schedule_label} <span className="soft">· {PHASE[p.phase] ?? p.phase.replace("_", " ")}</span></td>
                     <td title={p.classification_reason || undefined}><span className={"mk " + mk} /> <span className={"word" + (mk === "fault" ? " fault" : "")}>{word}</span></td>
-                    <td className="soft">{p.outcome.toLowerCase().replace(/_/g, " ")}{p.classification === "FAULT" && !sus && p.raw_error && <> · <code>{p.raw_error}</code></>}{p.attested === false && <> · unsigned</>}</td>
+                    <td className="soft">{p.outcome.toLowerCase().replace(/_/g, " ")}{p.classification === "FAULT" && !sus && p.raw_error && <> · <code>{p.raw_error}</code></>}{p.attested === false && <> · not endorsed</>}</td>
                     <td className="num">{p.rows_expected ? `${int(p.rows_returned)} / ${int(p.rows_expected)}` : "—"}</td>
                     <td className="num">{int(p.total_duration_ms)}</td>
                     <td className="go"><Link href={`/blob/?hash=${p.promise_hash}`} aria-label="open the blob">→</Link></td>
@@ -371,14 +371,14 @@ function Page() {
 }
 
 /**
- * What "signed" means, one tap away. The same sentence as the overview
- * table's Signed column, so the two pages never explain one figure two ways:
+ * What "endorsed" means, one tap away. The same sentence as the overview
+ * table's Endorsed column, so the two pages never explain one figure two ways:
  * a missing signature is the quorum rule working, not the validator failing.
  */
 function SignedInfo() {
   return (
-    <Info label="Signed ⅔">
-      <p>Settled promises in this period that assigned this validator rows and carry its verified signature.</p>
+    <Info label="Endorsed ⅔">
+      <p>Settled promises in this period that assigned this validator rows and carry its verified endorsement (signature).</p>
       <p>Publishers stop collecting signatures at two thirds of stake, so roughly a third of validators miss any given promise by design. A low rate is normal; only a sustained 0 with a reachable host is worth a look.</p>
     </Info>
   );

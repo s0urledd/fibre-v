@@ -39,7 +39,7 @@ function cellTitle(day: string, point: string, c: HeatCell | undefined, beforeRa
     return `${where}: no data, no rated or held-out probe`;
   }
   const rated = c.served + c.faults;
-  const held = c.held_out > 0 ? ` · ${int(c.held_out)} held out (no verdict: unsigned, unreachable, gaps…)` : "";
+  const held = c.held_out > 0 ? ` · ${int(c.held_out)} held out (no verdict: not endorsed, unreachable, gaps…)` : "";
   if (rated === 0) return `${where}: no verdict · n = 0 rated · ${int(c.held_out)} probe${c.held_out === 1 ? "" : "s"} held out`;
   const broken = c.faults > 0 ? ` · ${int(c.faults)} broken` : "";
   return `${where}: n = ${int(rated)} rated · served ${int(c.served)} / ${int(rated)} (${pctOf(c.served, rated)})${broken}${held}${c.rolled ? " · from the daily rollup" : ""}`;
