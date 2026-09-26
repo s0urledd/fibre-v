@@ -26,10 +26,9 @@ func newPersisted(t *testing.T, cfg Config, file string) *Policy {
 	return p
 }
 
-// A restart does not hand out a fresh budget: the request window, the byte
-// window and the transport backoff all carry over, and the spacing counts
-// from before the restart.
-func TestBudgetAndBackoffSurviveARestart(t *testing.T) {
+// A restart does not hand out a fresh budget: the request window and the
+// byte window carry over, and the spacing counts from before the restart.
+func TestBudgetSurvivesARestart(t *testing.T) {
 	file := filepath.Join(t.TempDir(), BudgetStateFile)
 	if err := writeAtomic(file, []byte(`{"version":1,"saved_at":"2026-01-01T00:00:00Z","validators":{}}`)); err != nil {
 		t.Fatal(err)
@@ -37,21 +36,20 @@ func TestBudgetAndBackoffSurviveARestart(t *testing.T) {
 	cfg := Default()
 	cfg.Caps.PerValidator.MinRequestSpacing = 0
 	cfg.Caps.PerValidator.RequestsPerMinute = 3
-	cfg.Backoff.SkipDownloadAfter = 2
 	p := newPersisted(t, cfg, file)
 	now := time.Now()
 	pub := pubOf(hexHash(31), now, 1<<20, 148)
 	tgt := probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148, Assigned: true}
 	fail := probe.Measurement{ValidatorAddress: tgt.AddressHex, AssignedRowCount: 148, StartedAt: now, Outcome: probe.OutcomeTCPTimeout}
 	for i := 0; i < 2; i++ {
-		if allow, _, reason := p.BeforeProbe(pub, tgt, now); !allow {
+		if allow, reason := p.BeforeProbe(pub, tgt, now); !allow {
 			t.Fatalf("probe %d denied: %s", i, reason)
 		}
 		p.AfterProbe(pub, fail)
 	}
 	// a third admitted and still in flight when the process dies
-	if allow, skip, reason := p.BeforeProbe(pub, tgt, now); !allow || !skip {
-		t.Fatalf("third probe: allow=%v skip=%v %s", allow, skip, reason)
+	if allow, reason := p.BeforeProbe(pub, tgt, now); !allow {
+		t.Fatalf("third probe: denied: %s", reason)
 	}
 	if err := p.Flush(); err != nil {
 		t.Fatal(err)
@@ -59,12 +57,12 @@ func TestBudgetAndBackoffSurviveARestart(t *testing.T) {
 
 	// the next process
 	q := newPersisted(t, cfg, file)
-	if allow, _, reason := q.BeforeProbe(pub, tgt, now); allow || reason != "budget:validator_requests_per_minute=3" {
+	if allow, reason := q.BeforeProbe(pub, tgt, now); allow || reason != "budget:validator_requests_per_minute=3" {
 		t.Fatalf("after a restart, a 4th request in the same minute: allow=%v reason=%s (a fresh budget)", allow, reason)
 	}
-	// next minute: admitted, and still backed off (2 transport failures on record)
-	if allow, skip, reason := q.BeforeProbe(pub, tgt, now.Add(61*time.Second)); !allow || !skip {
-		t.Fatalf("after a restart: allow=%v skip=%v %s, want admitted without the download (backoff kept)", allow, skip, reason)
+	// next minute: admitted in full, whatever the earlier probes returned
+	if allow, reason := q.BeforeProbe(pub, tgt, now.Add(61*time.Second)); !allow {
+		t.Fatalf("after a restart, the next minute: denied: %s", reason)
 	}
 	q.mu.Lock()
 	vs := q.validators[tgt.AddressHex]
@@ -104,7 +102,7 @@ func TestTheByteBudgetSurvivesARestart(t *testing.T) {
 		p := newPersisted(t, cfg, file)
 		for i := 0; i < 3; i++ {
 			now := time.Now()
-			if allow, _, _ := p.BeforeProbe(pub, tgt, now); allow {
+			if allow, _ := p.BeforeProbe(pub, tgt, now); allow {
 				admitted++
 				p.AfterProbe(pub, probe.Measurement{ValidatorAddress: tgt.AddressHex, AssignedRowCount: 148, StartedAt: now,
 					Outcome: probe.OutcomeServedOK, Download: probe.DownloadResult{Attempted: true, RowsExpected: 148}})
@@ -144,13 +142,13 @@ func TestAnUnknownBudgetStateStartsWithACoolDown(t *testing.T) {
 			p.SetLogger(func(f string, a ...any) { logged = append(logged, f) })
 			pub := pubOf(hexHash(33), time.Now(), 1<<20, 148)
 			tgt := probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148, Assigned: true}
-			if allow, _, reason := p.BeforeProbe(pub, tgt, time.Now()); allow || reason != "budget:state_unknown_cooldown" {
+			if allow, reason := p.BeforeProbe(pub, tgt, time.Now()); allow || reason != "budget:state_unknown_cooldown" {
 				t.Fatalf("allow=%v reason=%s, want the cool-down", allow, reason)
 			}
 			if len(logged) == 0 {
 				t.Fatal("the cool-down was not logged")
 			}
-			if allow, _, reason := p.BeforeProbe(pub, tgt, time.Now().Add(11*time.Minute)); !allow {
+			if allow, reason := p.BeforeProbe(pub, tgt, time.Now().Add(11*time.Minute)); !allow {
 				t.Fatalf("after the cool-down: %s", reason)
 			}
 			if err := p.Flush(); err != nil {
@@ -167,7 +165,7 @@ func TestAnUnknownBudgetStateStartsWithACoolDown(t *testing.T) {
 	cfg.Caps.PerValidator.MinRequestSpacing = 0
 	p := newPersisted(t, cfg, filepath.Join(t.TempDir(), BudgetStateFile))
 	pub := pubOf(hexHash(34), time.Now(), 1<<20, 148)
-	if allow, _, reason := p.BeforeProbe(pub, probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148}, time.Now()); !allow {
+	if allow, reason := p.BeforeProbe(pub, probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148}, time.Now()); !allow {
 		t.Fatalf("cool-down 0: %s", reason)
 	}
 }
@@ -181,13 +179,13 @@ func TestAnUnsavableBudgetStateClosesAdmission(t *testing.T) {
 	p := newPersisted(t, cfg, filepath.Join(dir, BudgetStateFile))
 	pub := pubOf(hexHash(35), time.Now(), 1<<20, 148)
 	tgt := probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148}
-	if allow, _, _ := p.BeforeProbe(pub, tgt, time.Now()); !allow {
+	if allow, _ := p.BeforeProbe(pub, tgt, time.Now()); !allow {
 		t.Fatal("first probe denied")
 	}
 	if err := p.Flush(); err == nil {
 		t.Fatal("save into a missing directory succeeded")
 	}
-	if allow, _, reason := p.BeforeProbe(pub, tgt, time.Now()); allow || reason != "budget:state_unsaved" {
+	if allow, reason := p.BeforeProbe(pub, tgt, time.Now()); allow || reason != "budget:state_unsaved" {
 		t.Fatalf("with the state unsaved: allow=%v reason=%s", allow, reason)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -196,7 +194,7 @@ func TestAnUnsavableBudgetStateClosesAdmission(t *testing.T) {
 	if err := p.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if allow, _, reason := p.BeforeProbe(pub, tgt, time.Now()); !allow {
+	if allow, reason := p.BeforeProbe(pub, tgt, time.Now()); !allow {
 		t.Fatalf("after a save worked: %s", reason)
 	}
 }
@@ -213,7 +211,7 @@ func TestTheBudgetStateIsSavedAfterChanges(t *testing.T) {
 	p := newPersisted(t, cfg, file)
 	pub := pubOf(hexHash(36), time.Now(), 1<<20, 148)
 	tgt := probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148}
-	if allow, _, _ := p.BeforeProbe(pub, tgt, time.Now()); !allow {
+	if allow, _ := p.BeforeProbe(pub, tgt, time.Now()); !allow {
 		t.Fatal("denied")
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -290,7 +288,7 @@ func TestAnUnchangedBudgetStateIsNotWritten(t *testing.T) {
 			}
 			if name == "unreadable" {
 				q := newPersisted(t, cfg, file)
-				if allow, _, reason := q.BeforeProbe(pub, probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148}, time.Now()); allow || reason != "budget:state_unknown_cooldown" {
+				if allow, reason := q.BeforeProbe(pub, probe.Target{AddressHex: pub.Assignment.Validators[0].Address, RowCount: 148}, time.Now()); allow || reason != "budget:state_unknown_cooldown" {
 					t.Fatalf("the next start: allow=%v reason=%s, want the cool-down again", allow, reason)
 				}
 			}

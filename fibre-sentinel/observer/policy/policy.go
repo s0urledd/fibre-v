@@ -1,15 +1,21 @@
 // Package policy implements the probe load policy (docs/SYSTEM.md, "Load
 // policy and sampling"): deterministic, unpredictable sampling
 // of publications when the byte or request budget would be exceeded,
-// per-validator and global caps, and a backoff that never adds requests.
+// and per-validator and global caps.
+//
+// There is no backoff. It used to skip the download for twenty minutes after
+// three transport failures in a row, which turned the scheduled points of a
+// validator that had recovered into handshake-only rows: the observer's own
+// state, not the validator, decided what was measured. Every scheduled point
+// that the caps admit now downloads the shard.
 //
 // The policy plugs into the prober through probe.Policy. Its counters live
 // in memory and, when a state file is configured, are saved to the data
 // dir so a restart does not start on a fresh budget (budgetstate.go); the
 // durable record of every decision is what the prober writes with the
 // policy's reason: for a publication drawn out of the sample, one
-// probe.SampledOut line in sampling_decisions.jsonl; for a probe a cap or
-// the backoff denied, that probe's NOT_PROBED measurement.
+// probe.SampledOut line in sampling_decisions.jsonl; for a probe a cap
+// denied, that probe's NOT_PROBED measurement.
 package policy
 
 import (
@@ -73,10 +79,6 @@ type Config struct {
 		ProjectionLookback   time.Duration `yaml:"projection_lookback"`
 		AlwaysProbe          []string      `yaml:"always_probe"` // promise hashes exempt from sampling
 	} `yaml:"sampling"`
-	Backoff struct {
-		SkipDownloadAfter int           `yaml:"skip_download_after"` // consecutive transport failures before L4 is skipped
-		SkipWindow        time.Duration `yaml:"skip_window"`         // how long after the last failure the skip holds
-	} `yaml:"backoff"`
 	// State is where the budget and backoff state survives a restart
 	// (budgetstate.go). File is set by sentinel-probe to
 	// <data-dir>/probe-budget.json, like the master secret, and is not read
@@ -104,8 +106,6 @@ func Default() Config {
 	c.Caps.Global.BytesPerHour = 50 << 30 // 50 GiB
 	c.Caps.Global.BytesPerDay = 600 << 30 // 600 GiB
 	c.Sampling.ProjectionLookback = time.Hour
-	c.Backoff.SkipDownloadAfter = 3
-	c.Backoff.SkipWindow = 20 * time.Minute
 	c.State.UnknownCooldown = 10 * time.Minute
 	return c
 }
@@ -147,9 +147,6 @@ func (c Config) validate() error {
 	}
 	if c.Sampling.ProjectionLookback <= 0 {
 		return errors.New("sampling: projection_lookback must be positive")
-	}
-	if c.Backoff.SkipWindow < 0 || c.Backoff.SkipDownloadAfter < 0 {
-		return errors.New("backoff: skip_window and skip_download_after must not be negative")
 	}
 	if c.State.UnknownCooldown < 0 {
 		return errors.New("budget_state: unknown_cooldown must not be negative")
@@ -201,8 +198,6 @@ type event struct {
 type validatorState struct {
 	events       []event // trailing 24h
 	lastRequest  time.Time
-	consecFail   int
-	lastFailAt   time.Time
 	rowsLastSeen int
 }
 
@@ -824,7 +819,7 @@ func trim(events []event, since time.Time) []event {
 // back to back: up to seven shards over the per-validator byte and request
 // caps and no spacing at all, on exactly the endpoints the policy promises
 // to be gentlest with.
-func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time) (allow, skipDownload bool, reason string) {
+func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time) (allow bool, reason string) {
 	// The spacing wait happens outside the lock. It used to run inside the
 	// critical section, which meant one validator's two-second wait blocked
 	// admission for every other validator in the pool: with eight workers
@@ -841,7 +836,7 @@ func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time
 	p.mu.Lock()
 	if denied := p.stateGuard(now); denied != "" {
 		p.mu.Unlock()
-		return false, false, denied
+		return false, denied
 	}
 	p.mu.Unlock()
 	for {
@@ -865,7 +860,7 @@ func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time
 	// flight: an admitted probe costs the budget from the moment it is
 	// admitted, not from the moment it happens to finish.
 	if reqs, _ := p.sumWithPending(vs.events, t.AddressHex, now.Add(-time.Minute)); pv.RequestsPerMinute > 0 && reqs >= pv.RequestsPerMinute {
-		return false, false, fmt.Sprintf("budget:validator_requests_per_minute=%d", pv.RequestsPerMinute)
+		return false, fmt.Sprintf("budget:validator_requests_per_minute=%d", pv.RequestsPerMinute)
 	}
 	rows := t.RowCount
 	if rows == 0 {
@@ -873,31 +868,21 @@ func (p *Policy) BeforeProbe(pub scan.Publication, t probe.Target, now time.Time
 	}
 	est := ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, rows)
 	if _, hb := p.sumWithPending(vs.events, t.AddressHex, now.Add(-time.Hour)); hb+est > p.cfg.bytesPerHourCap(rows) {
-		return false, false, "budget:validator_bytes_per_hour"
+		return false, "budget:validator_bytes_per_hour"
 	}
 	if _, db := p.sumWithPending(vs.events, t.AddressHex, now.Add(-24*time.Hour)); db+est > p.cfg.bytesPerDayCap(rows) {
-		return false, false, "budget:validator_bytes_per_day"
+		return false, "budget:validator_bytes_per_day"
 	}
 	if _, gh := p.sumWithPending(p.global, "", now.Add(-time.Hour)); gh+est > p.cfg.Caps.Global.BytesPerHour {
-		return false, false, "budget:global_bytes_per_hour"
+		return false, "budget:global_bytes_per_hour"
 	}
 	if _, gd := p.sumWithPending(p.global, "", now.Add(-24*time.Hour)); p.cfg.Caps.Global.BytesPerDay > 0 && gd+est > p.cfg.Caps.Global.BytesPerDay {
-		return false, false, "budget:global_bytes_per_day"
-	}
-	backedOff := p.cfg.Backoff.SkipDownloadAfter > 0 && vs.consecFail >= p.cfg.Backoff.SkipDownloadAfter &&
-		now.Sub(vs.lastFailAt) < p.cfg.Backoff.SkipWindow
-	// A backed-off probe skips L4 and downloads nothing: it books the
-	// request, not the shard.
-	if backedOff {
-		est = 0
+		return false, "budget:global_bytes_per_day"
 	}
 	p.pending = append(p.pending, reservation{addr: t.AddressHex, at: now, bytes: est})
 	vs.lastRequest = now
 	p.markDirty()
-	if backedOff {
-		return true, true, fmt.Sprintf("backoff:transport:k=%d", vs.consecFail)
-	}
-	return true, false, ""
+	return true, ""
 }
 
 // reservation is one admitted probe not yet accounted: booked by
@@ -1019,24 +1004,8 @@ func (p *Policy) AfterProbe(pub scan.Publication, m probe.Measurement) {
 	ev := event{at: m.StartedAt, bytes: bytes}
 	vs.events = append(vs.events, ev)
 	p.global = append(p.global, ev)
-	defer p.markDirty() // after the backoff counters below change too
+	p.markDirty()
 
-	switch m.Outcome {
-	case probe.OutcomeDNSFail, probe.OutcomeTCPRefused, probe.OutcomeTCPTimeout, probe.OutcomeTCPUnreachable,
-		probe.OutcomeTLSFail, probe.OutcomeRPCUnavailable, probe.OutcomeRPCDeadline, probe.OutcomeRPCError,
-		probe.OutcomeThrottled:
-		vs.consecFail++
-		vs.lastFailAt = m.StartedAt
-	case probe.OutcomeServedOK, probe.OutcomeNotFound, probe.OutcomePartial,
-		probe.OutcomeWrongRows, probe.OutcomeInvalidRows, probe.OutcomeServerError:
-		// Only an answer about the shard clears the counter. REACHABLE is
-		// deliberately absent: it is what the backoff itself produces when it
-		// skips the download, so counting it as recovery made the counter
-		// reset every fourth probe. A validator that was up but failing had
-		// a quarter of its evidence turned into a gap, for ever, and the
-		// backoff never actually engaged for its full window.
-		vs.consecFail = 0
-	}
 }
 
 var _ probe.Policy = (*Policy)(nil)

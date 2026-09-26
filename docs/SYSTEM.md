@@ -59,7 +59,7 @@ chain block
   prober: re-derives the pending queue every cycle from publications.jsonl
           + measurements.jsonl (never stored)
        ├─ ScheduleFor(publication)  → 4 in-window + grace + post
-       ├─ policy.Admit / BeforeProbe  → sampled in/out, budgets, backoff
+       ├─ policy.Admit / BeforeProbe  → sampled in/out, budgets
        ├─ probe.Run  → DNS · TCP · TLS 1.3 · consensus-key identity · DownloadShard
        ├─ verify rows against the commitment (rsema1d) and the assignment
        ├─ Classify(Evidence) → one classification + a reason
@@ -270,10 +270,10 @@ against chain time every cycle and stamps the offset on every row;
   `p`, binding and commitment, not as a NOT_PROBED row per validator per
   point; the store derives those rows for every figure (`probe_rows`,
   migration 24)
-- backoff only ever **removes** the download step: 3 consecutive transport
-  failures → 20 minutes without `DownloadShard`, recorded as a gap, never a
-  verdict
-- budgets and backoff survive a restart: `<data-dir>/probe-budget.json`
+- no backoff: every scheduled point the caps admit downloads the shard,
+  whatever the validator's earlier probes returned; the observer's own state
+  never decides what is measured
+- budgets survive a restart: `<data-dir>/probe-budget.json`
   (versioned, written atomically at most once a second and on exit) holds
   each validator's last 24 h of probes in minute buckets, its last request
   and its failure streak. A missing or corrupt file means the spend is
@@ -563,6 +563,6 @@ Stated here because they are properties of the machine, not of any validator.
 | the serve rate moved with no new probes | an amendment settled a deferred verdict (`probe_amendments`) |
 | every validator faulted at one minute | `vantage_health.suspect` — that point is already out of every rate |
 | the scanner stopped | scan gaps in `state.json`; `scanner_lag` and `chain_liveness` in `/v1/health` |
-| the prober records nothing | policy projection (`/v1/meta`), backoff, `BackfillMissed` horizon |
+| the prober records nothing | policy projection (`/v1/meta`), `BackfillMissed` horizon |
 | the build says `-dirty` | an untracked file in the working tree at build time |
 | the API refuses to start | schema older or newer than the binary; run the collector once |

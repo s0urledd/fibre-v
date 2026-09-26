@@ -169,11 +169,13 @@ func TestAdmitSamplesWhenGlobalCapBinds(t *testing.T) {
 	}
 }
 
-func TestBudgetAndBackoff(t *testing.T) {
+// Transport failures never change what a probe does: there is no backoff,
+// so the fourth request is refused by the per-minute cap alone, and the
+// next minute is admitted in full after three failures in a row.
+func TestBudgetWithoutBackoff(t *testing.T) {
 	cfg := Default()
 	cfg.Caps.PerValidator.MinRequestSpacing = 0
 	cfg.Caps.PerValidator.RequestsPerMinute = 3
-	cfg.Backoff.SkipDownloadAfter = 2
 	p := newTest(t, cfg)
 	now := time.Now()
 	pub := pubOf(hexHash(7), now, 1<<20, 148)
@@ -181,24 +183,16 @@ func TestBudgetAndBackoff(t *testing.T) {
 
 	m := probe.Measurement{ValidatorAddress: tgt.AddressHex, AssignedRowCount: 148, StartedAt: now, Outcome: probe.OutcomeTCPRefused}
 	for i := 0; i < 3; i++ {
-		allow, skip, reason := p.BeforeProbe(pub, tgt, now)
-		if !allow {
+		if allow, reason := p.BeforeProbe(pub, tgt, now); !allow {
 			t.Fatalf("probe %d denied: %s", i, reason)
-		}
-		if i >= 2 && !skip {
-			t.Fatalf("probe %d: expected download skip after 2 transport failures", i)
 		}
 		p.AfterProbe(pub, m)
 	}
-	if allow, _, reason := p.BeforeProbe(pub, tgt, now); allow || reason != "budget:validator_requests_per_minute=3" {
+	if allow, reason := p.BeforeProbe(pub, tgt, now); allow || reason != "budget:validator_requests_per_minute=3" {
 		t.Fatalf("4th probe within a minute: allow=%v reason=%s", allow, reason)
 	}
-	// a success clears the backoff.
-	ok := probe.Measurement{ValidatorAddress: tgt.AddressHex, StartedAt: now.Add(2 * time.Minute), Outcome: probe.OutcomeServedOK,
-		Download: probe.DownloadResult{Attempted: true, RowsReturned: 148}}
-	p.AfterProbe(pub, ok)
-	if _, skip, _ := p.BeforeProbe(pub, tgt, now.Add(3*time.Minute)); skip {
-		t.Fatal("backoff should clear after a success")
+	if allow, reason := p.BeforeProbe(pub, tgt, now.Add(61*time.Second)); !allow {
+		t.Fatalf("the next minute, after three transport failures: denied: %s", reason)
 	}
 	// byte cap: a 128 MiB blob's floor shard is ~5 MB; cap is 2.9 GB/h, so
 	// ~585 downloads fit; force the cap low instead.
@@ -208,7 +202,7 @@ func TestBudgetAndBackoff(t *testing.T) {
 	cfg2.Capacity.FloorValidatorBps = 8 * 1024 // 1 KiB/s -> 36 KB/h at 1%
 	p2 := newTest(t, cfg2)
 	big := pubOf(hexHash(8), now, 128<<20, 148)
-	if allow, _, reason := p2.BeforeProbe(big, tgt, now); allow {
+	if allow, reason := p2.BeforeProbe(big, tgt, now); allow {
 		t.Fatalf("5 MB shard should exceed a 36 KB/h cap; reason=%s", reason)
 	}
 }
@@ -251,7 +245,6 @@ func TestValidateRejectsBadConfig(t *testing.T) {
 		{"negative requests", func(c *Config) { c.Caps.PerValidator.RequestsPerMinute = -1 }},
 		{"negative spacing", func(c *Config) { c.Caps.PerValidator.MinRequestSpacing = -time.Second }},
 		{"zero lookback", func(c *Config) { c.Sampling.ProjectionLookback = 0 }},
-		{"negative skip window", func(c *Config) { c.Backoff.SkipWindow = -time.Minute }},
 		{"zero floor rows", func(c *Config) { c.Capacity.FloorRows = 0 }},
 	}
 	for _, b := range bad {
@@ -454,7 +447,7 @@ func admitConcurrently(p *Policy, pub scan.Publication, tgt probe.Target, n int)
 		go func() {
 			defer wg.Done()
 			<-start
-			allow, _, reason := p.BeforeProbe(pub, tgt, time.Now())
+			allow, reason := p.BeforeProbe(pub, tgt, time.Now())
 			mu.Lock()
 			defer mu.Unlock()
 			if allow {
@@ -492,11 +485,11 @@ func TestBeforeProbe_ConcurrentAdmissionsHoldTheRequestCap(t *testing.T) {
 	}
 	// A released reservation frees its slot; an accounted one keeps it.
 	p.Release(pub, tgt)
-	if allow, _, reason := p.BeforeProbe(pub, tgt, time.Now()); !allow {
+	if allow, reason := p.BeforeProbe(pub, tgt, time.Now()); !allow {
 		t.Fatalf("a released slot was not given back: %s", reason)
 	}
 	p.AfterProbe(pub, probe.Measurement{ValidatorAddress: tgt.AddressHex, AssignedRowCount: 148, StartedAt: time.Now(), Outcome: probe.OutcomeNotFound})
-	if allow, _, _ := p.BeforeProbe(pub, tgt, time.Now()); allow {
+	if allow, _ := p.BeforeProbe(pub, tgt, time.Now()); allow {
 		t.Fatal("an accounted probe gave its slot back")
 	}
 	p.mu.Lock()
@@ -564,7 +557,7 @@ func TestBeforeProbe_ConcurrentAdmissionsAreSpaced(t *testing.T) {
 	// And an ask inside the spacing of the last admission waits it out
 	// rather than going straight through.
 	began := time.Now()
-	if allow, _, _ := p.BeforeProbe(pub, tgt, time.Now()); !allow {
+	if allow, _ := p.BeforeProbe(pub, tgt, time.Now()); !allow {
 		t.Fatal("denied")
 	}
 	if waited := time.Since(began); waited < cfg.Caps.PerValidator.MinRequestSpacing/2 {

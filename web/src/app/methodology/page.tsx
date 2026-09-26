@@ -5,7 +5,7 @@ import ProtocolParams from "@/components/ProtocolParams";
 // The rules version, as verdict.MethodologyVersion in the Go code and
 // methodology_version in /v1/meta and every export manifest. Bumped in the
 // same change as any rule that can move a figure.
-const METHODOLOGY_VERSION = "2026-09-26.1";
+const METHODOLOGY_VERSION = "2026-09-26.2";
 
 export const metadata = { title: "Methodology · Tensile · Celestia Fibre" };
 
@@ -56,7 +56,7 @@ export default function Methodology() {
       <p>When Tensile could not probe (downtime, sampling, its own errors), the row is <strong>NOT_PROBED</strong> or <strong>PROBE_ERROR</strong>: shown, never a zero, never in a rate. A probe point where at least half the validators failed at once is treated as an observer-side problem and left out of every figure. Blocks the observer&rsquo;s node could not read are listed as scan gaps. Process health is at <code>/api/v1/health</code>.</p>
 
       <h2 id="sampling">Load and sampling</h2>
-      <p>A probe downloads the whole shard, so Tensile caps its load per validator and overall. Above the cap, blobs are sampled at probability <em>p</em>, decided by <code>H(promise_hash || day_secret) &lt; p · 2^64</code>. Each day&rsquo;s secret is committed in advance at <code>/api/v1/sampling</code> and revealed seven days later, so anyone can check which blobs should have been probed. A sampled-out blob is recorded once, with its probability, and counts as not probed for every assigned validator at every point. After three failures or rate limits in a row a validator&rsquo;s downloads pause for twenty minutes; the skipped slots are recorded as not probed.</p>
+      <p>A probe downloads the whole shard, so Tensile caps its load per validator and overall. Above the cap, blobs are sampled at probability <em>p</em>, decided by <code>H(promise_hash || day_secret) &lt; p · 2^64</code>. Each day&rsquo;s secret is committed in advance at <code>/api/v1/sampling</code> and revealed seven days later, so anyone can check which blobs should have been probed. A sampled-out blob is recorded once, with its probability, and counts as not probed for every assigned validator at every point. Every scheduled point within the caps downloads the shard, whatever the validator&rsquo;s earlier probes returned: there is no backoff, so the observer&rsquo;s own state never decides what is measured. A download that times out near the end of the window is tried once more.</p>
 
       <h2 id="publishers">Publishers and fees</h2>
       <ul>

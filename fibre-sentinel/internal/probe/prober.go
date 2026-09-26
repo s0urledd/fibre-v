@@ -119,8 +119,7 @@ type Config struct {
 	// bytes, runs RetryDelay or more after the first attempt (queued, not
 	// slept on in a worker), and is skipped when it would land in a
 	// different schedule phase than the first attempt, or when the policy,
-	// asked again at the moment it would run, denies it or has the validator
-	// backed off. Both attempts are recorded in the final measurement's
+	// asked again at the moment it would run, denies it. Both attempts are recorded in the final measurement's
 	// Retry field.
 	RetryTransportTimeout bool
 	RetryDelay            time.Duration // default 20s
@@ -711,12 +710,14 @@ type Policy interface {
 	// decision must stay "yes" so a schedule is never half-recorded.
 	Admit(pub scan.Publication, alreadyStarted bool) (ok bool, reason string)
 	// BeforeProbe is asked right before one probe, with the validator's
-	// lock held. It may deny it (recorded as NOT_PROBED with reason) or ask
-	// for L1-L3 only. An allow reserves the request against the caps and the
+	// lock held. It may deny it (recorded as NOT_PROBED with reason); an
+	// allowed probe runs in full. There is no "handshake only" answer: every
+	// scheduled point that runs downloads the shard, whatever the
+	// validator's earlier probes returned. An allow reserves the request against the caps and the
 	// spacing at once, so two concurrent asks can never both be admitted
 	// into the same slot; every allow is settled by exactly one AfterProbe
 	// (the probe ran) or one Release (it did not).
-	BeforeProbe(pub scan.Publication, t Target, now time.Time) (allow, skipDownload bool, reason string)
+	BeforeProbe(pub scan.Publication, t Target, now time.Time) (allow bool, reason string)
 	// AfterProbe accounts the bytes and requests a probe consumed, settling
 	// the reservation its BeforeProbe made.
 	AfterProbe(pub scan.Publication, m Measurement)
@@ -934,10 +935,9 @@ type work struct {
 // retryReq is a first attempt that earned the transport-timeout retry: it
 // waits in the sweep's retry queue, holding no worker and no lock, until at.
 type retryReq struct {
-	it     work
-	in     Input
-	first  Measurement
-	skipDL bool
+	it    work
+	in    Input
+	first Measurement
 	at     time.Time
 }
 
@@ -1195,15 +1195,12 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 	// dated from the admission, not from when it got to go out.
 	lock := p.validatorLock(t.AddressHex)
 	lock.Lock()
-	skipDL := false
 	if p.cfg.Policy != nil {
-		allow, skip, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now())
-		if !allow {
+		if allow, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now()); !allow {
 			lock.Unlock()
 			p.recordNotProbedTarget(pub, j.point, t, reason)
 			return false, nil
 		}
-		skipDL = skip
 	}
 	in := Input{
 		Vantage:             p.cfg.Vantage,
@@ -1218,7 +1215,6 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 		AllowUnroutableHost: p.cfg.AllowUnroutableHosts,
 		SchedulePoint:       j.point,
 		PruneTolerance:      p.schedCfg().PruneTolerance,
-		SkipDownload:        skipDL,
 		ExpectedShardBytes:  ShardBytes(pub.Promise.BlobSize, pub.Assignment.ProtocolParams.OriginalRows, t.RowCount),
 		MaxMessageSize:      maxMessageSizeFor(pub.Assignment.ProtocolParams),
 		ClockOffsetMS:       p.clockOffsetMS(),
@@ -1242,13 +1238,11 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 		return false, nil
 	}
 	m := Run(ctx, in, it.coder, p.cfg.Timeouts)
-	// Not while the policy has the validator backed off: the backoff's
-	// promise is that it never adds a request to an endpoint already failing.
-	if p.cfg.RetryTransportTimeout && !skipDL && shouldRetry(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
-		// The first attempt is a request the endpoint received and a
-		// failure the backoff must count now, not when the retry is done:
-		// every other probe of this validator in the meantime, and the
-		// retry's own policy check, decide on the policy's state. Told
+	if p.cfg.RetryTransportTimeout && shouldRetry(m, pub, p.cfg.Schedule, p.cfg.RetryDelay, time.Now()) {
+		// The first attempt is a request the endpoint received, accounted
+		// now, not when the retry is done: every other probe of this
+		// validator in the meantime, and the retry's own policy check,
+		// decide on the policy's state. Told
 		// before the lock goes, so the next probe of the validator is
 		// asked about on a state that includes it.
 		if p.cfg.Policy != nil {
@@ -1256,9 +1250,9 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 		}
 		lock.Unlock()
 		p.log.Printf("probe %s %s: %s (%s); retrying once in %s", short(ph), t.Host, m.Outcome, m.RawError, p.cfg.RetryDelay)
-		return true, &retryReq{it: it, in: in, first: m, skipDL: skipDL, at: time.Now().Add(p.cfg.RetryDelay)}
+		return true, &retryReq{it: it, in: in, first: m, at: time.Now().Add(p.cfg.RetryDelay)}
 	}
-	p.finish(ctx, it, in, m, skipDL, lock, false)
+	p.finish(ctx, it, in, m, false, lock, false)
 	return true, nil
 }
 
@@ -1267,9 +1261,9 @@ func (p *Prober) runOne(ctx context.Context, it work) (bool, *retryReq) {
 // policy, asked again now, says no.
 //
 // The policy decided the first attempt, and the retry waited at least
-// RetryDelay since: meanwhile other probes of the validator can have pushed
-// it into backoff or used up a budget, and a retry run on the old decision
-// was a request the policy would have refused.
+// RetryDelay since: meanwhile other probes of the validator can have used up
+// a budget, and a retry run on the old decision was a request the policy
+// would have refused.
 func (p *Prober) runRetry(ctx context.Context, r retryReq) {
 	pub, t := r.it.job.pub, r.it.target
 	// Asked under the validator's lock, as in runOne, so the answer and the
@@ -1279,17 +1273,10 @@ func (p *Prober) runRetry(ctx context.Context, r retryReq) {
 	skip := ""
 	admitted := false
 	if p.cfg.Policy != nil && ctx.Err() == nil {
-		allow, skipDL, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now())
-		switch {
-		case !allow:
-			skip = reason
-		case skipDL:
-			// backed off: a retry is a request it promised not to add, so the
-			// slot it was just given is handed straight back.
-			p.cfg.Policy.Release(pub, t)
-			skip = reason
-		default:
+		if allow, reason := p.cfg.Policy.BeforeProbe(pub, t, time.Now()); allow {
 			admitted = true
+		} else {
+			skip = reason
 		}
 	}
 	m := r.first
@@ -1298,7 +1285,7 @@ func (p *Prober) runRetry(ctx context.Context, r retryReq) {
 		m.ClassificationReason += "; retry not run: " + skip
 	case ctx.Err() == nil && PhaseAt(time.Now(), pub, p.cfg.Schedule) == r.first.Phase:
 		m = retryOnce(ctx, r.in, r.it.coder, p.cfg.Timeouts, r.first, time.Since(r.first.FinishedAt).Round(time.Second))
-		p.finish(ctx, r.it, r.in, m, r.skipDL, lock, false)
+		p.finish(ctx, r.it, r.in, m, false, lock, false)
 		return
 	}
 	// Admitted, but the phase moved on or the sweep is stopping while the
@@ -1340,19 +1327,12 @@ func (p *Prober) finish(ctx context.Context, it work, in Input, m Measurement, n
 		// the policy like any other and is accounted like any other. It used
 		// to do neither: the one extra request the observer makes of a
 		// validator whose current host is already failing went out with no
-		// spacing after the probe that just failed, past the caps and past
-		// the backoff, whose promise is that it never adds a request to an
-		// endpoint already failing.
+		// spacing after the probe that just failed, past the caps.
 		ht := t
 		ht.Host, ht.HostSource = t.HostAtSettlement, "settlement"
 		skip := ""
 		if p.cfg.Policy != nil {
-			allow, skipDL, reason := p.cfg.Policy.BeforeProbe(pub, ht, time.Now())
-			switch {
-			case !allow:
-				skip = reason
-			case skipDL:
-				p.cfg.Policy.Release(pub, ht)
+			if allow, reason := p.cfg.Policy.BeforeProbe(pub, ht, time.Now()); !allow {
 				skip = reason
 			}
 		}

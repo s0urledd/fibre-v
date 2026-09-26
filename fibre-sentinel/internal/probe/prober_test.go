@@ -458,20 +458,20 @@ func TestRunRetry_AcrossAPhaseBoundaryRecordsTheFirstAttempt(t *testing.T) {
 // recPolicy is a Policy whose BeforeProbe answer the test sets, and which
 // records every AfterProbe it is told about.
 type recPolicy struct {
-	mu            sync.Mutex
-	allow, skipDL bool
-	reason        string
-	after         []Measurement
-	asked         []Target
-	released      int
+	mu       sync.Mutex
+	allow    bool
+	reason   string
+	after    []Measurement
+	asked    []Target
+	released int
 }
 
 func (r *recPolicy) Admit(scan.Publication, bool) (bool, string) { return true, "" }
-func (r *recPolicy) BeforeProbe(_ scan.Publication, t Target, _ time.Time) (bool, bool, string) {
+func (r *recPolicy) BeforeProbe(_ scan.Publication, t Target, _ time.Time) (bool, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.asked = append(r.asked, t)
-	return r.allow, r.skipDL, r.reason
+	return r.allow, r.reason
 }
 func (r *recPolicy) AfterProbe(_ scan.Publication, m Measurement) {
 	r.mu.Lock()
@@ -487,22 +487,21 @@ func (r *recPolicy) SamplingFor(scan.Publication) (float64, string, string) { re
 func (r *recPolicy) Forget(string)                                          {}
 
 // A queued retry asks the policy again when its time comes. Between the
-// first attempt and the retry, other probes of the validator can push it
-// into backoff or use up a budget; the retry then does not run, the first
+// first attempt and the retry, other probes of the validator can use up a
+// budget; the retry then does not run, the first
 // attempt is recorded with the reason, and the policy is not told about the
 // first attempt a second time (it was told when the retry was queued).
 func TestRunRetry_AsksThePolicyAgainAndRecordsTheFirstAttemptWhenItSaysNo(t *testing.T) {
 	for _, c := range []struct {
-		name          string
-		allow, skipDL bool
-		reason        string
+		name   string
+		allow  bool
+		reason string
 	}{
-		{"backed off meanwhile", true, true, "backoff:transport:k=3"},
-		{"budget used up meanwhile", false, false, "budget:validator_requests_per_minute=6"},
+		{"budget used up meanwhile", false, "budget:validator_requests_per_minute=6"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := testProber(t)
-			pol := &recPolicy{allow: c.allow, skipDL: c.skipDL, reason: c.reason}
+			pol := &recPolicy{allow: c.allow, reason: c.reason}
 			p.cfg.Policy = pol
 			now := time.Now().UTC()
 			pubA := pub(now.Add(-2*time.Hour), now.Add(time.Hour)) // still in window
@@ -534,8 +533,7 @@ func TestRunRetry_AsksThePolicyAgainAndRecordsTheFirstAttemptWhenItSaysNo(t *tes
 }
 
 // The first attempt of a retried probe reaches the policy the moment the
-// retry is queued: it is a request the endpoint received and a failure the
-// backoff counts, and while the retry waits, every other probe of the
+// retry is queued: it is a request the endpoint received, and while the retry waits, every other probe of the
 // validator and the retry's own check decide on that state. The retry, when
 // it runs, is told about separately: two requests, two AfterProbe calls.
 func TestRunOne_QueuingARetryTellsThePolicyAboutTheFirstAttemptAtOnce(t *testing.T) {
@@ -651,13 +649,12 @@ func TestRunRetry_NotRunMeansNoProbeOfTheSettlementHost(t *testing.T) {
 		return ln, &n
 	}
 	for _, c := range []struct {
-		name          string
-		allow, skipDL bool
-		phaseMoved    bool
-		probed        bool
+		name       string
+		allow      bool
+		phaseMoved bool
+		probed     bool
 	}{
 		{name: "budget used up meanwhile", allow: false},
-		{name: "backed off meanwhile", allow: true, skipDL: true},
 		{name: "phase moved on", allow: true, phaseMoved: true},
 		{name: "retry runs", allow: true, probed: true},
 	} {
@@ -696,7 +693,7 @@ func TestRunRetry_NotRunMeansNoProbeOfTheSettlementHost(t *testing.T) {
 				t.Fatalf("the settlement host was probed before the retry: %d connection(s)", n)
 			}
 			pol.mu.Lock()
-			pol.allow, pol.skipDL, pol.reason = c.allow, c.skipDL, "budget or backoff"
+			pol.allow, pol.reason = c.allow, "budget used up"
 			pol.mu.Unlock()
 			if c.phaseMoved {
 				retry.first.Phase = PhasePost
@@ -720,7 +717,7 @@ func TestRunRetry_NotRunMeansNoProbeOfTheSettlementHost(t *testing.T) {
 				t.Fatalf("the row lost the host registered at settlement: %q", ms[0].HostAtSettlement)
 			}
 			// Every admission is settled exactly once. A retry admitted and
-			// then not run (backed off, phase moved on) gives its slot back;
+			// then not run (the phase moved on) gives its slot back;
 			// one that runs is accounted, and so is the settlement-host
 			// probe, which asked the policy for its own slot first.
 			pol.mu.Lock()
@@ -752,14 +749,14 @@ type overlapPolicy struct {
 	overlaps int
 }
 
-func (o *overlapPolicy) BeforeProbe(_ scan.Publication, t Target, _ time.Time) (bool, bool, string) {
+func (o *overlapPolicy) BeforeProbe(_ scan.Publication, t Target, _ time.Time) (bool, string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.inflight[t.AddressHex] > 0 {
 		o.overlaps++
 	}
 	o.inflight[t.AddressHex]++
-	return true, false, ""
+	return true, ""
 }
 func (o *overlapPolicy) AfterProbe(_ scan.Publication, m Measurement) {
 	o.mu.Lock()

@@ -235,7 +235,7 @@ by `TestClassify_UnattestedIsNeverAFault`.
 | `RPC_ERROR` | any other gRPC error |
 | `NO_REGISTERED_HOST` | the validator has no fibre host in `x/valaddr`, so nobody can fetch its rows; treated as unreachable |
 | `PROBE_ERROR` (no coder) | the observer could not build the verifier for this blob's `(original_rows, total_rows)`, so no download was attempted |
-| `REACHABLE` | TCP, TLS and identity passed and the download was deliberately skipped (heartbeat, or policy backoff); no retention verdict |
+| `REACHABLE` | TCP, TLS and identity passed and the download was deliberately skipped (the reachability heartbeat); no retention verdict |
 | `PROBE_ERROR` | the observer's own probe failed (bug or config), not the target |
 | `MISSED` | the scheduled point elapsed before the prober ran it |
 
@@ -353,7 +353,7 @@ One sentence each, and what a reader should conclude.
     with `tls_ok = 1`: the endpoint completed a handshake and answered with
     `SERVER_ERROR`, `THROTTLED`, an `RPC_*` failure or an unusable
     certificate), `unobserved_unreachable` (attempts, none of which
-    completed TLS), `unobserved_not_probed` (no attempt: backoff, a load
+    completed TLS), `unobserved_not_probed` (no attempt: a load
     cap, a slot that elapsed).
 
   Only `served` and `broken` enter the rate. The first rule, "kept when no

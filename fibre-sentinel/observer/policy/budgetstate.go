@@ -13,21 +13,20 @@ import (
 // Budget state across restarts.
 //
 // The caps in BeforeProbe are sliding windows (a minute of requests, an
-// hour and a day of bytes) plus the minimum spacing and the transport
-// backoff, and all of it used to live in memory only. A prober restart
+// hour and a day of bytes) plus the minimum spacing, and all of it used to
+// live in memory only. A prober restart
 // started every validator on a fresh budget: a restart loop — a crash
 // dump, a supervisor restarting it every few seconds, an operator
 // redeploying through an afternoon — could spend the whole hourly byte cap
-// once per restart, send a minute's requests again in the same minute, and
-// forget that a validator's transport had failed three times in a row, on
-// exactly the endpoints the policy promises to be gentlest with. The caps
+// once per restart, or send a minute's requests again in the same minute.
+// The caps
 // constrain this vantage over wall-clock windows, not per process.
 //
 // So the minimal state behind those checks is written to the data dir and
 // read back on start: per validator, the trailing 24 hours of accounted and
-// reserved probes in one-minute buckets, the last admission (spacing), the
-// consecutive transport failures and when the last one was (backoff), and
-// the rows last seen. The global windows are the sum of the validators'
+// reserved probes in one-minute buckets, the last admission (spacing), and
+// the rows last seen. A state file written before the backoff was removed
+// still loads: its consec_fail and last_fail_at are ignored. The global windows are the sum of the validators'
 // events, as they are in memory, so they need nothing of their own.
 //
 // Conservative in every direction a reload can be wrong:
@@ -71,8 +70,6 @@ type budgetState struct {
 
 type validatorSnapshot struct {
 	LastRequest  time.Time      `json:"last_request"`
-	ConsecFail   int            `json:"consec_fail,omitempty"`
-	LastFailAt   time.Time      `json:"last_fail_at"`
 	RowsLastSeen int            `json:"rows_last_seen,omitempty"`
 	Minutes      []minuteBucket `json:"minutes,omitempty"`
 }
@@ -101,9 +98,9 @@ func (p *Policy) snapshot(now time.Time) budgetState {
 				evs = append(evs, event{at: r.at, bytes: r.bytes})
 			}
 		}
-		snap := validatorSnapshot{LastRequest: vs.lastRequest.UTC(), ConsecFail: vs.consecFail, LastFailAt: vs.lastFailAt.UTC(),
+		snap := validatorSnapshot{LastRequest: vs.lastRequest.UTC(),
 			RowsLastSeen: vs.rowsLastSeen, Minutes: bucketByMinute(evs)}
-		if len(snap.Minutes) == 0 && snap.ConsecFail == 0 && snap.LastRequest.Before(since) {
+		if len(snap.Minutes) == 0 && snap.LastRequest.Before(since) {
 			continue // nothing that still constrains anything
 		}
 		st.Validators[addr] = snap
@@ -149,7 +146,7 @@ func (p *Policy) restore(now time.Time) {
 	n := 0
 	for addr, snap := range st.Validators {
 		vs := p.state(addr)
-		vs.lastRequest, vs.consecFail, vs.lastFailAt, vs.rowsLastSeen = snap.LastRequest, snap.ConsecFail, snap.LastFailAt, snap.RowsLastSeen
+		vs.lastRequest, vs.rowsLastSeen = snap.LastRequest, snap.RowsLastSeen
 		for _, b := range snap.Minutes {
 			if b.At.Before(since) || b.N <= 0 {
 				continue
