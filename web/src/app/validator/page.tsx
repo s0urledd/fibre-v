@@ -245,7 +245,7 @@ function Page() {
         <Metric label="Reachability"
           value={!bonded ? "—" : rw && rw.den > 0 ? pctOf(rw.num, rw.den) : "—"}
           tone={!bonded || !rw || rw.den === 0 ? "absent" : undefined}
-          help={!bonded ? "out of the bonded list · no handshake" : rw && rw.den > 0 ? `${int(rw.num)} / ${int(rw.den)} checks · now ${e.word.toLowerCase()}` : "no handshake yet"}
+          help={!bonded ? "out of the bonded list · no handshake" : rw && rw.den > 0 ? `${int(rw.num)} / ${int(rw.den)} checks` : "no handshake yet"}
           title="TLS handshakes completed over handshakes attempted with the registered endpoint in the period, from one location. Not signing uptime." />
         <Metric label="Throughput"
           value={v.serve_bytes_per_second == null ? "—" : `${bytes(v.serve_bytes_per_second)}/s`} tone={v.serve_bytes_per_second == null ? "absent" : undefined}

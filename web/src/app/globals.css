@@ -838,6 +838,20 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 .tablewrap.framed th:last-child, .tablewrap.framed td:last-child { padding-right: 14px; }
 .tablewrap.framed td { padding-top: 10px; padding-bottom: 10px; }
 .tablewrap.framed tbody tr:last-child td { border-bottom: 0; }
+/* the Blobs page tables: the first column reads left, every other column is
+   centred under its heading, cells and headings alike, at a width that
+   follows what the cells hold */
+.bt th, .bt td, .bt th.right, .bt td.right { text-align: center; }
+.bt th:first-child, .bt td:first-child { text-align: left; }
+/* figures in the text face with even digits, which keep a column narrow; only the promise hash stays monospaced */
+.bt td.mono:not(:first-child) { font-family: inherit; font-variant-numeric: tabular-nums; }
+@media (min-width: 900px) {
+  .bt { table-layout: fixed; }
+  .bt td { overflow: hidden; text-overflow: ellipsis; }
+  .bt.nss th:nth-child(1) { width: 20%; } .bt.nss th:nth-child(2) { width: 12%; } .bt.nss th:nth-child(3) { width: 9%; }
+  .bt.nss th:nth-child(4) { width: 16%; } .bt.nss th:nth-child(5) { width: 9%; } .bt.nss th:nth-child(6) { width: 17%; } .bt.nss th:nth-child(7) { width: 17%; }
+  .bt.pubs th:nth-child(1) { width: 14%; } .bt.pubs th:nth-child(2) { width: 14%; } .bt.pubs th:nth-child(3) { width: 8%; } .bt.pubs th:nth-child(4) { width: 11%; } .bt.pubs th:nth-child(5) { width: 7%; } .bt.pubs th:nth-child(6) { width: 7%; } .bt.pubs th:nth-child(7) { width: 7%; } .bt.pubs th:nth-child(8) { width: 6%; } .bt.pubs th:nth-child(9) { width: 12%; } .bt.pubs th:nth-child(10) { width: 14%; }
+}
 .fm-key { margin: 0 0 0 auto; display: flex; gap: 14px; font-size: var(--t-tiny); color: var(--text-3); }
 .fm-key i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 0; }
 
