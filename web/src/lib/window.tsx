@@ -4,7 +4,7 @@ import { useSearchParams } from "next/navigation";
 
 export const WINDOWS = ["24h", "7d", "30d", "all"] as const;
 export type WindowName = (typeof WINDOWS)[number];
-export const windowLabel = (w: string) => (w === "all" ? "All time" : w);
+export const windowLabel = (w: string) => (w === "all" ? "All" : w);
 
 /**
  * The selected period, carried in the URL (?window=7d) so a link to a page
