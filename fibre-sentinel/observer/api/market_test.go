@@ -118,7 +118,12 @@ func TestMarketSummary(t *testing.T) {
 		EscrowHeld      int64                       `json:"escrow_held_utia"`
 		EscrowAccounts  int64                       `json:"escrow_accounts"`
 		Daily           []map[string]any            `json:"daily"`
-		Top             []struct {
+		Hourly          []struct {
+			Hour        string `json:"hour"`
+			Bytes       int64  `json:"bytes"`
+			Settlements int64  `json:"settlements"`
+		} `json:"hourly"`
+		Top []struct {
 			Publisher string   `json:"publisher"`
 			Label     string   `json:"label"`
 			FeesShare *float64 `json:"fees_share"`
@@ -155,6 +160,17 @@ func TestMarketSummary(t *testing.T) {
 	if len(m.Daily) == 0 {
 		t.Fatal("no daily buckets")
 	}
+	// a day is charted by the hour: the same settlements, split by UTC hour
+	var hb, hs int64
+	for _, h := range m.Hourly {
+		if len(h.Hour) != 13 {
+			t.Fatalf("hour key %q, want YYYY-MM-DDTHH", h.Hour)
+		}
+		hb, hs = hb+h.Bytes, hs+h.Settlements
+	}
+	if hs != m.Settlements || hb != m.Bytes {
+		t.Fatalf("hourly sums to %d settlements, %d bytes; want %d, %d", hs, hb, m.Settlements, m.Bytes)
+	}
 	if len(m.Top) != 2 || m.Top[0].Publisher != otherPublisher || m.Top[1].Label != "Sentinel test publisher" {
 		t.Fatalf("top: %+v", m.Top)
 	}
@@ -171,10 +187,16 @@ func TestMarketSummary(t *testing.T) {
 		t.Fatalf("honesty fields missing: notes=%d source=%q at=%q", len(m.Notes), m.Source, m.ComputedAt)
 	}
 	// The old settlement is in 30d, not in 24h.
-	var m30 struct{ Settlements int64 }
+	var m30 struct {
+		Settlements int64
+		Hourly      []map[string]any `json:"hourly"`
+	}
 	get(t, ts, "/v1/market?window=30d", &m30)
 	if m30.Settlements != 3 {
 		t.Fatalf("30d settlements: %d", m30.Settlements)
+	}
+	if m30.Hourly != nil {
+		t.Fatalf("a 30-day window carries hourly buckets: %d", len(m30.Hourly))
 	}
 	if code := get(t, ts, "/v1/market?window=1y", nil); code != 400 {
 		t.Fatalf("bad window: %d", code)

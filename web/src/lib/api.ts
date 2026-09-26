@@ -621,6 +621,8 @@ export type Market = {
   escrow_total_utia?: number;
   escrow_total_at?: string;
   daily: DayBucket[];
+  /** UTC hours, for a window of a day or less */
+  hourly?: { hour: string; bytes: number; settlements: number }[];
   daily_by_publisher: DayPublisher[];
   top_publishers: PublisherShare[];
   other_publishers: PublisherShare | null;

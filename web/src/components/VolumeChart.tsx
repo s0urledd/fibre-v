@@ -1,40 +1,69 @@
 import { type Market, bytes, int } from "@/lib/api";
+import type { WindowName } from "@/lib/window";
 
 /**
- * Settled volume per UTC day over a fixed seven-day context: the padded
- * size the module charges for, from the chain's own records. The last day
- * is partial and drawn so; a day with nothing settled is a hairline, not
- * an absence.
+ * Settled volume over the selected period: the padded size the module
+ * charges for, from the chain's own records. A day is one column per UTC
+ * hour; longer periods are one column per UTC day (seven or thirty, or every
+ * day on record for "all"). The newest column is partial and drawn so; a
+ * column with nothing settled is a hairline, not an absence.
  */
-export default function VolumeChart({ market, days = 7 }: { market: Market | null; days?: number }) {
-  if (!market) return <p className="vchart-empty">Loading…</p>;
+type Col = { key: string; label: string; bytes: number; settlements: number; partial: boolean; tick: boolean };
+
+function columns(market: Market, win: WindowName): Col[] {
   const end = new Date(market.window.end);
-  const today = end.toISOString().slice(0, 10);
-  const list: string[] = [];
-  for (let i = days - 1; i >= 0; i--) list.push(new Date(end.getTime() - i * 86400_000).toISOString().slice(0, 10));
+  if (win === "24h") {
+    const byHour = new Map((market.hourly ?? []).map((h) => [h.hour, h]));
+    const now = end.toISOString().slice(0, 13);
+    const out: Col[] = [];
+    for (let i = 23; i >= 0; i--) {
+      const key = new Date(end.getTime() - i * 3600_000).toISOString().slice(0, 13);
+      const h = byHour.get(key);
+      out.push({ key, label: `${key.slice(11)}:00`, bytes: h?.bytes ?? 0, settlements: h?.settlements ?? 0, partial: key === now, tick: Number(key.slice(11)) % 4 === 0 });
+    }
+    return out;
+  }
   const byDay = new Map(market.daily.map((d) => [d.day, d]));
-  const max = Math.max(0, ...list.map((d) => byDay.get(d)?.bytes ?? 0));
-  // the axis top: a round number of MiB (or GiB) above the largest day
+  const today = end.toISOString().slice(0, 10);
+  let days = win === "30d" ? 30 : 7;
+  if (win === "all" && market.daily.length > 0) {
+    const first = new Date(market.daily[0].day + "T00:00:00Z").getTime();
+    days = Math.max(7, Math.floor((end.getTime() - first) / 86400_000) + 1);
+  }
+  const every = days > 14 ? Math.ceil(days / 8) : 1;
+  const out: Col[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const key = new Date(end.getTime() - i * 86400_000).toISOString().slice(0, 10);
+    const d = byDay.get(key);
+    const label = new Date(key + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+    out.push({ key, label, bytes: d?.bytes ?? 0, settlements: d?.settlements ?? 0, partial: key === today, tick: i % every === 0 });
+  }
+  return out;
+}
+
+export default function VolumeChart({ market, win }: { market: Market | null; win: WindowName }) {
+  if (!market) return <p className="vchart-empty">Loading…</p>;
+  const list = columns(market, win);
+  const max = Math.max(0, ...list.map((c) => c.bytes));
+  // the axis top: a round number of MiB (or GiB) above the largest column
   const mib = 1048576;
   const step = max >= 1024 * mib ? 512 * mib : max >= 200 * mib ? 100 * mib : 20 * mib;
   const top = Math.max(step, Math.ceil(max / step) * step);
-  const label = (d: string) => new Date(d + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  const unit = win === "24h" ? "hour" : "day";
   return (
-    <div className="vchart" role="img" aria-label={`settled volume per day over the last ${days} days`}>
-      {/* With nothing settled in the whole week an axis would only label an empty box: no tick labels, one sentence. */}
+    <div className="vchart" role="img" aria-label={`settled volume per ${unit} over the selected period`}>
+      {/* With nothing settled in the period an axis would only label an empty box: no tick labels, one sentence. */}
       <div className="y" aria-hidden={max === 0}>{max > 0 && <><span style={{ top: 0 }}>{bytes(top)}</span><span style={{ top: "50%" }}>{bytes(top / 2)}</span><span style={{ top: "100%" }}>0</span></>}</div>
       <div className="plot">
         {max > 0 && <><i className="gl" style={{ top: 0 }} /><i className="gl" style={{ top: "50%" }} /></>}
-        {max === 0 && <span className="none">No settled volume yet</span>}
-        {list.map((d) => {
-          const b = byDay.get(d);
-          const v = b?.bytes ?? 0;
-          const cls = "col" + (d === today ? " partial" : "") + (v === 0 ? " zero" : "");
-          const title = `${d}${d === today ? " (partial day)" : ""} · ${bytes(v)} · ${int(b?.settlements ?? 0)} settlement${(b?.settlements ?? 0) === 1 ? "" : "s"}`;
-          return <div key={d} className={cls} title={title}><i style={{ height: `${Math.max(v / top * 100, v ? 1 : 0).toFixed(1)}%` }} /></div>;
+        {max === 0 && <span className="none">No settled volume in this period</span>}
+        {list.map((c) => {
+          const cls = "col" + (c.partial ? " partial" : "") + (c.bytes === 0 ? " zero" : "");
+          const title = `${c.key.replace("T", " ")}${unit === "hour" ? ":00 UTC" : ""}${c.partial ? ` (partial ${unit})` : ""} · ${bytes(c.bytes)} · ${int(c.settlements)} settlement${c.settlements === 1 ? "" : "s"}`;
+          return <div key={c.key} className={cls} title={title}><i style={{ height: `${Math.max(c.bytes / top * 100, c.bytes ? 1 : 0).toFixed(1)}%` }} /></div>;
         })}
       </div>
-      <div className="x">{list.map((d) => <span key={d}>{label(d)}</span>)}</div>
+      <div className="x">{list.map((c) => <span key={c.key}>{c.tick ? c.label : ""}</span>)}</div>
     </div>
   );
 }

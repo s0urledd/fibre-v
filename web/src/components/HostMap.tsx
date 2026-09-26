@@ -383,7 +383,6 @@ export default function HostMap({ rows, showReadiness, aside }: { rows: Validato
   // ---- counts ----
   const countries = hosted.size - (hosted.has("") ? 1 : 0);
   const providers = new Set(r.registered.map((v) => providerOf(v.hosting)).filter(Boolean)).size;
-  const readyPct = r.pct(r.reachPower), needPct = r.pct(r.quorum);
 
   return (
     <section className={`band hostmap${showReadiness ? "" : " solo"}`} aria-labelledby="hostmap-h">
@@ -394,7 +393,6 @@ export default function HostMap({ rows, showReadiness, aside }: { rows: Validato
             <span><b>{hosts.length + unplaced}</b> hosts</span>
             <span><b>{countries}</b> countries</span>
             <span><b>{providers}</b> providers</span>
-            <span>stake ready <b>{readyPct}</b> / {needPct}</span>
           </p>
         </div>
         <div className={`fm-box${zoomed ? " zoomed" : ""}`} ref={box}
