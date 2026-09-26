@@ -938,7 +938,7 @@ type retryReq struct {
 	it    work
 	in    Input
 	first Measurement
-	at     time.Time
+	at    time.Time
 }
 
 // runDue probes every due slot. Slots are grouped by publication so the
