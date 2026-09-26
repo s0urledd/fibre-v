@@ -53,7 +53,7 @@ function sortValue(v: Validator, k: SortKey): number | null {
     case "broken": return o?.broken ?? 0;
     case "pending": return o && o.total > 0 ? o.pending : null;
     // Signing is descriptive, and below the sample floor it is not ranked either.
-    case "load": return v.load && v.load.rows_per_blob > 0 ? v.load.rows_per_blob : null;
+    case "load": return v.host && v.load && v.load.rows_per_blob > 0 ? v.load.rows_per_blob : null;
     case "signed": { const s = v.signing; return s && s.assigned >= MIN_RATED ? s.signed / s.assigned : null; }
     case "seen": return v.last_seen_at ? new Date(v.last_seen_at).getTime() : null;
   }
@@ -220,7 +220,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                   <td><Link className="rowcover" href={href(v)} tabIndex={-1} aria-hidden="true" /><span className="state" title={e.title}><i className={"dot " + e.dot} />{e.word}</span></td>
                   {showHosting && <td><HostingCell h={v.hosting} /></td>}
                   <td className="num">{int(v.voting_power)}</td>
-                  <td className="num">{v.load && v.load.rows_per_blob > 0 ? (v.host ? <span title={loadTitle(v.load)}>{int(v.load.rows_per_blob)}</span> : <span className="muted" title={`${int(v.load.rows_per_blob)} rows of every blob assigned by stake; no Fibre host registered to receive them.`}>{int(v.load.rows_per_blob)}</span>) : <span className="muted" title="Not in the validator set of the newest settled blob.">—</span>}</td>
+                  <td className="num">{v.load && v.load.rows_per_blob > 0 ? (v.host ? <span title={loadTitle(v.load)}>{int(v.load.rows_per_blob)}</span> : <span className="muted">—</span>) : <span className="muted" title="Not in the validator set of the newest settled blob.">—</span>}</td>
                   {showScores && <>
                     <td className="num">{rate(v)}</td>
                     <td className="num">{count(v, o?.broken ?? 0, "broken")}</td>
