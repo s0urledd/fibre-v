@@ -740,7 +740,7 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 .hostmap .fm-side .ready-answer { font-size: var(--t-cell); }
 .hostmap .fm-side .ready-meter { margin-bottom: 26px; }
 /* the obligation outcomes under the quorum panel */
-/* the newest settlement beside the map: a label and its value on each line */
+/* the newest blob beside the map: a label and its value on each line */
 .latest { display: grid; margin: 10px 0 0; }
 .latest > div { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line-soft); font-size: var(--t-cell); }
 .latest dt { color: var(--text-2); }

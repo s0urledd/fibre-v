@@ -40,12 +40,12 @@ function Overview() {
     return { count: withHost.length, of: bonded.length, share: power > 0 ? pctOf(hosted, power) : "—" };
   })();
 
-  // The newest MsgPayForFibre, whatever the period: one settled promise, as
-  // the chain recorded it.
+  // The newest blob, whatever the period: the one whose MsgPayForFibre settled
+  // last, as the chain recorded it. It opens the blob page.
   const last = newest.data?.blobs?.[0];
   const latest = last && (
     <div id="latest">
-      <h2>Latest settlement <span className="soft">· {ago(last.settlement_time)}</span></h2>
+      <h2>Latest blob <span className="soft">· settled {ago(last.settlement_time)}</span></h2>
       <dl className="latest">
         <div><dt>Height</dt><dd>{int(last.settlement_height)}</dd></div>
         <div><dt>Time</dt><dd>{whenUTC(last.settlement_time)}</dd></div>
@@ -54,7 +54,7 @@ function Overview() {
         {last.attested_voting_power != null && !!last.total_voting_power && <div><dt>Endorsed voting power</dt><dd>{pctOf(last.attested_voting_power, last.total_voting_power)}</dd></div>}
       </dl>
       <p className="blobs">
-        <Link href={`/blob/?hash=${last.promise_hash}`}>This settlement →</Link>
+        <Link href={`/blob/?hash=${last.promise_hash}`}>Blob details →</Link>
         <span className="sep">·</span>
         <Link href="/blobs/">All blobs →</Link>
       </p>
@@ -72,7 +72,7 @@ function Overview() {
 
       {vals.data && <HostMap rows={rows} showReadiness={!!meta?.fibre_active} aside={latest || undefined} />}
 
-      {/* the period drives the figures below it, not the map, the stake or the latest settlement */}
+      {/* the period drives the figures below it, not the map, the stake or the latest blob */}
       <div className="period-row"><WindowSwitch value={win} onChange={setWin} /></div>
       <Metrics>
         <Metric label="Fibre providers"
