@@ -79,7 +79,7 @@ function state(v: Validator, c: EndpointCheck | undefined, decided: number): Sta
     const chk = c && c.host === v.host ? c : undefined;
     const at = chk ? <>At {whenUTC(chk.at)}</> : <>At the newest check</>;
     const err = chk?.raw_error ? <> (<code>{chk.raw_error}</code>)</> : null;
-    const notFault = <>{v.also_failed_from && <> Also failed from a second location.</>} Not counted as broken{v.last_reachable_at ? <>; last handshake {ago(v.last_reachable_at)}</> : null}.</>;
+    const notFault = <>{v.also_failed_from && <> Also failed from a second location.</>}{v.last_reachable_at ? <> Last handshake {ago(v.last_reachable_at)}.</> : null}</>;
     const refused = chk && (chk.outcome === "TCP_REFUSED" || /refused/i.test(chk.raw_error ?? ""));
     if (chk && !chk.dns_ok) {
       return {
@@ -114,7 +114,7 @@ function state(v: Validator, c: EndpointCheck | undefined, decided: number): Sta
     }
     return {
       tone: "hold", title: "Unreachable at the newest check",
-      body: <>{host} did not complete a TLS handshake{v.last_seen_at && <> ({ago(v.last_seen_at)})</>}{err}.{notFault}</>,
+      body: <>{host} did not complete a TLS handshake{v.last_unreachable_at && <> ({ago(v.last_unreachable_at)})</>}{err}.{notFault}</>,
     };
   }
   const reason = v.identity_reason ? <> (<code>{v.identity_reason}</code>)</> : null;
@@ -122,13 +122,13 @@ function state(v: Validator, c: EndpointCheck | undefined, decided: number): Sta
     const clock = !!v.identity_reason && CLOCK_REASONS.has(v.identity_reason);
     return {
       tone: "hold", title: "The certificate endorsement has lapsed",
-      body: <>{host} completes TLS, but the consensus-key endorsement is outside its validity window{reason}, so clients reject it and publishers will not upload here. Not counted as broken. {clock ? "Fix the server clock, then restart" : "Check the signer connection and the clock, then restart"} the Fibre server for a fresh endorsement (<Docs href={TLS_DOCS}>transport security</Docs>).</>,
+      body: <>{host} completes TLS, but the consensus-key endorsement is outside its validity window{reason}, so clients reject it and publishers will not upload here. {clock ? "Fix the server clock, then restart" : "Check the signer connection and the clock, then restart"} the Fibre server for a fresh endorsement (<Docs href={TLS_DOCS}>transport security</Docs>).</>,
     };
   }
   if (v.identity_status === "mismatch") {
     return {
       tone: "hold", title: "The certificate is not this validator’s",
-      body: <>{host} completes TLS, but its certificate is not endorsed by this validator’s consensus key{reason}, so publishers will not upload here. Not counted as broken. Point the Fibre server’s signer at this validator’s own key and chain ID, and check the registered host is this validator’s server (<Docs href={TLS_DOCS}>transport security</Docs>).</>,
+      body: <>{host} completes TLS, but its certificate is not endorsed by this validator’s consensus key{reason}, so publishers will not upload here. Point the Fibre server’s signer at this validator’s own key and chain ID, and check the registered host is this validator’s server (<Docs href={TLS_DOCS}>transport security</Docs>).</>,
     };
   }
   if (v.identity_status !== "verified") {
