@@ -199,6 +199,10 @@ button.dis:hover, a.dis:hover { text-decoration: underline; }
 /* --------------------------------------------------------------- metrics --- */
 /* headline figures and the cell grids below them: each figure in its own light frame, like the facts grid */
 .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 16px 0 0; }
+/* the validator page's Load: four figures under their own heading, flush to it */
+#load { margin-top: 18px; }
+#load .vhead { padding: 0; }
+#load .metrics { grid-template-columns: repeat(4, 1fr); margin-top: 10px; }
 .metric { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
 .metric .label { font-size: var(--t-small); color: var(--text-2); font-weight: 500; }
 .metric .value { font-size: var(--t-kpi); font-weight: 500; letter-spacing: -.02em; line-height: 1.1; margin: 6px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -310,15 +314,15 @@ td a.plain:hover, td a.fault:hover { text-decoration: underline; }
    over the row for the pointer. Anything in a cell that carries its own
    title or link sits above the cover. */
 .vt { font-variant-numeric: tabular-nums; }
-.vt th:not(:first-child), .vt td:not(:first-child) { text-align: center; padding-left: 8px; padding-right: 8px; }
+.vt th:not(:first-child), .vt td:not(:first-child) { text-align: center; padding-left: 6px; padding-right: 6px; }
 @media (min-width: 900px) {
   .vt { table-layout: fixed; }
-  .vt th:first-child { width: 20%; }
+  .vt th:first-child { width: 19%; }
   .vt td:not(:first-child) { overflow: hidden; text-overflow: ellipsis; }
   .vt .hosting { max-width: 100%; vertical-align: middle; }
   .vt .hosting > span:not(.flag):not(.flag-none):not(.cc) { overflow: hidden; text-overflow: ellipsis; }
 }
-.pair { display: inline-grid; grid-template-columns: 6ch minmax(7ch, auto); column-gap: 8px; align-items: baseline; }
+.pair { display: inline-grid; grid-template-columns: 5ch minmax(7ch, auto); column-gap: 6px; align-items: baseline; }
 .pair > .rate { text-align: right; }
 .pair > .den { text-align: left; font-size: inherit; margin: 0; }
 /* the endorsement share describes, it does not rate: regular weight, quieter */
@@ -555,7 +559,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
   .title { flex-direction: column; gap: 12px; }
   .head { flex-direction: column; gap: 12px; }
   .status > span { white-space: normal; }
-  .metrics, .cells, .cells.three, .cells.four, .cells.five { grid-template-columns: repeat(2, 1fr); }
+  .metrics, .cells, .cells.three, .cells.four, .cells.five, #load .metrics { grid-template-columns: repeat(2, 1fr); }
   .metric .help { white-space: normal; }
   .band { grid-template-columns: 1fr; }
   .band > div { padding: 0; }

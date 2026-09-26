@@ -58,6 +58,9 @@ export default function Methodology() {
       <h2 id="sampling">Load and sampling</h2>
       <p>A probe downloads the whole shard, so Tensile caps its load per validator and overall. Above the cap, blobs are sampled at probability <em>p</em>, decided by <code>H(promise_hash || day_secret) &lt; p · 2^64</code>. Each day&rsquo;s secret is committed in advance at <code>/api/v1/sampling</code> and revealed seven days later, so anyone can check which blobs should have been probed. A sampled-out blob is recorded once, with its probability, and counts as not probed for every assigned validator at every point. Every scheduled point within the caps downloads the shard, whatever the validator&rsquo;s earlier probes returned: there is no backoff, so the observer&rsquo;s own state never decides what is measured. A download that times out near the end of the window is tried once more.</p>
 
+      <h2 id="load">Load</h2>
+      <p><strong>Load</strong> is the row data the protocol assigned a validator: the rows its stake gets on every settled blob, each <code>blob_size / original_rows</code> bytes, to receive and keep for the retention window. It is read from the assignment table, nothing measured; blobs that settled before the validator&rsquo;s Fibre host existed are left out. <strong>Mainnet sizing</strong> applies the Fibre team&rsquo;s sizing arithmetic to the same share: its rows of a 128 MiB blob at 2.2 GB/s of blob data, kept for the retention window.</p>
+
       <h2 id="publishers">Publishers and fees</h2>
       <ul>
         <li>Every figure on the Publishers page is read from the chain: settlements, reported timeouts, escrow deposits, withdrawals and balances.</li>
