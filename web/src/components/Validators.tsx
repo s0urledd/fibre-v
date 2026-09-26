@@ -27,7 +27,7 @@ function isSelf(v: Validator): boolean {
   return [v.address, v.cons_address, v.operator_address].some((a) => !!a && a.toLowerCase() === SELF_VALIDATOR);
 }
 
-type Filter = "all" | "broken" | "unreachable" | "collecting" | "nohost";
+type Filter = "all" | "broken" | "unreachable" | "nohost";
 type SortKey = "power" | "kept" | "broken" | "pending" | "signed" | "seen";
 
 /** the endpoint right now: the chain's own words first, then the newest handshake */
@@ -69,7 +69,6 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     all: rows.length,
     broken: rows.filter((v) => (v.obligations?.broken ?? 0) > 0).length,
     unreachable: rows.filter((v) => bonded(v) && !!v.host && v.reachable === false).length,
-    collecting: rows.filter((v) => { const o = v.obligations; return !!o && o.total > 0 && o.served + o.broken < MIN_RATED; }).length,
     nohost: rows.filter((v) => bonded(v) && !v.host).length,
   }), [rows]);
 
@@ -86,7 +85,6 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
       switch (filter) {
         case "broken": return (o?.broken ?? 0) > 0;
         case "unreachable": return bonded(v) && !!v.host && v.reachable === false;
-        case "collecting": return !!o && o.total > 0 && o.served + o.broken < MIN_RATED;
         case "nohost": return bonded(v) && !v.host;
         default: return true;
       }
@@ -133,7 +131,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     const d = o.served + o.broken;
     if (d === 0) return <span className="muted" title={`Awaiting results: ${int(o.total)} obligation${o.total === 1 ? "" : "s"} in this period, none assessed yet (pending or inconclusive).`}>—</span>;
     const counts = `${int(o.served)} of ${int(d)} assessed obligations kept`;
-    return <span className={"rate share " + (rateTone(o.served, d) ?? "")} title={d < MIN_RATED ? `${counts}. Fewer than ${MIN_RATED}: shown, not ranked.` : counts}>{pctOf(o.served, d)}</span>;
+    return <span className={"rate share " + (rateTone(o.served, d) ?? "")} title={counts}>{pctOf(o.served, d)}</span>;
   };
   // The signing cell, in the service rate's form: share and counts, a dash
   // with its reason when nothing was assigned. Never a fault colour: a
@@ -142,7 +140,7 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
     const s = v.signing;
     if (!s || s.assigned === 0) return <span className="muted" title={s && s.unknown > 0 ? `${int(s.unknown)} assigned promise${s.unknown === 1 ? "" : "s"} recorded before signatures were verified: nothing to say either way.` : "No settled promise assigned this validator rows in this period."}>—</span>;
     const counts = `${int(s.signed)} of ${int(s.assigned)} promises endorsed`;
-    return <span className="rate share endorsed" title={s.assigned < MIN_RATED ? `${counts}. Fewer than ${MIN_RATED}: shown, not ranked.` : counts}>{pctOf(s.signed, s.assigned)}</span>;
+    return <span className="rate share endorsed" title={counts}>{pctOf(s.signed, s.assigned)}</span>;
   };
   const count = (v: Validator, n: number, kind: "broken" | "pending") => {
     const o = v.obligations;
@@ -168,7 +166,6 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
               <option value="all">All validators · {counts.all}</option>
               <option value="broken">Broken obligations · {counts.broken}</option>
               <option value="unreachable">Unreachable now · {counts.unreachable}</option>
-              <option value="collecting">Small sample · {counts.collecting}</option>
               <option value="nohost">No endpoint · {counts.nohost}</option>
             </select>
           </label>
@@ -196,7 +193,6 @@ export default function Validators({ rows, window: win, notLive, loading }: { ro
                   : needle ? `Nothing matches “${q}”.`
                   : filter === "broken" ? "No broken obligation in this period."
                   : filter === "unreachable" ? "Every registered endpoint answered its newest check."
-                  : filter === "collecting" ? `Every validator with obligations has ${MIN_RATED} or more assessed.`
                   : "Every bonded validator has registered a Fibre endpoint."}
               </td></tr>
             )}
