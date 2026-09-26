@@ -70,6 +70,14 @@ type dayBucket struct {
 	TimedOutUtia int64  `json:"timed_out_utia"`
 }
 
+// hourBucket is one UTC hour of settlements, for the one-day chart: a day
+// of daily buckets is one bar.
+type hourBucket struct {
+	Hour        string `json:"hour"` // YYYY-MM-DDTHH, UTC
+	Bytes       int64  `json:"bytes"`
+	Settlements int64  `json:"settlements"`
+}
+
 // dayPublisher is one publisher's share of one day, for the stacked daily
 // chart: the window's top five publishers by fees keep their identity, the
 // rest fold into one "other" row per day (publisher empty).
@@ -135,7 +143,10 @@ type marketResponse struct {
 	// request, because the queue is not kept as a series of past states.
 	WithdrawalQueue *withdrawalQueue `json:"withdrawal_queue,omitempty"`
 
-	Daily        []dayBucket      `json:"daily"`
+	Daily []dayBucket `json:"daily"`
+	// Hourly is set for windows of a day or less, where a daily chart is one
+	// bar.
+	Hourly       []hourBucket     `json:"hourly,omitempty"`
 	DailyByPub   []dayPublisher   `json:"daily_by_publisher"`
 	Top          []publisherShare `json:"top_publishers"`
 	Other        *publisherShare  `json:"other_publishers"`
@@ -310,6 +321,29 @@ func (s *Server) computeMarket(ctx context.Context, win Window) (*marketResponse
 			return nil, fmt.Errorf("withdrawal queue: %w", err)
 		}
 		r.WithdrawalQueue = wq
+	}
+
+	if win.Span > 0 && win.Span <= 25*time.Hour {
+		hrows, err := db.QueryContext(ctx, `SELECT substr(time, 1, 13) AS hour,
+				COALESCE(SUM(blob_size), 0), COUNT(*)
+			FROM payments WHERE kind = 'settlement' AND time >= ? AND time <= ?
+			GROUP BY hour ORDER BY hour`, start, end)
+		if err != nil {
+			return nil, fmt.Errorf("hourly: %w", err)
+		}
+		r.Hourly = []hourBucket{}
+		for hrows.Next() {
+			var h hourBucket
+			if err := hrows.Scan(&h.Hour, &h.Bytes, &h.Settlements); err != nil {
+				hrows.Close()
+				return nil, err
+			}
+			r.Hourly = append(r.Hourly, h)
+		}
+		hrows.Close()
+		if err := hrows.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	// Daily buckets, over settlements and timeouts. The day is the block

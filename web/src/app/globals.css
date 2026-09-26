@@ -250,7 +250,7 @@ button.dis:hover, a.dis:hover { text-decoration: underline; }
 .vchart .col.zero i { height: 2px !important; background: var(--line); }
 .vchart .col.nodata i { background: var(--gap-hatch); opacity: 1; border-radius: 0; }
 .vchart .x { grid-column: 2; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); font-size: var(--t-tiny); color: var(--text-3); text-align: center; margin-top: 6px; min-width: 0; }
-.vchart .x span { overflow: hidden; white-space: nowrap; }
+.vchart .x span { overflow: visible; white-space: nowrap; }
 .vchart-empty { font-size: var(--t-cell); color: var(--text-3); margin-top: 22px; }
 .vchart .plot .none { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: var(--t-cell); color: var(--text-3); }
 
@@ -822,6 +822,17 @@ button.rowlink:hover { color: var(--accent-ink); text-decoration: underline; }
 .fm-zoomin:hover { background: var(--accent-tint); }
 
 .fm-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
+/* the three counts beside the map's title: one frame, spread evenly, a size down */
+.fm-pill.fm-stats { display: grid; grid-template-columns: repeat(3, auto); justify-content: space-between; column-gap: 18px; min-width: 260px; font-size: var(--t-tiny); }
+.fm-pill.fm-stats > span:not(:last-child)::after { content: none; }
+/* a table that stands on its own: one frame, a tinted head, a line between rows */
+.tablewrap.framed { border: 1px solid var(--line); border-radius: 8px; margin-top: 12px; }
+.tablewrap.framed table { border-collapse: separate; border-spacing: 0; }
+.tablewrap.framed th { background: var(--wash); padding-top: 10px; border-bottom: 1px solid var(--line); }
+.tablewrap.framed th:first-child, .tablewrap.framed td:first-child { padding-left: 14px; }
+.tablewrap.framed th:last-child, .tablewrap.framed td:last-child { padding-right: 14px; }
+.tablewrap.framed td { padding-top: 10px; padding-bottom: 10px; }
+.tablewrap.framed tbody tr:last-child td { border-bottom: 0; }
 .fm-key { margin: 0 0 0 auto; display: flex; gap: 14px; font-size: var(--t-tiny); color: var(--text-3); }
 .fm-key i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 0; }
 

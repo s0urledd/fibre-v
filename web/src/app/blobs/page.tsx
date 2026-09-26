@@ -8,6 +8,7 @@ import { unit } from "@/components/Unit";
 import { useApi, type Meta, type Market, type Blob, type NamespaceRow, utc, ago, shortHex, nsDisplay, bytes, int } from "@/lib/api";
 import { Mark, type Tier } from "@/components/Verdict";
 import VolumeChart from "@/components/VolumeChart";
+import { useWindow, WindowSwitch } from "@/lib/window";
 
 // Reconstructability as a mark and a word, in the same channel the verdicts
 // use, so "degraded" on this page means what "held out" means everywhere else.
@@ -42,7 +43,8 @@ function Page() {
   const { data, error, loading } = useApi<{ blobs: Blob[] }>(q);
   const { data: meta } = useApi<Meta>("/v1/meta");
   const nss = useApi<{ namespaces: NamespaceRow[] }>("/v1/namespaces?limit=20");
-  const market = useApi<Market>("/v1/market?window=7d");
+  const [win, setWin] = useWindow("24h");
+  const market = useApi<Market>(`/v1/market?window=${win}`);
   return (
     <>
       <div className="section-head">
@@ -54,9 +56,32 @@ function Page() {
       {error && !data && <p className="notice">The observer API is not answering ({error}); the page retries every 30 seconds. This is an observer outage, not a Fibre network outage.</p>}
       {error && data && <p className="sample">Showing the last list received; the API is not answering right now ({error}).</p>}
       {loading && !data && <p className="muted">Loading…</p>}
-      <Panel title="Settled volume · 7 days" right="UTC days · padded size">
-        <VolumeChart market={market.data} />
+      <Panel title="Settled volume" right={<WindowSwitch value={win} onChange={setWin} />}>
+        <p className="sub">{win === "24h" ? "UTC hours" : "UTC days"} · padded size</p>
+        <VolumeChart market={market.data} win={win} />
       </Panel>
+      {nss.data && nss.data.namespaces.length > 0 && (
+        <Panel title="Namespaces" right={ns.trim() ? <button className="btn" onClick={() => setNs("")}>show all</button> : undefined}>
+          <div className="tablewrap framed">
+            <table>
+              <thead><tr><th>namespace</th><th className="right">data</th><th className="right">blobs</th><th className="right">last 24h</th><th className="right">accounts</th><th>first seen</th><th>last blob</th></tr></thead>
+              <tbody>
+                {nss.data.namespaces.map((n) => (
+                  <tr key={n.namespace} className={ns.trim().toLowerCase() === n.namespace ? "on" : undefined}>
+                    <td title={n.namespace}><button className="rowlink mono" onClick={() => setNs(n.namespace)}>{nsDisplay(n.namespace)}</button></td>
+                    <td className="right">{bytes(n.bytes)}</td>
+                    <td className="right">{int(n.blobs)}</td>
+                    <td className="right">{n.blobs_24h > 0 ? <>{bytes(n.bytes_24h)} <span className="soft">· {int(n.blobs_24h)}</span></> : "—"}</td>
+                    <td className="right">{int(n.accounts)}</td>
+                    <td title={utc(n.first_seen)}>{ago(n.first_seen)}</td>
+                    <td title={utc(n.last_blob)}>{ago(n.last_blob)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
       {data && (
         <Panel title="Publications" right={<>{data.blobs.length} newest{ns.trim() && ` in namespace ${ns.trim()}`}
               {data.blobs.length >= limit && limit < 500 && <> · <button className="btn" onClick={() => setLimit(Math.min(500, limit * 4))}>show more</button></>}</>}>
@@ -85,28 +110,6 @@ function Page() {
             </tbody>
           </table>
         </div>
-        </Panel>
-      )}
-      {nss.data && nss.data.namespaces.length > 0 && (
-        <Panel title="Namespaces" right={ns.trim() ? <button className="btn" onClick={() => setNs("")}>show all</button> : undefined}>
-          <div className="tablewrap">
-            <table>
-              <thead><tr><th>namespace</th><th className="right">data</th><th className="right">blobs</th><th className="right">last 24h</th><th className="right">accounts</th><th>first seen</th><th>last blob</th></tr></thead>
-              <tbody>
-                {nss.data.namespaces.map((n) => (
-                  <tr key={n.namespace} className={ns.trim().toLowerCase() === n.namespace ? "on" : undefined}>
-                    <td title={n.namespace}><button className="rowlink mono" onClick={() => setNs(n.namespace)}>{nsDisplay(n.namespace)}</button></td>
-                    <td className="right">{bytes(n.bytes)}</td>
-                    <td className="right">{int(n.blobs)}</td>
-                    <td className="right">{n.blobs_24h > 0 ? <>{bytes(n.bytes_24h)} <span className="soft">· {int(n.blobs_24h)}</span></> : "—"}</td>
-                    <td className="right">{int(n.accounts)}</td>
-                    <td title={utc(n.first_seen)}>{ago(n.first_seen)}</td>
-                    <td title={utc(n.last_blob)}>{ago(n.last_blob)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         </Panel>
       )}
     </>
