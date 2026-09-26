@@ -40,7 +40,7 @@ echo "== environment file is complete"
 for key in NETWORK RPC VANTAGE DATA_DIR POLICY API_LISTEN; do
   grep -q "^${key}=" "$ENVFILE" || fail "$ENVFILE has no $key"
 done
-for key in VANTAGE_LOCATION VANTAGE_PROVIDER VANTAGE_ASN VANTAGE_EGRESS; do
+for key in VANTAGE_LOCATION VANTAGE_PROVIDER; do
   value=$(sed -n "s/^${key}=//p" "$ENVFILE" | head -1)
   [ -n "$value" ] || echo "  WARNING: $key is empty; a public vantage publishes reachability verdicts without saying where from"
 done

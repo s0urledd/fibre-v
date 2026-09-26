@@ -52,37 +52,12 @@ port, behind one Caddy with a site per network (see "Two networks").
 ## 1a. Describe the vantage before you publish anything
 
 Every reachability verdict on the site is a statement about a network path,
-and half that path is yours. A reader cannot judge an `UNREACHABLE` without
-knowing where it was measured from, and a validator operator cannot check
-your traffic against their own logs without knowing which addresses to look
-for. So the env file has four settings that a public vantage must fill in,
-and the API logs a warning at startup if it does not.
-
-```bash
-curl -4 https://ifconfig.co    # every address probes can leave from
-curl -6 https://ifconfig.co
-whois -h whois.radb.net "$(curl -4 -s https://ifconfig.co)" | grep -i origin
-```
-
-`VANTAGE_EGRESS` is the anchor and the only one that has to be exactly right:
-an operator who sees connections from those addresses on their Fibre port can
-match them against `/v1/meta`, and one who sees connections from anywhere
-else knows they are not you. Include every address the host can leave from,
-including IPv6, or a validator will see traffic it cannot attribute.
-
-`VANTAGE_ASN` is the one that earns its place. It names the network your
-traffic is routed through, not a place: one provider can hold several
-autonomous systems and one autonomous system can span countries. It matters
-because the most likely cause of a systematic false `UNREACHABLE` is a
-peering or rate-limiting problem between your network and a validator's. With
-the ASN published, an operator can look at their own peering and recognise
-it; without it, the same evidence reads as the validator's fault. It is also
-the field a third party can confirm from your egress addresses through public
-routing data, which is what makes the rest of the block more than a claim.
-
-`VANTAGE_PROVIDER` usually follows from the ASN. `VANTAGE_LOCATION` is the
-only one nothing proves, because geolocating an address is a guess, and
-`/v1/meta` says so per field rather than presenting all four as equal.
+and half that path is yours, so a reader cannot judge an `UNREACHABLE`
+without knowing roughly where it was measured from. The env file has two
+settings for that, `VANTAGE_LOCATION` and `VANTAGE_PROVIDER`, and the API
+logs a warning at startup if a public vantage leaves them blank. Both are
+your word, and `/v1/meta` says so per field. The observer's own addresses
+and autonomous system are not published.
 
 ## 2. Build
 

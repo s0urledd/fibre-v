@@ -112,13 +112,11 @@ export function through(rt: RecordThrough | null | undefined): { text: string; t
 }
 /** a heartbeat vantage with rows in the last hour (Meta.vantages) */
 export type VantageSeen = { name: string; newest_at: string; primary: boolean };
-/** where this observer watches from; the first three are operator-declared */
+/** where this observer watches from; both fields are operator-declared */
 export type VantageInfo = {
   name: string;
   location?: string;
   provider?: string;
-  asn?: string;
-  egress_addresses?: string[];
   /** per-field: what a reader can actually check, and how */
   verifiability: Record<string, string>;
   complete: boolean;
