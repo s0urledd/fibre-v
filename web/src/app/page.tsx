@@ -85,7 +85,7 @@ function Overview() {
           value={none ? "—" : int(M.publishers_active)}
           tone={none || M.publishers_active === 0 ? "absent" : undefined}
           title="Accounts that published blobs in this period."
-          help={none ? " " : M.publishers_active === 0 ? "none in this period" : "accounts that paid"} />
+          help=" " />
         <Metric label="Payment promise timeouts"
           value={none ? "—" : int(M.timeouts)}
           tone={none ? "absent" : undefined}
