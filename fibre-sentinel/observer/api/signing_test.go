@@ -364,3 +364,39 @@ func TestSigningRecentAndLastEndorsement(t *testing.T) {
 		}
 	}
 }
+
+// The blob list carries how many validators with rows endorsed each promise,
+// and leaves it out for a record from before signatures were verified.
+func TestBlobListAttestedWithRows(t *testing.T) {
+	ts, _, _ := signingFixture(t)
+	var resp struct {
+		Blobs []struct {
+			PromiseHash      string `json:"promise_hash"`
+			AttestedWithRows *int   `json:"attested_with_rows"`
+		} `json:"blobs"`
+	}
+	if code := get(t, ts, "/v1/blobs?window=all", &resp); code != 200 {
+		t.Fatalf("blobs: %d", code)
+	}
+	want := map[string]int{"p1": 2, "p2": 3, "p3": 1}
+	seen := 0
+	for _, b := range resp.Blobs {
+		if b.PromiseHash == "p4" {
+			if b.AttestedWithRows != nil {
+				t.Errorf("p4: attested_with_rows = %d, want absent", *b.AttestedWithRows)
+			}
+			continue
+		}
+		w, ok := want[b.PromiseHash]
+		if !ok {
+			continue
+		}
+		seen++
+		if b.AttestedWithRows == nil || *b.AttestedWithRows != w {
+			t.Errorf("%s: attested_with_rows = %v, want %d", b.PromiseHash, b.AttestedWithRows, w)
+		}
+	}
+	if seen != 3 {
+		t.Fatalf("saw %d of 3 blobs", seen)
+	}
+}
