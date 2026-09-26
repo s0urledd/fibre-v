@@ -486,12 +486,12 @@ export const MIN_RATED = 20;
 
 /**
  * The colour of a service rate: green from 98% (one isolated loss stays
- * green), amber from 90%, red below. None under MIN_RATED assessed
- * obligations, where one result would swing the colour.
+ * green), amber from 90%, red below, whatever the sample; the counts behind a
+ * small one are in its tooltip.
  */
 export type RateTone = "r-good" | "r-warn" | "r-bad";
 export function rateTone(served: number, assessed: number): RateTone | undefined {
-  if (assessed < MIN_RATED) return undefined;
+  if (assessed <= 0) return undefined;
   const r = served / assessed;
   return r >= 0.98 ? "r-good" : r >= 0.9 ? "r-warn" : "r-bad";
 }
